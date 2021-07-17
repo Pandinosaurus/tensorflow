@@ -85,7 +85,7 @@ SimpleOrcJIT::InferTargetMachineForJIT(
 }
 
 SimpleOrcJIT::SimpleOrcJIT(
-    std::unique_ptr<llvm::orc::TargetProcessControl> target_process_control,
+    std::unique_ptr<llvm::orc::ExecutorProcessControl> target_process_control,
     std::unique_ptr<llvm::orc::ExecutionSession> execution_session,
     const llvm::TargetOptions& target_options,
     llvm::CodeGenOpt::Level opt_level, bool optimize_for_size,
@@ -94,6 +94,7 @@ SimpleOrcJIT::SimpleOrcJIT(
     LLVMCompiler::ModuleHook post_optimization_hook,
     std::function<void(const llvm::object::ObjectFile&)> post_codegen_hook)
     : target_machine_(InferTargetMachineForJIT(target_options, opt_level)),
+      target_triple_(target_machine_->getTargetTriple()),
       data_layout_(target_machine_->createDataLayout()),
       target_process_control_(std::move(target_process_control)),
       execution_session_(std::move(execution_session)),
@@ -144,7 +145,7 @@ SimpleOrcJIT::SimpleOrcJIT(
   object_layer_.registerJITEventListener(*this);
 
   // Copied from LLJIT, required to find symbols on Windows.
-  if (target_machine_->getTargetTriple().isOSBinFormatCOFF()) {
+  if (target_triple_.isOSBinFormatCOFF()) {
     object_layer_.setOverrideObjectFlagsWithResponsibilityFlags(true);
     object_layer_.setAutoClaimResponsibilityForObjectSymbols(true);
   }
@@ -165,7 +166,7 @@ llvm::Expected<std::unique_ptr<SimpleOrcJIT>> SimpleOrcJIT::Create(
     std::function<void(const llvm::object::ObjectFile&)> post_codegen_hook) {
   auto SSP = std::make_shared<llvm::orc::SymbolStringPool>();
   auto target_process_control =
-      llvm::orc::SelfTargetProcessControl::Create(std::move(SSP));
+      llvm::orc::SelfExecutorProcessControl::Create(std::move(SSP));
   if (!target_process_control) {
     return target_process_control.takeError();
   }
@@ -221,6 +222,12 @@ llvm::Error SimpleOrcJIT::AddModule(llvm::orc::ThreadSafeModule module) {
   return compile_layer_.add(*main_jit_dylib_, std::move(module));
 }
 
+void SimpleOrcJIT::DoneCompiling() {
+  // The target machine takes a non-trivial amount of memory, so once we are
+  // done compiling throw it away.
+  target_machine_.reset();
+}
+
 llvm::Expected<llvm::JITEvaluatedSymbol> SimpleOrcJIT::FindCompiledSymbol(
     const std::string& name) {
   return execution_session_->lookup({main_jit_dylib_}, name);
@@ -238,6 +245,7 @@ bool RegisterKnownJITSymbols() {
   xla::CustomCallTargetRegistry* registry =
       xla::CustomCallTargetRegistry::Global();
   registry->Register("printf", reinterpret_cast<void*>(&printf), "Host");
+  registry->Register("puts", reinterpret_cast<void*>(&puts), "Host");
 
 #define REGISTER_CPU_RUNTIME_SYMBOL(base_name)                               \
   do {                                                                       \
@@ -279,6 +287,7 @@ bool RegisterKnownJITSymbols() {
   REGISTER_CPU_RUNTIME_SYMBOL(EigenSingleThreadedMatMulC128);
   REGISTER_CPU_RUNTIME_SYMBOL(EigenSingleThreadedMatMulS32);
   REGISTER_CPU_RUNTIME_SYMBOL(ParallelForkJoin);
+  REGISTER_CPU_RUNTIME_SYMBOL(PrintfToStderr);
   REGISTER_CPU_RUNTIME_SYMBOL(ReleaseInfeedBufferAfterDequeue);
   REGISTER_CPU_RUNTIME_SYMBOL(ReleaseOutfeedBufferAfterPopulation);
   REGISTER_CPU_RUNTIME_SYMBOL(KeyValueSort);
@@ -385,6 +394,7 @@ bool RegisterKnownJITSymbols() {
 
 #ifdef __APPLE__
   registry->Register("__bzero", reinterpret_cast<void*>(bzero), "Host");
+  registry->Register("bzero", reinterpret_cast<void*>(bzero), "Host");
   registry->Register("memset_pattern16",
                      reinterpret_cast<void*>(memset_pattern16), "Host");
 #endif

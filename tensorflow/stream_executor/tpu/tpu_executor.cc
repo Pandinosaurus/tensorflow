@@ -192,7 +192,7 @@ TpuExecutor::CreateEventImplementation() {
   return ptr;
 }
 
-DeviceMemoryBase TpuExecutor::Allocate(uint64 size, int64 memory_space) {
+DeviceMemoryBase TpuExecutor::Allocate(uint64 size, int64_t memory_space) {
   SE_DeviceMemoryBase se_base = tpu::ExecutorApiFn()->TpuExecutor_AllocateFn(
       executor_, size, memory_space);
   return ApiConverter::FromC(se_base);
@@ -325,6 +325,21 @@ bool TpuExecutor::MemcpyDeviceToDevice(
     Stream* stream, ::stream_executor::DeviceMemoryBase* gpu_dst,
     const ::stream_executor::DeviceMemoryBase& host_src, uint64 size) {
   LOG(FATAL) << __func__ << " not supported on TpuExecutor";
+}
+
+Status TpuExecutor::UnloadAllPrograms() {
+  StatusHelper status;
+  tpu::ExecutorApiFn()->TpuExecutor_UnloadAllProgramsFn(executor_,
+                                                        status.c_status);
+  return status.status();
+}
+
+Status TpuExecutor::EnqueueCompactionOnStreamForHbm(Stream* compaction_stream) {
+  StatusHelper status;
+  tpu::ExecutorApiFn()->TpuExecutor_EnqueueCompactionOnStreamForHbmFn(
+      executor_, get_stream(compaction_stream->implementation()),
+      status.c_status);
+  return status.status();
 }
 
 struct HostCallbackContext {

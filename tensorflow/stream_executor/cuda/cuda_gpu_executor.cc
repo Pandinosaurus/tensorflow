@@ -115,10 +115,6 @@ GpuContext* ExtractGpuContext(GpuExecutor* cuda_exec) {
   return cuda_exec->gpu_context();
 }
 
-GpuExecutor* ExtractGpuExecutor(StreamExecutor* stream_exec) {
-  return static_cast<GpuExecutor*>(stream_exec->implementation());
-}
-
 GpuExecutor::~GpuExecutor() {
   CHECK(kernel_to_gpu_binary_.empty()) << "GpuExecutor has live kernels.";
   CHECK(gpu_binary_to_module_.empty()) << "GpuExecutor has loaded modules.";
@@ -514,7 +510,7 @@ int GpuExecutor::CompareOccupancy(int* initial_blocks,
   }
 }
 
-DeviceMemoryBase GpuExecutor::Allocate(uint64 size, int64 memory_space) {
+DeviceMemoryBase GpuExecutor::Allocate(uint64 size, int64_t memory_space) {
   CHECK_EQ(memory_space, 0);
   return DeviceMemoryBase(GpuDriver::DeviceAllocate(context_, size), size);
 }
@@ -924,8 +920,8 @@ static int TryToReadNumaNode(const std::string& pci_bus_id,
   // could use the file::* utilities).
   FILE* file = fopen(filename.c_str(), "r");
   if (file == nullptr) {
-    LOG(ERROR) << "could not open file to read NUMA node: " << filename
-               << "\nYour kernel may have been built without NUMA support.";
+    LOG(INFO) << "could not open file to read NUMA node: " << filename
+              << "\nYour kernel may have been built without NUMA support.";
     return kUnknownNumaNode;
   }
 

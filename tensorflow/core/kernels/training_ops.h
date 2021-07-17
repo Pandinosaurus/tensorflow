@@ -46,6 +46,18 @@ struct ApplyAdadelta {
                   typename TTypes<T>::ConstFlat grad);
 };
 
+template <typename Device, typename T, typename Tindex>
+struct SparseApplyAdadelta {
+  void operator()(const Device& d, typename TTypes<T>::Matrix var,
+                  typename TTypes<T>::Matrix accum,
+                  typename TTypes<T>::Matrix accum_update,
+                  typename TTypes<T>::ConstScalar lr,
+                  typename TTypes<T>::ConstScalar rho,
+                  typename TTypes<T>::ConstScalar epsilon,
+                  typename TTypes<T>::ConstMatrix grad,
+                  typename TTypes<Tindex>::ConstFlat indices);
+};
+
 template <typename Device, typename T>
 struct FobosElasticNet {
   void operator()(const Device& d, typename TTypes<T>::Flat var,
@@ -92,6 +104,18 @@ struct ApplyAdagradDA {
                   typename TTypes<T>::ConstFlat grad);
 };
 
+template <typename Device, typename T, typename Tindex, bool has_epsilon>
+struct SparseApplyAdagrad {
+  // Note that epsilon is ignored if has_epsilon is false.
+  Status operator()(const Device& d, typename TTypes<T>::Matrix var,
+                    typename TTypes<T>::Matrix accum,
+                    typename TTypes<T>::ConstScalar lr,
+                    typename TTypes<T>::ConstScalar epsilon,
+                    typename TTypes<T>::ConstMatrix grad,
+                    typename TTypes<Tindex>::ConstVec indices, int64 inner_dim,
+                    bool update_slots);
+};
+
 template <typename Device, typename T>
 struct ApplyProximalAdagrad {
   void operator()(const Device& d, typename TTypes<T>::Flat var,
@@ -100,6 +124,17 @@ struct ApplyProximalAdagrad {
                   typename TTypes<T>::ConstScalar l1,
                   typename TTypes<T>::ConstScalar l2,
                   typename TTypes<T>::ConstFlat grad);
+};
+
+template <typename Device, typename T, typename Tindex>
+struct SparseApplyProximalAdagrad {
+  Status operator()(const Device& d, typename TTypes<T>::Matrix var,
+                    typename TTypes<T>::Matrix accum,
+                    typename TTypes<T>::ConstScalar lr,
+                    typename TTypes<T>::ConstScalar l1,
+                    typename TTypes<T>::ConstScalar l2,
+                    typename TTypes<T>::ConstMatrix grad,
+                    typename TTypes<Tindex>::ConstVec indices, int64 inner_dim);
 };
 
 template <typename Device, typename T>

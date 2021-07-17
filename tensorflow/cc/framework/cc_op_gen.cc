@@ -60,7 +60,7 @@ string GetPath(const string& dot_h_fname) {
   if (result.size() > sizeof("external/") &&
       result.compare(0, sizeof("external/") - 1, "external/") == 0) {
     result = result.substr(sizeof("external/") - 1);
-    pos = result.find("/");
+    pos = result.find('/');
     if (pos != string::npos) {
       result = result.substr(pos + 1);
     }
@@ -152,9 +152,9 @@ string PrintTensorShape(const TensorShapeProto& shape_proto) {
 }
 
 template <typename T>
-string PrintArray(int64 num_elts, const T* array) {
+string PrintArray(int64_t num_elts, const T* array) {
   string ret;
-  for (int64 i = 0; i < num_elts; ++i) {
+  for (int64_t i = 0; i < num_elts; ++i) {
     if (i > 0) strings::StrAppend(&ret, ", ");
     strings::StrAppend(&ret, array[i]);
   }
@@ -190,7 +190,7 @@ string PrintTensor(const TensorProto& tensor_proto) {
       return PrintArray(num_elts, t.flat<bool>().data());
     case DT_STRING: {
       string ret;
-      for (int64 i = 0; i < num_elts; ++i) {
+      for (int64_t i = 0; i < num_elts; ++i) {
         if (i > 0) strings::StrAppend(&ret, " ");
         strings::StrAppend(&ret, absl::CEscape(t.flat<tstring>()(i)));
       }
@@ -586,7 +586,7 @@ OpInfo::OpInfo(const OpDef& graph_op_def, const ApiDef& api_def,
   if (!api_def.description().empty()) {
     strings::StrAppend(&comment, "\n", api_def.description(), "\n");
   }
-  strings::StrAppend(&comment, "\nArguments:\n* scope: A Scope object\n");
+  strings::StrAppend(&comment, "\nArgs:\n* scope: A Scope object\n");
 
   // Process inputs
   for (int i = 0; i < api_def.arg_order_size(); ++i) {

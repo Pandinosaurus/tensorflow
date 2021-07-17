@@ -25,6 +25,7 @@ limitations under the License.
 #include "tensorflow/compiler/tf2xla/xla_op_registry.h"
 #include "tensorflow/compiler/xla/client/lib/constants.h"
 #include "tensorflow/compiler/xla/client/xla_builder.h"
+#include "tensorflow/compiler/xla/literal.h"
 #include "tensorflow/compiler/xla/shape_util.h"
 #include "tensorflow/core/framework/bounds_check.h"
 #include "tensorflow/core/framework/kernel_def_builder.h"
@@ -97,10 +98,11 @@ class XlaSetBoundOp : public XlaOpKernel {
                                 bound_shape.DebugString()));
     int64 bound;
     OP_REQUIRES_OK(ctx, ctx->ConstantInputAsIntScalar("bound", &bound));
-
-    xla::XlaOp result = xla::CustomCall(
-        ctx->builder(), "SetBound", {ctx->Input("input")},
-        ctx->InputXlaShape("input").ValueOrDie(), absl::StrFormat("%d", bound));
+    xla::Literal bound_literal = xla::LiteralUtil::CreateR0<int32>(bound);
+    xla::XlaOp result =
+        xla::CustomCall(ctx->builder(), "SetBound", {ctx->Input("input")},
+                        ctx->InputXlaShape("input").ValueOrDie(), "", false, {},
+                        &bound_literal);
     ctx->SetOutput(0, result);
   }
 };
@@ -124,7 +126,7 @@ class XlaSetDynamicDimensionSizeOp : public XlaOpKernel {
                                         "XlaSetDynamicDimensionSizeOp"));
 
     OP_REQUIRES(
-        ctx, dim_index_shape.dims() == 0,
+        ctx, dim_index_shape.dims() == 0 && size_shape.dims() == 0,
         errors::InvalidArgument("XlaSetDynamicDimensionSizeOp's dim_index and "
                                 "size has to be int32 scalar value"));
     int64 dim_index;
@@ -139,6 +141,34 @@ class XlaSetDynamicDimensionSizeOp : public XlaOpKernel {
 REGISTER_XLA_OP(
     Name("XlaSetDynamicDimensionSize").CompileTimeConstantInput("dim_index"),
     XlaSetDynamicDimensionSizeOp);
+
+class XlaRemoveDynamicDimensionSizeOp : public XlaOpKernel {
+ public:
+  explicit XlaRemoveDynamicDimensionSizeOp(OpKernelConstruction* context)
+      : XlaOpKernel(context) {}
+
+  void Compile(XlaOpKernelContext* ctx) override {
+    const TensorShape dim_index_shape = ctx->InputShape("dim_index");
+
+    OP_REQUIRES(ctx, ctx->InputType("dim_index") == DT_INT32,
+                errors::InvalidArgument("dim_index has to be int32 for"
+                                        "XlaRemoveDynamicDimensionSizeOp"));
+
+    OP_REQUIRES(
+        ctx, dim_index_shape.dims() == 0,
+        errors::InvalidArgument("XlaRemoveDynamicDimensionSizeOp's dim_index "
+                                "has to be int32 scalar value"));
+    int64 dim_index;
+    OP_REQUIRES_OK(ctx, ctx->ConstantInputAsIntScalar("dim_index", &dim_index));
+
+    xla::XlaOp result = xla::RemoveDynamicDimension(ctx->Input(0), dim_index);
+    ctx->SetOutput(0, result);
+  }
+};
+
+REGISTER_XLA_OP(
+    Name("XlaRemoveDynamicDimensionSize").CompileTimeConstantInput("dim_index"),
+    XlaRemoveDynamicDimensionSizeOp);
 
 class ShapeNOp : public XlaOpKernel {
  public:

@@ -77,7 +77,12 @@ class HloCostAnalysis : public ConstDfsHloVisitor {
   Status HandleTriangularSolve(const HloInstruction* hlo) override;
   Status HandleCholesky(const HloInstruction* hlo) override;
   Status HandleAllGather(const HloInstruction* hlo) override;
+  Status HandleAllGatherStart(const HloInstruction* hlo) override;
+  Status HandleAllGatherDone(const HloInstruction* hlo) override;
   Status HandleAllReduce(const HloInstruction* crs) override;
+  Status HandleReduceScatter(const HloInstruction* hlo) override;
+  Status HandleAllReduceStart(const HloInstruction* hlo) override;
+  Status HandleAllReduceDone(const HloInstruction* hlo) override;
   Status HandleAllToAll(const HloInstruction* hlo) override;
   Status HandleCollectivePermute(const HloInstruction* hlo) override;
   Status HandleCollectivePermuteStart(const HloInstruction* hlo) override;
@@ -183,6 +188,12 @@ class HloCostAnalysis : public ConstDfsHloVisitor {
     return GetProperty(key, per_second_rates_);
   }
 
+  // Return the key that is used to index into Properties for the specified
+  // input/output at the shape index.
+  static std::string GetOperandBytesAccessedKey(int64 operand_num,
+                                                ShapeIndex index = {});
+  static std::string GetOutputBytesAccessedKey(ShapeIndex index = {});
+
  protected:
   typedef std::unordered_map<const HloInstruction*, Properties> HloToProperties;
 
@@ -228,12 +239,6 @@ class HloCostAnalysis : public ConstDfsHloVisitor {
   // Set bytes accessed by the output at the shape index.
   void SetOutputBytesAccessed(float value);
   void SetOutputBytesAccessed(ShapeIndex index, float value);
-
-  // Return the key that is used to index into Properties for the specified
-  // input/output at the shape index.
-  static std::string GetOperandBytesAccessedKey(int64 operand_num,
-                                                ShapeIndex index = {});
-  static std::string GetOutputBytesAccessedKey(ShapeIndex index = {});
 
   // Function which computes the size of the top-level of a given shape (not
   // including nested elements, if any). If null then bytes_accessed methods

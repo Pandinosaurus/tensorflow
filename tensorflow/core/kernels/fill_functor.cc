@@ -90,6 +90,18 @@ DEFINE_SETONE_CPU(complex64);
 DEFINE_SETONE_CPU(complex128);
 #undef DEFINE_SETONE_CPU
 
+template <typename T>
+void SetNanFunctor<Eigen::ThreadPoolDevice, T>::operator()(
+    const Eigen::ThreadPoolDevice& d, typename TTypes<T>::Flat out) {
+  out.device(d) = out.constant(Eigen::NumTraits<T>::quiet_NaN());
+}
+
+// Explicit instantiations.
+#define DEFINE_SETNAN_CPU(T) \
+  template struct SetNanFunctor<Eigen::ThreadPoolDevice, T>;
+TF_CALL_NUMBER_TYPES(DEFINE_SETNAN_CPU);
+TF_CALL_bool(DEFINE_SETNAN_CPU);
+#undef DEFINE_SETNAN_CPU
 
 template <typename T>
 struct FillFunctor<Eigen::ThreadPoolDevice, T> {
@@ -109,6 +121,7 @@ DEFINE_FILL_CPU(quint8);
 DEFINE_FILL_CPU(quint16);
 DEFINE_FILL_CPU(qint8);
 DEFINE_FILL_CPU(qint16);
+DEFINE_FILL_CPU(qint32);
 #undef DEFINE_FILL_CPU
 
 

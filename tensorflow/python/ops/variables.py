@@ -27,7 +27,6 @@ import six
 from tensorflow.core.framework import attr_value_pb2
 from tensorflow.core.framework import variable_pb2
 from tensorflow.python import pywrap_tensorflow  # pylint: disable=unused-import
-from tensorflow.python import _pywrap_utils
 from tensorflow.python.eager import context
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import ops
@@ -41,6 +40,7 @@ from tensorflow.python.ops import math_ops
 from tensorflow.python.ops import state_ops
 from tensorflow.python.platform import tf_logging as logging
 from tensorflow.python.training.tracking import base as trackable
+from tensorflow.python.util import _pywrap_utils
 from tensorflow.python.util import compat
 from tensorflow.python.util import object_identity
 from tensorflow.python.util import tf_should_use
@@ -83,6 +83,12 @@ class VariableSynchronization(enum.Enum):
   * `ON_READ`: Indicates that the variable will be aggregated across devices
     when it is read (eg. when checkpointing or when evaluating an op that uses
     the variable).
+
+    Example:
+  >>> temp_grad=[tf.Variable([0.], trainable=False,
+  ...                      synchronization=tf.VariableSynchronization.ON_READ,
+  ...                      aggregation=tf.VariableAggregation.MEAN
+  ...                      )]
   """
   AUTO = 0
   NONE = 1
@@ -361,11 +367,9 @@ class Variable(six.with_metaclass(VariableMetaclass, trackable.Trackable)):
   """
 
   @deprecated_args(
-      None,
-      "A variable's value can be manually cached by calling "
+      None, "A variable's value can be manually cached by calling "
       "tf.Variable.read_value() under a tf.device scope. The caching_device "
-      "argument does not work properly.",
-      "caching_device")
+      "argument does not work properly.", "caching_device")
   def __init__(self,
                initial_value=None,
                trainable=None,
@@ -394,10 +398,11 @@ class Variable(six.with_metaclass(VariableMetaclass, trackable.Trackable)):
       validate_shape: If `False`, allows the variable to be initialized with a
         value of unknown shape. If `True`, the default, the shape of
         `initial_value` must be known.
-      caching_device: Optional device string describing where the Variable
-        should be cached for reading.  Defaults to the Variable's device. If not
-        `None`, caches on another device.  Typical use is to cache on the device
-        where the Ops using the Variable reside, to deduplicate copying through
+      caching_device: Note: This argument is only valid when using a v1-style
+        `Session`. Optional device string describing where the Variable should
+        be cached for reading. Defaults to the Variable's device. If not `None`,
+        caches on another device. Typical use is to cache on the device where
+        the Ops using the Variable reside, to deduplicate copying through
         `Switch` and other conditional statements.
       name: Optional name for the variable. Defaults to `'Variable'` and gets
         uniquified automatically.
@@ -812,14 +817,13 @@ class Variable(six.with_metaclass(VariableMetaclass, trackable.Trackable)):
         v = tf.Variable([1, 2, 3, 4, 5, 6, 7, 8])
         indices = tf.constant([[4], [3], [1] ,[7]])
         updates = tf.constant([9, 10, 11, 12])
-        op = v.scatter_nd_sub(indices, updates)
-        with tf.compat.v1.Session() as sess:
-          print sess.run(op)
+        v.scatter_nd_sub(indices, updates)
+        print(v)
     ```
 
-    The resulting update to v would look like this:
+    After the update `v` would look like this:
 
-        [1, -9, 3, -6, -6, 6, 7, -4]
+        [1, -9, 3, -6, -4, 6, 7, -4]
 
     See `tf.scatter_nd` for more details about how to make updates to
     slices.
@@ -859,9 +863,8 @@ class Variable(six.with_metaclass(VariableMetaclass, trackable.Trackable)):
         v = tf.Variable([1, 2, 3, 4, 5, 6, 7, 8])
         indices = tf.constant([[4], [3], [1] ,[7]])
         updates = tf.constant([9, 10, 11, 12])
-        add = v.scatter_nd_add(indices, updates)
-        with tf.compat.v1.Session() as sess:
-          print sess.run(add)
+        v.scatter_nd_add(indices, updates)
+        print(v)
     ```
 
     The resulting update to v would look like this:
@@ -906,9 +909,8 @@ class Variable(six.with_metaclass(VariableMetaclass, trackable.Trackable)):
         v = tf.Variable([1, 2, 3, 4, 5, 6, 7, 8])
         indices = tf.constant([[4], [3], [1] ,[7]])
         updates = tf.constant([9, 10, 11, 12])
-        op = v.scatter_nd_assign(indices, updates)
-        with tf.compat.v1.Session() as sess:
-          print sess.run(op)
+        v.scatter_nd_update(indices, updates)
+        print(v)
     ```
 
     The resulting update to v would look like this:
@@ -3261,6 +3263,11 @@ def variables_initializer(var_list, name="init"):
   If `var_list` is empty, however, the function still returns an Op that can
   be run. That Op just has no effect.
 
+  @compatibility(TF2)
+  In TF2, variables are initialized immediately when they are created. There is
+  no longer a need to run variable initializers before using them.
+  @end_compatibility
+
   Args:
     var_list: List of `Variable` objects to initialize.
     name: Optional name for the returned operation.
@@ -3287,6 +3294,11 @@ def global_variables_initializer():
 
   This is just a shortcut for `variables_initializer(global_variables())`
 
+  @compatibility(TF2)
+  In TF2, variables are initialized immediately when they are created. There is
+  no longer a need to run variable initializers before using them.
+  @end_compatibility
+
   Returns:
     An Op that initializes global variables in the graph.
   """
@@ -3308,6 +3320,11 @@ def local_variables_initializer():
   """Returns an Op that initializes all local variables.
 
   This is just a shortcut for `variables_initializer(local_variables())`
+
+  @compatibility(TF2)
+  In TF2, variables are initialized immediately when they are created. There is
+  no longer a need to run variable initializers before using them.
+  @end_compatibility
 
   Returns:
     An Op that initializes all local variables in the graph.

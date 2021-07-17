@@ -69,7 +69,7 @@ class ReduceWindowTest : public ::testing::WithParamInterface<bool>,
  public:
   ReduceWindowTest() : builder_(TestName()) { set_use_bfloat16(GetParam()); }
 
-  void ReduceWindowAdd(const XlaOp& input,
+  void ReduceWindowAdd(const XlaOp input,
                        absl::Span<const int64> window_dimensions,
                        absl::Span<const int64> window_strides,
                        Padding padding) {
@@ -80,7 +80,7 @@ class ReduceWindowTest : public ::testing::WithParamInterface<bool>,
                  window_dimensions, window_strides, padding);
   }
 
-  void ReduceWindowMax(const XlaOp& input,
+  void ReduceWindowMax(const XlaOp input,
                        absl::Span<const int64> window_dimensions,
                        absl::Span<const int64> window_strides,
                        Padding padding) {
@@ -91,7 +91,7 @@ class ReduceWindowTest : public ::testing::WithParamInterface<bool>,
                  window_dimensions, window_strides, padding);
   }
 
-  void ReduceWindowMin(const XlaOp& input,
+  void ReduceWindowMin(const XlaOp input,
                        absl::Span<const int64> window_dimensions,
                        absl::Span<const int64> window_strides,
                        Padding padding) {
@@ -1702,6 +1702,188 @@ ENTRY R4OnlyDilation {
 }
 )";
   EXPECT_TRUE(RunAndCompare(hlo_string, ErrorSpec{0.001}));
+}
+
+XLA_TEST_F(HloTestBase, DISABLED_ON_GPU(ReduceWindowVariadicSupport)) {
+  const char* const hlo_string = R"(
+HloModule module
+
+sum {
+  a0 = f32[] parameter(0)
+  a1 = f32[] parameter(1) 
+  b0 = f32[] parameter(2)
+  b1 = f32[] parameter(3)
+  add0 = f32[] add(a0, b0)
+  add1 = f32[] add(a1, b1)
+  ROOT sum2 = (f32[], f32[]) tuple(add0, add1)
+}
+
+ENTRY entry {
+  constant = f32[4,2]{1,0} constant({{1,1},{1,4},{2,1},{3,1}})
+  constant.1 = f32[] constant(0)
+  constant.2 = f32[4,2]{1,0} constant({{1,1},{1,4},{2,1},{3,1}})
+  constant.3 = f32[] constant(0)
+  reduce-window = (f32[2,2]{1,0}, f32[2,2]{1,0}) 
+    reduce-window(constant, constant.2, constant.1, constant.3),
+    window={size=5x1 stride=3x1 pad=2_2x0_0}, to_apply=sum
+  ROOT copy = (f32[2,2]{1,0}, f32[2,2]{1,0}) copy(reduce-window)
+})";
+  EXPECT_TRUE(RunAndCompare(hlo_string, ErrorSpec{1e-4, 1e-4}));
+}
+
+XLA_TEST_F(HloTestBase, DISABLED_ON_GPU(ReduceWindowVariadicSupport2)) {
+  const char* const hlo_string = R"(
+HloModule module
+
+sum {
+  a0 = f32[] parameter(0)
+  a1 = s32[] parameter(1) 
+  b0 = f32[] parameter(2)
+  b1 = s32[] parameter(3)
+  add0 = f32[] add(a0, b0)
+  add1 = s32[] add(a1, b1)
+  ROOT sum2 = (f32[], s32[]) tuple(add0, add1)
+}
+
+ENTRY entry {
+  constant = f32[4,2]{1,0} constant({{1,1},{1,4},{2,1},{3,1}})
+  constant.1 = f32[] constant(0)
+  constant.2 = s32[4,2]{1,0} constant({{1,1},{1,4},{2,1},{3,1}})
+  constant.3 = s32[] constant(0)
+  ROOT reduce-window = (f32[2,2]{1,0}, s32[2,2]{1,0}) 
+    reduce-window(constant, constant.2, constant.1, constant.3),
+    window={size=5x1 stride=3x1 pad=2_2x0_0}, to_apply=sum
+})";
+  EXPECT_TRUE(RunAndCompare(hlo_string, ErrorSpec{1e-4, 1e-4}));
+}
+
+XLA_TEST_F(HloTestBase, DISABLED_ON_GPU(ReduceWindowVariadicSupport3)) {
+  const char* const hlo_string = R"(
+HloModule module
+
+sum {
+  a0 = f32[] parameter(0)
+  a1 = bf16[] parameter(1) 
+  b0 = f32[] parameter(2)
+  b1 = bf16[] parameter(3)
+  add0 = f32[] add(a0, b0)
+  add1 = bf16[] add(a1, b1)
+  ROOT sum2 = (f32[], bf16[]) tuple(add0, add1)
+}
+
+ENTRY entry {
+  constant = f32[4,2]{1,0} constant({{1,1},{1,4},{2,1},{3,1}})
+  constant.1 = f32[] constant(0)
+  constant.2 = bf16[4,2]{1,0} constant({{1,1},{1,4},{2,1},{3,1}})
+  constant.3 = bf16[] constant(0)
+  ROOT reduce-window = (f32[2,2]{1,0}, bf16[2,2]{1,0}) 
+    reduce-window(constant, constant.2, constant.1, constant.3),
+    window={size=5x1 stride=3x1 pad=2_2x0_0}, to_apply=sum
+})";
+  EXPECT_TRUE(RunAndCompare(hlo_string, ErrorSpec{1e-4, 1e-4}));
+}
+
+XLA_TEST_F(HloTestBase, DISABLED_ON_GPU(ReduceWindowVariadicSupport4)) {
+  const char* const hlo_string = R"(
+HloModule module
+
+sum {
+  a0 = f32[] parameter(0)
+  a1 = bf16[] parameter(1) 
+  b0 = f32[] parameter(2)
+  b1 = bf16[] parameter(3)
+  add0 = f32[] add(a0, b0)
+  add1 = bf16[] multiply(a1, b1)
+  ROOT sum2 = (f32[], bf16[]) tuple(add0, add1)
+}
+
+ENTRY entry {
+  constant = f32[4,2]{1,0} constant({{1,1},{1,4},{2,1},{3,1}})
+  constant.1 = f32[] constant(0)
+  constant.2 = bf16[4,2]{1,0} constant({{1,1},{1,4},{2,1},{3,1}})
+  constant.3 = bf16[] constant(1)
+  ROOT reduce-window = (f32[2,2]{1,0}, bf16[2,2]{1,0}) 
+    reduce-window(constant, constant.2, constant.1, constant.3),
+    window={size=5x1 stride=3x1 pad=2_2x0_0}, to_apply=sum
+})";
+  EXPECT_TRUE(RunAndCompare(hlo_string, ErrorSpec{1e-4, 1e-4}));
+}
+
+XLA_TEST_F(HloTestBase, DISABLED_ON_GPU(ReduceWindowS64Support)) {
+  const char* const hlo_string = R"(
+HloModule jit_dilated_window_sum.10
+
+%primitive_computation_add.4 (parameter.5: s64[], parameter.6: s64[]) -> s64[] {
+  %parameter.5 = s64[] parameter(0), metadata={op_type="add" op_name="add"}
+  %parameter.6 = s64[] parameter(1), metadata={op_type="add" op_name="add"}
+  ROOT %add.7 = s64[] add(s64[] %parameter.5, s64[] %parameter.6), metadata={op_type="add" op_name="add"}
+}
+
+ENTRY %jit_dilated_window_sum.10 (parameter.1: s64[8,10,12]) -> (s64[8,10,12]) {
+  %constant.2 = pred[] constant(false)
+  %parameter.1 = s64[8,10,12]{2,1,0} parameter(0)
+  %constant.3 = s64[] constant(0), metadata={op_type="reduce_window_sum" op_name="jit(dilated_window_sum)/reduce_window_sum[ base_dilation=(1, 1, 1)\n                                           padding=((1, 1), (1, 1), (0, 0))\n                                           window_dilation=(1, 2, 2)\n                                           window_dimensions=(3, 2, 1)\n                                           window_strides=(1, 1, 1) ]" source_file="<ipython-input-1-315291761729>" source_line=9}
+  %reduce-window.8 = s64[8,10,12]{2,1,0} reduce-window(s64[8,10,12]{2,1,0} %parameter.1, s64[] %constant.3), window={size=3x2x1 pad=1_1x1_1x0_0 rhs_dilate=1x2x2}, to_apply=%primitive_computation_add.4, metadata={op_type="reduce_window_sum" op_name="jit(dilated_window_sum)/reduce_window_sum[ base_dilation=(1, 1, 1)\n                                           padding=((1, 1), (1, 1), (0, 0))\n                                           window_dilation=(1, 2, 2)\n                                           window_dimensions=(3, 2, 1)\n                                           window_strides=(1, 1, 1) ]" source_file="<ipython-input-1-315291761729>" source_line=9}
+  ROOT %tuple.9 = (s64[8,10,12]{2,1,0}) tuple(s64[8,10,12]{2,1,0} %reduce-window.8)
+})";
+  EXPECT_TRUE(RunAndCompare(hlo_string, ErrorSpec{1e-4, 1e-4}));
+}
+
+XLA_TEST_F(HloTestBase, DISABLED_ON_GPU(ReduceWindowS64Support2)) {
+  const char* const hlo_string = R"(
+HloModule SyncTensorsGraph.43
+
+%MulComputation.18 (x.19: s64[], y.20: s64[]) -> s64[] {
+  %x.19 = s64[] parameter(0)
+  %y.20 = s64[] parameter(1)
+  ROOT %multiply.21 = s64[] multiply(s64[] %x.19, s64[] %y.20)
+}
+
+%MulComputation.26 (x.27: s64[], y.28: s64[]) -> s64[] {
+  %x.27 = s64[] parameter(0)
+  %y.28 = s64[] parameter(1)
+  ROOT %multiply.29 = s64[] multiply(s64[] %x.27, s64[] %y.28)
+}
+
+%MaxComputation.34 (x.35: s64[], y.36: s64[]) -> s64[] {
+  %x.35 = s64[] parameter(0)
+  %y.36 = s64[] parameter(1)
+  ROOT %maximum.37 = s64[] maximum(s64[] %x.35, s64[] %y.36)
+}
+
+ENTRY %SyncTensorsGraph.43 (p0.1: f32[], p1.7: pred[3,3]) -> (pred[]) {
+  %constant.8 = pred[] constant(false)
+  %reshape.9 = pred[1,1]{1,0} reshape(pred[] %constant.8)
+  %broadcast.10 = pred[1,1]{1,0} broadcast(pred[1,1]{1,0} %reshape.9), dimensions={0,1}
+  %reshape.11 = pred[] reshape(pred[1,1]{1,0} %broadcast.10)
+  %broadcast.12 = pred[3,3]{1,0} broadcast(pred[] %reshape.11), dimensions={}
+  %p1.7 = pred[3,3]{1,0} parameter(1)
+  %reshape.13 = pred[3,3]{1,0} reshape(pred[3,3]{1,0} %p1.7)
+  %reshape.14 = pred[3,3]{1,0} reshape(pred[3,3]{1,0} %reshape.13)
+  %convert.24 = s64[3,3]{1,0} convert(pred[3,3]{1,0} %reshape.14)
+  %constant.25 = s64[] constant(1)
+  %reduce-window.30 = s64[3,3]{1,0} reduce-window(s64[3,3]{1,0} %convert.24, s64[] %constant.25), window={size=3x1 pad=2_0x0_0}, to_apply=%MulComputation.26
+  %convert.15 = s32[3,3]{1,0} convert(pred[3,3]{1,0} %reshape.14)
+  %convert.16 = s64[3,3]{1,0} convert(s32[3,3]{1,0} %convert.15)
+  %constant.17 = s64[] constant(1)
+  %reduce-window.22 = s64[3,3]{1,0} reduce-window(s64[3,3]{1,0} %convert.16, s64[] %constant.17), window={size=3x1 pad=2_0x0_0}, to_apply=%MulComputation.18
+  %constant.2 = s64[] constant(1)
+  %reshape.3 = s64[1,1]{1,0} reshape(s64[] %constant.2)
+  %broadcast.4 = s64[1,1]{1,0} broadcast(s64[1,1]{1,0} %reshape.3), dimensions={0,1}
+  %reshape.5 = s64[] reshape(s64[1,1]{1,0} %broadcast.4)
+  %broadcast.6 = s64[3,3]{1,0} broadcast(s64[] %reshape.5), dimensions={}
+  %multiply.23 = s64[3,3]{1,0} multiply(s64[3,3]{1,0} %reduce-window.22, s64[3,3]{1,0} %broadcast.6)
+  %subtract.31 = s64[3,3]{1,0} subtract(s64[3,3]{1,0} %reduce-window.30, s64[3,3]{1,0} %multiply.23)
+  %abs.32 = s64[3,3]{1,0} abs(s64[3,3]{1,0} %subtract.31)
+  %constant.33 = s64[] constant(-9223372036854775808)
+  %reduce.38 = s64[] reduce(s64[3,3]{1,0} %abs.32, s64[] %constant.33), dimensions={0,1}, to_apply=%MaxComputation.34
+  %reshape.39 = s64[] reshape(s64[] %reduce.38)
+  %convert.40 = f32[] convert(s64[] %reshape.39)
+  %p0.1 = f32[] parameter(0)
+  %compare.41 = pred[] compare(f32[] %convert.40, f32[] %p0.1), direction=LE
+  ROOT %tuple.42 = (pred[]) tuple(pred[] %compare.41)
+})";
+  EXPECT_TRUE(RunAndCompare(hlo_string, ErrorSpec{1e-4, 1e-4}));
 }
 
 }  // namespace

@@ -54,6 +54,10 @@ using TensorVector = gtl::InlinedVector<TensorValue, 4>;
 // e.g., shape input to Reshape op.
 const int64 kUnknownDimFromConst = INT64_MAX;
 
+// Skip const value instantiation if the number of elements in a const tensor
+// is greater than this threshold.
+const int kThresholdToSkipConstTensorInstantiation = 128;
+
 template <typename Handle>
 struct HashHandle {
   std::size_t operator()(const Handle& h) const { return h.Handle(); }
@@ -113,7 +117,7 @@ struct Processor<DimensionHandle> {
       *result = -counter;
       counter++;
     } else {
-      int64 val = InferenceContext::Value(d);
+      int64_t val = InferenceContext::Value(d);
       if (val >= 0) {
         *result = val;
       } else {
@@ -152,7 +156,7 @@ struct Processor<DimensionHandle> {
   }
 
  private:
-  Status RefineDim(int64 dim, int64* result) {
+  Status RefineDim(int64_t dim, int64* result) {
     if (*result >= 0) {
       if (!(*result == dim || dim < 0)) {
         return errors::InvalidArgument("Inconsistent dimensions detected");
@@ -403,7 +407,7 @@ TensorProto MakeTensorProtoFromShape(InferenceContext* ic,
   }
   // For a scalar tensor, tensor_shape field will be left empty; no dim.
   for (int i = 0; i < ic->Rank(tensor_as_shape); i++) {
-    int64 value = ic->Value(ic->Dim(tensor_as_shape, i));
+    int64_t value = ic->Value(ic->Dim(tensor_as_shape, i));
     if (dtype == DT_INT32) {
       tensor_proto.add_int_val(value);
     } else {
@@ -435,6 +439,53 @@ NodeDef MakeConstNodeDefFromShape(InferenceContext* ic,
                                   const DataType& dtype) {
   return MakeConstNodeDefFromTensorProto(
       ic, MakeTensorProtoFromShape(ic, shape, tensor_as_shape, dtype), dtype);
+}
+
+bool IsNumericType(const DataType dtype) {
+  static const gtl::FlatSet<DataType>* const kRealNumberTypes =
+      CHECK_NOTNULL((new gtl::FlatSet<DataType>{
+          // Floating point.
+          DT_BFLOAT16,
+          DT_HALF,
+          DT_FLOAT,
+          DT_DOUBLE,
+          // Int / UInt.
+          DT_INT8,
+          DT_INT16,
+          DT_INT32,
+          DT_INT64,
+          DT_UINT8,
+          DT_UINT16,
+          DT_UINT32,
+          DT_UINT64,
+          // Quantized Int.
+          DT_QINT8,
+          DT_QUINT8,
+          DT_QINT16,
+          DT_QUINT16,
+          DT_QINT32,
+          // Bool.
+          DT_BOOL,
+      }));
+  return kRealNumberTypes->find(dtype) != kRealNumberTypes->end();
+}
+
+// Returns the number of elements in the input (const) tensor.
+// -1 if the tensor has no shape or unknown rank.
+uint64 NumElementsFromTensorProto(const TensorProto& tensor_proto) {
+  if (!tensor_proto.has_tensor_shape()) {
+    return -1;
+  }
+  const auto& tensor_shape_proto = tensor_proto.tensor_shape();
+  if (tensor_shape_proto.unknown_rank()) {
+    return -1;
+  }
+  int64_t num_elements = 1;
+  for (const auto& dim : tensor_shape_proto.dim()) {
+    // Note that in some cases, dim.size() can be zero (e.g., empty vector).
+    num_elements *= dim.size();
+  }
+  return num_elements;
 }
 
 }  // namespace
@@ -513,34 +564,6 @@ class TopoQueue {
   std::set<NodeAndId, OrderByIdAscending> queue_;
 };
 
-bool IsNumericType(const DataType dtype) {
-  static const gtl::FlatSet<DataType>* const kRealNumberTypes =
-      CHECK_NOTNULL((new gtl::FlatSet<DataType>{
-          // Floating point.
-          DT_BFLOAT16,
-          DT_HALF,
-          DT_FLOAT,
-          DT_DOUBLE,
-          // Int / UInt.
-          DT_INT8,
-          DT_INT16,
-          DT_INT32,
-          DT_INT64,
-          DT_UINT8,
-          DT_UINT16,
-          DT_UINT32,
-          DT_UINT64,
-          // Quantized Int.
-          DT_QINT8,
-          DT_QUINT8,
-          DT_QINT16,
-          DT_QUINT16,
-          DT_QINT32,
-          // Bool.
-          DT_BOOL,
-      }));
-  return kRealNumberTypes->find(dtype) != kRealNumberTypes->end();
-}
 
 bool IsAllowListedOpTypeForEvaluateNode(const string& op_type) {
   static const gtl::FlatSet<string>* const kOpTpeAllowlist =
@@ -1087,6 +1110,9 @@ class SymbolicShapeRefiner {
     for (int dst_input = 0; dst_input < ic->num_inputs(); ++dst_input) {
       const TensorProto* tensor_proto = ctx->input_tensor_protos[dst_input];
       if (tensor_proto != nullptr &&
+          // Skip if the const tensor is too large.
+          NumElementsFromTensorProto(*tensor_proto) <=
+              kThresholdToSkipConstTensorInstantiation &&
           const_values[dst_input].FromProto(*tensor_proto)) {
         input_tensors[dst_input] = &const_values[dst_input];
       }
@@ -1152,8 +1178,8 @@ class SymbolicShapeRefiner {
     } else {
       for (int d = 0; d < rank; ++d) {
         if (!ctx->Dim(shape1, d).SameHandle(ctx->Dim(shape2, d))) {
-          int64 val1 = ctx->Value(ctx->Dim(shape1, d));
-          int64 val2 = ctx->Value(ctx->Dim(shape2, d));
+          int64_t val1 = ctx->Value(ctx->Dim(shape1, d));
+          int64_t val2 = ctx->Value(ctx->Dim(shape2, d));
           if (val1 != val2 || (val1 < 0 && val2 < 0)) {
             DimensionHandle new_dim = GetUnknownOutputDim(node, port_index, d);
             TF_CHECK_OK(ctx->ReplaceDim(relaxed, d, new_dim, &relaxed));
@@ -1178,9 +1204,9 @@ class SymbolicShapeRefiner {
     for (int i = 0; i < rank; ++i) {
       if (!InferenceContext::DimKnownRank(s1, i).SameHandle(
               InferenceContext::DimKnownRank(s2, i))) {
-        int64 val1 =
+        int64_t val1 =
             InferenceContext::Value(InferenceContext::DimKnownRank(s1, i));
-        int64 val2 =
+        int64_t val2 =
             InferenceContext::Value(InferenceContext::DimKnownRank(s2, i));
         if (val1 >= 0 && val2 >= 0 && val1 == val2) {
           continue;
@@ -1214,9 +1240,9 @@ class SymbolicShapeRefiner {
       if (!InferenceContext::DimKnownRank(inferred_shape, i)
                .SameHandle(
                    InferenceContext::DimKnownRank(annotated_shape, i))) {
-        int64 val1 = InferenceContext::Value(
+        int64_t val1 = InferenceContext::Value(
             InferenceContext::DimKnownRank(inferred_shape, i));
-        int64 val2 = InferenceContext::Value(
+        int64_t val2 = InferenceContext::Value(
             InferenceContext::DimKnownRank(annotated_shape, i));
         if (val1 >= 0 && val1 != val2) {
           return false;
@@ -1237,9 +1263,9 @@ class SymbolicShapeRefiner {
     }
     const int rank = InferenceContext::Rank(inferred_shape);
     for (int i = 0; i < rank; ++i) {
-      int64 val1 = InferenceContext::Value(
+      int64_t val1 = InferenceContext::Value(
           InferenceContext::DimKnownRank(inferred_shape, i));
-      int64 val2 = InferenceContext::Value(
+      int64_t val2 = InferenceContext::Value(
           InferenceContext::DimKnownRank(annotated_shape, i));
       if (val1 != val2) {
         return false;
@@ -1447,7 +1473,7 @@ class SymbolicShapeRefiner {
 
   // Returns true if we want to update output shapes and values with running
   // EvaluateNode() for this op, based on op type, data type, and size.
-  bool ShouldUpdateOutputShapesAndValues(NodeContext* c, int64 max_size) {
+  bool ShouldUpdateOutputShapesAndValues(NodeContext* c, int64_t max_size) {
     InferenceContext* ic = c->inference_context.get();
 
     // Due to the cost of running EvaluateNode(), we limit only to white listed
@@ -1529,7 +1555,7 @@ class SymbolicShapeRefiner {
         } else {
           auto flat = tensor->flat<int64>();
           for (int j = 0; j < rank; j++) {
-            int64 dim = ic->Value(ic->Dim(shape_handle, j));
+            int64_t dim = ic->Value(ic->Dim(shape_handle, j));
             flat(j) = dim;
           }
         }
@@ -1672,8 +1698,8 @@ class SymbolicShapeRefiner {
     InferenceContext* ic = c->inference_context.get();
     if (!is_fed) {
       if (IsConstant(node)) {
-        c->output_tensor_protos.resize(1);
         const TensorProto& tensor_proto = node.attr().at("value").tensor();
+        c->output_tensor_protos.resize(1);
         c->output_tensor_protos[0] = &tensor_proto;
         c->output_tensors_as_shapes.resize(1);
         MaybeTensorProtoToShape(ic, tensor_proto,
@@ -1691,7 +1717,7 @@ class SymbolicShapeRefiner {
         DimensionHandle size = ic->NumElements(ic->input(0));
         if (ic->ValueKnown(size)) {
           // Propagate size value.
-          int64 sz = ic->Value(size);
+          int64_t sz = ic->Value(size);
           bool valid = false;
           if (node.attr().at("out_type").type() == DT_INT32) {
             if (sz < std::numeric_limits<int32>::max()) {
@@ -1747,9 +1773,10 @@ class SymbolicShapeRefiner {
               valid = false;
               break;
             }
-            int64 size = t->dtype() == DT_INT32 ? t->scalar<int32>()()
-                                                : t->scalar<int64>()();
-            dims.push_back(size < 0 ? ic->UnknownDim() : ic->MakeDim(size));
+            int64_t size = t->dtype() == DT_INT32 ? t->scalar<int32>()()
+                                                  : t->scalar<int64>()();
+            dims.push_back(size < 0 ? ic->MakeDim(kUnknownDimFromConst)
+                                    : ic->MakeDim(size));
           } else {
             // Don't have tensor value, but use input_tensors_as_shapes, if
             // possible.
@@ -1759,7 +1786,9 @@ class SymbolicShapeRefiner {
                 ic->ValueKnown(ic->Dim(shape_handle, 0))) {
               dims.push_back(ic->Dim(shape_handle, 0));
             } else {
-              dims.push_back(ic->UnknownDim());
+              // This is not from Const, but as it shouldn'be used as symbolic
+              // unknown dim for different ops, we use kUnknownDimFromConst.
+              dims.push_back(ic->MakeDim(kUnknownDimFromConst));
             }
           }
         }
@@ -1783,17 +1812,17 @@ class SymbolicShapeRefiner {
         const Tensor* slice_size = ic->input_tensor(2);
         valid &= slice_size != nullptr && slice_size->NumElements() == 1;
         if (valid) {
-          int64 start = slice_offset->dtype() == DT_INT32
-                            ? slice_offset->flat<int32>()(0)
-                            : slice_offset->flat<int64>()(0);
-          int64 size =
+          int64_t start = slice_offset->dtype() == DT_INT32
+                              ? slice_offset->flat<int32>()(0)
+                              : slice_offset->flat<int64>()(0);
+          int64_t size =
               (slice_size->dtype() == DT_INT32 ? slice_size->flat<int32>()(0)
                                                : slice_size->flat<int64>()(0));
           ShapeHandle result;
           if (size == -1) {
             TF_RETURN_IF_ERROR(ic->Subshape(input, start, &result));
           } else {
-            int64 end = start + size;
+            int64_t end = start + size;
             TF_RETURN_IF_ERROR(ic->Subshape(input, start, end, &result));
           }
           c->output_tensors_as_shapes.resize(1);
@@ -1833,21 +1862,21 @@ class SymbolicShapeRefiner {
           valid = false;
         }
         if (valid) {
-          int64 begin = 0;
+          int64_t begin = 0;
           if (begin_mask == 0) {
             begin = slice_begin->dtype() == DT_INT32
                         ? slice_begin->flat<int32>()(0)
                         : slice_begin->flat<int64>()(0);
           }
-          int64 end = std::numeric_limits<int64>::max();
+          int64_t end = std::numeric_limits<int64>::max();
           if (end_mask == 0) {
             end =
                 (slice_end->dtype() == DT_INT32 ? slice_end->flat<int32>()(0)
                                                 : slice_end->flat<int64>()(0));
           }
-          int64 stride = slice_stride->dtype() == DT_INT32
-                             ? slice_stride->flat<int32>()(0)
-                             : slice_stride->flat<int64>()(0);
+          int64_t stride = slice_stride->dtype() == DT_INT32
+                               ? slice_stride->flat<int32>()(0)
+                               : slice_stride->flat<int64>()(0);
           ShapeHandle result;
           TF_RETURN_IF_ERROR(ic->Subshape(input, begin, end, stride, &result));
           c->output_tensors_as_shapes.resize(1);
@@ -1941,6 +1970,11 @@ class SymbolicShapeRefiner {
     if (tensor_proto.dtype() != DT_INT32 && tensor_proto.dtype() != DT_INT64) {
       return false;
     }
+    // Skip if the const tensor is too large.
+    if (NumElementsFromTensorProto(tensor_proto) >
+        kThresholdToSkipConstTensorInstantiation) {
+      return false;
+    }
     // Skip if shape is neither scalar nor vector.
     if (tensor_proto.tensor_shape().unknown_rank() ||
         tensor_proto.tensor_shape().dim_size() > 1) {
@@ -1962,8 +1996,8 @@ class SymbolicShapeRefiner {
       bool has_values_smaller_than_minus_1 = false;
       std::vector<DimensionHandle> dims;
       for (int i = 0; i < tensor.NumElements(); i++) {
-        int64 value = tensor.dtype() == DT_INT32 ? tensor.flat<int32>()(i)
-                                                 : tensor.flat<int64>()(i);
+        int64_t value = tensor.dtype() == DT_INT32 ? tensor.flat<int32>()(i)
+                                                   : tensor.flat<int64>()(i);
         has_values_smaller_than_minus_1 |= (value < -1);
         // Mark this as UnknownDim from Const.
         dims.push_back(value < 0 ? ic->MakeDim(kUnknownDimFromConst)
@@ -1976,8 +2010,8 @@ class SymbolicShapeRefiner {
       }
     } else if (IsIntegerScalar(tensor)) {
       // Scalar constant.
-      int64 value = tensor.dtype() == DT_INT32 ? tensor.flat<int32>()(0)
-                                               : tensor.flat<int64>()(0);
+      int64_t value = tensor.dtype() == DT_INT32 ? tensor.flat<int32>()(0)
+                                                 : tensor.flat<int64>()(0);
       if (value == -1) {
         // Scalar value -1 represents an unknown shape. If we would try to
         // MakeShape(MakeDim) with it, we would get vector of unknown size.
@@ -2053,9 +2087,31 @@ class SymbolicShapeManager {
       for (int j = 0; j < InferenceContext::Rank(actual_shape); ++j) {
         shape_inference::DimensionHandle dim =
             InferenceContext::DimKnownRank(actual_shape, j);
-        int64 d = dims_.GetMergedValue(dim);
+        int64_t d = dims_.GetMergedValue(dim);
         properties->mutable_shape()->add_dim()->set_size(d);
       }
+    }
+  }
+
+  // Returns merged shape with merged dimensions.
+  ShapeHandle GetMergedShape(InferenceContext* ic, ShapeHandle s) {
+    const auto& actual_shape = shapes_.GetMergedValue(s);
+    if (!InferenceContext::RankKnown(actual_shape)) {
+      return ic->UnknownShape();
+    } else {
+      std::vector<DimensionHandle> dims;
+      for (int j = 0; j < InferenceContext::Rank(actual_shape); ++j) {
+        shape_inference::DimensionHandle dim =
+            InferenceContext::DimKnownRank(actual_shape, j);
+        int64_t d = dims_.GetMergedValue(dim);
+        // Symbolic shape manager may made some dims < -1, which causes errors
+        // in creating Dimension.
+        if (d < -1) {
+          d = -1;
+        }
+        dims.push_back(ic->MakeDim(d));
+      }
+      return ic->MakeShape(dims);
     }
   }
 
@@ -2063,6 +2119,105 @@ class SymbolicShapeManager {
   DisjointSet<shape_inference::ShapeHandle> shapes_;
   DisjointSet<shape_inference::DimensionHandle> dims_;
 };
+
+// Checks whether there is any conflict in merged shapes and dims in
+// SymbolicShapeManager.
+Status ValidateSymbolicShapeManager(const GraphDef& graph_def,
+                                    SymbolicShapeRefiner* refiner,
+                                    SymbolicShapeManager* shape_manager) {
+  if (!VLOG_IS_ON(1)) {
+    return Status::OK();
+  }
+
+  VLOG(1) << "Checking any conflics in shapes and dimensions ...";
+  int64_t num_incompatible_shapes = 0;
+  for (const NodeDef& node : graph_def.node()) {
+    auto ctx = refiner->GetNodeContext(&node);
+    if (!ctx) {
+      continue;
+    }
+    auto* ic = ctx->inference_context.get();
+    for (int i = 0; i < ic->num_inputs(); ++i) {
+      const auto& shape = ic->input(i);
+      const auto& merged_shape = shape_manager->GetMergedShape(ic, shape);
+      if (!refiner->CompatibleShapes(shape, merged_shape)) {
+        num_incompatible_shapes++;
+        VLOG(1) << "**** Incompatible shape from SymbolicShapeManager "
+                << "for node " << node.name() << " input (" << i << ") "
+                << ic->DebugString(shape)
+                << " vs. merged: " << ic->DebugString(merged_shape);
+      }
+    }
+    for (int i = 0; i < ic->num_outputs(); ++i) {
+      const auto& shape = ic->output(i);
+      const auto& merged_shape = shape_manager->GetMergedShape(ic, shape);
+      if (!refiner->CompatibleShapes(shape, merged_shape)) {
+        num_incompatible_shapes++;
+        VLOG(1) << "**** Incompatible shape from SymbolicShapeManager "
+                << "for node " << node.name() << " output (" << i << ") "
+                << ic->DebugString(shape)
+                << " vs. merged: " << ic->DebugString(merged_shape);
+      }
+    }
+  }
+  if (num_incompatible_shapes > 0) {
+    VLOG(1) << "**** WARNING: " << num_incompatible_shapes
+            << " incompatible shapes from SymbolicShapeManager.";
+  } else {
+    VLOG(1) << "**** No incompatible shape found from SymbolicShapeManager.";
+  }
+
+  return Status::OK();
+}
+
+// Log shape inference and its merged shapes.
+Status VerboseShapeInferenceLogging(const GraphDef& graph_def,
+                                    SymbolicShapeRefiner* refiner,
+                                    SymbolicShapeManager* shape_manager) {
+  // As logging all the nodes would generate too many lines, we by default
+  // skip this detailed logging. Users may add nodes of interest to
+  // node_names_for_logging to enable detailed logging.
+  absl::flat_hash_set<std::string> node_names_for_logging = {};
+  if (!VLOG_IS_ON(3) || node_names_for_logging.empty()) {
+    return Status::OK();
+  }
+
+  auto should_log = [&node_names_for_logging](std::string node_name) {
+    return node_names_for_logging.find(node_name) !=
+           node_names_for_logging.end();
+  };
+
+  for (const NodeDef& node : graph_def.node()) {
+    if (!should_log(node.name())) {
+      continue;
+    }
+    auto ctx = refiner->GetNodeContext(&node);
+    if (!ctx) {
+      continue;
+    }
+    auto* ic = ctx->inference_context.get();
+    VLOG(3) << "Shape inference for node : " << node.name();
+    VLOG(3) << ctx->DebugString(node);
+    std::string merged_shapes = "Merged shapes from SymbolicShapManager:\n";
+    for (int i = 0; i < ic->num_inputs(); ++i) {
+      absl::StrAppend(
+          &merged_shapes, " input[", i, "] -- ",
+          ic->DebugString(shape_manager->GetMergedShape(ic, ic->input(i))),
+          "\n");
+    }
+    for (int i = 0; i < ic->num_outputs(); ++i) {
+      absl::StrAppend(
+          &merged_shapes, " output[", i, "] -- ",
+          ic->DebugString(shape_manager->GetMergedShape(ic, ic->output(i))),
+          "\n");
+    }
+    VLOG(3) << merged_shapes;
+    VLOG(3) << "--------------------------------";
+    VLOG(3) << "";
+  }
+
+  return Status::OK();
+}
 
 Status GraphProperties::RelaxEnqueueShapesAndMergeTypes(
     SymbolicShapeRefiner* shape_refiner, const NodeDef* qnode,
@@ -2217,9 +2372,9 @@ Status GraphProperties::PropagateShapes(
   const int64 num_queues = resource_handles.size();
   const int64 max_resource_iterations = num_queues * num_queues * max_rank;
 
-  int64 num_resource_iterations = 0;
+  int64_t num_resource_iterations = 0;
   do {
-    int64 num_loop_iterations = 0;
+    int64_t num_loop_iterations = 0;
     while (!new_shapes->empty() &&
            num_loop_iterations++ < max_loop_iterations) {
       const NodeDef* n = new_shapes->pop();
@@ -2485,8 +2640,11 @@ Status GraphProperties::InferStatically(bool assume_valid_feeds,
     }
   }
 
+  TF_RETURN_IF_ERROR(ValidateSymbolicShapeManager(item_.graph, refiner.get(),
+                                                  shape_manager.get()));
+
   for (const NodeDef& node : item_.graph.node()) {
-    VLOG(3) << "Filling in graph properties for node: " << node.name();
+    VLOG(4) << "Filling in graph properties for node: " << node.name();
     auto ctx = refiner->GetNodeContext(&node);
     if (!ctx) {
       continue;
@@ -2579,6 +2737,9 @@ Status GraphProperties::InferStatically(bool assume_valid_feeds,
   // Help trace the unknown dimensions to their origins.
   VerboseLogUnknownDimensionSources(item_.graph, input_properties_,
                                     output_properties_);
+
+  TF_RETURN_IF_ERROR(VerboseShapeInferenceLogging(item_.graph, refiner.get(),
+                                                  shape_manager.get()));
 
   return Status::OK();
 }

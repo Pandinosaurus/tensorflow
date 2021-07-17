@@ -39,9 +39,10 @@ namespace xla {
     TransferManager::platform_transfer_manager_mutex_(
         tensorflow::LINKER_INITIALIZED);
 
-/* static */ std::map<se::Platform::Id, TransferManager::State>*
+/* static */ absl::flat_hash_map<se::Platform::Id, TransferManager::State>*
 TransferManager::GetPlatformTransferManagers() {
-  static auto* r = new std::map<se::Platform::Id, TransferManager::State>;
+  static auto* r =
+      new absl::flat_hash_map<se::Platform::Id, TransferManager::State>;
   return r;
 }
 
@@ -386,13 +387,15 @@ Status TransferManager::TransferBufferToDevice(
 
 StatusOr<ScopedShapedBuffer> TransferManager::AllocateScopedShapedBuffer(
     const Shape& on_host_shape, se::DeviceMemoryAllocator* allocator,
-    int device_ordinal) {
+    int device_ordinal, DeviceShapeRepresentationFn shape_representation_fn) {
   if (!LayoutUtil::HasLayout(on_host_shape)) {
     return InvalidArgument("Shape must have a layout: %s",
                            ShapeUtil::HumanStringWithLayout(on_host_shape));
   }
   TF_RETURN_IF_ERROR(ShapeUtil::ValidateShape(on_host_shape));
-  Shape on_device_shape = HostShapeToDeviceShape(on_host_shape);
+  Shape on_device_shape = (shape_representation_fn == nullptr)
+                              ? HostShapeToDeviceShape(on_host_shape)
+                              : shape_representation_fn(on_host_shape);
   TF_RET_CHECK(LayoutUtil::HasLayout(on_device_shape));
 
   ScopedShapedBuffer shaped_buffer(std::move(on_device_shape), allocator,

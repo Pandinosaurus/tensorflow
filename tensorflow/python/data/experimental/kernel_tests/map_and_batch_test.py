@@ -23,6 +23,7 @@ from absl.testing import parameterized
 import numpy as np
 
 from tensorflow.python.data.experimental.ops import batching
+from tensorflow.python.data.kernel_tests import checkpoint_test_base
 from tensorflow.python.data.kernel_tests import test_base
 from tensorflow.python.data.ops import dataset_ops
 from tensorflow.python.eager import context
@@ -397,6 +398,94 @@ class MapAndBatchTest(test_base.DatasetTestBase, parameterized.TestCase):
             self.evaluate(get_next()))
     with self.assertRaises(errors.OutOfRangeError):
       self.evaluate(get_next())
+
+
+class MapAndBatchCheckpointTest(checkpoint_test_base.CheckpointTestBase,
+                                parameterized.TestCase):
+
+  @combinations.generate(
+      combinations.times(
+          test_base.default_test_combinations(),
+          checkpoint_test_base.default_test_combinations(),
+          combinations.combine(drop_remainder=[True, False])))
+  def testNumParallelBatches(self, verify_fn, drop_remainder):
+    range_size = 11
+    num_shards = 3
+    num_repeats = 2
+    batch_size = 5
+    num_parallel_batches = 2
+    total_outputs = (range_size // num_shards) * num_repeats
+    if drop_remainder:
+      num_outputs = total_outputs // batch_size
+    else:
+      num_outputs = int(math.ceil(total_outputs / batch_size))
+
+    def build_ds(range_start, drop_remainder):
+
+      def _map_fn(x):
+        return math_ops.square(x)
+
+      return dataset_ops.Dataset.range(
+          range_start, range_start + range_size).shard(
+              num_shards=num_shards, index=0).repeat(num_repeats).apply(
+                  batching.map_and_batch(
+                      map_func=_map_fn,
+                      batch_size=batch_size,
+                      num_parallel_batches=num_parallel_batches,
+                      drop_remainder=drop_remainder))
+
+    verify_fn(self, lambda: build_ds(10, drop_remainder=drop_remainder),
+              num_outputs)
+
+  @combinations.generate(
+      combinations.times(
+          test_base.default_test_combinations(),
+          checkpoint_test_base.default_test_combinations(),
+          combinations.combine(drop_remainder=[True, False])))
+  def testNumParallelCalls(self, verify_fn, drop_remainder):
+    range_size = 11
+    num_shards = 3
+    num_repeats = 2
+    batch_size = 5
+    num_parallel_calls = 7
+    total_outputs = (range_size // num_shards) * num_repeats
+    if drop_remainder:
+      num_outputs = total_outputs // batch_size
+    else:
+      num_outputs = int(math.ceil(total_outputs / batch_size))
+
+    def build_ds(range_start, drop_remainder=False):
+
+      def _map_fn(x):
+        return math_ops.square(x)
+
+      return dataset_ops.Dataset.range(
+          range_start, range_start + range_size).shard(
+              num_shards=num_shards, index=0).repeat(num_repeats).apply(
+                  batching.map_and_batch(
+                      map_func=_map_fn,
+                      batch_size=batch_size,
+                      num_parallel_calls=num_parallel_calls,
+                      drop_remainder=drop_remainder))
+
+    verify_fn(self, lambda: build_ds(10, drop_remainder=drop_remainder),
+              num_outputs)
+
+  @combinations.generate(
+      combinations.times(test_base.default_test_combinations(),
+                         checkpoint_test_base.default_test_combinations()))
+  def testSparse(self, verify_fn):
+
+    def build_dataset():
+
+      def map_fn(i):
+        return sparse_tensor.SparseTensorValue(
+            indices=[[0]], values=(i * [1]), dense_shape=[1])
+
+      return dataset_ops.Dataset.range(10).apply(
+          batching.map_and_batch(map_fn, 5))
+
+    verify_fn(self, build_dataset, num_outputs=2)
 
 
 if __name__ == "__main__":

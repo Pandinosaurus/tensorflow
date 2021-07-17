@@ -100,7 +100,7 @@ void Master::GC() {
     std::vector<string> handles;
     const int64 num_micros = static_cast<int64>(session_gc_seconds_ * 1000000);
     for (const auto& entry : sessions_) {
-      int64 lat = entry.second->last_access_time_usec();
+      int64_t lat = entry.second->last_access_time_usec();
       if (static_cast<int64>(env->NowMicros()) - lat > num_micros) {
         handles.push_back(entry.first);
         auto* sess = entry.second;
@@ -414,7 +414,7 @@ void Master::CreateSession(const CreateSessionRequest* req,
           }
         }
       }
-
+      worker_cache_factory_options.rpc_options = &req->config().rpc_options();
       // Create the worker cache from the computed server_def.
       status = env_->worker_cache_factory(worker_cache_factory_options,
                                           &worker_cache);

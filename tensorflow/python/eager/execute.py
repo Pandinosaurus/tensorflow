@@ -151,7 +151,7 @@ def must_record_gradient():
 
 
 def record_gradient(unused_op_name, unused_inputs, unused_attrs,
-                    unused_results):
+                    unused_outputs):
   """Import backprop if you want gradients recorded."""
   pass
 
@@ -302,7 +302,7 @@ def args_to_mixed_eager_tensors(lists, ctx):
   assert len(lists) > 1
 
   # Generate an error if len(lists[i]) is not the same for all i.
-  lists_ret = []
+  lists_ret = [[]]
   for l in lists[1:]:
     if len(l) != len(lists[0]):
       raise ValueError(

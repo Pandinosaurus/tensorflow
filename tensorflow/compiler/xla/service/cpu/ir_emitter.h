@@ -121,13 +121,6 @@ class IrEmitter : public DfsHloVisitorWithDefault,
   // Emit an LLVM global variable for every constant buffer allocation.
   Status EmitConstantGlobals();
 
-  // Emit code to emit the element at `index` for a convolution instruction.
-  StatusOr<llvm::Value*> EmitElementalConvolution(
-      const HloConvolutionInstruction* convolution,
-      const llvm_ir::ElementGenerator& input_generator,
-      const llvm_ir::ElementGenerator& kernel_generator,
-      const llvm_ir::IrArray::Index& index);
-
  protected:
   //
   // The following methods implement the DfsHloVisitor interface.
@@ -339,7 +332,7 @@ class IrEmitter : public DfsHloVisitorWithDefault,
   // most-minor dimension).
   llvm::Constant* CreateInitializerForConstantArray(
       const std::vector<llvm::Constant*>& array_elements, const Shape& shape,
-      int64 dimension_index);
+      int64_t dimension_index);
 
   // Tries to codegen a reduction operation using vectorized instructions.
   // Returns true if successful, and false on failure.  On failure, sets
@@ -386,7 +379,7 @@ class IrEmitter : public DfsHloVisitorWithDefault,
   // "store_address".
   void EmitShardedVectorStore(llvm::Value* store_address,
                               const ShardedVector& value_to_store,
-                              const int alignment,
+                              llvm::Align alignment,
                               const llvm_ir::IrArray& containing_array);
 
   using ReductionGenerator = std ::function<llvm::Value*(
@@ -406,7 +399,7 @@ class IrEmitter : public DfsHloVisitorWithDefault,
       const llvm_ir::IrArray::Index& output_index,
       const ShardedVectorType& accumulator_type, HloInstruction* init_value,
       HloInstruction* arg, absl::Span<const int64> dimensions,
-      unsigned element_alignment);
+      llvm::Align element_alignment);
 
   // Tries to emit a fast concatenate operation using memcpy.  Returns true if
   // successful, and false on failure.  On failure, sets "failure_reason" to a
@@ -418,13 +411,15 @@ class IrEmitter : public DfsHloVisitorWithDefault,
   // Emits LLVM IR to transfer "element_count" elements of type "primitive_type"
   // from the address "source" to the address "target".
   void EmitTransferElements(llvm::Value* target, llvm::Value* source,
-                            int64 element_count, PrimitiveType primitive_type,
+                            int64_t element_count, PrimitiveType primitive_type,
                             const llvm_ir::IrArray& target_array,
                             const llvm_ir::IrArray& source_array);
 
   // Emits printing during the execution.
   llvm::Value* EmitPrintf(absl::string_view fmt,
                           absl::Span<llvm::Value* const> arguments);
+  llvm::Value* EmitPrintfToStderr(absl::string_view fmt,
+                                  absl::Span<llvm::Value* const> arguments);
 
   // Emits a call to a non-variadic function `func_name` with arguments
   // `arguments` assuming C calling convention.
@@ -559,14 +554,15 @@ class IrEmitter : public DfsHloVisitorWithDefault,
   // Given a load instruction and a shape or buffer size, annotate the load's
   // result with the alignment required by the shape or size.
   void AttachAlignmentMetadataForLoad(llvm::LoadInst* load, const Shape& shape);
-  void AttachAlignmentMetadataForLoad(llvm::LoadInst* load, int64 buffer_size);
+  void AttachAlignmentMetadataForLoad(llvm::LoadInst* load,
+                                      int64_t buffer_size);
 
   // Given a load instruction and a shape or buffer size, annotate the load's
   // result with the dereferenceable bytes required by the shape / buffer size.
   void AttachDereferenceableMetadataForLoad(llvm::LoadInst* load,
                                             const Shape& shape);
   void AttachDereferenceableMetadataForLoad(llvm::LoadInst* load,
-                                            int64 buffer_size);
+                                            int64_t buffer_size);
 
   // Calculate the alignment of a buffer allocated for a given shape.
   int MinimumAlignmentForShape(const Shape& shape);

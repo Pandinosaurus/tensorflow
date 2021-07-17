@@ -149,6 +149,7 @@ Status HierarchicalTreeBroadcaster::InitializeCollectiveParams(
     if (col_params->subdiv_rank.empty()) col_params->subdiv_rank.push_back(-1);
     col_params->instance.impl_details.subdiv_source_rank.push_back(source_task);
   }
+  VLOG(2) << collective_util::SubdivPermDebugString(*col_params);
 
   // Intra-task subdivs.  Pick all devices in task ti for subdiv sdi.  Set
   // source to dev 0 for that task if it does not contain original source, else
@@ -188,7 +189,7 @@ Status HierarchicalTreeBroadcaster::InitializeCollectiveContext(
     std::shared_ptr<CollectiveContext> col_ctx) {
   CHECK(col_ctx->dev_mgr);
   col_ctx_ = col_ctx;
-  col_params_ = &col_ctx->col_params;
+  col_params_ = col_ctx->col_params;
   return collective_util::InitializeDeviceAndLocality(
       col_ctx->dev_mgr, col_ctx->device_name, &col_ctx->device,
       &col_ctx->device_locality);
@@ -408,8 +409,8 @@ void HierarchicalTreeBroadcaster::DispatchSend(int subdiv, int dst_rank,
                                                const Tensor* src_tensor,
                                                const StatusCallback& done) {
   ScopedMemoryDebugAnnotation op_annotation(
-      col_ctx_->op_ctx->op_kernel().name_view().data(), col_ctx_->step_id,
-      "dynamic", src_tensor->dtype(), &src_tensor->shape());
+      col_params_->name.data(), col_ctx_->step_id, "dynamic",
+      src_tensor->dtype(), &src_tensor->shape());
   string send_buf_key =
       BroadcastBufKey(col_ctx_->exec_key, subdiv, src_rank, dst_rank);
   int dst_idx =

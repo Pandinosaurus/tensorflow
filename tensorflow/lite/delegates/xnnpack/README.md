@@ -13,7 +13,7 @@ for floating-point inference.
 
 ### Enable XNNPACK via Java API on Android (recommended on Android)
 
-Pre-built [nightly TensorFlow Lite binaries for Android](https://www.tensorflow.org/lite/guide/android#use_the_tensorflow_lite_aar_from_jcenter)
+Pre-built [nightly TensorFlow Lite binaries for Android](https://www.tensorflow.org/lite/guide/android#use_the_tensorflow_lite_aar_from_mavencentral)
 include XNNPACK, albeit it is disabled by default. Use the `setUseXNNPACK`
 method in `Interpreter.Options` class to enable it:
 
@@ -62,6 +62,27 @@ bazel build -c opt --fat_apk_cpu=x86,x86_64,arm64-v8a,armeabi-v7a \
   --define tflite_with_xnnpack=true \
   //tensorflow/lite/java:tensorflow-lite
 ```
+
+Note that in this case `Interpreter::SetNumThreads` invocation does not take
+effect on number of threads used by XNNPACK engine. In order to specify number
+of threads available for XNNPACK engine you should manually pass the value when
+constructing the interpreter. The snippet below illustrates this assuming you
+are using `InterpreterBuilder` to construct the interpreter:
+
+```c++
+// Load model
+tflite::Model* model;
+...
+
+// Construct the interprepter
+tflite::ops::builtin::BuiltinOpResolver resolver;
+std::unique_ptr<tflite::Interpreter> interpreter;
+
+TfLiteStatus res = tflite::InterpreterBuilder(model, resolver, num_threads);
+```
+
+**XNNPACK engine used by TensorFlow Lite interpreter uses a single thread for
+inference by default.**
 
 ### Enable XNNPACK via additional dependency
 
@@ -180,7 +201,6 @@ Below is the list of current operators and limitations:
 ### `FULLY_CONNECTED`
 
 * Inputs and outputs must be in 32-bit floating-point format.
-* Bias is mandatory.
 * Both filter and bias must be static (use `kTfLiteMmapRo` allocation type).
 * Fused `NONE`, `RELU`, `RELU_N1_TO_1`, and `RELU6` activations are supported,
   but fused `TANH` and `SIGN_BIT` activations are not.

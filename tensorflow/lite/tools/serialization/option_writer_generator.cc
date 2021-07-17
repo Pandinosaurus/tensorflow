@@ -82,6 +82,13 @@ static const char* param_structs[] = {"TfLiteAddParams",
                                       "TfLiteWhileParams",
                                       "TfLiteCumsumParams",
                                       "TfLiteCallOnceParams",
+                                      "TfLiteConv3DParams",
+                                      "TfLiteHashtableParams",
+                                      "TfLiteHashtableFindParams",
+                                      "TfLiteHashtableImportParams",
+                                      "TfLiteHashtableSizeParams",
+                                      "TfLiteConv3DTransposeParams",
+                                      "TfLiteVarHandleParams",
                                       nullptr};
 }  // namespace
 
@@ -154,6 +161,7 @@ class OpOptionData {
     op_to_option_["REDUCE_MAX"] = "ReducerOptions";
     op_to_option_["REDUCE_MIN"] = "ReducerOptions";
     op_to_option_["REDUCE_ANY"] = "ReducerOptions";
+    op_to_option_["REDUCE_ALL"] = "ReducerOptions";
     op_to_option_["SUM"] = "ReducerOptions";
     op_to_option_["REDUCE_MAX"] = "ReducerOptions";
     op_to_option_["REDUCE_PROD"] = "ReducerOptions";
@@ -165,6 +173,7 @@ class OpOptionData {
     op_to_option_["UNIDIRECTIONAL_SEQUENCE_RNN"] = "SequenceRNNOptions";
     op_to_option_["MAXIMUM"] = "MaximumMinimumOptions";
     op_to_option_["MINIMUM"] = "MaximumMinimumOptions";
+    op_to_option_["CONV_3D_TRANSPOSE"] = "Conv3DOptions";
 
     // These operators are not real ones.
     op_to_option_["CUSTOM"] = "";    // TODO(aselle): maybe something else.
@@ -192,6 +201,10 @@ class OpOptionData {
     op_to_option_["RSQRT"] = "";
     op_to_option_["ELU"] = "";
     op_to_option_["REVERSE_SEQUENCE"] = "";
+    op_to_option_["REAL"] = "";
+    op_to_option_["IMAG"] = "";
+    op_to_option_["COMPLEX_ABS"] = "";
+    op_to_option_["BROADCAST_ARGS"] = "";
 
     // TODO(aselle): These are undesirable hacks. Consider changing C structs
     option_to_struct_["Pool2DOptions"] = "TfLitePoolParams";
@@ -203,7 +216,6 @@ class OpOptionData {
     // Now for every op, try to find an option.
     bool fatal = false;
     for (const auto& op_name : ops_) {
-      bool found_option = false;
       auto d = tflite::BuiltinOptionsTypeTable();
       std::string collapsed_option_name_guess =
           ToCollapsed(op_name) + "options";
@@ -213,7 +225,6 @@ class OpOptionData {
         std::string collapsed_option_name = ToCollapsed(option_name);
         if (collapsed_option_name_guess == collapsed_option_name) {
           op_to_option_.insert(std::make_pair(op_name, option_name));
-          found_option = true;
           break;
         }
       }
@@ -270,17 +281,33 @@ void GenerateImportForResizeBilinearOp(FILE* fp) {
           "  }\n  break;\n");
 }
 
+void GenerateImportForVarHandleOp(FILE* fp) {
+  fprintf(fp,
+          "  case BuiltinOperator_VAR_HANDLE:  {\n"
+          "    const auto* params = reinterpret_cast<const "
+          "TfLiteVarHandleParams*>(builtin_op_data);\n"
+          "    auto union_type = CreateVarHandleOptions(*fbb, "
+          "fbb->CreateString(params->container), "
+          "fbb->CreateString(params->shared_name)).Union();\n"
+          "    return std::make_pair(BuiltinOptions_VarHandleOptions, "
+          "union_type);\n"
+          "  }\n  break;\n");
+}
+
 // Reshape Op infers output shape either from Parameter or from shape tensor
 // that's is an additional input. When we have this additional shape tensor as
 // input we don't have the parameter present in this layer. In case of more than
-// one input we import an empty vector for the parameters.
+// one input and the shape parameter does not have a valid value, we import an
+// empty vector for the parameters.
 void GenerateImportForReshapeOp(FILE* fp) {
   fprintf(fp,
           "  case BuiltinOperator_RESHAPE:  {\n"
           "    const auto* params = reinterpret_cast<const "
           "TfLiteReshapeParams*>(builtin_op_data);\n"
           "    flatbuffers::Offset<void> union_type;\n"
-          "    if (node.inputs->size > 1) {\n"
+          "    if (node.inputs->size > 1 && (params->num_dimensions <= 0 || "
+          "params->num_dimensions > TFLITE_RESHAPE_PARAMS_MAX_DIMENSION_COUNT))"
+          " {\n"
           "      union_type = CreateReshapeOptions(*fbb).Union();\n"
           "    } else {\n"
           "      auto val0 = fbb->CreateVector(std::vector<int>(params->shape, "
@@ -301,6 +328,11 @@ void GenerateImportForOp(FILE* fp, const std::string& op_name,
   // Special-case ResizeBilinear which has some deprecated fields.
   if (struct_name == "TfLiteResizeBilinearParams") {
     GenerateImportForResizeBilinearOp(fp);
+    return;
+  }
+
+  if (struct_name == "TfLiteVarHandleParams") {
+    GenerateImportForVarHandleOp(fp);
     return;
   }
 
@@ -331,10 +363,14 @@ void GenerateImportForOp(FILE* fp, const std::string& op_name,
       elem_name = "stride_width";
     else if (elem_name == "stride_h")
       elem_name = "stride_height";
+    else if (elem_name == "stride_d")
+      elem_name = "stride_depth";
     else if (elem_name == "dilation_h_factor")
       elem_name = "dilation_height_factor";
     else if (elem_name == "dilation_w_factor")
       elem_name = "dilation_width_factor";
+    else if (elem_name == "dilation_d_factor")
+      elem_name = "dilation_depth_factor";
     else if (elem_name == "idx_out_type")
       elem_name = "index_out_type";
 

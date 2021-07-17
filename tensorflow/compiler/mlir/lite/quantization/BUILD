@@ -10,24 +10,21 @@ load(
     "tf_proto_library",
 )
 load(
-    "//third_party/mlir:tblgen.bzl",
-    "gentbl",
+    "@llvm-project//mlir:tblgen.bzl",
+    "gentbl_cc_library",
 )
 
 package(
     default_visibility = [
         ":friends",
     ],
-    licenses = ["notice"],  # Apache 2.0
+    licenses = ["notice"],
 )
 
 package_group(
     name = "friends",
-    includes = ["//third_party/mlir:subpackages"],
-    packages = [
-        "//learning/brain/experimental/mlir/quantization/...",
-        "//tensorflow/compiler/mlir/...",
-    ],
+    includes = ["@llvm-project//mlir:subpackages"],
+    packages = ["//tensorflow/compiler/mlir/..."],
 )
 
 exports_files([
@@ -45,22 +42,22 @@ filegroup(
     ],
 )
 
-gentbl(
+gentbl_cc_library(
     name = "quantization_interfaces_inc_gen",
     compatible_with = get_compatible_with_cloud(),
     tbl_outs = [
         (
-            "-gen-op-interface-decls",
+            ["-gen-op-interface-decls"],
             "quantization_interface.h.inc",
         ),
         (
-            "-gen-op-interface-defs",
+            ["-gen-op-interface-defs"],
             "quantization_interface.cc.inc",
         ),
     ],
     tblgen = "@llvm-project//mlir:mlir-tblgen",
     td_file = "quantization.td",
-    td_srcs = [
+    deps = [
         ":quantization_td_files",
     ],
 )
@@ -111,7 +108,11 @@ cc_library(
     ],
     deps = [
         "//tensorflow/core:lib_proto_parsing",
+        "//tensorflow/lite/kernels/internal:tensor_utils",
+        "//tensorflow/lite/tools/optimize:quantization_utils",
+        "@com_google_absl//absl/container:flat_hash_set",
         "@com_google_absl//absl/memory",
+        "@com_google_absl//absl/strings",
         "@llvm-project//llvm:Support",
         "@llvm-project//mlir:IR",
         "@llvm-project//mlir:QuantOps",
@@ -130,6 +131,7 @@ cc_library(
     ],
     deps = [
         "//tensorflow/core:protos_all_cc",
+        "//tensorflow/lite/tools/optimize:reduced_precision_support",
         "@com_google_absl//absl/strings",
         "@llvm-project//llvm:Support",
     ],

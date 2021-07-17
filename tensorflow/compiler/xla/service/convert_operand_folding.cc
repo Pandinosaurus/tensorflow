@@ -15,23 +15,25 @@ limitations under the License.
 
 #include "tensorflow/compiler/xla/service/convert_operand_folding.h"
 
+#include "absl/base/attributes.h"
+#include "tensorflow/compiler/xla/primitive_util.h"
+#include "tensorflow/compiler/xla/xla_data.pb.h"
+
 namespace xla {
 namespace {
 
 bool IsUpcastConvert(const HloInstruction* hlo) {
-  return hlo->opcode() == HloOpcode::kConvert &&
-         ShapeUtil::CanUpcastIntegral(hlo->operand(0)->shape(), hlo->shape()) &&
-         ShapeUtil::EqualIgnoringElementType(hlo->operand(0)->shape(),
-                                             hlo->shape());
+  if (hlo->opcode() != HloOpcode::kConvert) {
+    return false;
+  }
+  return primitive_util::CastPreservesValues(
+      hlo->operand(0)->shape().element_type(), hlo->shape().element_type());
 }
 
 }  // namespace
 
 bool ConvertOperandFolding::InstructionMatchesPattern(
     HloInstruction* instruction) {
-  if (!ShapeUtil::ElementIsIntegral(instruction->shape())) {
-    return false;
-  }
   if (instruction->opcode() != HloOpcode::kDot &&
       instruction->opcode() != HloOpcode::kConvolution) {
     return false;

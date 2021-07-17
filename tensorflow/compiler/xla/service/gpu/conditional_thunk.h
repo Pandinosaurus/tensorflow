@@ -34,13 +34,7 @@ struct ConditionalThunkConfig {
   bool branch_index_is_bool;
   int64 branch_count;
   std::vector<std::unique_ptr<SequentialThunk>> branch_thunks;
-  std::vector<absl::optional<size_t>> branch_profile_indices;
 };
-
-ConditionalThunkConfig GetConditionalThunkConfig(
-    const HloInstruction* instr,
-    std::vector<ThunkSequence>&& branch_thunk_sequences,
-    std::vector<absl::optional<size_t>>&& branch_profile_indices);
 
 // ConditionalThunk implements the conditional instruction on GPU by reading the
 // predicate of the conditional and executing the true or the false computation
@@ -54,10 +48,8 @@ ConditionalThunkConfig GetConditionalThunkConfig(
 // false computation share the same allocation.
 class ConditionalThunk : public Thunk {
  public:
-  ConditionalThunk(
-      ThunkInfo thunk_info, ConditionalThunkConfig&& config,
-      const BufferAllocation::Slice& branch_index_buffer_index,
-      absl::Span<const BufferAllocation::Slice> branch_operand_buffer_indexes);
+  ConditionalThunk(ThunkInfo thunk_info, ConditionalThunkConfig config,
+                   const BufferAllocation::Slice& branch_index_buffer_index);
 
   ConditionalThunk(const ConditionalThunk&) = delete;
   ConditionalThunk& operator=(const ConditionalThunk&) = delete;
@@ -69,7 +61,6 @@ class ConditionalThunk : public Thunk {
  private:
   const ConditionalThunkConfig config_;
   BufferAllocation::Slice branch_index_buffer_index_;
-  std::vector<BufferAllocation::Slice> branch_operand_buffer_indexes_;
 };
 
 }  // namespace gpu

@@ -16,6 +16,7 @@ limitations under the License.
 #ifndef TENSORFLOW_LITE_DELEGATES_GPU_COMMON_GPU_INFO_H_
 #define TENSORFLOW_LITE_DELEGATES_GPU_COMMON_GPU_INFO_H_
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -49,6 +50,7 @@ enum class AdrenoGpu {
   kAdreno685,
   kAdreno680,
   kAdreno675,
+  kAdreno660,
   kAdreno650,
   kAdreno640,
   kAdreno630,
@@ -93,6 +95,15 @@ enum class AdrenoGpu {
   kUnknown
 };
 
+struct AMDInfo {
+  AMDInfo() = default;
+  int shader_engines;
+  int compute_units_per_shader_engine;
+  int GetComputeUnitsCount() const {
+    return shader_engines * compute_units_per_shader_engine;
+  }
+};
+
 struct AdrenoInfo {
   AdrenoInfo() = default;
   explicit AdrenoInfo(const std::string& device_version);
@@ -124,6 +135,8 @@ struct AdrenoInfo {
   // Not supported on some Adreno devices with specific driver version.
   // b/131099086
   bool support_one_layer_texture_array = true;
+
+  bool compiler_bugs_in_a6xx = false;
 };
 
 enum class AppleGpu {
@@ -213,6 +226,12 @@ struct OpenGlInfo {
   int max_work_group_invocations = 0;
   int max_texture_size = 0;
   int max_array_texture_layers = 0;
+  int max_fragment_image_units = 0;
+  int max_fragment_uniform_vec4_count = 0;
+  int max_color_atttachments = 0;
+  int max_viewport_width = 0;
+  int max_viewport_height = 0;
+  int max_renderbuffer_size = 0;
 
   std::vector<std::string> extensions;
   int max_compute_work_group_size_x;
@@ -227,10 +246,13 @@ struct VulkanInfo {
   uint32_t api_version_minor = -1;
   uint32_t api_version_patch = -1;
 
-  uint32_t max_per_stage_descriptor_sampled_images = 0;
+  int max_per_stage_descriptor_sampled_images = 0;
   uint32_t max_compute_work_group_invocations;
   uint32_t max_image_dimension_2d;
   uint32_t max_image_array_layers;
+
+  uint32_t subgroup_size = 0;
+  bool supports_subgroup_arithmetic = false;
 
   std::vector<std::string> extensions;
   int max_compute_work_group_size_x;
@@ -251,13 +273,20 @@ enum class OpenClVersion {
 std::string OpenClVersionToString(OpenClVersion version);
 
 struct OpenClInfo {
+  std::string device_name;
+  std::string vendor_name;
+  std::string opencl_c_version;
+  std::string platform_version;
+
   OpenClVersion cl_version;
 
   std::vector<std::string> extensions;
   bool supports_fp16;
   bool supports_image3d_writes;
+  bool supports_images;
   int compute_units_count;
   uint64_t buffer_max_size;
+  uint64_t max_allocation_size;
   uint64_t image2d_max_width;
   uint64_t image2d_max_height;
   uint64_t image_buffer_max_size;
@@ -269,6 +298,8 @@ struct OpenClInfo {
   int max_work_group_size_y;
   int max_work_group_size_z;
   int max_work_group_total_size;
+  uint64_t image_pitch_alignment;
+  uint64_t base_addr_align_in_bits;
 
   // rtn is ROUND_TO_NEAREST
   // with rtn precision is much better then with rtz (ROUND_TO_ZERO)
@@ -287,6 +318,29 @@ struct OpenClInfo {
   bool supports_rg_f32_tex2d = false;
   bool supports_rgb_f32_tex2d = false;
   bool supports_rgba_f32_tex2d = false;
+
+  bool IsImage2dFromBufferSupported() const;
+};
+
+enum class MetalLanguageVersion {
+  kMetal1_0,
+  kMetal1_1,
+  kMetal1_2,
+  kMetal2_0,
+  kMetal2_1,
+  kMetal2_2,
+  kMetal2_3,
+  kUnknown,
+};
+
+struct MetalInfo {
+  MetalLanguageVersion language_version;
+
+  int max_work_group_size_x;
+  int max_work_group_size_y;
+  int max_work_group_size_z;
+
+  uint64_t buffer_max_size;
 };
 
 struct GpuInfo {
@@ -298,14 +352,19 @@ struct GpuInfo {
   bool IsAMD() const;
   bool IsIntel() const;
 
+  bool IsGlsl() const;
+
   // floating point rounding mode
   bool IsRoundToNearestSupported() const;
 
   bool SupportsFP16() const;
 
+  bool SupportsImages() const;
   bool SupportsTextureArray() const;
   bool SupportsImageBuffer() const;
   bool SupportsImage3D() const;
+
+  bool SupportsPointersInKernels() const;
 
   // returns true if device have fixed wave size equal to 32
   bool IsWaveSizeEqualTo32() const;
@@ -330,6 +389,7 @@ struct GpuInfo {
   uint64_t GetMaxImage3DHeight() const;
   uint64_t GetMaxImage3DDepth() const;
   uint64_t GetMaxBufferSize() const;
+  uint64_t GetMaxMemoryAllocationSize() const;
   uint64_t GetMaxImageBufferWidth() const;
 
   GpuVendor vendor = GpuVendor::kUnknown;
@@ -338,6 +398,7 @@ struct GpuInfo {
   std::vector<int> supported_subgroup_sizes;
 
   AdrenoInfo adreno_info;
+  AMDInfo amd_info;
   AppleInfo apple_info;
   MaliInfo mali_info;
 
@@ -350,10 +411,12 @@ struct GpuInfo {
   VulkanInfo vulkan_info;
   bool IsApiVulkan() const;
 
+  MetalInfo metal_info;
   bool IsApiMetal() const;
 
   OpenClInfo opencl_info;
   bool IsApiOpenCl() const;
+  bool IsCL11OrHigher() const;
   bool IsCL20OrHigher() const;
   bool IsCL30OrHigher() const;
 };

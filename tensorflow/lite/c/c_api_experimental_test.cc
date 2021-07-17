@@ -20,6 +20,7 @@ limitations under the License.
 #include <memory>
 #include <vector>
 
+#include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include "tensorflow/lite/builtin_ops.h"
 #include "tensorflow/lite/c/c_api.h"
@@ -27,6 +28,8 @@ limitations under the License.
 #include "tensorflow/lite/delegates/delegate_test_util.h"
 #include "tensorflow/lite/testing/util.h"
 
+using testing::HasSubstr;
+using tflite::delegates::test_utils::SimpleDelegate;
 using tflite::delegates::test_utils::TestDelegate;
 
 namespace {
@@ -108,9 +111,9 @@ TEST(CApiExperimentalTest, MissingBuiltin) {
   // Check that interpreter creation failed, because the model contain a buitin
   // op that wasn't supported, and that we got the expected error messages.
   ASSERT_EQ(interpreter, nullptr);
-  EXPECT_EQ(reporter.error_messages(),
-            "Didn't find op for builtin opcode 'ADD' version '1'\n"
-            "Registration failed.\n");
+  EXPECT_THAT(
+      reporter.error_messages(),
+      HasSubstr("Didn't find op for builtin opcode 'ADD' version '1'."));
   EXPECT_EQ(reporter.num_calls(), 2);
 
   TfLiteInterpreterDelete(interpreter);
@@ -292,9 +295,3 @@ TEST_F(TestDelegate, TestFallbackWithMultipleDelegates) {
 }
 
 }  // namespace
-
-int main(int argc, char** argv) {
-  ::tflite::LogToStderr();
-  ::testing::InitGoogleTest(&argc, argv);
-  return RUN_ALL_TESTS();
-}

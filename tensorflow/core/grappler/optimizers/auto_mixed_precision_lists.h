@@ -16,6 +16,8 @@ limitations under the License.
 #ifndef TENSORFLOW_CORE_GRAPPLER_OPTIMIZERS_AUTO_MIXED_PRECISION_LISTS_H_
 #define TENSORFLOW_CORE_GRAPPLER_OPTIMIZERS_AUTO_MIXED_PRECISION_LISTS_H_
 
+#include <string>
+
 #include "tensorflow/core/lib/gtl/flatset.h"
 #include "tensorflow/core/lib/strings/str_util.h"
 #include "tensorflow/core/util/env_var.h"
@@ -123,14 +125,19 @@ class AutoMixedPrecisionListsCuda : public AutoMixedPrecisionLists {
         "CudnnRNNV2",
         "CudnnRNNV3",
         "Einsum",
+        "FusedConv2DBiasActivation",
         "GRUBlockCell",
         "GRUBlockCellGrad",
         "LSTMBlockCell",
         "LSTMBlockCellGrad",
         "MatMul",
     };
+#if TENSORFLOW_USE_ROCM
+    if (true) {
+#else
     if (cuda_version_ >= 9010) {
       // Fp16 BatchMatMul is slow before CUDA 9.1.
+#endif
       list.insert("BatchMatMul");
       list.insert("BatchMatMulV2");
     }
@@ -333,6 +340,7 @@ class AutoMixedPrecisionListsCuda : public AutoMixedPrecisionLists {
         "TopK",
         "TopKV2",
         "Transpose",
+        "Unpack",
         "Where",
         "ZerosLike",
     };
@@ -431,7 +439,7 @@ class AutoMixedPrecisionListsMkl : public AutoMixedPrecisionLists {
         "ReluGrad",        "Reshape",   "Select",        "SelectV2",
         "Shape",           "ShapeN",    "Slice",         "Split",
         "SplitV",          "Squeeze",   "StopGradient",  "Switch",
-        "Transpose",       "ZerosLike",
+        "Transpose",       "Unpack",    "ZerosLike",
     };
     AddTensorListOps(&list);
     UpdateList("CLEARLIST", &list);

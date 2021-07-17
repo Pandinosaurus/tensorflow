@@ -20,6 +20,7 @@ limitations under the License.
 #include "tensorflow/core/framework/types.pb.h"
 #include "tensorflow/core/platform/tensor_coding.h"
 #include "tensorflow/core/platform/types.h"
+#include "tensorflow/core/util/managed_stack_trace.h"
 
 namespace tensorflow {
 
@@ -71,6 +72,15 @@ class ResourceHandle {
     dtypes_and_shapes_ = dtypes_and_shapes;
   }
 
+  void set_definition_stack_trace(
+      const absl::optional<ManagedStackTrace>& definition_stack_trace) {
+    definition_stack_trace_ = definition_stack_trace;
+  }
+
+  const absl::optional<ManagedStackTrace>& definition_stack_trace() const {
+    return definition_stack_trace_;
+  }
+
   // Conversion to and from ResourceHandleProto
   void AsProto(ResourceHandleProto* proto) const;
   void FromProto(const ResourceHandleProto& proto);
@@ -86,13 +96,14 @@ class ResourceHandle {
   static constexpr const char* ANONYMOUS_NAME =
       "cd2c89b7-88b7-44c8-ad83-06c2a9158347";
 
- public:
+ private:
   std::string device_;
   std::string container_;
   std::string name_;
   uint64 hash_code_ = 0;
   std::string maybe_type_name_;
   std::vector<DtypeAndPartialTensorShape> dtypes_and_shapes_;
+  absl::optional<ManagedStackTrace> definition_stack_trace_;
 };
 
 // For backwards compatibility for when this was a proto

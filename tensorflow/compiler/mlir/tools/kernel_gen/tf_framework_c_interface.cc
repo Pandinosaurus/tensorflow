@@ -52,17 +52,19 @@ extern "C" void* _mlir_ciface_tf_alloc(void* op_kernel_ctx, size_t num_elements,
     // Iterate over indices of all inputs that can potentially be used for
     // forwarding.
     for (int i = 0; i < num_candidates; ++i) {
-      // TODO(pifon): Expose fetching AllocatorAttributes with the output_index.
-      AllocatorAttributes output_attr;
-      auto tensor = ctx->forward_input(
-          candidate_input_indices[i], output_index,
-          ctx->expected_output_dtype(output_index), output_shape,
-          ctx->output_memory_type(output_index), output_attr);
+      auto tensor = ctx->forward_input(candidate_input_indices[i], output_index,
+                                       ctx->expected_output_dtype(output_index),
+                                       output_shape,
+                                       ctx->output_memory_type(output_index),
+                                       ctx->output_alloc_attr(output_index));
       if (tensor != nullptr) {
         return tensor->data();
       }
     }
+
+    CHECK(!ctx->output_expects_forwarding(output_index));
   }
+
   // If no forwarding happened, allocate a chunk of memory.
   return GetAllocator(op_kernel_ctx)
       ->AllocateRaw(Allocator::kAllocatorAlignment,
@@ -84,6 +86,25 @@ extern "C" void _mlir_ciface_tf_report_error(void* op_kernel_ctx,
   auto* ctx = static_cast<tensorflow::OpKernelContext*>(op_kernel_ctx);
   ctx->CtxFailureWithWarning(
       tensorflow::Status{ConvertAttrToEnumValue(symbol.getValue()), msg});
+}
+
+static void ReportError(void* op_kernel_ctx, ErrorCode error_code,
+                        const char* msg) {
+  _mlir_ciface_tf_report_error(op_kernel_ctx, static_cast<uint32_t>(error_code),
+                               const_cast<char*>(msg));
+}
+
+extern "C" void* _mlir_ciface_tf_jit_compile(void* op_kernel_ctx, char* code) {
+  ReportError(op_kernel_ctx, ErrorCode::UNIMPLEMENTED,
+              "JIT compilation is not yet implemented.");
+  return nullptr;
+}
+
+extern "C" void _mlir_ciface_tf_jit_execute(void* op_kernel_ctx, void* callable,
+                                            void* result, int64_t arg_rank,
+                                            void* arg_descr) {
+  ReportError(op_kernel_ctx, ErrorCode::UNIMPLEMENTED,
+              "JIT execution is not yet implemented.");
 }
 
 }  // namespace tf_framework

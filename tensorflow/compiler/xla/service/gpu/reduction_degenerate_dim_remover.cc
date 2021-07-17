@@ -53,7 +53,7 @@ class ReductionDegenerateDimRemoverVisitor : public DfsHloRewriteVisitor {
 
     const std::vector<int64> &reduced_dimensions = instr->dimensions();
     std::vector<int64> updated_reduced_dimensions;
-    int64 shift = 0;
+    int64_t shift = 0;
 
     for (int dim = 0; dim < input_shape.rank(); dim++) {
       if (input_shape.dimensions(dim) == 1) {
@@ -63,6 +63,12 @@ class ReductionDegenerateDimRemoverVisitor : public DfsHloRewriteVisitor {
           updated_reduced_dimensions.push_back(dim - shift);
         }
       }
+    }
+
+    if (updated_reduced_dimensions.empty()) {
+      std::unique_ptr<HloInstruction> reshape =
+          HloInstruction::CreateBitcast(reduce_shape, reduced_op);
+      return ReplaceWithNewInstruction(instr, std::move(reshape));
     }
 
     HloInstruction *input_reshape = instr->parent()->AddInstruction(

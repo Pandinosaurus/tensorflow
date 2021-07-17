@@ -16,27 +16,68 @@ limitations under the License.
 #ifndef TENSORFLOW_CORE_UTIL_ABSTRACT_STACK_TRACE_H_
 #define TENSORFLOW_CORE_UTIL_ABSTRACT_STACK_TRACE_H_
 
+#include <functional>
 #include <string>
+#include <unordered_map>
+#include <vector>
 
-#include "tensorflow/core/platform/status.h"
+#include "absl/strings/match.h"
+#include "absl/types/optional.h"
+#include "tensorflow/core/platform/stack_frame.h"
 
 namespace tensorflow {
+
+// Returns "true" on filenames which should be skipped.
+using StackTraceFilter = std::function<bool(const char*)>;
+
+using SourceLoc = std::pair<std::string, int>;
+
+// Using absl::Hash breaks NVCC under Windows :P
+struct PairHash {
+  template <class T1, class T2>
+  std::size_t operator()(const std::pair<T1, T2>& pair) const {
+    std::size_t h1 = std::hash<T1>()(pair.first);
+    std::size_t h2 = std::hash<T2>()(pair.second);
+    return h1 + 0x9e3779b9 + (h2 << 6) + (h2 >> 2);
+  }
+};
+
+// Maps filename/line_no combination into a stack frame.
+using SourceMap = std::unordered_map<SourceLoc, StackFrame, PairHash>;
+
+using ToStackFramesFunctor = std::vector<StackFrame>(int, const SourceMap&,
+                                                     const StackTraceFilter&,
+                                                     bool, int);
+
+// Returns whether the given frame is internal to TF.
+inline bool IsInternalFrameForFilename(absl::string_view file_name) {
+  // Use a simple heuristic for now.
+  // TODO(cheshire): Build a more sophisticated mechanism, rely on @tf.export.
+  return (absl::StrContains(file_name, "tensorflow/python") ||
+          absl::StrContains(file_name, "tensorflow\\python")) &&
+         !absl::StrContains(file_name, "keras") &&
+         !absl::StrContains(file_name, "test.py");
+}
 
 // Language agnostic stack trace class. It only saves an id, and language
 // clients are responsible for managing the actual stack trace objects.
 class ManagedStackTrace {
  public:
-  ManagedStackTrace(int id, std::vector<StackFrame> (*to_stack_frames)(int))
+  ManagedStackTrace(int id, ToStackFramesFunctor* to_stack_frames)
       : id_(id), to_stack_frames_(to_stack_frames) {}
 
   // Returns stack trace as a vector of `StackFrame`s.
-  std::vector<StackFrame> ToStackFrames() const {
-    return to_stack_frames_(id_);
+  std::vector<StackFrame> ToStackFrames(const SourceMap& source_map,
+                                        const StackTraceFilter& filtered,
+                                        bool reverse_traversal = false,
+                                        int limit = -1) const {
+    return to_stack_frames_(id_, source_map, filtered, reverse_traversal,
+                            limit);
   }
 
  private:
   int id_;
-  std::vector<StackFrame> (*to_stack_frames_)(int);
+  ToStackFramesFunctor* to_stack_frames_;
 };
 
 }  // namespace tensorflow

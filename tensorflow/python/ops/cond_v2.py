@@ -39,7 +39,6 @@ from tensorflow.python.framework import tensor_util
 from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import control_flow_util
 from tensorflow.python.ops import control_flow_util_v2 as util
-from tensorflow.python.ops import custom_gradient
 from tensorflow.python.ops import default_gradient
 from tensorflow.python.ops import gen_dataset_ops
 from tensorflow.python.ops import gen_functional_ops
@@ -76,7 +75,7 @@ def cond_v2(pred, true_fn, false_fn, name="cond"):
     # graphs. Propagate that behavior here.
     add_control_dependencies = ops.get_default_graph()._add_control_dependencies
     pred = ops.convert_to_tensor(pred)
-    if (tensor_util.is_tensor(pred) and
+    if (tensor_util.is_tf_type(pred) and
         (pred.shape.dims is None or pred.shape.dims)):
       pred = array_ops.squeeze_v2(pred)
 
@@ -332,7 +331,7 @@ def get_func_graphs(op):
       input_shapes = [t.shape for t in inputs]
       func_graph = util.get_func_graph(op, input_shapes, name_attr_list.name)
     for external_t, internal_t in zip(inputs, func_graph.inputs):
-      custom_gradient.copy_handle_data(external_t, internal_t)
+      handle_data_util.copy_handle_data(external_t, internal_t)
     func_graph.reset_captures(zip(inputs, func_graph.inputs))
     # Link the op so that the gradient code can use it.
     func_graph._forward_cond = op

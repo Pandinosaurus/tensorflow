@@ -16,7 +16,10 @@ limitations under the License.
 #ifndef TENSORFLOW_CORE_FRAMEWORK_METRICS_H_
 #define TENSORFLOW_CORE_FRAMEWORK_METRICS_H_
 
+#include "absl/container/flat_hash_map.h"
 #include "tensorflow/core/lib/monitoring/counter.h"
+#include "tensorflow/core/lib/monitoring/gauge.h"
+#include "tensorflow/core/platform/statusor.h"
 #include "tensorflow/core/platform/types.h"
 
 namespace tensorflow {
@@ -53,6 +56,12 @@ monitoring::CounterCell* GetTFDataBytesReadCounter(const string& name);
 // The `name` argument identifies the Dataset type (e.g. "Batch" or "Map").
 monitoring::CounterCell* GetTFDataElementsCounter(const string& name);
 
+// Returns a gauge than can be used to record the performance model information.
+//
+// The `id` argument represents the (unique) model ID.
+monitoring::GaugeCell<std::function<std::string()>>* GetTFDataModelGauge(
+    const string& id);
+
 // Records the number of bytes fetched from tf.data.Dataset iterator.
 void RecordTFDataBytesFetched(int64 num_bytes);
 
@@ -84,6 +93,14 @@ void RecordTFDataIteratorLifetime(uint64 duration_us);
 // The `name` argument identifies the optimization (e.g. "noop_elimination").
 void RecordTFDataOptimization(const string& name, int64 num_changes);
 
+// Records that a tf.data service worker has been created.
+void RecordTFDataServiceWorkerCreated();
+
+// Records the file name read by a tf.data Dataset.
+//
+// The `name` argument identifies the Dataset type (e.g. "TFRecordDataset").
+void RecordTFDataFilename(const string& name, const string& filename);
+
 // Records parsing of dense tensor features.
 void RecordParseDenseFeature(int64 num_features);
 
@@ -96,6 +113,9 @@ void RecordParseRaggedFeature(int64 num_features);
 // Records the size of input/output tensors in bytes.
 void RecordGraphInputTensors(const size_t size);
 void RecordGraphOutputTensors(const size_t size);
+
+// Records the number of cores requested by graphs with XLA SPMD enabled.
+void RecordTPUXlaSpmdCoresPerReplica(int64 cores_per_replica);
 
 void UpdateGraphExecTime(const uint64 running_time_usecs);
 void UpdateGraphPendingQueueLength(uint64 len);
@@ -124,14 +144,14 @@ void UpdateGraphOptimizationPassTime(const string& pass_name,
 void UpdateGrapplerPassTime(const string& pass_name,
                             const uint64 running_time_usecs);
 
+// Updates metrics for time to distribute variables to all TPU hosts.
+void UpdateTpuVariableDistributionTime(const uint64 distribution_time_usecs);
+
 // Updates the metrics stored about time XLA spents compiling graphs.
 void UpdateXlaCompilationTime(const uint64 compilation_time_usecs);
 
 // Updates the metrics stored about time BFC allocator spents during delay.
 void UpdateBfcAllocatorDelayTime(const uint64 delay_usecs);
-
-// Increment the number of jobs that failed during import to mlir.
-void IncrementMLIRImportFailureCount();
 
 }  // namespace metrics
 }  // namespace tensorflow

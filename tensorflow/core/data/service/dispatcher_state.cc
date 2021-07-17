@@ -15,10 +15,17 @@ limitations under the License.
 #include "tensorflow/core/data/service/dispatcher_state.h"
 
 #include <memory>
+#include <string>
+#include <vector>
 
+#include "absl/container/flat_hash_map.h"
+#include "absl/strings/string_view.h"
+#include "absl/types/optional.h"
+#include "tensorflow/core/data/service/data_service.h"
 #include "tensorflow/core/data/service/journal.h"
 #include "tensorflow/core/data/service/journal.pb.h"
 #include "tensorflow/core/platform/errors.h"
+#include "tensorflow/core/platform/status.h"
 
 namespace tensorflow {
 namespace data {
@@ -45,11 +52,26 @@ Status DispatcherState::Apply(const Update& update) {
     case Update::kReleaseJobClient:
       ReleaseJobClient(update.release_job_client());
       break;
+    case Update::kGarbageCollectJob:
+      GarbageCollectJob(update.garbage_collect_job());
+      break;
+    case Update::kRemoveTask:
+      RemoveTask(update.remove_task());
+      break;
+    case Update::kCreatePendingTask:
+      CreatePendingTask(update.create_pending_task());
+      break;
+    case Update::kClientHeartbeat:
+      ClientHeartbeat(update.client_heartbeat());
+      break;
     case Update::kCreateTask:
       CreateTask(update.create_task());
       break;
     case Update::kFinishTask:
       FinishTask(update.finish_task());
+      break;
+    case Update::kSetElementSpec:
+      SetElementSpec(update.set_element_spec());
       break;
     case Update::UPDATE_TYPE_NOT_SET:
       return errors::Internal("Update type not set.");
@@ -74,7 +96,8 @@ void DispatcherState::RegisterWorker(
     const RegisterWorkerUpdate& register_worker) {
   std::string address = register_worker.worker_address();
   DCHECK(!workers_.contains(address));
-  workers_[address] = std::make_shared<Worker>(address);
+  workers_[address] =
+      std::make_shared<Worker>(address, register_worker.transfer_address());
   tasks_by_worker_[address] =
       absl::flat_hash_map<int64, std::shared_ptr<Task>>();
 }
@@ -93,12 +116,14 @@ void DispatcherState::CreateJob(const CreateJobUpdate& create_job) {
   }
   auto job = std::make_shared<Job>(job_id, create_job.dataset_id(),
                                    ProcessingMode(create_job.processing_mode()),
+                                   create_job.num_split_providers(),
                                    named_job_key, num_consumers);
   DCHECK(!jobs_.contains(job_id));
   jobs_[job_id] = job;
   tasks_by_job_[job_id] = std::vector<std::shared_ptr<Task>>();
   if (named_job_key.has_value()) {
-    DCHECK(!named_jobs_.contains(named_job_key.value()));
+    DCHECK(!named_jobs_.contains(named_job_key.value()) ||
+           named_jobs_[named_job_key.value()]->garbage_collected);
     named_jobs_[named_job_key.value()] = job;
   }
   next_available_job_id_ = std::max(next_available_job_id_, job_id + 1);
@@ -108,13 +133,14 @@ void DispatcherState::ProduceSplit(const ProduceSplitUpdate& produce_split) {
   std::shared_ptr<Job> job = jobs_[produce_split.job_id()];
   DCHECK(job->distributed_epoch_state.has_value());
   DistributedEpochState& state = job->distributed_epoch_state.value();
-  DCHECK_EQ(produce_split.repetition(), state.repetition);
+  int64 provider_index = produce_split.split_provider_index();
+  DCHECK_EQ(produce_split.repetition(), state.repetitions[provider_index]);
   if (produce_split.finished()) {
-    state.repetition++;
-    state.split_provider_index = 0;
+    state.repetitions[provider_index]++;
+    state.indices[provider_index] = 0;
     return;
   }
-  state.split_provider_index++;
+  state.indices[provider_index]++;
 }
 
 void DispatcherState::AcquireJobClient(
@@ -140,13 +166,80 @@ void DispatcherState::ReleaseJobClient(
   jobs_for_client_ids_.erase(job_client_id);
 }
 
+void DispatcherState::GarbageCollectJob(
+    const GarbageCollectJobUpdate& garbage_collect_job) {
+  int64 job_id = garbage_collect_job.job_id();
+  for (auto& task : tasks_by_job_[job_id]) {
+    task->finished = true;
+    tasks_by_worker_[task->worker_address].erase(task->task_id);
+  }
+  jobs_[job_id]->finished = true;
+  jobs_[job_id]->garbage_collected = true;
+}
+
+void DispatcherState::RemoveTask(const RemoveTaskUpdate& remove_task) {
+  std::shared_ptr<Task>& task = tasks_[remove_task.task_id()];
+  DCHECK(task);
+  task->removed = true;
+  auto& tasks_for_job = tasks_by_job_[task->job->job_id];
+  for (auto it = tasks_for_job.begin(); it != tasks_for_job.end(); ++it) {
+    if ((*it)->task_id == task->task_id) {
+      tasks_for_job.erase(it);
+      break;
+    }
+  }
+  tasks_by_worker_[task->worker_address].erase(task->task_id);
+  tasks_.erase(task->task_id);
+  VLOG(1) << "Removed task " << remove_task.task_id() << " from worker "
+          << task->worker_address;
+}
+
+void DispatcherState::CreatePendingTask(
+    const CreatePendingTaskUpdate& create_pending_task) {
+  int64 task_id = create_pending_task.task_id();
+  auto& task = tasks_[task_id];
+  DCHECK_EQ(task, nullptr);
+  auto& job = jobs_[create_pending_task.job_id()];
+  DCHECK_NE(job, nullptr);
+  task =
+      std::make_shared<Task>(task_id, job, create_pending_task.worker_address(),
+                             create_pending_task.transfer_address());
+  job->pending_tasks.emplace(task, create_pending_task.starting_round());
+  tasks_by_worker_[create_pending_task.worker_address()][task->task_id] = task;
+  next_available_task_id_ = std::max(next_available_task_id_, task_id + 1);
+}
+
+void DispatcherState::ClientHeartbeat(
+    const ClientHeartbeatUpdate& client_heartbeat) {
+  int64 job_client_id = client_heartbeat.job_client_id();
+  auto& job = jobs_for_client_ids_[job_client_id];
+  DCHECK(!job->pending_tasks.empty());
+  auto& task = job->pending_tasks.front();
+  if (client_heartbeat.has_task_rejected()) {
+    task.failures++;
+    task.ready_consumers.clear();
+    task.target_round = client_heartbeat.task_rejected().new_target_round();
+  }
+  if (client_heartbeat.task_accepted()) {
+    task.ready_consumers.insert(job_client_id);
+    if (task.ready_consumers.size() == job->num_consumers.value()) {
+      VLOG(1) << "Promoting task " << task.task->task_id
+              << " from pending to active";
+      task.task->starting_round = task.target_round;
+      tasks_by_job_[job->job_id].push_back(task.task);
+      job->pending_tasks.pop();
+    }
+  }
+}
+
 void DispatcherState::CreateTask(const CreateTaskUpdate& create_task) {
   int64 task_id = create_task.task_id();
   auto& task = tasks_[task_id];
   DCHECK_EQ(task, nullptr);
   auto& job = jobs_[create_task.job_id()];
   DCHECK_NE(job, nullptr);
-  task = std::make_shared<Task>(task_id, job, create_task.worker_address());
+  task = std::make_shared<Task>(task_id, job, create_task.worker_address(),
+                                create_task.transfer_address());
   tasks_by_job_[create_task.job_id()].push_back(task);
   tasks_by_worker_[create_task.worker_address()][task->task_id] = task;
   next_available_task_id_ = std::max(next_available_task_id_, task_id + 1);
@@ -167,6 +260,24 @@ void DispatcherState::FinishTask(const FinishTaskUpdate& finish_task) {
   }
   VLOG(3) << "Job " << task->job->job_id << " finished: " << all_finished;
   jobs_[task->job->job_id]->finished = all_finished;
+}
+
+void DispatcherState::SetElementSpec(
+    const SetElementSpecUpdate& set_element_spec) {
+  int64 dataset_id = set_element_spec.dataset_id();
+  std::string element_spec = set_element_spec.element_spec();
+  DCHECK(!id_element_spec_info_.contains(dataset_id));
+  id_element_spec_info_[dataset_id] = element_spec;
+}
+
+Status DispatcherState::GetElementSpec(int64 dataset_id,
+                                       std::string& element_spec) const {
+  auto it = id_element_spec_info_.find(dataset_id);
+  if (it == id_element_spec_info_.end()) {
+    return errors::NotFound("Element_spec with key ", dataset_id, " not found");
+  }
+  element_spec = it->second;
+  return Status::OK();
 }
 
 int64 DispatcherState::NextAvailableDatasetId() const {
@@ -288,6 +399,7 @@ Status DispatcherState::TasksForJob(
 Status DispatcherState::TasksForWorker(
     absl::string_view worker_address,
     std::vector<std::shared_ptr<const Task>>& tasks) const {
+  tasks.clear();
   auto it = tasks_by_worker_.find(worker_address);
   if (it == tasks_by_worker_.end()) {
     return errors::NotFound("Worker ", worker_address, " not found");

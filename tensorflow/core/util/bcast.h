@@ -41,15 +41,15 @@ inline void ComputeBatchIndices(const int64 output_batch_size,
   //  - Broadcast to the output shape.
   //  - Reshape back to a flat 1D vector.
   out_indices->resize(output_batch_size);
-  int64 num_output_elements = 1;
-  int64 num_input_elements = 1;
-  for (int64 i = reshape.size() - 1; i >= 0; --i) {
+  int64_t num_output_elements = 1;
+  int64_t num_input_elements = 1;
+  for (int64_t i = reshape.size() - 1; i >= 0; --i) {
     // Replicate the already populated mapping an additional (dim - 1) times.
     // If we are broadcasting, just copy the existing mapping.
     // Otherwise, add another dimension from the input shape.
     const int64 dim = std::max(reshape[i], bcast[i]);
     const int64 incr = bcast[i] > 1 ? 0 : num_input_elements;
-    for (int64 k = 0; k < (dim - 1) * num_output_elements; ++k) {
+    for (int64_t k = 0; k < (dim - 1) * num_output_elements; ++k) {
       (*out_indices)[num_output_elements + k] = (*out_indices)[k] + incr;
     }
     num_output_elements *= dim;
@@ -132,6 +132,12 @@ BCastList<N>::BCastList(const BCastList::Vec (&x)[N],
                         const bool fewer_dims_optimization,
                         const bool return_flattened_batch_indices) {
   typedef BCastList::Vec Vec;
+
+  // Safely multiplies dimensions taking into account symbolic shapes.
+  auto mul_dims = [](int64_t dim1, int64_t dim2) -> int64 {
+    return dim1 != 0 && dim2 != 0 && (dim1 < 0 || dim2 < 0) ? -1 : dim1 * dim2;
+  };
+
   bool all_equal = true;
   size_t largest_rank = 0;
   output_batch_size_ = 1;
@@ -148,12 +154,12 @@ BCastList<N>::BCastList(const BCastList::Vec (&x)[N],
   }
   if (all_equal && TF_PREDICT_TRUE(fewer_dims_optimization)) {
     // Fast path for common case of identical shapes.
-    int64 elements = 1;
+    int64_t elements = 1;
     const int rank = x[0].size();
     output_.resize(rank);
     for (int i = 0; i < rank; i++) {
       const int64 dim = x[0][i];
-      elements *= dim;
+      elements = mul_dims(elements, dim);
       output_[i] = dim;
     }
     result_.push_back(elements);
@@ -218,7 +224,7 @@ BCastList<N>::BCastList(const BCastList::Vec (&x)[N],
       }
     }
     output_.push_back(output_dim_set ? output_dim : 1);
-    output_batch_size_ *= output_.back();
+    output_batch_size_ = mul_dims(output_batch_size_, output_.back());
     // All dimensions are 1.
     if (!output_dim_set) {
       if (!TF_PREDICT_TRUE(fewer_dims_optimization)) {
@@ -253,10 +259,11 @@ BCastList<N>::BCastList(const BCastList::Vec (&x)[N],
       // It is a run of the same broadcasting case as last time.
       // We can reshape the input so that fewer dimensions
       // are involved in the intermediate computation.
-      result_.back() *= output_dim;
+      result_.back() = mul_dims(result_.back(), output_dim);
       for (int i = 0; i < N; ++i) {
-        reshape_[i].back() *= copy[i][j];
-        bcast_[i].back() *= current_is_one[i] ? output_dim : 1;
+        reshape_[i].back() = mul_dims(reshape_[i].back(), copy[i][j]);
+        bcast_[i].back() =
+            mul_dims(bcast_[i].back(), current_is_one[i] ? output_dim : 1);
         if (current_is_one[i] && !none_is_one) {
           grad_reduce_idx_[i].push_back(largest_rank - 1 - j);
         }

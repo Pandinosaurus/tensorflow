@@ -25,10 +25,16 @@ limitations under the License.
 #include "tensorflow/compiler/xla/service/hlo_instruction.h"
 #include "tensorflow/compiler/xla/service/hlo_module.h"
 #include "tensorflow/compiler/xla/service/hlo_sharding.h"
+#include "tensorflow/compiler/xla/service/hlo_sharding_util.h"
 #include "tensorflow/compiler/xla/service/spmd/spmd_partitioner.h"
 
 namespace xla {
 namespace spmd {
+
+struct GatherParallelDimSharding {
+  HloSharding indices_sharding;
+  HloSharding operand_sharding;
+};
 
 // Returns true if the given sharding contains any replicated sharding.
 bool HasReplicatedSharding(const HloSharding& sharding);
@@ -90,7 +96,7 @@ int64 ShapeSizeInBytes(const Shape& shape);
 // sharding.
 Shape MakeNonPaddedShapeForGivenPartition(const Shape& shape,
                                           const HloSharding& sharding,
-                                          int64 partition_id);
+                                          int64_t partition_id);
 
 // Generates the HLO instructions that represent the dimension offsets on any
 // device. The size of the returned vector is the rank of the given shape.
@@ -133,8 +139,8 @@ class MultiplyAddDivideOffsetCalculation {
  public:
   MultiplyAddDivideOffsetCalculation()
       : multiplier_(0), offset_(0), divisor_(1) {}
-  MultiplyAddDivideOffsetCalculation(int64 multiplier, int64 offset,
-                                     int64 divisor);
+  MultiplyAddDivideOffsetCalculation(int64_t multiplier, int64_t offset,
+                                     int64_t divisor);
 
   OffsetCalculation operator-(
       const MultiplyAddDivideOffsetCalculation& other) const;
@@ -146,13 +152,13 @@ class MultiplyAddDivideOffsetCalculation {
 
   bool IsConstant() const { return multiplier_ == 0; }
   void Simplify();
-  int64 Calculate(int64 shard_ordinal) const;
+  int64 Calculate(int64_t shard_ordinal) const;
   HloInstruction* Calculate(HloInstruction* shard_ordinal,
                             SpmdBuilder* b) const;
 
   // Returns the maximum result for shard ordinals in the range
   // [start_ordinal, limit_ordinal).
-  int64 MaxInRange(int64 start_ordinal, int64 limit_ordinal) const;
+  int64 MaxInRange(int64_t start_ordinal, int64_t limit_ordinal) const;
 
  private:
   int64 multiplier_;
@@ -190,13 +196,13 @@ class OffsetCalculation {
 
   OffsetCalculation operator-(const OffsetCalculation& other) const;
   bool operator==(const OffsetCalculation& other) const;
-  int64 Calculate(int64 shard_ordinal) const;
+  int64 Calculate(int64_t shard_ordinal) const;
   HloInstruction* Calculate(HloInstruction* shard_ordinal,
                             SpmdBuilder* b) const;
 
   // Returns the maximum result for shard ordinals in the range
   // [start_ordinal, limit_ordinal).
-  int64 MaxInRange(int64 start_ordinal, int64 limit_ordinal) const;
+  int64 MaxInRange(int64_t start_ordinal, int64_t limit_ordinal) const;
 
  private:
   HloOpcode opcode_;
@@ -210,7 +216,7 @@ class OffsetCalculation {
 // direct neighbor of the shard.
 absl::optional<HloInstruction*> ExchangeHalo(
     HloInstruction* hlo, const OffsetCalculation& left_halo_size_function,
-    const OffsetCalculation& right_halo_size_function, int64 dim,
+    const OffsetCalculation& right_halo_size_function, int64_t dim,
     const HloSharding& target,
     const SPMDCollectiveOpsCreator& collective_ops_creator,
     int64* next_channel_id, SpmdBuilder* b);
@@ -247,8 +253,8 @@ absl::optional<HloInstruction*> ExchangeHaloAndGetValidData(
     HloInstruction* hlo, const Shape& base_shape,
     const OffsetCalculation& left_halo_size_function,
     const OffsetCalculation& right_halo_size_function,
-    int64 explicit_left_padding_on_full_shape, int64 padded_full_shape_size,
-    int64 shard_size_with_halo, int64 dim, const HloSharding& target,
+    int64_t explicit_left_padding_on_full_shape, int64_t padded_full_shape_size,
+    int64_t shard_size_with_halo, int64_t dim, const HloSharding& target,
     HloInstruction* offset_on_padded_shape, HloInstruction* pad_value,
     HloInstruction* partition_ordinal,
     const SPMDCollectiveOpsCreator& collective_ops_creator,
@@ -269,10 +275,10 @@ absl::optional<int64> GetKValueInTopKWhenPartitionSortDim(HloInstruction* hlo);
 
 // Slices the first k elements at slice dimension.
 HloInstruction* SliceFirstK(HloInstruction* hlo, SpmdBuilder* builder,
-                            int64 slice_dim, int64 k);
+                            int64_t slice_dim, int64_t k);
 
 // Check if a dimension is sharded.
-int64 ShardCountAtDim(const HloSharding& sharding, int64 dim);
+int64 ShardCountAtDim(const HloSharding& sharding, int64_t dim);
 
 // Returns the list of source-target pairs of dimensions to swap during
 // resharding via all-to-all. Reshard can be done by swapping each pair at a
@@ -291,7 +297,7 @@ bool CanReshardWithCollectivePermute(const HloSharding& source,
 struct GroupedSharding {
   GroupedSharding(std::vector<std::vector<int64>> device_groups,
                   std::vector<int64> group_dims,
-                  std::vector<int64> group_dim_sizes, int64 data_rank,
+                  std::vector<int64> group_dim_sizes, int64_t data_rank,
                   HloSharding grouped_sharding)
       : device_groups(std::move(device_groups)),
         group_dims(std::move(group_dims)),
@@ -322,6 +328,14 @@ HloSharding UngroupSharding(const GroupedSharding& grouped_sharding);
 GroupedSharding AlignGroupsWith(GroupedSharding grouped_sharding,
                                 const GroupedSharding& reference,
                                 bool ignore_group_order = false);
+
+// Align device groups between the two ahrdings. Equivalent in calling
+// GroupShardingOnDims on the two sharding AlignGroupsWith and then
+// UngroupSharding
+HloSharding AlignShardingOnDims(const HloSharding& sharding,
+                                absl::Span<const int64> sharding_dims,
+                                const HloSharding& reference,
+                                absl::Span<const int64> reference_dims);
 
 // Returns the per-group base shape, i.e., before applying the in-group
 // sharding.
@@ -384,6 +398,49 @@ absl::optional<HloInstruction*> TileToPartialReplicateHaloExchange(
 absl::optional<std::vector<int64>> FindMatchingPartitionedDimsForGrouping(
     const HloSharding& sharding,
     const std::vector<std::vector<int64>>& device_groups);
+
+// Create a sharding that matches the provided source sharding on the
+// specified dimensions. 'target_dims' and 'source_dims' represent the
+// dimensions for which the sharding should match in their respective shape.
+// If some devices from the source sharding are left over (because not all the
+// devices are allocated to 'source_dims' dimensions) then partial replication
+// is employed to make sure the number of devices for the two sharding match.
+HloSharding CreateMatchingShardingOnDims(const Shape& target_shape,
+                                         const HloSharding& source_sharding,
+                                         absl::Span<const int64> target_dims,
+                                         absl::Span<const int64> source_dims);
+
+// Returns if the sharding across operand and indices of a gather is across
+// parallel dimensions and matches what SPMD partitioner supports.
+absl::optional<GatherParallelDimSharding>
+GatherOperandsShardedAcrossParallelDims(
+    const HloInstruction& operand, const HloInstruction& indices,
+    const hlo_sharding_util::GatherParallelDims& parallel_dims);
+
+// Pattern rewrite preprocessing utilities.
+
+// Returns rotate_amount if the concat(lhs, rhs) is equivalent to rotating the
+// elements along the concat dimension to the right by rotate_amount, where the
+// input of rotation is the shard operand of lhs and rhs. Returns -1 if the
+// pattern is not found.
+int64 FindRotateRightPattern(const HloInstruction* concat,
+                             const HloInstruction* lhs,
+                             const HloInstruction* rhs);
+
+// Describes the pad with wrap pattern.
+struct PadWithWrapPattern {
+  int64 lhs_slice_start;
+  int64 rhs_slice_start;
+  std::vector<const HloInstruction*> lhs_modifiers;
+  std::vector<const HloInstruction*> rhs_modifiers;
+};
+
+// Returns the `PadWithWrapPattern` if the concat(lhs,mid,rhs) is equivalent to
+// padding mid with wrapping (i.e., padding mid with slices of itself). Return
+// absl::nullopt if the pattern is not found.
+absl::optional<PadWithWrapPattern> FindPadWithWrapPattern(
+    const HloInstruction* concat, const HloInstruction* lhs,
+    const HloInstruction* mid, const HloInstruction* rhs);
 
 }  // namespace spmd
 }  // namespace xla

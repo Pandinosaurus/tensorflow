@@ -232,11 +232,7 @@ REGISTER_OP("_FusedBatchNormEx")
     .Output("reserve_space_1: U")
     .Output("reserve_space_2: U")
     .Output("reserve_space_3: U")
-#ifdef ENABLE_MKLDNN_V1
     .Attr("T: {half, float, bfloat16}")
-#else
-    .Attr("T: {half, float}")
-#endif
     .Attr("U: {float}")
     .Attr("epsilon: float = 0.0001")
     .Attr("exponential_avg_factor: float = 1.0")
@@ -464,8 +460,8 @@ Status CommonFusedConvCalculations(InferenceContext* c, bool has_resize) {
     std::vector<DimensionHandle> output_dims;
     for (int i = 0; i < 4; ++i) {
       DimensionHandle dim = c->Dim(resized, i);
-      int64 p0 = static_cast<int64>(paddings_t->matrix<int32>()(i, 0));
-      int64 p1 = static_cast<int64>(paddings_t->matrix<int32>()(i, 1));
+      int64_t p0 = static_cast<int64>(paddings_t->matrix<int32>()(i, 0));
+      int64_t p1 = static_cast<int64>(paddings_t->matrix<int32>()(i, 1));
       if (p0 < 0 || p1 < 0) {
         return errors::InvalidArgument("Paddings must be non-negative");
       }
@@ -632,10 +628,10 @@ REGISTER_OP("_FusedDepthwiseConv2dNative")
     // Attributes for the LeakyRelu ----------------------------------------- //
     .Attr("leakyrelu_alpha: float = 0.2")
     // ---------------------------------------------------------------------- //
-
     .SetShapeFn(shape_inference::DepthwiseConv2DNativeShape);
 
 // --------------------------------------------------------------------------
+
 REGISTER_OP("Conv3D")
     .Input("input: T")
     .Input("filter: T")
@@ -1041,8 +1037,8 @@ REGISTER_OP("Dilation2D")
       Padding padding;
       TF_RETURN_IF_ERROR(c->GetAttr("padding", &padding));
 
-      int64 output_rows, output_cols;
-      int64 padding_before, padding_after;
+      int64_t output_rows, output_cols;
+      int64_t padding_before, padding_after;
       TF_RETURN_IF_ERROR(GetWindowedOutputSizeVerbose(
           in_rows, filter_rows_eff, stride_rows, padding, &output_rows,
           &padding_before, &padding_after));
@@ -1457,15 +1453,7 @@ REGISTER_OP("QuantizedAvgPool")
     .Attr("ksize: list(int)")
     .Attr("strides: list(int)")
     .Attr(GetPaddingAttrString())
-    .SetShapeFn([](InferenceContext* c) {
-      TF_RETURN_IF_ERROR(shape_inference::AvgPoolShape(c));
-      ShapeHandle unused;
-      TF_RETURN_IF_ERROR(c->WithRank(c->input(1), 0, &unused));
-      TF_RETURN_IF_ERROR(c->WithRank(c->input(2), 0, &unused));
-      c->set_output(1, c->Scalar());
-      c->set_output(2, c->Scalar());
-      return Status::OK();
-    });
+    .SetShapeFn(shape_inference::QuantizedAvgPoolShape);
 
 REGISTER_OP("QuantizedBiasAdd")
     .Input("input: T1")
@@ -1508,17 +1496,7 @@ REGISTER_OP("QuantizedConv2D")
     .Attr("strides: list(int)")
     .Attr(GetPaddingAttrString())
     .Attr("dilations: list(int) = [1, 1, 1, 1]")
-    .SetShapeFn([](InferenceContext* c) {
-      TF_RETURN_IF_ERROR(shape_inference::Conv2DShape(c));
-      ShapeHandle unused;
-      TF_RETURN_IF_ERROR(c->WithRank(c->input(2), 0, &unused));
-      TF_RETURN_IF_ERROR(c->WithRank(c->input(3), 0, &unused));
-      TF_RETURN_IF_ERROR(c->WithRank(c->input(4), 0, &unused));
-      TF_RETURN_IF_ERROR(c->WithRank(c->input(5), 0, &unused));
-      c->set_output(1, c->Scalar());
-      c->set_output(2, c->Scalar());
-      return Status::OK();
-    });
+    .SetShapeFn(shape_inference::QuantizedConv2DShape);
 
 REGISTER_OP("QuantizedMaxPool")
     .Input("input: T")
@@ -1656,11 +1634,11 @@ REGISTER_OP("_MklDepthwiseConv2dNative")
     .Attr("T: {half, bfloat16, float, double}")
     .Attr("strides: list(int)")
     .Attr("is_filter_const: bool = false")
-    .Attr(GetPaddingAttrString())
+    .Attr(GetPaddingAttrStringWithExplicit())
     .Attr(GetConvnetDataFormatAttrString())
     .Attr(GetExplicitPaddingsAttrString())
     .Attr("dilations: list(int) = [1, 1, 1, 1]")
-    .SetShapeFn(shape_inference::DepthwiseConv2DNativeShape);
+    .SetShapeFn(shape_inference::DepthwiseConv2DNativeShapeWithExplicitPadding);
 
 REGISTER_OP("_MklConv2D")
     .Input("input: T")
@@ -1675,11 +1653,11 @@ REGISTER_OP("_MklConv2D")
     .Attr("strides: list(int)")
     .Attr("use_cudnn_on_gpu: bool = true")
     .Attr("is_filter_const: bool = false")
-    .Attr(GetPaddingAttrString())
+    .Attr(GetPaddingAttrStringWithExplicit())
     .Attr(GetConvnetDataFormatAttrString())
     .Attr(GetExplicitPaddingsAttrString())
     .Attr("dilations: list(int) = [1, 1, 1, 1]")
-    .SetShapeFn(shape_inference::Conv2DShape)
+    .SetShapeFn(shape_inference::Conv2DShapeWithExplicitPadding)
     .Doc(R"doc(
 MKL version of Conv2D operator. Uses MKL DNN APIs to perform 2D convolution.
 
@@ -1716,10 +1694,11 @@ REGISTER_OP("__MklDummyConv2DWithBias")
     .Attr("strides: list(int)")
     .Attr("use_cudnn_on_gpu: bool = true")
     .Attr("is_filter_const: bool = false")
-    .Attr(GetPaddingAttrString())
+    .Attr(GetPaddingAttrStringWithExplicit())
+    .Attr(GetExplicitPaddingsAttrString())
     .Attr(GetConvnetDataFormatAttrString())
     .Attr("dilations: list(int) = [1, 1, 1, 1]")
-    .SetShapeFn(shape_inference::Conv2DShape)
+    .SetShapeFn(shape_inference::Conv2DShapeWithExplicitPadding)
     .Doc(R"doc(
 Dummy node that enables fusing Conv2D and BiasAdd operator for MKL. This node
 does not perform anything. It is just created as an intermediate output of
@@ -1744,10 +1723,11 @@ REGISTER_OP("_MklConv2DWithBias")
     .Attr("strides: list(int)")
     .Attr("use_cudnn_on_gpu: bool = true")
     .Attr("is_filter_const: bool = false")
-    .Attr(GetPaddingAttrString())
+    .Attr(GetPaddingAttrStringWithExplicit())
+    .Attr(GetExplicitPaddingsAttrString())
     .Attr(GetConvnetDataFormatAttrString())
     .Attr("dilations: list(int) = [1, 1, 1, 1]")
-    .SetShapeFn(shape_inference::Conv2DShape)
+    .SetShapeFn(shape_inference::Conv2DShapeWithExplicitPadding)
     .Doc(R"doc(
 MKL version of Conv2D and BiasAdd operator. Uses MKL DNN APIs to perform
 2D convolution and add Bias to the output of convolution.
@@ -1764,7 +1744,6 @@ REGISTER_OP("__MklDummyPadWithConv2D")
     .Attr("T: {bfloat16, float}")
     .Attr("strides: list(int)")
     .Attr("use_cudnn_on_gpu: bool = true")
-    .Attr("is_filter_const: bool = false")
     .Attr(GetPaddingAttrString())
     .Attr(GetConvnetDataFormatAttrString())
     .Attr("dilations: list(int) = [1, 1, 1, 1]")
@@ -1922,25 +1901,7 @@ REGISTER_OP("_MklConv2DBackpropFilterWithBias")
     .Attr(GetPaddingAttrString())
     .Attr(GetConvnetDataFormatAttrString())
     .Attr("dilations: list(int) = [1, 1, 1, 1]")
-    .SetShapeFn([](InferenceContext* c) {
-      ShapeHandle input_shape;
-      // Fetch the data_format attribute, which may not exist.
-      string data_format;
-      Status s = c->GetAttr("data_format", &data_format);
-
-      if (s.ok() && data_format == "NCHW") {
-        TF_RETURN_IF_ERROR(c->WithRank(c->input(0), 4, &input_shape));
-        c->set_output(1, c->Vector(c->Dim(input_shape, -3)));
-      } else {
-        TF_RETURN_IF_ERROR(c->WithRank(c->input(0), 4, &input_shape));
-        c->set_output(1, c->Vector(c->Dim(input_shape, -1)));
-      }
-      ShapeHandle sh;
-      TF_RETURN_IF_ERROR(c->MakeShapeFromShapeTensor(1, &sh));
-      TF_RETURN_IF_ERROR(c->WithRank(sh, 4, &sh));
-      c->set_output(0, sh);
-      return Status::OK();
-    })
+    .SetShapeFn(shape_inference::Conv2DBackpropFilterWithBiasShape)
     .Doc(R"doc(
 MKL version of Conv2DBackpropFilterWithBias. Uses MKL DNN APIs to compute the
 gradients of convolution with respect to the filter.

@@ -32,6 +32,9 @@ namespace gpu {
 
 void WarnIfBadDriverJITVersion();
 
+// Returns the directory containing nvvm libdevice files.
+string GetLibdeviceDir(const HloModuleConfig& hlo_module_config);
+
 // NVPTXCompiler generates efficient GPU executables for NVPTX target.
 class NVPTXCompiler : public GpuCompiler {
  public:
@@ -51,9 +54,9 @@ class NVPTXCompiler : public GpuCompiler {
   GpuVersion GetGpuVersion(se::StreamExecutor* stream_exec) override;
 
   StatusOr<std::pair<std::string, std::vector<uint8>>> CompileTargetBinary(
-      const HloModule* hlo_module, llvm::Module* llvm_module,
-      GpuVersion gpu_version, se::StreamExecutor* stream_exec,
-      bool relocatable) override;
+      const HloModuleConfig& module_config, llvm::Module* llvm_module,
+      GpuVersion gpu_version, se::StreamExecutor* stream_exec, bool relocatable,
+      const HloModule* debug_module) override;
 
  private:
   StatusOr<std::vector<uint8>> LinkModules(
@@ -75,8 +78,9 @@ class NVPTXCompiler : public GpuCompiler {
   // Tries to compile the given ptx string to cubin.  Returns a vector with the
   // compiled cubin.  If compilation was unsuccessful, returns an empty vector.
   std::vector<uint8> CompileGpuAsmOrGetCachedResult(
-      se::StreamExecutor* stream_exec, const string& ptx, int cc_major,
-      int cc_minor, const HloModuleConfig& hlo_module_config, bool relocatable);
+      se::StreamExecutor* stream_exec, const string& ptx,
+      se::CudaComputeCapability cc, const HloModuleConfig& hlo_module_config,
+      bool relocatable);
 
   // The compilation_cache_ map is a cache from {ptx string, cc_major, cc_minor}
   // -> cubin so we don't recompile the same ptx twice.  This is important for

@@ -598,6 +598,12 @@ class TFETest(test_util.TensorFlowTestCase):
       self.assertAllEqual(test_fn(test_var), 3.0)
     async_executor.wait()
 
+    with context.executor_scope(async_executor):
+      test_var = variables.Variable(2.)
+      result = test_fn(test_var)
+      context.async_wait()
+      self.assertAllEqual(result, 3.0)
+
   @test_util.run_gpu_only
   def testNumpyForceCPU(self):
     cpu = constant_op.constant([[1., 2.], [3., 4.]])
@@ -1091,8 +1097,9 @@ class SendRecvTest(test_util.TensorFlowTestCase):
 
   @test_util.disable_tfrt('Send/Receive not supported in TFRT yet.')
   def testBasic(self):
-    t0 = constant_op.constant(1.0)
-    t1 = constant_op.constant(2.0)
+    with ops.device(self.cpu_device):
+      t0 = constant_op.constant(1.0)
+      t1 = constant_op.constant(2.0)
     self._send(t0, 't0', self.cpu_device)
     self._send(t1, 't1', self.cpu_device)
     self.assertAllEqual(

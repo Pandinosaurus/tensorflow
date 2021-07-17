@@ -78,6 +78,11 @@ class SparseDenseBinaryOpShared : public OpKernel {
                     "but received shapes: ",
                     values_t->shape().DebugString(), " and ",
                     shape_t->shape().DebugString()));
+    OP_REQUIRES(
+        ctx, values_t->dim_size(0) == indices_t->dim_size(0),
+        errors::InvalidArgument(
+            "The first dimension of values and indices should match. (",
+            values_t->dim_size(0), " vs. ", indices_t->dim_size(0), ")"));
 
     const auto indices_mat = indices_t->matrix<int64>();
     const auto shape_vec = shape_t->vec<int64>();
@@ -109,7 +114,10 @@ class SparseDenseBinaryOpShared : public OpKernel {
     OP_REQUIRES_OK(
         ctx, ctx->allocate_temp(DataTypeToEnum<T>::value, TensorShape({nnz}),
                                 &dense_gathered));
-
+    bool op_is_div = false;
+    if (absl::StrContains(ctx->op_kernel().type_string_view(), "Div")) {
+      op_is_div = true;
+    }
     // Pulls relevant entries from the dense side, with reshape and broadcasting
     // *of the dense side* taken into account.  Use a TensorRef to avoid blowing
     // up memory.
@@ -138,6 +146,12 @@ class SparseDenseBinaryOpShared : public OpKernel {
           errors::InvalidArgument("Provided indices are out-of-bounds w.r.t. " \
                                   "dense side with broadcasted shape"));       \
       dense_gathered_flat(i) = rhs_ref.coeff(idx);                             \
+      if (op_is_div) {                                                         \
+        OP_REQUIRES(ctx, dense_gathered_flat(i) != 0,                          \
+                    errors::InvalidArgument(                                   \
+                        "SparseDenseCwiseDiv cannot divide by zero,"           \
+                        "but input dense tensor contains zero "));             \
+      }                                                                        \
     }                                                                          \
     break;                                                                     \
   }

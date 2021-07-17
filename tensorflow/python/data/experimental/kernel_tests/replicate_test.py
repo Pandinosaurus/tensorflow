@@ -120,15 +120,17 @@ class LocalReplicateTest(test_base.DatasetTestBase, parameterized.TestCase):
     dataset1 = replicated_ds[self._device1]
     dataset2 = replicated_ds[self._device2]
     self.evaluate(counter_var.initializer)
+    with ops.device(self._device1):
+      self.assertDatasetProduces(
+          dataset1, range(1, 101), requires_initialization=True)
+    with ops.device(self._device2):
+      self.assertDatasetProduces(
+          dataset2, range(1, 101), requires_initialization=True)
+    # Iterate through the original device last so that replication happens
+    # before counter_var is modified. The order only matters in graph mode.
     with ops.device(self._device0):
       self.assertDatasetProduces(
           dataset0, range(1, 101), requires_initialization=True)
-    with ops.device(self._device1):
-      self.assertDatasetProduces(
-          dataset1, range(101, 201), requires_initialization=True)
-    with ops.device(self._device2):
-      self.assertDatasetProduces(
-          dataset2, range(201, 301), requires_initialization=True)
 
   @combinations.generate(test_base.default_test_combinations())
   def testExternalStatePolicyIgnore(self):
@@ -248,16 +250,22 @@ class EagerClusterReplicateTest(test_base.DatasetTestBase,
   def __init__(self, methodName="runTest"):  # pylint: disable=invalid-name
     super(EagerClusterReplicateTest, self).__init__(methodName)
     self._job_name = "remove_device"
-    self._cached_server1 = server_lib.Server.create_local_server()
-    self._cached_server2 = server_lib.Server.create_local_server()
-    self._cached_server1_target = self._cached_server1.target[len("grpc://"):]
-    self._cached_server2_target = self._cached_server2.target[len("grpc://"):]
     self._device0 = "/job:%s/replica:0/task:0/device:CPU:0" % self._job_name
     self._device1 = "/job:%s/replica:0/task:1/device:CPU:0" % self._job_name
     self._device2 = "/job:%s/replica:0/task:2/device:CPU:0" % self._job_name
 
   def setUp(self):
     super(EagerClusterReplicateTest, self).setUp()
+
+    if context.context().use_tfrt:
+      self.skipTest("b/171412104: This test requires distributed support.")
+
+    # TODO(b/171412104): Move create server to __init__ once tfrt support it.
+    self._cached_server1 = server_lib.Server.create_local_server()
+    self._cached_server2 = server_lib.Server.create_local_server()
+    self._cached_server1_target = self._cached_server1.target[len("grpc://"):]
+    self._cached_server2_target = self._cached_server2.target[len("grpc://"):]
+
     # Start the local server.
     local_port = pywrap_tfe.TF_PickUnusedPortOrDie()
     context.set_server_def(
@@ -318,10 +326,10 @@ class EagerClusterReplicateTest(test_base.DatasetTestBase,
           dataset0, range(1, 101), requires_initialization=True)
     with ops.device(self._device1):
       self.assertDatasetProduces(
-          dataset1, range(101, 201), requires_initialization=True)
+          dataset1, range(1, 101), requires_initialization=True)
     with ops.device(self._device2):
       self.assertDatasetProduces(
-          dataset2, range(201, 301), requires_initialization=True)
+          dataset2, range(1, 101), requires_initialization=True)
 
 
 class GraphClusterReplicateTest(test_base.DatasetTestBase,

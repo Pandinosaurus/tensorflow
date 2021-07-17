@@ -17,6 +17,8 @@ limitations under the License.
 #include <numeric>
 #include <vector>
 
+#include "tensorflow/core/framework/op_requires.h"
+
 #define EIGEN_USE_THREADS
 
 #include "third_party/eigen3/Eigen/Core"
@@ -80,10 +82,10 @@ class CSRSparseCholeskyCPUOp : public OpKernel {
     OP_REQUIRES_OK(ctx, ExtractVariantFromInput(ctx, 0, &input_matrix));
     const Tensor& input_permutation_indices = ctx->input(1);
 
-    int64 num_rows;
+    int64_t num_rows;
     int batch_size;
-    ValidateInputs(ctx, *input_matrix, input_permutation_indices, &batch_size,
-                   &num_rows);
+    OP_REQUIRES_OK(ctx, ValidateInputs(*input_matrix, input_permutation_indices,
+                                       &batch_size, &num_rows));
 
     // Allocate batch pointers.
     Tensor batch_ptr(cpu_allocator(), DT_INT32, TensorShape({batch_size + 1}));
@@ -109,8 +111,8 @@ class CSRSparseCholeskyCPUOp : public OpKernel {
     std::atomic<int64> invalid_input_index(-1);
     Shard(worker_threads.num_threads, worker_threads.workers, batch_size,
           sparse_cholesky_cost_per_batch,
-          [&](int64 batch_begin, int64 batch_end) {
-            for (int64 batch_index = batch_begin; batch_index < batch_end;
+          [&](int64_t batch_begin, int64_t batch_end) {
+            for (int64_t batch_index = batch_begin; batch_index < batch_end;
                  ++batch_index) {
               // Define an Eigen SparseMatrix Map to operate on the
               // CSRSparseMatrix component without copying the data.
@@ -188,8 +190,8 @@ class CSRSparseCholeskyCPUOp : public OpKernel {
     // SparseMatrixSparseMatMul.
     Shard(worker_threads.num_threads, worker_threads.workers, batch_size,
           (3 * total_nnz) / batch_size /* cost per unit */,
-          [&](int64 batch_begin, int64 batch_end) {
-            for (int64 batch_index = batch_begin; batch_index < batch_end;
+          [&](int64_t batch_begin, int64_t batch_end) {
+            for (int64_t batch_index = batch_begin; batch_index < batch_end;
                  ++batch_index) {
               const SparseMatrix& cholesky_factor =
                   sparse_cholesky_factors[batch_index];
@@ -226,49 +228,48 @@ class CSRSparseCholeskyCPUOp : public OpKernel {
   }
 
  private:
-  void ValidateInputs(OpKernelContext* ctx,
-                      const CSRSparseMatrix& sparse_matrix,
-                      const Tensor& permutation_indices, int* batch_size,
-                      int64* num_rows) {
-    OP_REQUIRES(ctx, sparse_matrix.dtype() == DataTypeToEnum<T>::value,
-                errors::InvalidArgument(
-                    "Asked for a CSRSparseMatrix of type ",
-                    DataTypeString(DataTypeToEnum<T>::value),
-                    " but saw dtype: ", DataTypeString(sparse_matrix.dtype())));
+  Status ValidateInputs(const CSRSparseMatrix& sparse_matrix,
+                        const Tensor& permutation_indices, int* batch_size,
+                        int64* num_rows) {
+    if (sparse_matrix.dtype() != DataTypeToEnum<T>::value)
+      return errors::InvalidArgument(
+          "Asked for a CSRSparseMatrix of type ",
+          DataTypeString(DataTypeToEnum<T>::value),
+          " but saw dtype: ", DataTypeString(sparse_matrix.dtype()));
 
     const Tensor& dense_shape = sparse_matrix.dense_shape();
     const int rank = dense_shape.dim_size(0);
-    OP_REQUIRES(ctx, rank == 2 || rank == 3,
-                errors::InvalidArgument("sparse matrix must have rank 2 or 3; ",
-                                        "but dense_shape has size ", rank));
+    if (rank < 2 || rank > 3)
+      return errors::InvalidArgument("sparse matrix must have rank 2 or 3; ",
+                                     "but dense_shape has size ", rank);
     const int row_dim = (rank == 2) ? 0 : 1;
     auto dense_shape_vec = dense_shape.vec<int64>();
     *num_rows = dense_shape_vec(row_dim);
     const int64 num_cols = dense_shape_vec(row_dim + 1);
-    OP_REQUIRES(ctx, *num_rows == num_cols,
-                errors::InvalidArgument("sparse matrix must be square; got: ",
-                                        *num_rows, " != ", num_cols));
+    if (*num_rows != num_cols)
+      return errors::InvalidArgument(
+          "sparse matrix must be square; got: ", *num_rows, " != ", num_cols);
     const TensorShape& perm_shape = permutation_indices.shape();
-    OP_REQUIRES(
-        ctx, perm_shape.dims() + 1 == rank,
-        errors::InvalidArgument(
-            "sparse matrix must have the same rank as permutation; got: ", rank,
-            " != ", perm_shape.dims(), " + 1."));
-    OP_REQUIRES(
-        ctx, perm_shape.dim_size(rank - 2) == *num_rows,
-        errors::InvalidArgument(
-            "permutation must have the same number of elements in each batch "
-            "as the number of rows in sparse matrix; got: ",
-            perm_shape.dim_size(rank - 2), " != ", *num_rows));
+    if (perm_shape.dims() + 1 != rank)
+      return errors::InvalidArgument(
+          "sparse matrix must have the same rank as permutation; got: ", rank,
+          " != ", perm_shape.dims(), " + 1.");
+    if (perm_shape.dim_size(rank - 2) != *num_rows)
+      return errors::InvalidArgument(
+          "permutation must have the same number of elements in each batch "
+          "as the number of rows in sparse matrix; got: ",
+          perm_shape.dim_size(rank - 2), " != ", *num_rows);
 
     *batch_size = sparse_matrix.batch_size();
     if (*batch_size > 1) {
-      OP_REQUIRES(
-          ctx, perm_shape.dim_size(0) == *batch_size,
-          errors::InvalidArgument("permutation must have the same batch size "
-                                  "as sparse matrix; got: ",
-                                  perm_shape.dim_size(0), " != ", *batch_size));
+      if (perm_shape.dim_size(0) != *batch_size)
+        return errors::InvalidArgument(
+            "permutation must have the same batch size "
+            "as sparse matrix; got: ",
+            perm_shape.dim_size(0), " != ", *batch_size);
     }
+
+    return Status::OK();
   }
 };
 

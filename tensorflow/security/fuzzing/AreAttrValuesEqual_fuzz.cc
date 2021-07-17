@@ -21,7 +21,7 @@ limitations under the License.
 #include "tensorflow/core/framework/attr_value.pb.h"
 #include "tensorflow/core/framework/attr_value_util.h"
 
-// This is a fuzzer for AreAttrValuesEqual and FastAreAttrValuesEqual.
+// This is a fuzzer for AreAttrValuesEqual.
 
 namespace {
 
@@ -40,12 +40,18 @@ void compareValues(T value, T value_2) {
   const tensorflow::AttrValue proto_same = createAttrValue(value);
   const tensorflow::AttrValue proto2 = createAttrValue(value_2);
 
-  // Assert that the Fast and Regular are true.
-  assert(tensorflow::AreAttrValuesEqual(proto, proto_same));
-  assert(tensorflow::FastAreAttrValuesEqual(proto, proto_same));
-  // Assert that Fast and Regular for the random values.
-  assert(tensorflow::AreAttrValuesEqual(proto, proto2) ==
-         tensorflow::FastAreAttrValuesEqual(proto, proto2));
+  // Assert that AreAttrValuesEqual are same with or without allow false
+  // negatives.
+  assert(tensorflow::AreAttrValuesEqual(proto, proto_same,
+                                        /*allow_false_negatives=*/false));
+  assert(tensorflow::AreAttrValuesEqual(proto, proto_same,
+                                        /*allow_false_negatives=*/true));
+  // Assert that AreAttrValuesEqual are same with or without allow false
+  // negatives.
+  assert(tensorflow::AreAttrValuesEqual(proto, proto2,
+                                        /*allow_false_negatives=*/false) ==
+         tensorflow::AreAttrValuesEqual(proto, proto2,
+                                        /*allow_false_negatives=*/true));
 }
 
 extern "C" int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
@@ -67,8 +73,7 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
   const int content_size = fuzzed_data.ConsumeIntegralInRange(10, 300);
   const std::string test_string =
       fuzzed_data.ConsumeRandomLengthString(content_size);
-  const std::string test_string2 =
-      fuzzed_data.ConsumeRemainingBytesAsString();
+  const std::string test_string2 = fuzzed_data.ConsumeRemainingBytesAsString();
   compareValues(test_string, test_string2);
 
   return 0;

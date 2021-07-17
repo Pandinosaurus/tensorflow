@@ -18,6 +18,7 @@ limitations under the License.
 #include <vector>
 
 #include "absl/memory/memory.h"
+#include "tensorflow/core/framework/full_type.pb.h"
 #include "tensorflow/core/framework/node_def_util.h"
 #include "tensorflow/core/framework/tensor.h"
 #include "tensorflow/core/lib/core/errors.h"
@@ -133,14 +134,15 @@ struct DimensionOrConstant {
 struct ShapeAndType {
   ShapeAndType() {}
   ShapeAndType(ShapeHandle s, DataType t) : shape(s), dtype(t) {}
-  ShapeAndType(ShapeHandle s, DataType t, SpecializedType specialized_t)
-      : shape(s), dtype(t), specialized_type(specialized_t) {}
+  // TODO(mdan): Remove dtype from constructor, and use type_ instead.
+  // dtype is kept here for backward compatibiity. Its information should
+  // be redundant to that in type;
+  ShapeAndType(ShapeHandle s, DataType t, FullTypeDef type_)
+      : shape(s), dtype(t), type(type_) {}
 
   ShapeHandle shape;
   DataType dtype = DT_INVALID;
-  // The type of a variant-dtype tensor sometimes affects graph building
-  // (e.g. for vectorization), and needs to be know statically in such cases.
-  SpecializedType specialized_type = ST_INVALID;
+  FullTypeDef type;
 };
 
 // Shape inference functions registered on ops in REGISTER_OP implement
@@ -324,6 +326,8 @@ class InferenceContext {
 
   const AttrSlice& attrs() const { return attrs_; }
 
+  const FullTypeDef& ret_types() const { return ret_types_; }
+
   // idx can be negative for an offset from end of dimensions.
   // idx must be in the range [-1 * s.rank, s.rank).
   DimensionHandle Dim(ShapeHandle s, int64 idx) {
@@ -490,9 +494,13 @@ class InferenceContext {
   inline DimensionHandle UnknownDim() { return MakeDim(kUnknownDim); }
 
   // Returns in <val> a scalar value from an input tensor <t>.  The input tensor
-  // must be a 1-dimensional int32 or int64 tensor.  Caller must ensure that the
+  // must be a 0-dimensional int32 or int64 tensor.  Caller must ensure that the
   // input tensor is not NULL.
   Status GetScalarFromTensor(const Tensor* t, int64* val);
+
+  // Returns in <val> a scalar value from a 1D input tensor <t> with int32 or
+  // int64 elements. Caller must ensure that the input tensor is not NULL.
+  Status GetScalarFromTensor(const Tensor* t, int64 idx, int64* val);
 
   // Returns a new dimension whose value is given by a scalar input tensor.
   // The input tensor must be in host memory, since it is dereferenced to get
@@ -749,6 +757,11 @@ class InferenceContext {
   // Values may be NULL.
   std::vector<std::unique_ptr<std::vector<ShapeAndType>>>
       output_handle_shapes_and_types_;
+
+  // Return types for the node this context is associated with. This information
+  // is to eventually consolidate all the dtype and shape info, allowing for
+  // output_handle_shapes_and_types_ to be removed.
+  FullTypeDef ret_types_;
 
   const int graph_def_version_;
   AttrSlice attrs_;

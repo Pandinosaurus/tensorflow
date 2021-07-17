@@ -93,7 +93,8 @@ void PopulateWithIntNext<half>(Literal* literal) {
     // Zero-out the MSB of the exponent to avoid Infs and NaNs, and put it into
     // the sign bit. We could be less wasteful, but this is best-effort anyway.
     uint16 exponent_msb = next_value & 0x4000;
-    value.x = (next_value & 0xBFFF) | (exponent_msb << 1);
+    value = Eigen::numext::bit_cast<half, uint16>((next_value & 0xBFFF) |
+                                                  (exponent_msb << 1));
     next_value++;
   }
 }
@@ -107,7 +108,8 @@ void PopulateWithIntNext<bfloat16>(Literal* literal) {
     // Zero-out the MSB of the exponent to avoid Infs and NaNs, and put it into
     // the sign bit. We could be less wasteful, but this is best-effort anyway.
     uint16 exponent_msb = next_value & 0x4000;
-    value.value = (next_value & 0xBFFF) | (exponent_msb << 1);
+    value = Eigen::numext::bit_cast<bfloat16, uint16>((next_value & 0xBFFF) |
+                                                      (exponent_msb << 1));
     next_value++;
   }
 }
@@ -365,7 +367,7 @@ void PopulateWithRandomIntegralDataWithBounds(Literal* literal,
 // range [min, max]. Currently this works only for INT types.
 StatusOr<Literal> MakeFakeLiteralInternalWithBounds(const Shape& shape,
                                                     std::minstd_rand0* engine,
-                                                    int64 min, int64 max,
+                                                    int64_t min, int64_t max,
                                                     bool is_sorted) {
   if (shape.IsTuple()) {
     std::vector<Literal> elements;
@@ -488,7 +490,7 @@ bool NeedsInitValue(const HloUse& use) {
 
 // Generate random values that are constrained to the input_shape minus the
 // output_shape so as not to produce wrapping slices, for instance.
-Literal MakeRandomIndex(int64 index_bound, std::minstd_rand0* engine) {
+Literal MakeRandomIndex(int64_t index_bound, std::minstd_rand0* engine) {
   std::uniform_int_distribution<int32> generator(0, index_bound);
   return LiteralUtil::CreateR0<int32>(generator(*engine));
 }
@@ -548,7 +550,7 @@ StatusOr<Literal> CreateLiteralForConstrainedUses(
     const absl::Span<HloInstruction* const> constrained_uses,
     const HloInstruction& param, const Shape& param_shape,
     std::minstd_rand0* engine, bool use_large_range) {
-  int64 index_bound = INT64_MAX;
+  int64_t index_bound = INT64_MAX;
   bool no_duplicates = false;
   bool needs_constant = false;
   bool needs_sorted_indices = false;
@@ -563,7 +565,7 @@ StatusOr<Literal> CreateLiteralForConstrainedUses(
                                        : use->operand(1)->shape();
         const int64 first_index =
             Cast<HloDynamicIndexInstruction>(use)->first_index_operand_number();
-        for (int64 operand = first_index; operand < use->operand_count();
+        for (int64_t operand = first_index; operand < use->operand_count();
              ++operand) {
           if (use->operand(operand) == &param) {
             index_bound = std::min(
@@ -686,7 +688,11 @@ StatusOr<std::vector<Literal>> MakeFakeArguments(HloModule* const module,
   std::vector<Literal> arguments(params.size());
   for (int i = 0; i < params.size(); ++i) {
     const HloModuleConfig& module_config = module->config();
-    const Shape& param_shape = module_config.has_entry_computation_layout()
+    const Shape& param_shape = (module_config.has_entry_computation_layout() &&
+                                module_config.entry_computation_layout()
+                                    .parameter_layout(i)
+                                    .shape()
+                                    .is_static())
                                    ? module_config.entry_computation_layout()
                                          .parameter_layout(i)
                                          .shape()

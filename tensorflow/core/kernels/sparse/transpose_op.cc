@@ -135,12 +135,9 @@ REGISTER_TRANSPOSE(CPU, complex128)
 #if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 REGISTER_TRANSPOSE(GPU, float)
 REGISTER_TRANSPOSE(GPU, double)
-#endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM
-
-#if GOOGLE_CUDA
 REGISTER_TRANSPOSE(GPU, complex64)
 REGISTER_TRANSPOSE(GPU, complex128)
-#endif  // GOOGLE_CUDA
+#endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 
 #undef REGISTER_TRANSPOSE
 
@@ -227,7 +224,7 @@ struct CSRSparseMatrixTransposeComponent<CPUDevice, T> {
 
     // Compute the column counts; whose prefix sums make up the output row
     // pointers.
-    for (int64 i = 0; i < nnz; ++i) {
+    for (int64_t i = 0; i < nnz; ++i) {
       output->row_ptr(input.col_ind(i) + 1) += 1;
     }
     std::partial_sum(output->row_ptr.data(),
@@ -240,7 +237,7 @@ struct CSRSparseMatrixTransposeComponent<CPUDevice, T> {
     for (int row_idx = 0; row_idx < num_rows; ++row_idx) {
       const int64 row_begin = input.row_ptr(row_idx);
       const int64 row_end = input.row_ptr(row_idx + 1);
-      for (int64 i = row_begin; i < row_end; ++i) {
+      for (int64_t i = row_begin; i < row_end; ++i) {
         const int col_idx = input.col_ind(i);
         const int64 offset =
             output->row_ptr(col_idx) + current_col_count[col_idx];

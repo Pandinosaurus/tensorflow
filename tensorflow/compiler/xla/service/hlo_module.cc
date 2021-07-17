@@ -29,6 +29,7 @@ limitations under the License.
 #include "absl/memory/memory.h"
 #include "absl/strings/str_cat.h"
 #include "tensorflow/compiler/xla/map_util.h"
+#include "tensorflow/compiler/xla/service/hlo_computation.h"
 #include "tensorflow/compiler/xla/service/hlo_instruction.h"
 #include "tensorflow/compiler/xla/service/hlo_schedule.h"
 #include "tensorflow/compiler/xla/shape_util.h"
@@ -36,6 +37,7 @@ limitations under the License.
 #include "tensorflow/core/lib/core/errors.h"
 #include "tensorflow/core/lib/gtl/map_util.h"
 #include "tensorflow/core/lib/hash/hash.h"
+#include "tensorflow/core/platform/fingerprint.h"
 #include "tensorflow/core/platform/stacktrace.h"
 #include "tensorflow/core/platform/types.h"
 
@@ -134,7 +136,7 @@ HloComputation* HloModule::AddEntryComputationWithLayouts(
 }
 
 Status HloModule::RemoveEmbeddedComputation(HloComputation* to_remove) {
-  if (has_schedule() && !to_remove->IsFusionComputation()) {
+  if (has_schedule() && !to_remove->IsCalledComputation()) {
     schedule_->remove_computation(to_remove);
   }
 
@@ -156,7 +158,7 @@ HloComputation* HloModule::AddEmbeddedComputation(
 }
 
 void HloModule::ReplaceComputations(
-    const std::unordered_map<HloComputation*, HloComputation*>& replacements) {
+    const absl::flat_hash_map<HloComputation*, HloComputation*>& replacements) {
   // Replace all uses of non-canonical computations with their
   // representatives.
   std::vector<std::unique_ptr<HloComputation>> new_computations;
@@ -169,6 +171,7 @@ void HloModule::ReplaceComputations(
         case HloOpcode::kCall:
         case HloOpcode::kMap:
         case HloOpcode::kReduce:
+        case HloOpcode::kReduceScatter:
         case HloOpcode::kReduceWindow:
         case HloOpcode::kScatter:
         case HloOpcode::kSort: {
@@ -295,6 +298,7 @@ HloModuleProto HloModule::ToProto() const {
       prefetch->add_index(index);
     }
   }
+  proto.set_is_dynamic(is_dynamic_);
   return proto;
 }
 
@@ -427,6 +431,8 @@ StatusOr<std::unique_ptr<HloModule>> HloModule::CreateFromProto(
         prefetch.parameter(),
         ShapeIndex(prefetch.index().begin(), prefetch.index().end()));
   }
+
+  module->set_is_dynamic(proto.is_dynamic());
 
   return std::move(module);
 }
@@ -595,6 +601,22 @@ int64 HloModule::instruction_count() const {
   return n;
 }
 
+std::vector<HloComputation*> HloModule::MakeComputationPostOrder(
+    const absl::flat_hash_set<HloComputation*>& allow_list) const {
+  std::vector<HloComputation*> filtered_post_order(allow_list.size());
+  auto post_order = this->MakeComputationPostOrder();
+
+  int filtered_idx = 0;
+  for (auto& computation : post_order) {
+    if (allow_list.contains(computation)) {
+      filtered_post_order[filtered_idx] = computation;
+      filtered_idx += 1;
+    }
+  }
+
+  return filtered_post_order;
+}
+
 std::vector<HloComputation*> HloModule::MakeComputationPostOrder() const {
   // First determine all root computations by building a set of nonroot
   // computations (computations which are called by an instruction in the
@@ -645,19 +667,25 @@ std::vector<HloComputation*> HloModule::MakeComputationPostOrder() const {
 }
 
 namespace {
-bool CompareComputationsByContent(HloComputation* a, HloComputation* b) {
+bool CompareComputationsByContent(const HloComputation* a,
+                                  const HloComputation* b) {
   if (a->instruction_count() != b->instruction_count()) {
     return a->instruction_count() < b->instruction_count();
   }
   return a->ToString(HloPrintOptions::Fingerprint()) <
          b->ToString(HloPrintOptions::Fingerprint());
 }
+
+void SortComputationsByContent(std::vector<HloComputation*>* computations) {
+  absl::c_sort(*computations, CompareComputationsByContent);
+}
+
 }  // anonymous namespace
 
 std::vector<HloComputation*> HloModule::MakeComputationSorted() const {
   std::vector<HloComputation*> result = MakeComputationPostOrder();
   if (config().content_aware_computation_sorting()) {
-    absl::c_sort(result, CompareComputationsByContent);
+    SortComputationsByContent(&result);
   }
   return result;
 }
@@ -675,7 +703,7 @@ std::vector<HloComputation*> HloModule::MakeNonfusionComputationsSorted()
     const {
   auto result = MakeNonfusionComputations();
   if (config().content_aware_computation_sorting()) {
-    absl::c_sort(result, CompareComputationsByContent);
+    SortComputationsByContent(&result);
   }
   return result;
 }
@@ -694,17 +722,22 @@ std::unique_ptr<HloModule> HloModule::Clone(const HloModuleConfig& config,
   auto cloned_computation = entry_computation_->Clone(suffix, &context);
   module->AddEntryComputation(std::move(cloned_computation));
   module->input_output_alias_config() = input_output_alias_config();
-
+  module->set_is_dynamic(is_dynamic());
   if (has_schedule() && schedule().Verify().ok()) {
     HloSchedule clone_schedule(module.get());
     for (HloComputation* computation : computations()) {
       if (schedule().is_computation_scheduled(computation)) {
-        HloInstructionSequence& clone_sequence =
-            clone_schedule.GetOrCreateSequence(
-                context.GetComputation(computation));
-        for (const HloInstruction* instruction :
-             schedule().sequence(computation).instructions()) {
-          clone_sequence.push_back(context.GetInstruction(instruction));
+        HloComputation* new_computation = context.FindComputation(computation);
+        // The module being cloned may have computations that are dead, i.e.,
+        // unreachable from the entry computation. In that case, new_computation
+        // is nullptr.
+        if (new_computation != nullptr) {
+          HloInstructionSequence& clone_sequence =
+              clone_schedule.GetOrCreateSequence(new_computation);
+          for (const HloInstruction* instruction :
+               schedule().sequence(computation).instructions()) {
+            clone_sequence.push_back(context.GetInstruction(instruction));
+          }
         }
       }
     }

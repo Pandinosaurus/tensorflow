@@ -140,6 +140,8 @@ class BufferAllocation {
   // be live out of the entry computation.
   bool maybe_live_out() const { return maybe_live_out_; }
 
+  void set_maybe_live_out(bool value) { maybe_live_out_ = value; }
+
   // Returns the size of the allocation. Necessarily this must be at least as
   // large as any LogicalBuffer assigned to this allocation.
   int64 size() const { return size_; }
@@ -239,6 +241,7 @@ class BufferAllocation {
   // computation.
   void AddHeapTrace(const HeapSimulatorTrace& heap_trace) {
     heap_traces_.push_back(heap_trace);
+    heap_traces_.back().set_buffer_allocation_index(index());
   }
 
   // Return the set of heap traces used to assign slices to logical buffers in
@@ -272,14 +275,6 @@ class BufferAllocation {
     return index() < other.index();
   }
 
- private:
-  // Only BufferAssigner and BufferAssignment can modify BufferAllocation.
-  friend class BufferAssigner;
-  friend class BufferAssignment;
-
-  // Adds a LogicalBuffer to the set assigned to this buffer.
-  void AddAssignment(const HloValue& buffer, int64 offset, int64 size);
-
   void set_entry_computation_parameter(int64 parameter_number,
                                        ShapeIndex param_shape_index,
                                        bool parameter_aliased_with_output) {
@@ -290,7 +285,15 @@ class BufferAllocation {
   }
 
   void set_constant(bool is_constant) { is_constant_ = is_constant; }
-  void set_maybe_live_out(bool value) { maybe_live_out_ = value; }
+
+ private:
+  // Only BufferAssigner and BufferAssignment can modify BufferAllocation.
+  friend class BufferAssigner;
+  friend class BufferAssignment;
+
+  // Adds a LogicalBuffer to the set assigned to this buffer.
+  void AddAssignment(const HloValue& buffer, int64 offset, int64 size);
+
   void set_index(Index index) { index_ = index; }
   void set_size(int64 size) { size_ = size; }
 
@@ -356,6 +359,14 @@ class BufferAssignment {
   // Returns the vector containing all buffer allocations in this assignment.
   const std::vector<BufferAllocation>& Allocations() const {
     return allocations_;
+  }
+
+  // This is similar to copying Allocations(), but since it's moved out, it
+  // preserves the addresses. Since BufferAllocation::Slice keeps a
+  // BufferAllocation*, and some backends keep BufferAllocation::Slice in
+  // xla::Executables, migrating off the use of addresses can be hard.
+  std::vector<BufferAllocation> ReleaseAllocations() {
+    return std::move(allocations_);
   }
 
   // Returns the total size allocation holding all temporary buffers.
@@ -457,6 +468,7 @@ class BufferAssignment {
   const HloLiveRange& hlo_live_range() const { return *hlo_live_range_; }
 
   string ToString() const;
+  string BufferInfoString() const;
   BufferAssignmentProto ToProto() const;
 
   // Statistics for the assignment.  Values initialized to -1 are not always
@@ -607,12 +619,14 @@ class BufferAssigner {
       Colorer colorer = DefaultColorer(),
       const absl::flat_hash_set<HloOpcode>& must_not_live_out = {},
       HloDataflowAnalysis::CanShareBuffer can_share_buffer = nullptr,
-      std::unique_ptr<PresetAssignments> preset_assignments = {});
+      std::unique_ptr<memory_space_assignment::PresetAssignments>
+          preset_assignments = {});
 
  private:
   BufferAssigner(bool allocate_buffers_for_constants, Colorer colorer,
                  const absl::flat_hash_set<HloOpcode>& must_not_live_out,
-                 std::unique_ptr<PresetAssignments> preset_assignments)
+                 std::unique_ptr<memory_space_assignment::PresetAssignments>
+                     preset_assignments)
       : allocate_buffers_for_constants_(allocate_buffers_for_constants),
         colorer_(colorer),
         must_not_live_out_(must_not_live_out),
@@ -695,7 +709,8 @@ class BufferAssigner {
   absl::flat_hash_set<HloOpcode> must_not_live_out_;
 
   // Description of any buffer offsets that are already set by an earlier pass.
-  std::unique_ptr<PresetAssignments> preset_assignments_;
+  std::unique_ptr<memory_space_assignment::PresetAssignments>
+      preset_assignments_;
 
   TF_DISALLOW_COPY_AND_ASSIGN(BufferAssigner);
 };

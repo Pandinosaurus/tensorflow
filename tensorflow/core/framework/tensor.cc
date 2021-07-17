@@ -452,7 +452,8 @@ struct ProtoHelper<bfloat16> {
   static void Fill(const bfloat16* data, size_t n, TensorProto* proto) {
     proto->mutable_half_val()->Reserve(n);
     for (size_t i = 0; i < n; ++i) {
-      proto->mutable_half_val()->AddAlreadyReserved(data[i].value);
+      proto->mutable_half_val()->AddAlreadyReserved(
+          Eigen::numext::bit_cast<uint16>(data[i]));
     }
   }
 };
@@ -462,7 +463,8 @@ struct ProtoHelper<Eigen::half> {
   static void Fill(const Eigen::half* data, size_t n, TensorProto* proto) {
     proto->mutable_half_val()->Reserve(n);
     for (size_t i = 0; i < n; ++i) {
-      proto->mutable_half_val()->AddAlreadyReserved(data[i].x);
+      proto->mutable_half_val()->AddAlreadyReserved(
+          Eigen::numext::bit_cast<uint16>(data[i]));
     }
   }
 };
@@ -648,6 +650,12 @@ Tensor::Tensor(DataType type, const TensorShape& shape, TensorBuffer* buf)
     : shape_(shape), buf_(buf) {
   set_dtype(type);
   RefIfNonNull(buf);
+}
+
+Tensor::Tensor(DataType type, const TensorShape& shape,
+               core::RefCountPtr<TensorBuffer> buf)
+    : shape_(shape), buf_(buf.release()) {
+  set_dtype(type);
 }
 
 bool Tensor::IsInitialized() const {

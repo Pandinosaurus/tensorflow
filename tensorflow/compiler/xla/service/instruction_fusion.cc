@@ -29,6 +29,7 @@ limitations under the License.
 #include "tensorflow/compiler/xla/debug_options_flags.h"
 #include "tensorflow/compiler/xla/map_util.h"
 #include "tensorflow/compiler/xla/service/fusion_queue.h"
+#include "tensorflow/compiler/xla/service/hlo_graph_dumper.h"
 #include "tensorflow/compiler/xla/service/hlo_instruction.h"
 #include "tensorflow/compiler/xla/service/hlo_opcode.h"
 #include "tensorflow/compiler/xla/service/hlo_reachability.h"
@@ -147,7 +148,12 @@ bool IsAlwaysDuplicable(const HloInstruction& instruction) {
     case HloOpcode::kConditional:
     case HloOpcode::kConvolution:
     case HloOpcode::kAllGather:
+    case HloOpcode::kAllGatherStart:
+    case HloOpcode::kAllGatherDone:
     case HloOpcode::kAllReduce:
+    case HloOpcode::kReduceScatter:
+    case HloOpcode::kAllReduceStart:
+    case HloOpcode::kAllReduceDone:
     case HloOpcode::kAllToAll:
     case HloOpcode::kCollectivePermute:
     case HloOpcode::kCollectivePermuteDone:
@@ -467,6 +473,12 @@ class ReversePostOrderFusionQueue : public FusionQueue {
 
 }  // namespace
 
+std::vector<HloComputation*> InstructionFusion::GetFusionComputations(
+    HloModule* module) {
+  // Use sorted computations because fusion configuration is order-sensitive.
+  return module->MakeNonfusionComputationsSorted();
+}
+
 std::unique_ptr<FusionQueue> InstructionFusion::GetFusionQueue(
     HloComputation* computation) {
   return absl::make_unique<ReversePostOrderFusionQueue>(computation);
@@ -484,8 +496,7 @@ StatusOr<bool> InstructionFusion::Run(HloModule* module) {
     fusion_config->clear();
   }
 
-  // Use sorted computations because fusion configuration is order-sensitive.
-  for (auto* computation : module->MakeNonfusionComputationsSorted()) {
+  for (auto* computation : GetFusionComputations(module_)) {
     CHECK(!computation->IsFusionComputation());
     computation_ = computation;
     reachability_ = HloReachabilityMap::Build(computation_);
@@ -556,6 +567,7 @@ StatusOr<bool> InstructionFusion::Run(HloModule* module) {
         }
 
         if (fusion_instruction == nullptr) {
+          fusion_queue->NotFusingInstruction(operand, instruction);
           continue;
         }
 
@@ -576,6 +588,12 @@ StatusOr<bool> InstructionFusion::Run(HloModule* module) {
           do_not_duplicate.erase(instruction);
         }
         break;
+      }
+
+      if (module->config().debug_options().xla_dump_fusion_visualization()) {
+        TF_RETURN_IF_ERROR(RegisterFusionState(
+            *computation,
+            absl::StrCat("InstructionFusion, may_duplicate=", may_duplicate_)));
       }
     }
 
@@ -599,7 +617,6 @@ StatusOr<bool> InstructionFusion::Run(HloModule* module) {
     }
     VLOG(1) << "There are " << fused_count << " fused bits that cause "
             << fuse_count << " fusion actions.";
-    VLOG(1) << FusionConfigToString(*fusion_config);
     module->set_config(module_config);
   }
 

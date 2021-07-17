@@ -22,6 +22,7 @@ limitations under the License.
 #include "tensorflow/compiler/xla/client/xla_builder.h"
 #include "tensorflow/compiler/xla/client/xla_computation.h"
 #include "tensorflow/compiler/xla/literal_util.h"
+#include "tensorflow/compiler/xla/service/hlo_parser.h"
 #include "tensorflow/compiler/xla/shape_util.h"
 #include "tensorflow/compiler/xla/statusor.h"
 #include "tensorflow/compiler/xla/test_helpers.h"
@@ -513,6 +514,26 @@ XLA_TEST_F(TupleTest, ComplexTuples) {
 
 class TupleHloTest : public HloTestBase {};
 
+XLA_TEST_F(TupleHloTest, BadTupleShapeFailsGracefully) {
+  const char* testcase = R"(
+    HloModule m, is_scheduled=true
+
+    ENTRY test {
+      parameter = f32[3]{0} parameter(0)
+      ROOT tuple = (f32[3]{0}, f32[3]{0}) tuple(parameter)
+    }
+  )";
+
+  TF_ASSERT_OK_AND_ASSIGN(auto module,
+                          ParseAndReturnUnverifiedModule(testcase));
+  auto status = verifier().Run(module.get()).status();
+  EXPECT_FALSE(status.ok());
+  EXPECT_THAT(
+      status.error_message(),
+      ::testing::HasSubstr("Expected instruction to have shape equal to"));
+  EXPECT_THAT(status.error_message(), ::testing::HasSubstr("actual shape is"));
+}
+
 XLA_TEST_F(TupleHloTest, BitcastAfterGTE) {
   const char* testcase = R"(
     HloModule m, is_scheduled=true
@@ -573,7 +594,7 @@ XLA_TEST_F(TupleHloTest, DISABLED_ON_GPU(DISABLED_ON_INTERPRETER(
       LiteralUtil::MakeTupleOwned(LiteralUtil::CreateR1<float>({2, 3}));
   auto literal = Literal::CreateFromShape(expected.shape());
   TF_EXPECT_OK(backend().transfer_manager()->TransferLiteralFromOutfeed(
-      backend().default_stream_executor(), expected.shape(), &literal));
+      backend().default_stream_executor(), &literal));
   EXPECT_TRUE(LiteralTestUtil::Equal(expected, literal));
 }
 

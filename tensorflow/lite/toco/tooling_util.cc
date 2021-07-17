@@ -1074,7 +1074,7 @@ void CheckEachArray(const Model& model) {
     // Check name.  Either "name_with_suffix_8", "name_with_port:3", but not
     // "name_with_both:3_8".
     const std::string& name = array_entry.first;
-    auto colon_pos = name.find_first_of(":");
+    auto colon_pos = name.find_first_of(':');
     if (colon_pos != std::string::npos) {
       CHECK_EQ(name.substr(colon_pos + 1).find_first_not_of("0123456789"),
                std::string::npos)
@@ -1905,7 +1905,7 @@ bool EstimateArithmeticOpsCount(const Model& model, const Operator& op,
       if (!output_array.has_shape() || !weights_array.has_shape()) {
         return false;
       }
-      int64 cols = 1;
+      int64_t cols = 1;
       for (int i = 0; i < output_array.shape().dimensions_count() - 1; i++) {
         cols *= output_array.shape().dims(i);
       }
@@ -2024,9 +2024,9 @@ bool EstimateArithmeticOpsCount(const Model& model, const Operator& op,
 }
 
 bool EstimateArithmeticOpsCount(const Model& model, int64* result) {
-  int64 total = 0;
+  int64_t total = 0;
   for (const auto& op : model.operators) {
-    int64 num_ops;
+    int64_t num_ops;
     if (!EstimateArithmeticOpsCount(model, *op, &num_ops)) {
       return false;
     }
@@ -2036,7 +2036,7 @@ bool EstimateArithmeticOpsCount(const Model& model, int64* result) {
   return true;
 }
 
-std::string FormattedNumber(int64 x) {
+std::string FormattedNumber(int64_t x) {
   const int64 million = 1000000;
   const int64 billion = 1000000000;
   if (x < 10000) {
@@ -2299,14 +2299,19 @@ ArrayDataType ConvertIODataTypeToArrayDataType(IODataType type) {
   switch (type) {
     case FLOAT:
       return ArrayDataType::kFloat;
+    case UINT8:
     case QUANTIZED_UINT8:
       return ArrayDataType::kUint8;
     case INT8:
+    case QUANTIZED_INT8:
       return ArrayDataType::kInt8;
+    case INT16:
     case QUANTIZED_INT16:
       return ArrayDataType::kInt16;
     case INT32:
       return ArrayDataType::kInt32;
+    case UINT32:
+      return ArrayDataType::kUint32;
     case INT64:
       return ArrayDataType::kInt64;
     case UINT64:
@@ -2323,6 +2328,8 @@ ArrayDataType ConvertIODataTypeToArrayDataType(IODataType type) {
       return ArrayDataType::kFloat16;
     case FLOAT64:
       return ArrayDataType::kFloat64;
+    case RESOURCE:
+    case VARIANT:
     default:
       return ArrayDataType::kNone;
   }

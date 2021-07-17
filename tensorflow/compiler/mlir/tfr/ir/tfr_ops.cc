@@ -26,11 +26,13 @@ limitations under the License.
 #include "llvm/ADT/Twine.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/raw_ostream.h"
+#include "mlir/Dialect/Quant/QuantTypes.h"  // from @llvm-project
 #include "mlir/Dialect/Shape/IR/Shape.h"  // from @llvm-project
 #include "mlir/Dialect/StandardOps/IR/Ops.h"  // from @llvm-project
 #include "mlir/IR/Attributes.h"  // from @llvm-project
 #include "mlir/IR/Builders.h"  // from @llvm-project
 #include "mlir/IR/BuiltinOps.h"  // from @llvm-project
+#include "mlir/IR/BuiltinTypes.h"  // from @llvm-project
 #include "mlir/IR/DialectImplementation.h"  // from @llvm-project
 #include "mlir/IR/FunctionImplementation.h"  // from @llvm-project
 #include "mlir/IR/MLIRContext.h"  // from @llvm-project
@@ -38,7 +40,6 @@ limitations under the License.
 #include "mlir/IR/OpDefinition.h"  // from @llvm-project
 #include "mlir/IR/OpImplementation.h"  // from @llvm-project
 #include "mlir/IR/PatternMatch.h"  // from @llvm-project
-#include "mlir/IR/StandardTypes.h"  // from @llvm-project
 #include "mlir/IR/Types.h"  // from @llvm-project
 #include "mlir/Support/LogicalResult.h"  // from @llvm-project
 #include "mlir/Transforms/InliningUtils.h"  // from @llvm-project
@@ -100,8 +101,18 @@ struct TFRInlinerInterface : public DialectInlinerInterface {
   Operation *materializeCallConversion(OpBuilder &builder, Value input,
                                        Type result_type,
                                        Location conversion_loc) const final {
-    if (!result_type.isa<IntegerType>()) return nullptr;
-    return builder.create<TruncateIOp>(conversion_loc, result_type, input);
+    if (!input.getType().isa<IntegerType>() ||
+        !result_type.isa<IntegerType>()) {
+      return nullptr;
+    }
+    auto input_itype = input.getType().cast<IntegerType>();
+    auto result_itype = result_type.cast<IntegerType>();
+    if (input_itype.getWidth() == result_itype.getWidth()) return nullptr;
+    if (input_itype.getWidth() > result_itype.getWidth()) {
+      return builder.create<TruncateIOp>(conversion_loc, result_type, input);
+    } else {
+      return builder.create<SignExtendIOp>(conversion_loc, result_type, input);
+    }
   }
 };
 }  // namespace
@@ -112,6 +123,9 @@ struct TFRInlinerInterface : public DialectInlinerInterface {
 
 TFRDialect::TFRDialect(MLIRContext *context)
     : Dialect(/*name=*/"tfr", context, TypeID::get<TFRDialect>()) {
+  // TFR depends on TensorFlow for its canonicalization
+  context->getOrLoadDialect<TF::TensorFlowDialect>();
+
   addTypes<TFRTensorType, TFRTensorListType, TFRAttrType>();
   addOperations<
 #define GET_OP_LIST
@@ -119,6 +133,13 @@ TFRDialect::TFRDialect(MLIRContext *context)
       >();
 
   addInterfaces<TFRInlinerInterface>();
+}
+
+Operation *TFRDialect::materializeConstant(OpBuilder &builder, Attribute value,
+                                           Type type, Location loc) {
+  if (ConstantOp::isBuildableWith(value, type))
+    return builder.create<ConstantOp>(loc, type, value);
+  return nullptr;
 }
 
 bool TFRType::classof(Type type) {
@@ -224,7 +245,7 @@ static LogicalResult Verify(TFRFuncOp func) {
   // Collect all the undefined attributes used in the inputs.
   llvm::SmallVector<StringAttr, 4> undefined_attrs;
   for (auto attr : input_used_attrs) {
-    if (!func.getAttr(attr.getValue())) {
+    if (!func->getAttr(attr.getValue())) {
       undefined_attrs.push_back(attr);
     }
   }
@@ -288,7 +309,7 @@ static LogicalResult Verify(TFRFuncOp func) {
 
   // Collect all the undefined attributes used in the outputs.
   for (auto attr : output_used_attrs) {
-    if (!func.getAttr(attr.getValue())) {
+    if (!func->getAttr(attr.getValue())) {
       undefined_attrs.push_back(attr);
     }
   }
@@ -323,18 +344,18 @@ static LogicalResult Verify(TFRFuncOp func) {
 
 static ParseResult ParseFuncOp(OpAsmParser &parser, OperationState *result) {
   auto build_func_type = [](Builder &builder, ArrayRef<Type> arg_types,
-                            ArrayRef<Type> results, impl::VariadicFlag,
-                            std::string &) {
+                            ArrayRef<Type> results,
+                            function_like_impl::VariadicFlag, std::string &) {
     return builder.getFunctionType(arg_types, results);
   };
-  return impl::parseFunctionLikeOp(parser, *result, /*allowVariadic=*/false,
-                                   build_func_type);
+  return function_like_impl::parseFunctionLikeOp(
+      parser, *result, /*allowVariadic=*/false, build_func_type);
 }
 
 static void PrintFuncOp(OpAsmPrinter &p, TFRFuncOp op) {
   FunctionType fn_type = op.getType();
-  impl::printFunctionLikeOp(p, op, fn_type.getInputs(), /*isVariadic=*/false,
-                            fn_type.getResults());
+  function_like_impl::printFunctionLikeOp(
+      p, op, fn_type.getInputs(), /*isVariadic=*/false, fn_type.getResults());
 }
 
 }  // namespace TFR
@@ -404,6 +425,13 @@ struct RemoveRedundantCast : public OpRewritePattern<CastOp> {
     Value input = preceding_cast.arg();
     Type input_type = input.getType();
     Type output_type = cast_op.getType();
+
+    // Preserve quantization information for intermediate tensors.
+    auto intermediate_type = preceding_cast.getType().dyn_cast<TensorType>();
+    if (intermediate_type &&
+        intermediate_type.getElementType().isa<quant::QuantizedType>()) {
+      return failure();
+    }
 
     // If the two types are the same, the back-to-back tfr.cast ops can be
     // removed.
@@ -504,6 +532,196 @@ struct BuildConstantListAsAttr : public OpRewritePattern<BuildListOp> {
   }
 };
 
+quant::QuantizedType getQuantizedElementType(CastOp cast_op) {
+  if (!cast_op || !cast_op.getInputElementType()) {
+    return {};
+  }
+  return cast_op.getInputElementType()
+      .cast<TypeAttr>()
+      .getValue()
+      .dyn_cast<quant::QuantizedType>();
+}
+
+struct RemoveRawDataOp : public OpRewritePattern<TFRQuantRawDataOp> {
+  using OpRewritePattern<TFRQuantRawDataOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(TFRQuantRawDataOp raw_data_op,
+                                PatternRewriter &rewriter) const override {
+    auto preceding_cast = dyn_cast<CastOp>(raw_data_op.input().getDefiningOp());
+    if (!getQuantizedElementType(preceding_cast)) {
+      return failure();
+    }
+    // If there are redundant casts, hoist output of raw data op originating op.
+    if (auto redundant_cast = preceding_cast.arg().getDefiningOp()) {
+      if (!isa<CastOp>(redundant_cast) ||
+          cast<CastOp>(redundant_cast).arg().getType() !=
+              preceding_cast.out().getType()) {
+        return failure();
+      }
+      raw_data_op.output().replaceAllUsesWith(
+          cast<CastOp>(redundant_cast).arg());
+    } else {
+      // If the argument of cast op is input, then simply remove the RawData op.
+      raw_data_op.output().replaceAllUsesWith(preceding_cast.out());
+    }
+    return success();
+  }
+};
+
+struct RemoveQParamsOp : public OpRewritePattern<TFRQuantQParamsOp> {
+  using OpRewritePattern<TFRQuantQParamsOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(TFRQuantQParamsOp qparams_op,
+                                PatternRewriter &rewriter) const override {
+    auto cast_op = dyn_cast<TFR::CastOp>(qparams_op.input().getDefiningOp());
+    auto cast_qtype = getQuantizedElementType(cast_op);
+    if (!cast_qtype) {
+      return failure();
+    }
+    // Reads quantization parameters from the quantized type, and converts
+    // them to constants.
+    rewriter.setInsertionPoint(qparams_op);
+    if (auto qtype = cast_qtype.dyn_cast<quant::UniformQuantizedType>()) {
+      auto scale = rewriter.create<ConstantOp>(
+          qparams_op->getLoc(), rewriter.getF32FloatAttr(qtype.getScale()));
+      auto scale_tensor = rewriter.create<TFR::ConstantTensorOp>(
+          qparams_op->getLoc(), qparams_op.scale().getType(),
+          scale.getResult());
+      auto zp = rewriter.create<ConstantOp>(
+          qparams_op->getLoc(),
+          rewriter.getI32IntegerAttr(qtype.getZeroPoint()));
+      auto zp_tensor = rewriter.create<TFR::ConstantTensorOp>(
+          qparams_op->getLoc(), qparams_op.zp().getType(), zp.getResult());
+      qparams_op.scale().replaceAllUsesWith(scale_tensor.getResult());
+      qparams_op.zp().replaceAllUsesWith(zp_tensor.getResult());
+    } else {
+      // TODO(b/192720615): Add handling of UniformQuantizedPerAxisType
+      return failure();
+    }
+    return success();
+  }
+};
+
+// TODO(b/193731721): Migrate tfr_ builtin canonicalizations to LowerTFROpPass
+struct RemoveScaleFactorOp : public OpRewritePattern<TFRQuantScaleFactorOp> {
+  using OpRewritePattern<TFRQuantScaleFactorOp>::OpRewritePattern;
+
+  // Replace quant_scale_factor with constant tensor equivalent to
+  // TFR_ConstantTensorOp (
+  //  ConstantOp (ConstAttr<F32Attr (in_scale[0] * in_scale [1] / filter_scale))
+  // )
+  LogicalResult matchAndRewrite(TFRQuantScaleFactorOp scale_factor_op,
+                                PatternRewriter &rewriter) const override {
+    auto out_scale_op = scale_factor_op.out_scale().getDefiningOp<ConstantOp>();
+    if (!out_scale_op) {
+      return failure();
+    }
+    auto in_scales_op =
+        scale_factor_op.in_scales().getDefiningOp<BuildListOp>();
+    if (!in_scales_op || in_scales_op.getNumOperands() != 2) {
+      // BuildListOp is variadic, but we require two values: input_scale
+      // and filter_scale.
+      return failure();
+    }
+    auto in_scale_tensor =
+        in_scales_op.getOperand(0).getDefiningOp<ConstantTensorOp>();
+    if (!in_scale_tensor) {
+      return failure();
+    }
+    auto in_scale_op = in_scale_tensor.arg().getDefiningOp<ConstantOp>();
+    if (!in_scale_op) {
+      return failure();
+    }
+    const double out_scale =
+        out_scale_op.value().cast<FloatAttr>().getValueAsDouble();
+    const double in_scale =
+        in_scale_op.value().cast<FloatAttr>().getValueAsDouble();
+    const Location loc = scale_factor_op->getLoc();
+    const Type out_type = scale_factor_op.scale_factor().getType();
+    ConstantOp const_op;
+    if (auto filter_scale_tensor_op =
+            in_scales_op.getOperand(1).getDefiningOp<ConstantTensorOp>()) {
+      auto filter_scale_op =
+          filter_scale_tensor_op.arg().getDefiningOp<ConstantOp>();
+      if (!filter_scale_op) {
+        return failure();
+      }
+      const double filter_scale =
+          filter_scale_op.value().cast<FloatAttr>().getValueAsDouble();
+      const_op = rewriter.create<ConstantOp>(
+          loc, rewriter.getF32FloatAttr(in_scale * filter_scale / out_scale));
+    } else if (auto perchannel_tensor_op =
+                   in_scales_op.getOperand(1).getDefiningOp<CastOp>()) {
+      auto perchannel_op =
+          perchannel_tensor_op.arg().getDefiningOp<ConstantOp>();
+      if (!perchannel_op) {
+        return failure();
+      }
+      auto filter_scales_attr = perchannel_op.value().cast<DenseElementsAttr>();
+      if (!filter_scales_attr) {
+        return failure();
+      }
+      SmallVector<float> scale_factors;
+      scale_factors.reserve(filter_scales_attr.size());
+      for (auto value : filter_scales_attr.getFloatValues()) {
+        scale_factors.push_back(in_scale * value.convertToFloat() / out_scale);
+      }
+      const_op = rewriter.create<ConstantOp>(
+          loc, rewriter.getF32ArrayAttr(scale_factors));
+    }
+    if (!const_op) {
+      return failure();
+    }
+    auto const_tensor_op =
+        rewriter.create<ConstantTensorOp>(loc, out_type, const_op.getResult());
+    scale_factor_op.scale_factor().replaceAllUsesWith(const_tensor_op.out());
+    return success();
+  }
+};
+
+struct RemoveRescaleOp : public OpRewritePattern<TFRQuantRescaleOp> {
+  using OpRewritePattern<TFRQuantRescaleOp>::OpRewritePattern;
+
+  // Replace quant_rescale (input, scale, zp) with
+  // tf.Cast(tf.Round(tf.Cast(input, f32) * scale) + tf.Cast(zp, f32), i32)
+  LogicalResult matchAndRewrite(TFRQuantRescaleOp rescale_op,
+                                PatternRewriter &rewriter) const override {
+    Value input = rescale_op.input();
+    Value scale = rescale_op.scale();
+    Value zp = rescale_op.zp();
+    const Location loc = rescale_op->getLoc();
+    const auto result_types = rescale_op->getResultTypes();
+    auto c_false =
+        rewriter.create<ConstantOp>(loc, rewriter.getBoolAttr(false));
+    TypeAttr f32_attr = TypeAttr::get(rewriter.getF32Type());
+    TFRAttrType output_type = TFRAttrType::get(rewriter.getContext());
+    auto constant_f32_op = rewriter.create<ConstOp>(loc, output_type, f32_attr);
+    TypeAttr i32_attr = TypeAttr::get(rewriter.getI32Type());
+    auto constant_i32_op = rewriter.create<ConstOp>(loc, output_type, i32_attr);
+    auto cast_input_to_float_op = rewriter.create<CallOp>(
+        loc, result_types, rewriter.getSymbolRefAttr("tf__cast"),
+        ArrayRef<Value>{input, constant_f32_op, c_false});
+    auto input_x_scale_op = rewriter.create<CallOp>(
+        loc, result_types, rewriter.getSymbolRefAttr("tf__mul"),
+        ArrayRef<Value>{cast_input_to_float_op.getResult(0), scale});
+    auto round_rescaled_op = rewriter.create<CallOp>(
+        loc, result_types, rewriter.getSymbolRefAttr("tf__round"),
+        ArrayRef<Value>{input_x_scale_op->getResult(0)});
+    auto cast_zp_to_float_op = rewriter.create<CallOp>(
+        loc, result_types, rewriter.getSymbolRefAttr("tf__cast"),
+        ArrayRef<Value>{zp, constant_f32_op, c_false});
+    auto recentered_op = rewriter.create<CallOp>(
+        loc, result_types, rewriter.getSymbolRefAttr("tf__add"),
+        ArrayRef<Value>{round_rescaled_op->getResult(0),
+                        cast_zp_to_float_op->getResult(0)});
+    auto cast_output_to_i32 = rewriter.create<CallOp>(
+        loc, result_types, rewriter.getSymbolRefAttr("tf__cast"),
+        ArrayRef<Value>{recentered_op->getResult(0), constant_i32_op, c_false});
+    rescale_op.output().replaceAllUsesWith(cast_output_to_i32.getResult(0));
+    return success();
+  }
+};
+
 void ConstantTensorOp::getCanonicalizationPatterns(
     OwningRewritePatternList &results, MLIRContext *context) {
   results.insert<ConvertConstToTensorConst>(context);
@@ -534,11 +752,31 @@ void BuildListOp::getCanonicalizationPatterns(OwningRewritePatternList &results,
   results.insert<BuildConstantListAsAttr>(context);
 }
 
+void TFRQuantRawDataOp::getCanonicalizationPatterns(
+    OwningRewritePatternList &results, MLIRContext *context) {
+  results.insert<RemoveRawDataOp>(context);
+}
+
+void TFRQuantQParamsOp::getCanonicalizationPatterns(
+    OwningRewritePatternList &results, MLIRContext *context) {
+  results.insert<RemoveQParamsOp>(context);
+}
+
+void TFRQuantRescaleOp::getCanonicalizationPatterns(
+    OwningRewritePatternList &results, MLIRContext *context) {
+  results.insert<RemoveRescaleOp>(context);
+}
+
+void TFRQuantScaleFactorOp::getCanonicalizationPatterns(
+    OwningRewritePatternList &results, MLIRContext *context) {
+  results.insert<RemoveScaleFactorOp>(context);
+}
+
 OpFoldResult TFR::EqualOp::fold(ArrayRef<Attribute> operands) {
   assert(operands.size() == 2 && "equal op has two operands");
   auto ctx = getContext();
-  if (operands[0] == operands[1]) return BoolAttr::get(/*value=*/true, ctx);
-  return BoolAttr::get(/*value=*/false, ctx);
+  if (operands[0] == operands[1]) return BoolAttr::get(ctx, true);
+  return BoolAttr::get(ctx, false);
 }
 
 OpFoldResult ConstOp::fold(ArrayRef<Attribute> operands) {
@@ -586,7 +824,7 @@ Type TFRDialect::parseType(DialectAsmParser &parser) const {
     do {
       StringRef attr;
       if (failed(parser.parseKeyword(&attr))) return {};
-      attrs.push_back(StringAttr::get(attr, ctx));
+      attrs.push_back(StringAttr::get(ctx, attr));
     } while (succeeded(parser.parseOptionalComma()));
 
     if (l_square_parsed && failed(parser.parseRSquare())) {
@@ -603,7 +841,7 @@ Type TFRDialect::parseType(DialectAsmParser &parser) const {
   } else if (typeNameSpelling == "tensor_list") {
     return TFRTensorListType::getChecked(attrs, loc);
   } else if (typeNameSpelling == "attr") {
-    return TFRAttrType::getChecked(loc);
+    return TFRAttrType::getChecked(loc, loc.getContext());
   } else {
     parser.emitError(parser.getNameLoc(), "unknown type " + typeNameSpelling);
     return {};

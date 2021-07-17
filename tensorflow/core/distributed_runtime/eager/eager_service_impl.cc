@@ -186,7 +186,7 @@ Status AddOpRetvalsToResponse(
     for (int i = 0; i < num_retvals; i++) {
       TF_RETURN_IF_ERROR(TensorHandleShape(retvals[i], add_shape_proto_fn()));
       if (add_device_fn) {
-        Device* device = absl::get<Device*>(retvals[i]->device());
+        Device* device = retvals[i]->device();
         *add_device_fn() = device ? device->name() : "";
       }
       if (retvals[i]->Type() == TensorHandle::REMOTE) {
@@ -241,7 +241,7 @@ Status EagerServiceImpl::CreateContext(const CreateContextRequest* request,
   TF_RETURN_IF_ERROR(env_->session_mgr->CreateSession(
       session_name, request->server_def(), request->cluster_device_attributes(),
       true));
-  int64 context_id = request->context_id();
+  int64_t context_id = request->context_id();
   std::function<void()> session_destroyer = [this, context_id, session_name]() {
     env_->rendezvous_mgr->Cleanup(context_id);
     auto s = env_->session_mgr->DeleteSession(session_name);
@@ -255,13 +255,13 @@ Status EagerServiceImpl::CreateContext(const CreateContextRequest* request,
   TF_RETURN_IF_ERROR(env_->session_mgr->WorkerSessionForSession(
       session_name, &worker_session));
 
-  const tensorflow::DeviceMgr* device_mgr = worker_session->device_mgr();
+  tensorflow::DeviceMgr* device_mgr = worker_session->device_mgr();
 
   // Initialize remote tensor communication based on worker session.
   TF_RETURN_IF_ERROR(r->Initialize(worker_session.get()));
 
-  std::function<Rendezvous*(const int64)> rendezvous_creator =
-      [worker_session, this](const int64 step_id) {
+  std::function<Rendezvous*(const int64_t)> rendezvous_creator =
+      [worker_session, this](const int64_t step_id) {
         auto* r = env_->rendezvous_mgr->Find(step_id);
         r->Initialize(worker_session.get()).IgnoreError();
         return r;
@@ -274,8 +274,8 @@ Status EagerServiceImpl::CreateContext(const CreateContextRequest* request,
   opts.config = request->server_def().default_session_config();
   tensorflow::EagerContext* ctx = new tensorflow::EagerContext(
       opts, tensorflow::ContextDevicePlacementPolicy::DEVICE_PLACEMENT_SILENT,
-      request->async(), request->lazy_copy_remote_function_inputs(), device_mgr,
-      false, r, worker_session->cluster_flr());
+      request->async(), device_mgr, false, r, worker_session->cluster_flr(),
+      env_->collective_executor_mgr.get());
   // Ownership will be transferred to the ServerContext, or else in an error
   // case ctx will be deleted by this unref.
   core::ScopedUnref unref_ctx(ctx);
@@ -357,8 +357,6 @@ Status EagerServiceImpl::UpdateContext(const UpdateContextRequest* request,
             << ctx->HostCPU()->name();
     return Status::OK();
   }
-  // TODO(b/143914772): Potential memory leak if rendezvous has pending
-  // tensors for removed / replaced workers.
 
   auto session_name =
       tensorflow::strings::StrCat("eager_", request->context_id());
@@ -592,7 +590,6 @@ Status EagerServiceImpl::Enqueue(CallOptions* call_opts,
 
     if (!s.ok()) {
       if (stream_id != kInvalidStreamId) {
-        // TODO(b/138847548): Cleanup the executor when StreamCall is deleted.
         context->Context()->RemoteMgr()->DeleteExecutorForStream(stream_id);
       }
       return s;

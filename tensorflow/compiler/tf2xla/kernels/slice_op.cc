@@ -20,6 +20,7 @@ limitations under the License.
 #include "tensorflow/compiler/tf2xla/xla_helpers.h"
 #include "tensorflow/compiler/tf2xla/xla_op_kernel.h"
 #include "tensorflow/compiler/tf2xla/xla_op_registry.h"
+#include "tensorflow/compiler/xla/client/lib/constants.h"
 #include "tensorflow/compiler/xla/client/xla_builder.h"
 #include "tensorflow/compiler/xla/util.h"
 #include "tensorflow/core/framework/op_kernel.h"
@@ -56,9 +57,11 @@ class SliceOp : public XlaOpKernel {
 
     std::vector<int64> begin;
     std::vector<int64> size;
-    OP_REQUIRES_OK(ctx, ctx->ConstantInputAsIntVector(2, &size));
-    std::vector<int64> wrapped_size(size.size());
-    if (ctx->ConstantInputAsIntVector(1, &begin).ok()) {
+    const bool begin_is_constant =
+        ctx->ConstantInputAsIntVector(1, &begin).ok();
+    const bool size_is_constant = ctx->ConstantInputAsIntVector(2, &size).ok();
+    if (begin_is_constant && size_is_constant) {
+      std::vector<int64> wrapped_size(size.size());
       // `begin` is a compile-time constant.
       for (int i = 0; i < input_dims; ++i) {
         if (size[i] == -1) {
@@ -116,26 +119,70 @@ class SliceOp : public XlaOpKernel {
       }
       ctx->SetOutput(0, slice);
     } else {
-      // `begin` is not a compile-time constant.
-      for (int i = 0; i < input_dims; ++i) {
-        OP_REQUIRES(ctx, 0 <= size[i],
-                    errors::InvalidArgument(
-                        "XLA compilation of Slice operator with negative sizes "
-                        "requires that 'begin' is a compile-time constant."));
-        OP_REQUIRES(ctx, size[i] <= input_shape.dim_size(i),
-                    errors::InvalidArgument("Expected size[", i, "] in [0, ",
-                                            input_shape.dim_size(i), "], but ",
-                                            "got ", size[i]));
+      // When a size is -1, we take rest of the dimension according to
+      // https://www.tensorflow.org/api_docs/python/tf/slice.
+      // This essentially makes size as dynamic.
+      bool constant_size_is_minus_one = false;
+      // `begin` or `size` is not a compile-time constant.
+      if (size_is_constant) {
+        for (int i = 0; i < input_dims; ++i) {
+          if (size[i] < 0) {
+            OP_REQUIRES(ctx, size[i] == -1,
+                        errors::InvalidArgument(
+                            "Negative size of slice operator can only be -1"));
+            constant_size_is_minus_one = true;
+          }
+
+          OP_REQUIRES(ctx, size[i] <= input_shape.dim_size(i),
+                      errors::InvalidArgument("Expected size[", i, "] in [0, ",
+                                              input_shape.dim_size(i),
+                                              "], but ", "got ", size[i]));
+        }
       }
 
-      absl::InlinedVector<xla::XlaOp, 4> scalar_indices;
-      scalar_indices.reserve(input_dims);
+      absl::InlinedVector<xla::XlaOp, 4> begin_indices;
+      begin_indices.reserve(input_dims);
       xla::XlaOp begin = ctx->Input("begin");
-      for (int i = 0; i < input_dims; i++)
-        scalar_indices.push_back(
+      for (int i = 0; i < input_dims; i++) {
+        begin_indices.push_back(
             xla::Reshape(xla::Slice(begin, {i}, {i + 1}, {1}), {}));
+      }
+      if (size_is_constant && !constant_size_is_minus_one) {
+        ctx->SetOutput(0,
+                       xla::DynamicSlice(ctx->Input(0), begin_indices, size));
+      } else {
+        // Size is not constant, use input size as upperbound and then set
+        // dimension size on it.
 
-      ctx->SetOutput(0, xla::DynamicSlice(ctx->Input(0), scalar_indices, size));
+        // First pad input with input size to avoid OOB -- dynamic slice with
+        // OOB slice produces undesired results.
+        xla::PaddingConfig padding_config;
+        for (xla::int64 i = 0; i < input_dims; ++i) {
+          auto* dims = padding_config.add_dimensions();
+          dims->set_edge_padding_low(0);
+          dims->set_edge_padding_high(input_shape.dim_size(i));
+          dims->set_interior_padding(0);
+        }
+        auto padded_input = xla::Pad(
+            ctx->Input(0), xla::Zero(ctx->builder(), ctx->input_xla_type(0)),
+            padding_config);
+
+        // Slice full size out of the input starting from the offsets.
+        auto sliced = xla::DynamicSlice(padded_input, begin_indices,
+                                        input_shape.dim_sizes());
+        for (int i = 0; i < input_dims; i++) {
+          xla::XlaOp dynamic_size =
+              xla::Reshape(xla::Slice(ctx->Input(2), {i}, {i + 1}, {1}), {});
+          if (constant_size_is_minus_one && size[i] == -1) {
+            // size = input_.dim_size(i) - begin[i]
+            dynamic_size = xla::ConstantR0<int32>(ctx->builder(),
+                                                  input_shape.dim_size(i)) -
+                           begin_indices[i];
+          }
+          sliced = xla::SetDimensionSize(sliced, dynamic_size, i);
+        }
+        ctx->SetOutput(0, sliced);
+      }
     }
   }
 };

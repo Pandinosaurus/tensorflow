@@ -70,7 +70,6 @@ from tensorflow.python.autograph.operators import variables
 from tensorflow.python.autograph.utils import ag_logging
 from tensorflow.python.autograph.utils import misc
 from tensorflow.python.autograph.utils import tensors
-from tensorflow.python.data.experimental.ops import scan_ops
 from tensorflow.python.data.experimental.ops import take_while_ops
 from tensorflow.python.data.ops import dataset_ops
 from tensorflow.python.data.ops import iterator_ops
@@ -144,8 +143,8 @@ def _verify_single_loop_var(
   if isinstance(exit_, (bool, int, float, str)):
     exit_ = ops.convert_to_tensor_v2(exit_)
 
-  if (not tensor_util.is_tensor(entry) or
-      not tensor_util.is_tensor(exit_)):
+  if (not tensor_util.is_tf_type(entry) or
+      not tensor_util.is_tf_type(exit_)):
     return
 
   # TODO(mdan): Properly account for CompositeTensors.
@@ -228,8 +227,8 @@ def _verify_single_cond_var(name, body_var, orelse_var):
   if isinstance(orelse_var, (bool, int, float, str)):
     orelse_var = ops.convert_to_tensor_v2(orelse_var)
 
-  if (not tensor_util.is_tensor(body_var) or
-      not tensor_util.is_tensor(orelse_var)):
+  if (not tensor_util.is_tf_type(body_var) or
+      not tensor_util.is_tf_type(orelse_var)):
     return
 
   # TODO(mdan): Properly account for CompositeTensors.
@@ -325,7 +324,7 @@ def for_stmt(iter_,
   Returns:
     Tuple containing the final state.
   """
-  if tensor_util.is_tensor(iter_):
+  if tensor_util.is_tf_type(iter_):
     if tensors.is_range_tensor(iter_):
       return _tf_range_for_stmt(iter_, extra_test, body, get_state, set_state,
                                 init_vars, basic_symbol_names,
@@ -661,7 +660,9 @@ def _general_purpose_scan(ds, init_state, body):
   # preprocessing.
   # TODO(mdan): s/use_default_device/specialize_for_input_pipeline.
   # TODO(mdan): Don't use private symbols.
-  return scan_ops._ScanDataset(ds, init_state, body, use_default_device=False)  # pylint:disable=protected-access
+  # pylint:disable=protected-access
+  return dataset_ops._ScanDataset(
+      ds, init_state, body, use_default_device=False)
 
 
 def _dataset_for_stmt_with_extra_test(ds, extra_test, body, get_state,
