@@ -15,10 +15,15 @@ limitations under the License.
 #ifndef TENSORFLOW_LITE_KERNELS_INTERNAL_REFERENCE_ADD_H_
 #define TENSORFLOW_LITE_KERNELS_INTERNAL_REFERENCE_ADD_H_
 
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
 #include <type_traits>
 
 #include "fixedpoint/fixedpoint.h"
 #include "tensorflow/lite/kernels/internal/common.h"
+#include "tensorflow/lite/kernels/internal/compatibility.h"
+#include "tensorflow/lite/kernels/internal/reference/broadcast_loop.h"
 
 namespace tflite {
 
@@ -35,8 +40,9 @@ inline void Add(const ArithmeticParams& params,
   const int flat_size =
       MatchingElementsSize(input1_shape, input2_shape, output_shape);
   for (int i = 0; i < flat_size; ++i) {
-    output_data[i] = ActivationFunctionWithMinMax(
-        input1_data[i] + input2_data[i], activation_min, activation_max);
+    output_data[i] = ActivationFunctionWithMinMax<T>(
+        WrappingAdd(input1_data[i], input2_data[i]), activation_min,
+        activation_max);
   }
 }
 
@@ -194,45 +200,92 @@ inline void Add(const ArithmeticParams& params,
 }
 
 template <typename T>
-inline typename std::enable_if<!is_small_integer<T>::value, void>::type
-BroadcastAdd4DSlow(const ArithmeticParams& params,
+inline void AddBroadcast(const T* input_data, const T* broadcast_data,
+                         T* output_data, size_t size, T activation_min,
+                         T activation_max) {
+  for (size_t c = 0; c < size; ++c) {
+    output_data[c] = ActivationFunctionWithMinMax<T>(
+        WrappingAdd<T>(input_data[c], broadcast_data[0]), activation_min,
+        activation_max);
+  }
+}
+
+template <>
+inline void AddBroadcast<int32_t>(const int32_t* input_data,
+                                  const int32_t* broadcast_data,
+                                  int32_t* output_data, size_t size,
+                                  int32_t activation_min,
+                                  int32_t activation_max) {
+  size_t c = 0;
+#ifdef USE_NEON
+  const int32x4_t vmax = vdupq_n_s32(activation_max);
+  const int32x4_t vmin = vdupq_n_s32(activation_min);
+  const int32x4_t vb = vdupq_n_s32(broadcast_data[0]);
+  for (; c + 4 <= size; c += 4) {
+    const int32x4_t va = vld1q_s32(&input_data[c]);
+    int32x4_t vres = vaddq_s32(va, vb);
+    vres = vmaxq_s32(vmin, vres);
+    vres = vminq_s32(vmax, vres);
+    vst1q_s32(&output_data[c], vres);
+  }
+#endif
+  for (; c < size; ++c) {
+    output_data[c] = ActivationFunctionWithMinMax<int32_t>(
+        WrappingAdd<int32_t>(input_data[c], broadcast_data[0]), activation_min,
+        activation_max);
+  }
+}
+
+template <typename T>
+void AddElementwise(const T* input1_data, const T* input2_data, T* output_data,
+                    size_t size, T activation_min, T activation_max) {
+  for (size_t c = 0; c < size; ++c) {
+    output_data[c] = ActivationFunctionWithMinMax<T>(
+        input1_data[c] + input2_data[c], activation_min, activation_max);
+  }
+}
+
+template <>
+inline void AddElementwise<int32_t>(const int32_t* input1_data,
+                                    const int32_t* input2_data,
+                                    int32_t* output_data, size_t size,
+                                    int32_t activation_min,
+                                    int32_t activation_max) {
+  size_t c = 0;
+#ifdef USE_NEON
+  const int32x4_t vmax = vdupq_n_s32(activation_max);
+  const int32x4_t vmin = vdupq_n_s32(activation_min);
+  for (; c + 4 <= size; c += 4) {
+    const int32x4_t va = vld1q_s32(&input1_data[c]);
+    const int32x4_t vb = vld1q_s32(&input2_data[c]);
+    int32x4_t vres = vaddq_s32(va, vb);
+    vres = vmaxq_s32(vmin, vres);
+    vres = vminq_s32(vmax, vres);
+    vst1q_s32(&output_data[c], vres);
+  }
+#endif
+  for (; c < size; ++c) {
+    output_data[c] = ActivationFunctionWithMinMax<int32_t>(
+        input1_data[c] + input2_data[c], activation_min, activation_max);
+  }
+}
+
+template <typename T,
+          // For unquantized add for small integers, explicitly set to true.
+          bool dummy = false>
+inline typename std::enable_if<!is_small_integer<T>::value || dummy, void>::type
+BroadcastAdd6DSlow(const ArithmeticParams& params,
                    const RuntimeShape& input1_shape, const T* input1_data,
                    const RuntimeShape& input2_shape, const T* input2_data,
                    const RuntimeShape& output_shape, T* output_data) {
-  NdArrayDesc<4> desc1;
-  NdArrayDesc<4> desc2;
-  NdArrayDescsForElementwiseBroadcast(input1_shape, input2_shape, &desc1,
-                                      &desc2);
-  const RuntimeShape extended_output_shape =
-      RuntimeShape::ExtendedShape(4, output_shape);
-
   T activation_min, activation_max;
   GetActivationParams(params, &activation_min, &activation_max);
-
-  // In Tensorflow, the dimensions are canonically named (batch_number, row,
-  // col, channel), with extents (batches, height, width, depth), with the
-  // trailing dimension changing most rapidly (channels has the smallest stride,
-  // typically 1 element).
-  //
-  // In generated C code, we store arrays with the dimensions reversed. The
-  // first dimension has smallest stride.
-  //
-  // We name our variables by their Tensorflow convention, but generate C code
-  // nesting loops such that the innermost loop has the smallest stride for the
-  // best cache behavior.
-  for (int b = 0; b < extended_output_shape.Dims(0); ++b) {
-    for (int y = 0; y < extended_output_shape.Dims(1); ++y) {
-      for (int x = 0; x < extended_output_shape.Dims(2); ++x) {
-        for (int c = 0; c < extended_output_shape.Dims(3); ++c) {
-          output_data[Offset(extended_output_shape, b, y, x, c)] =
-              ActivationFunctionWithMinMax<T>(
-                  input1_data[SubscriptToIndex(desc1, b, y, x, c)] +
-                      input2_data[SubscriptToIndex(desc2, b, y, x, c)],
-                  activation_min, activation_max);
-        }
-      }
-    }
-  }
+  auto op = [activation_min, activation_max](T a, T b) {
+    return ActivationFunctionWithMinMax<T>(WrappingAdd(a, b), activation_min,
+                                           activation_max);
+  };
+  BroadcastBinaryOpSimple(input1_shape, input1_data, input2_shape, input2_data,
+                          output_shape, output_data, op);
 }
 
 // This function is used for 8-bit as well as for 16-bit, but the accumulator
@@ -240,64 +293,42 @@ BroadcastAdd4DSlow(const ArithmeticParams& params,
 // choice of the shift (20 or 15, accordingly - see add.cc for more comments).
 template <typename T>
 inline typename std::enable_if<is_small_integer<T>::value, void>::type
-BroadcastAdd4DSlow(const ArithmeticParams& params,
+BroadcastAdd6DSlow(const ArithmeticParams& params,
                    const RuntimeShape& input1_shape, const T* input1_data,
                    const RuntimeShape& input2_shape, const T* input2_data,
                    const RuntimeShape& output_shape, T* output_data) {
-  NdArrayDesc<4> desc1;
-  NdArrayDesc<4> desc2;
-  NdArrayDescsForElementwiseBroadcast(input1_shape, input2_shape, &desc1,
-                                      &desc2);
-  const RuntimeShape extended_output_shape =
-      RuntimeShape::ExtendedShape(4, output_shape);
+  auto op = [&params](T a, T b) {
+    const int32_t input1_val = params.input1_offset + a;
+    const int32_t input2_val = params.input2_offset + b;
+    const int32_t shifted_input1_val = input1_val * (1 << params.left_shift);
+    const int32_t shifted_input2_val = input2_val * (1 << params.left_shift);
+    const int32_t scaled_input1_val =
+        MultiplyByQuantizedMultiplierSmallerThanOneExp(
+            shifted_input1_val, params.input1_multiplier, params.input1_shift);
+    const int32_t scaled_input2_val =
+        MultiplyByQuantizedMultiplierSmallerThanOneExp(
+            shifted_input2_val, params.input2_multiplier, params.input2_shift);
+    const int32_t raw_sum = scaled_input1_val + scaled_input2_val;
+    const int32_t raw_output =
+        MultiplyByQuantizedMultiplierSmallerThanOneExp(
+            raw_sum, params.output_multiplier, params.output_shift) +
+        params.output_offset;
+    const int32_t clamped_output =
+        std::min(params.quantized_activation_max,
+                 std::max(params.quantized_activation_min, raw_output));
+    return static_cast<T>(clamped_output);
+  };
+  BroadcastBinaryOpSimple(input1_shape, input1_data, input2_shape, input2_data,
+                          output_shape, output_data, op);
+}
 
-  // In Tensorflow, the dimensions are canonically named (batch_number, row,
-  // col, channel), with extents (batches, height, width, depth), with the
-  // trailing dimension changing most rapidly (channels has the smallest stride,
-  // typically 1 element).
-  //
-  // In generated C code, we store arrays with the dimensions reversed. The
-  // first dimension has smallest stride.
-  //
-  // We name our variables by their Tensorflow convention, but generate C code
-  // nesting loops such that the innermost loop has the smallest stride for the
-  // best cache behavior.
-  for (int b = 0; b < extended_output_shape.Dims(0); ++b) {
-    for (int y = 0; y < extended_output_shape.Dims(1); ++y) {
-      for (int x = 0; x < extended_output_shape.Dims(2); ++x) {
-        for (int c = 0; c < extended_output_shape.Dims(3); ++c) {
-          const int32_t input1_val =
-              params.input1_offset +
-              input1_data[SubscriptToIndex(desc1, b, y, x, c)];
-          const int32_t input2_val =
-              params.input2_offset +
-              input2_data[SubscriptToIndex(desc2, b, y, x, c)];
-          const int32_t shifted_input1_val =
-              input1_val * (1 << params.left_shift);
-          const int32_t shifted_input2_val =
-              input2_val * (1 << params.left_shift);
-          const int32_t scaled_input1_val =
-              MultiplyByQuantizedMultiplierSmallerThanOneExp(
-                  shifted_input1_val, params.input1_multiplier,
-                  params.input1_shift);
-          const int32_t scaled_input2_val =
-              MultiplyByQuantizedMultiplierSmallerThanOneExp(
-                  shifted_input2_val, params.input2_multiplier,
-                  params.input2_shift);
-          const int32_t raw_sum = scaled_input1_val + scaled_input2_val;
-          const int32_t raw_output =
-              MultiplyByQuantizedMultiplierSmallerThanOneExp(
-                  raw_sum, params.output_multiplier, params.output_shift) +
-              params.output_offset;
-          const int32_t clamped_output =
-              std::min(params.quantized_activation_max,
-                       std::max(params.quantized_activation_min, raw_output));
-          output_data[Offset(extended_output_shape, b, y, x, c)] =
-              static_cast<T>(clamped_output);
-        }
-      }
-    }
-  }
+template <typename T>
+inline void BroadcastAdd4DSlow(
+    const ArithmeticParams& params, const RuntimeShape& input1_shape,
+    const T* input1_data, const RuntimeShape& input2_shape,
+    const T* input2_data, const RuntimeShape& output_shape, T* output_data) {
+  return BroadcastAdd6DSlow(params, input1_shape, input1_data, input2_shape,
+                            input2_data, output_shape, output_data);
 }
 
 inline void BroadcastAddFivefold(const ArithmeticParams& unswitched_params,

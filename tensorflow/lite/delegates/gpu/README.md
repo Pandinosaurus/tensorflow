@@ -53,25 +53,31 @@ TFLite on GPU supports the following ops in 16-bit and 32-bit float precision:
 
 **Note:** Following section describes the example usage for Android GPU delegate
 with C++. For other languages and platforms, please see
-[the documentation](https://www.tensorflow.org/lite/performance/gpu).
+[the documentation](https://developers.google.com/edge/litert/performance/gpu).
 
 Using TFLite on GPU is as simple as getting the GPU delegate via
 `TfLiteGpuDelegateV2Create()` and then passing it to
-`Interpreter::ModifyGraphWithDelegate()` instead of calling
-`Interpreter::AllocateTensors()`:
+`InterpreterBuilder::AddDelegate()`:
 
 ```c++
 ////////
-// Set up interpreter.
+// Set up InterpreterBuilder.
 auto model = FlatBufferModel::BuildFromFile(model_path);
 ops::builtin::BuiltinOpResolver op_resolver;
-std::unique_ptr<Interpreter> interpreter;
-InterpreterBuilder(*model, op_resolver)(&interpreter);
+InterpreterBuilder interpreter_builder(*model, op_resolver);
 
 ////////
 // NEW: Prepare GPU delegate.
 auto* delegate = TfLiteGpuDelegateV2Create(/*default options=*/nullptr);
-if (interpreter->ModifyGraphWithDelegate(delegate) != kTfLiteOk) return;
+interpreter_builder.AddDelegate(delegate);
+
+////////
+// Set up Interpreter.
+std::unique_ptr<Interpreter> interpreter;
+if (interpreter_builder(&interpreter) != kTfLiteOk) return;
+
+////////
+// IMPORTANT: AllocateTensors can be called only AFTER ModifyGraphWithDelegate
 
 ////////
 // Run inference.
@@ -85,11 +91,13 @@ TfLiteGpuDelegateV2Delete(delegate);
 ```
 
 *IMPORTANT:* When calling `Interpreter::ModifyGraphWithDelegate()` or
+`InterpreterBuilder::operator()` or
 `Interpreter::Invoke()`, the caller must have a `EGLContext` in the current
 thread and `Interpreter::Invoke()` must be called from the same `EGLContext`.
 If such `EGLContext` does not exist, the delegate will internally create one,
 but then the developer must ensure that `Interpreter::Invoke()` is always called
-from the same thread `Interpreter::ModifyGraphWithDelegate()` was called.
+from the same thread `InterpreterBuilder::operator()` or
+`Interpreter::ModifyGraphWithDelegate()` was called.
 
 ## Building and Runtime
 
@@ -152,7 +160,7 @@ performs FP16 calculation internally, and set `wait_type` to
   that 4-channel input is significantly faster as a memory copy (from 3-channel
   RGB to 4-channel RGBX) can be avoided.
 
-* For performance [best practices](https://www.tensorflow.org/lite/performance/best_practices), do not hesitate to re-train your classifier with
+* For performance [best practices](https://developers.google.com/edge/litert/conversion/tensorflow/build/best_practices), do not hesitate to re-train your classifier with
   mobile-optimized network architecture.  That is a significant part of
   optimization for on-device inference.
 

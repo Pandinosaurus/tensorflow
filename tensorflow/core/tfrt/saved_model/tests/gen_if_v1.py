@@ -12,13 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-
-# Lint as: python3
 """Generates a toy v1 saved model for testing."""
-
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
 
 import shutil
 from absl import app
@@ -27,7 +21,7 @@ from tensorflow.python.client import session
 from tensorflow.python.framework import constant_op
 from tensorflow.python.framework import dtypes
 from tensorflow.python.ops import array_ops
-from tensorflow.python.ops import control_flow_ops
+from tensorflow.python.ops import cond
 from tensorflow.python.ops import math_ops
 from tensorflow.python.ops import variable_scope
 from tensorflow.python.ops import variables
@@ -52,7 +46,7 @@ def main(argv):
   one = variable_scope.get_variable(name='y', initializer=[1])
   neg_one = variable_scope.get_variable(name='z', initializer=[-1])
   x = array_ops.placeholder(dtypes.int32, shape=(), name='input')
-  r = control_flow_ops.cond(
+  r = cond.cond(
       x < zero, lambda: math_ops.cast(math_ops.greater(x, one), dtypes.int32),
       lambda: math_ops.cast(math_ops.greater(x, neg_one), dtypes.int32))
 

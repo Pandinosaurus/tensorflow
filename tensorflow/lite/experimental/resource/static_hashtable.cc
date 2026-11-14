@@ -15,8 +15,17 @@ limitations under the License.
 
 #include "tensorflow/lite/experimental/resource/static_hashtable.h"
 
+#include <cstdint>
 #include <memory>
+#include <string>
+
+#include "tensorflow/lite/c/c_api_types.h"
+#include "tensorflow/lite/c/common.h"
 #include "tensorflow/lite/experimental/resource/lookup_interfaces.h"
+#include "tensorflow/lite/experimental/resource/lookup_util.h"
+#include "tensorflow/lite/experimental/resource/resource_base.h"
+#include "tensorflow/lite/kernels/internal/tensor_ctypes.h"
+#include "tensorflow/lite/kernels/internal/types.h"
 
 namespace tflite {
 namespace resource {
@@ -27,8 +36,8 @@ TfLiteStatus StaticHashtable<KeyType, ValueType>::Lookup(
     TfLiteContext* context, const TfLiteTensor* keys, TfLiteTensor* values,
     const TfLiteTensor* default_value) {
   if (!is_initialized_) {
-    context->ReportError(context,
-                         "hashtable need to be initialized before using");
+    TF_LITE_KERNEL_LOG(context,
+                       "hashtable need to be initialized before using");
     return kTfLiteError;
   }
   const int size =
@@ -92,23 +101,22 @@ LookupInterface* CreateStaticHashtable(TfLiteType key_type,
 
 }  // namespace internal
 
-void CreateHashtableResourceIfNotAvailable(ResourceMap* resources,
-                                           int resource_id,
-                                           TfLiteType key_dtype,
-                                           TfLiteType value_dtype) {
-  if (resources->count(resource_id) != 0) {
-    return;
-  }
-  auto* hashtable = internal::CreateStaticHashtable(key_dtype, value_dtype);
-  resources->emplace(resource_id, std::unique_ptr<LookupInterface>(hashtable));
+TfLiteStatus CreateHashtableResourceIfNotAvailable(ResourceMap* resources,
+                                                   int resource_id,
+                                                   TfLiteType key_dtype,
+                                                   TfLiteType value_dtype) {
+  return CreateTypedResourceIfNotAvailable(
+      resources, resource_id, ResourceBase::ResourceType::kHashTable,
+      [key_dtype, value_dtype]() {
+        auto* hashtable =
+            internal::CreateStaticHashtable(key_dtype, value_dtype);
+        return std::unique_ptr<LookupInterface>(hashtable);
+      });
 }
 
 LookupInterface* GetHashtableResource(ResourceMap* resources, int resource_id) {
-  auto it = resources->find(resource_id);
-  if (it != resources->end()) {
-    return static_cast<LookupInterface*>(it->second.get());
-  }
-  return nullptr;
+  return GetTypedResource<LookupInterface>(
+      resources, resource_id, ResourceBase::ResourceType::kHashTable);
 }
 
 }  // namespace resource

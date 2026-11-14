@@ -1,6 +1,23 @@
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
+load("@xla//third_party/rules_python/python:py_library.bzl", "py_library")
 load("//tensorflow:tensorflow.bzl", "py_test")
 
 package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
     default_visibility = ["//tensorflow:internal"],
     licenses = ["notice"],
 )
@@ -8,10 +25,9 @@ package(
 py_library(
     name = "nest",
     srcs = ["nest.py"],
-    srcs_version = "PY3",
+    strict_deps = True,
     deps = [
-        "//tensorflow/python:util",
-        "@six_archive//:six",
+        "//tensorflow/python/util:nest_util",
     ],
 )
 
@@ -19,33 +35,34 @@ py_test(
     name = "nest_test",
     size = "small",
     srcs = ["nest_test.py"],
-    python_version = "PY3",
-    srcs_version = "PY3",
+    strict_deps = True,
     deps = [
         ":nest",
-        "//tensorflow/python:array_ops",
-        "//tensorflow/python:client_testlib",
-        "//tensorflow/python:framework_for_generated_wrappers",
-        "//tensorflow/python:math_ops",
         "//tensorflow/python/data/kernel_tests:test_base",
-        "//tensorflow/python/ops/ragged",
+        "//tensorflow/python/framework:combinations",
+        "//tensorflow/python/framework:constant_op",
+        "//tensorflow/python/framework:sparse_tensor",
+        "//tensorflow/python/framework:tensor",
+        "//tensorflow/python/ops:array_ops",
+        "//tensorflow/python/ops:math_ops",
+        "//tensorflow/python/ops/ragged:ragged_factory_ops",
+        "//tensorflow/python/platform:client_testlib",
         "//third_party/py/numpy",
+        "@absl_py//absl/testing:parameterized",
     ],
 )
 
 py_library(
     name = "sparse",
     srcs = ["sparse.py"],
-    srcs_version = "PY3",
+    strict_deps = True,
     deps = [
         ":nest",
-        "//tensorflow/python:dtypes",
-        "//tensorflow/python:sparse_ops",
-        "//tensorflow/python:sparse_tensor",
-        "//tensorflow/python:tensor_shape",
-        "//tensorflow/python:util",
-        "//tensorflow/python/user_ops:ops",
-        "@six_archive//:six",
+        "//tensorflow/python/framework:dtypes",
+        "//tensorflow/python/framework:sparse_tensor",
+        "//tensorflow/python/framework:tensor",
+        "//tensorflow/python/framework:tensor_shape",
+        "//tensorflow/python/ops:sparse_ops",
     ],
 )
 
@@ -53,36 +70,45 @@ py_test(
     name = "sparse_test",
     size = "small",
     srcs = ["sparse_test.py"],
-    python_version = "PY3",
-    srcs_version = "PY3",
+    strict_deps = True,
     deps = [
         ":nest",
         ":sparse",
-        "//tensorflow/python:client_testlib",
-        "//tensorflow/python:dtypes",
-        "//tensorflow/python:sparse_tensor",
-        "//tensorflow/python:tensor_shape",
         "//tensorflow/python/data/kernel_tests:test_base",
+        "//tensorflow/python/framework:combinations",
+        "//tensorflow/python/framework:constant_op",
+        "//tensorflow/python/framework:dtypes",
+        "//tensorflow/python/framework:sparse_tensor",
+        "//tensorflow/python/framework:tensor",
+        "//tensorflow/python/framework:tensor_shape",
+        "//tensorflow/python/platform:client_testlib",
+        "@absl_py//absl/testing:parameterized",
     ],
 )
 
 py_library(
     name = "structure",
     srcs = ["structure.py"],
-    srcs_version = "PY3",
+    strict_deps = True,
     deps = [
         ":nest",
-        "//tensorflow/python:dtypes",
-        "//tensorflow/python:framework_ops",
-        "//tensorflow/python:sparse_ops",
-        "//tensorflow/python:sparse_tensor",
-        "//tensorflow/python:tensor_array_ops",
-        "//tensorflow/python:tensor_shape",
-        "//tensorflow/python:tensor_util",
-        "//tensorflow/python:util",
-        "//tensorflow/python/ops/ragged",
-        "//tensorflow/python/user_ops:ops",
-        "@wrapt",
+        "//tensorflow/python/framework:composite_tensor",
+        "//tensorflow/python/framework:none_tensor",
+        "//tensorflow/python/framework:ops",
+        "//tensorflow/python/framework:sparse_tensor",
+        "//tensorflow/python/framework:tensor",
+        "//tensorflow/python/framework:tensor_shape",
+        "//tensorflow/python/framework:type_spec",
+        "//tensorflow/python/ops:resource_variable_ops",
+        "//tensorflow/python/ops:tensor_array_ops",
+        "//tensorflow/python/ops/ragged:ragged_tensor",
+        "//tensorflow/python/platform:tf_logging",
+        "//tensorflow/python/types:internal",
+        "//tensorflow/python/util:compat",
+        "//tensorflow/python/util:deprecation",
+        "//tensorflow/python/util:nest_util",
+        "//tensorflow/python/util:tf_export",
+        "@pypi//wrapt",
     ],
 )
 
@@ -90,61 +116,62 @@ py_test(
     name = "structure_test",
     size = "small",
     srcs = ["structure_test.py"],
-    python_version = "PY3",
-    srcs_version = "PY3",
+    strict_deps = True,
     deps = [
         ":nest",
         ":structure",
-        "//tensorflow/python:array_ops",
-        "//tensorflow/python:client_testlib",
-        "//tensorflow/python:constant_op",
-        "//tensorflow/python:dtypes",
-        "//tensorflow/python:framework_ops",
-        "//tensorflow/python:framework_test_lib",
-        "//tensorflow/python:sparse_tensor",
-        "//tensorflow/python:tensor_array_ops",
-        "//tensorflow/python:tensor_shape",
-        "//tensorflow/python:tensor_spec",
-        "//tensorflow/python:type_spec",
-        "//tensorflow/python:variables",
         "//tensorflow/python/data/kernel_tests:test_base",
+        "//tensorflow/python/data/ops:dataset_ops",
+        "//tensorflow/python/framework:combinations",
+        "//tensorflow/python/framework:constant_op",
+        "//tensorflow/python/framework:dtypes",
+        "//tensorflow/python/framework:sparse_tensor",
+        "//tensorflow/python/framework:tensor",
+        "//tensorflow/python/framework:tensor_shape",
+        "//tensorflow/python/ops:array_ops",
+        "//tensorflow/python/ops:tensor_array_ops",
+        "//tensorflow/python/ops:variables",
         "//tensorflow/python/ops/ragged:ragged_factory_ops",
         "//tensorflow/python/ops/ragged:ragged_tensor",
         "//tensorflow/python/ops/ragged:ragged_tensor_value",
+        "//tensorflow/python/platform:client_testlib",
+        "//tensorflow/python/util:compat",
         "//third_party/py/numpy",
         "@absl_py//absl/testing:parameterized",
-        "@wrapt",
+        "@pypi//wrapt",
     ],
 )
 
 py_library(
     name = "options",
     srcs = ["options.py"],
-    srcs_version = "PY3",
+    strict_deps = True,
+    deps = ["@absl_py//absl/logging"],
 )
 
 py_test(
     name = "options_test",
     size = "small",
     srcs = ["options_test.py"],
-    python_version = "PY3",
-    srcs_version = "PY3",
+    strict_deps = True,
     deps = [
         ":options",
-        "//tensorflow/python:client_testlib",
         "//tensorflow/python/data/kernel_tests:test_base",
+        "//tensorflow/python/framework:combinations",
+        "//tensorflow/python/platform:client_testlib",
+        "@absl_py//absl/testing:parameterized",
     ],
 )
 
 py_library(
     name = "convert",
     srcs = ["convert.py"],
-    srcs_version = "PY3",
+    strict_deps = True,
     deps = [
-        "//tensorflow/python:constant_op",
-        "//tensorflow/python:dtypes",
-        "//tensorflow/python:framework_ops",
-        "//tensorflow/python:tensor_shape",
+        "//tensorflow/python/framework:constant_op",
+        "//tensorflow/python/framework:dtypes",
+        "//tensorflow/python/framework:ops",
+        "//tensorflow/python/framework:tensor_shape",
     ],
 )
 
@@ -152,48 +179,56 @@ py_test(
     name = "convert_test",
     size = "small",
     srcs = ["convert_test.py"],
-    python_version = "PY3",
-    srcs_version = "PY3",
+    strict_deps = True,
     deps = [
         ":convert",
-        "//tensorflow/python:client_testlib",
-        "//tensorflow/python:framework_for_generated_wrappers",
-        "//tensorflow/python:util",
         "//tensorflow/python/data/kernel_tests:test_base",
+        "//tensorflow/python/framework:combinations",
+        "//tensorflow/python/framework:constant_op",
+        "//tensorflow/python/framework:for_generated_wrappers",
+        "//tensorflow/python/platform:client_testlib",
+        "//tensorflow/python/util:compat",
+        "@absl_py//absl/testing:parameterized",
     ],
 )
 
 py_library(
     name = "random_seed",
     srcs = ["random_seed.py"],
-    srcs_version = "PY3",
+    strict_deps = True,
     deps = [
-        "//tensorflow/python:constant_op",
-        "//tensorflow/python:dtypes",
-        "//tensorflow/python:framework",
+        "//tensorflow/python/framework:constant_op",
+        "//tensorflow/python/framework:dtypes",
+        "//tensorflow/python/framework:ops",
+        "//tensorflow/python/framework:random_seed",
+        "//tensorflow/python/ops:array_ops",
+        "//tensorflow/python/ops:math_ops",
     ],
 )
 
 py_test(
     name = "random_seed_test",
-    size = "small",
+    size = "medium",
     srcs = ["random_seed_test.py"],
-    python_version = "PY3",
-    srcs_version = "PY3",
+    strict_deps = True,
     deps = [
         ":random_seed",
-        "//tensorflow/python:client_testlib",
-        "//tensorflow/python:framework_for_generated_wrappers",
-        "//tensorflow/python:util",
         "//tensorflow/python/data/kernel_tests:test_base",
+        "//tensorflow/python/framework:combinations",
+        "//tensorflow/python/framework:constant_op",
+        "//tensorflow/python/framework:for_generated_wrappers",
+        "//tensorflow/python/framework:random_seed",
+        "//tensorflow/python/platform:client_testlib",
+        "@absl_py//absl/testing:parameterized",
     ],
 )
 
 py_library(
     name = "traverse",
     srcs = ["traverse.py"],
-    srcs_version = "PY3",
+    strict_deps = True,
     deps = [
+        "//tensorflow/python/framework:dtypes",
     ],
 )
 
@@ -201,15 +236,16 @@ py_test(
     name = "traverse_test",
     size = "small",
     srcs = ["traverse_test.py"],
-    python_version = "PY3",
-    srcs_version = "PY3",
+    strict_deps = True,
     deps = [
         ":traverse",
-        "//tensorflow/python:client_testlib",
-        "//tensorflow/python:framework_for_generated_wrappers",
-        "//tensorflow/python/data/experimental/kernel_tests/service:test_base",
+        "//tensorflow/python/compat",
         "//tensorflow/python/data/experimental/ops:dataset_ops",
         "//tensorflow/python/data/kernel_tests:test_base",
         "//tensorflow/python/data/ops:dataset_ops",
+        "//tensorflow/python/framework:combinations",
+        "//tensorflow/python/ops:math_ops",
+        "//tensorflow/python/platform:client_testlib",
+        "@absl_py//absl/testing:parameterized",
     ],
 )

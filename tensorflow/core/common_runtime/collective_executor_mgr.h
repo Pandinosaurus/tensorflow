@@ -31,11 +31,13 @@ class CollectiveExecutorMgr : public CollectiveExecutorMgrInterface {
       std::unique_ptr<ParamResolverInterface> param_resolver,
       std::unique_ptr<NcclCommunicatorInterface> nccl_communicator);
 
-  virtual ~CollectiveExecutorMgr();
+  ~CollectiveExecutorMgr() override;
 
   CollectiveExecutor* FindOrCreate(int64_t step_id) override;
 
   void Cleanup(int64_t step_id) override;
+
+  void CleanupAll() override;
 
   ParamResolverInterface* GetParamResolver() const override {
     return param_resolver_.get();
@@ -69,7 +71,7 @@ class CollectiveExecutorMgr : public CollectiveExecutorMgrInterface {
   const DeviceMgr* dev_mgr_;
   std::unique_ptr<DeviceResolverInterface> dev_resolver_;
   std::unique_ptr<ParamResolverInterface> param_resolver_;
-  string gpu_ring_order_;
+  std::string gpu_ring_order_;
   std::unique_ptr<NcclCommunicatorInterface> nccl_communicator_;
   // Unbounded work queue for scheduling potentially-blocking work during
   // collective op execution.  Ownership is shared between `this` and

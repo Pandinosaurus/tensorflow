@@ -19,11 +19,15 @@ There are several common transformations that can be applied to GraphDefs
 created to train a model, that help reduce the amount of computation needed when
 the network is used only for inference. These include:
 
+ - Convert given PlaceholderWithDefault or Placeholder nodes to Constant
+
  - Removing training-only operations like checkpoint saving.
 
  - Stripping out parts of the graph that are never reached.
 
  - Removing debug operations like CheckNumerics.
+
+ - Fusing a group of primitive ops for batch normalization to FusedBatchNorm op.
 
  - Folding batch normalization ops into the pre-calculated weights.
 
@@ -50,10 +54,6 @@ bazel-bin/tensorflow/python/tools/optimize_for_inference \
 
 
 """
-
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
 
 import argparse
 import os
@@ -89,7 +89,9 @@ def main(unused_args):
       FLAGS.input_names.split(","),
       FLAGS.output_names.split(","),
       _parse_placeholder_types(FLAGS.placeholder_type_enum),
-      FLAGS.toco_compatible)
+      FLAGS.toco_compatible,
+      FLAGS.placeholder_to_const_names.split(","),
+  )
 
   if FLAGS.frozen_graph:
     f = gfile.GFile(FLAGS.output, "w")
@@ -151,12 +153,23 @@ def parse_args():
       """)
   parser.add_argument(
       "--toco_compatible",
-      type=bool,
+      type="bool",
       default=False,
       help="""\
       If true, only use ops compatible with Tensorflow
       Lite Optimizing Converter.\
-      """)
+      """,
+  )
+  parser.add_argument(
+      "--placeholder_to_const_names",
+      type=str,
+      default="",
+      help="""\
+      List of PlaceholderWithDefault or Placeholder node names and
+      their new value to be converted to Constant node, comma separated.
+      eg: --placeholder_to_const_names=phase_train=False\
+      """,
+  )
   return parser.parse_known_args()
 
 

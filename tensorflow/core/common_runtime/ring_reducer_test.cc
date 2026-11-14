@@ -47,7 +47,7 @@ namespace tensorflow {
 std::unique_ptr<OpKernel> GetKernel(const NodeDef& node,
                                     const DeviceType& device_type,
                                     DeviceBase* device) {
-  Status status;
+  absl::Status status;
   std::unique_ptr<OpKernel> k = CreateOpKernel(
       device_type, device, device->GetAllocator(AllocatorAttributes()), node,
       TF_GRAPH_DEF_VERSION, &status);
@@ -89,7 +89,7 @@ class RingReducerTest : public ::testing::Test {
     for (int wi = 0; wi < num_workers; ++wi) {
       for (int di = 0; di < num_devices; ++di) {
         int rank = wi * num_devices + di;
-        instances_.push_back(absl::make_unique<DeviceInstance>(
+        instances_.push_back(std::make_unique<DeviceInstance>(
             rank, num_subdivs, dtype, shape, test_env_.get()));
       }
     }
@@ -137,9 +137,8 @@ class RingReducerTest : public ::testing::Test {
     if (fail_after > 0) {
       // Confirm that every device terminated with the expected error status.
       for (int di = 0; di < static_cast<int>(instances_.size()); ++di) {
-        EXPECT_NE(
-            instances_[di]->status_.error_message().find("Deliberate failure"),
-            string::npos);
+        EXPECT_NE(instances_[di]->status_.message().find("Deliberate failure"),
+                  std::string::npos);
       }
     } else {
       // Confirm that every device computed the same correct reduction value.
@@ -166,7 +165,7 @@ class RingReducerTest : public ::testing::Test {
             GenerateEvenSubdivOffsets(test_env->num_devices_per_worker,
                                       num_subdivs);
       }
-      string dev_name = col_params_->group.members[rank].device.name();
+      std::string dev_name = col_params_->group.members[rank].device.name();
       TF_CHECK_OK(test_env_->device_mgr->LookupDevice(dev_name, &device_))
           << "Couldn't find device " << dev_name
           << " existing devices: " << test_env_->device_mgr->DebugString();
@@ -195,13 +194,13 @@ class RingReducerTest : public ::testing::Test {
     core::RefCountPtr<CollectiveParams> col_params_;
     std::unique_ptr<OpKernel> merge_op_;
     std::unique_ptr<OpKernel> final_op_;
-    Status status_;
+    absl::Status status_;
   };
 
   std::unique_ptr<CollectiveTestEnv> test_env_;
   std::vector<std::unique_ptr<DeviceInstance>> instances_;
   mutex mu_;
-  int32 reduce_counter_ TF_GUARDED_BY(mu_) = 0;
+  int32_t reduce_counter_ TF_GUARDED_BY(mu_) = 0;
 };
 
 class RingReducerInitParamsTest : public ::testing::Test {

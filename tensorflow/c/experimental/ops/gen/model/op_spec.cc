@@ -17,6 +17,11 @@ limitations under the License.
 #include <string>
 
 #include "absl/container/flat_hash_set.h"
+#include "tensorflow/c/experimental/ops/gen/model/arg_spec.h"
+#include "tensorflow/c/experimental/ops/gen/model/attr_spec.h"
+#include "tensorflow/core/framework/api_def.pb.h"
+#include "tensorflow/core/framework/op_def.pb.h"
+#include "tensorflow/core/platform/types.h"
 
 namespace tensorflow {
 namespace generator {
@@ -29,7 +34,7 @@ OpSpec::OpSpec(const OpDef& op_def, const ApiDef& api_def)
     : name_(op_def.name()),
       summary_(api_def.summary()),
       description_(api_def.description()) {
-  absl::flat_hash_set<string> inferred_attrs;
+  absl::flat_hash_set<std::string> inferred_attrs;
   // Parse the arguments
   for (const OpDef::ArgDef& arg_def : op_def.input_arg()) {
     ArgSpec arg = ArgSpec::CreateInput(arg_def, input_args_.size());

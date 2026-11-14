@@ -2,11 +2,11 @@ path: "tensorflow.dtypes"
 tf_module {
   member {
     name: "DType"
-    mtype: "<class \'pybind11_builtins.pybind11_type\'>"
+    mtype: "<class \'tensorflow.python.framework.dtypes.DTypeMeta\'>"
   }
   member {
     name: "QUANTIZED_DTYPES"
-    mtype: "<type \'frozenset\'>"
+    mtype: "<class \'frozenset\'>"
   }
   member {
     name: "bfloat16"
@@ -27,6 +27,10 @@ tf_module {
   member {
     name: "double"
     mtype: "<class \'tensorflow.python.framework.dtypes.DType\'>"
+  }
+  member {
+    name: "experimental"
+    mtype: "<class \'module\'>"
   }
   member {
     name: "float16"

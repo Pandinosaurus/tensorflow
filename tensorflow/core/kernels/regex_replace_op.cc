@@ -22,7 +22,6 @@ limitations under the License.
 #include "tensorflow/core/lib/core/status.h"
 #include "tensorflow/core/platform/mutex.h"
 #include "tensorflow/core/platform/thread_annotations.h"
-#include "tensorflow/core/util/ptr_util.h"
 
 namespace tensorflow {
 namespace {
@@ -31,8 +30,8 @@ namespace {
 // Context requirements:
 //  - "input" string Tensor at input_index=0
 //  - "output" string Tensor at output_index=0
-Status InternalCompute(const RE2& regex, const string& rewrite,
-                       const bool replace_global, OpKernelContext* ctx) {
+absl::Status InternalCompute(const RE2& regex, const std::string& rewrite,
+                             const bool replace_global, OpKernelContext* ctx) {
   const Tensor* input_tensor;
   TF_RETURN_IF_ERROR(ctx->input("input", &input_tensor));
   Tensor* output_tensor;
@@ -52,7 +51,7 @@ Status InternalCompute(const RE2& regex, const string& rewrite,
   for (size_t i = 0; i < output_flat.size(); ++i) {
     // TODO(dero): Mitigate copy; Global and GlobalReplace below currently only
     // accept std::string.
-    string buf = output_flat(i);
+    std::string buf = output_flat(i);
     if (replace_global) {
       RE2::GlobalReplace(&buf, regex, rewrite);
     } else {
@@ -60,7 +59,7 @@ Status InternalCompute(const RE2& regex, const string& rewrite,
     }
     output_flat(i) = std::move(buf);
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 }  // namespace
 
@@ -70,31 +69,34 @@ class RegexReplaceOp : public OpKernel {
     OP_REQUIRES_OK(ctx, ctx->GetAttr("replace_global", &replace_global_));
   }
 
-  ~RegexReplaceOp() override {}
+  ~RegexReplaceOp() override = default;
 
   void Compute(OpKernelContext* ctx) override {
     const Tensor* pattern_tensor;
     OP_REQUIRES_OK(ctx, ctx->input("pattern", &pattern_tensor));
     OP_REQUIRES(ctx, TensorShapeUtils::IsScalar(pattern_tensor->shape()),
-                errors::InvalidArgument("Pattern must be scalar, but received ",
-                                        pattern_tensor->shape().DebugString()));
-    const string& pattern = pattern_tensor->scalar<tstring>()();
+                absl::InvalidArgumentError(
+                    absl::StrCat("Pattern must be scalar, but received ",
+                                 pattern_tensor->shape().DebugString())));
+    const std::string& pattern = pattern_tensor->scalar<tstring>()();
     std::shared_ptr<RE2> regex = CachedRE2(pattern);
-    OP_REQUIRES(ctx, regex->ok(),
-                errors::InvalidArgument("Invalid pattern: ", pattern,
-                                        ", error: ", regex->error()));
+    OP_REQUIRES(
+        ctx, regex->ok(),
+        absl::InvalidArgumentError(absl::StrCat("Invalid pattern: ", pattern,
+                                                ", error: ", regex->error())));
 
     const Tensor* rewrite_tensor;
     OP_REQUIRES_OK(ctx, ctx->input("rewrite", &rewrite_tensor));
     OP_REQUIRES(ctx, TensorShapeUtils::IsScalar(rewrite_tensor->shape()),
-                errors::InvalidArgument("Rewrite must be scalar, but received ",
-                                        rewrite_tensor->shape().DebugString()));
-    const string& rewrite = rewrite_tensor->scalar<tstring>()();
+                absl::InvalidArgumentError(
+                    absl::StrCat("Rewrite must be scalar, but received ",
+                                 rewrite_tensor->shape().DebugString())));
+    const std::string& rewrite = rewrite_tensor->scalar<tstring>()();
     OP_REQUIRES_OK(ctx, InternalCompute(*regex, rewrite, replace_global_, ctx));
   }
 
  private:
-  std::shared_ptr<RE2> CachedRE2(const string& pattern) {
+  std::shared_ptr<RE2> CachedRE2(const std::string& pattern) {
     {
       tf_shared_lock l(mu_);
       if (regex_ != nullptr && regex_->pattern() == pattern) {
@@ -116,7 +118,8 @@ class RegexReplaceOp : public OpKernel {
   mutex mu_;
   std::shared_ptr<RE2> regex_ TF_GUARDED_BY(mu_);
 
-  TF_DISALLOW_COPY_AND_ASSIGN(RegexReplaceOp);
+  RegexReplaceOp(const RegexReplaceOp&) = delete;
+  void operator=(const RegexReplaceOp&) = delete;
 };
 
 REGISTER_KERNEL_BUILDER(Name("RegexReplace").Device(DEVICE_CPU),
@@ -125,12 +128,12 @@ REGISTER_KERNEL_BUILDER(Name("RegexReplace").Device(DEVICE_CPU),
 class StaticRegexReplaceOp : public OpKernel {
  public:
   explicit StaticRegexReplaceOp(OpKernelConstruction* ctx) : OpKernel(ctx) {
-    string pattern;
+    std::string pattern;
     OP_REQUIRES_OK(ctx, ctx->GetAttr("pattern", &pattern));
-    re_ = MakeUnique<RE2>(pattern);
+    re_ = std::make_unique<RE2>(pattern);
     OP_REQUIRES(ctx, re_->ok(),
-                errors::InvalidArgument("Invalid pattern: ", pattern,
-                                        ", error: ", re_->error()));
+                absl::InvalidArgumentError(absl::StrCat(
+                    "Invalid pattern: ", pattern, ", error: ", re_->error())));
     OP_REQUIRES_OK(ctx, ctx->GetAttr("rewrite", &rewrite_str_));
     OP_REQUIRES_OK(ctx, ctx->GetAttr("replace_global", &replace_global_));
   }
@@ -142,7 +145,7 @@ class StaticRegexReplaceOp : public OpKernel {
 
  private:
   std::unique_ptr<RE2> re_;
-  string rewrite_str_;
+  std::string rewrite_str_;
   bool replace_global_;
 };
 

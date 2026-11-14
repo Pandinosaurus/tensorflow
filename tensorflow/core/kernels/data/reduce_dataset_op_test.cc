@@ -13,6 +13,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include <utility>
+#include <vector>
+
 #include "tensorflow/core/data/dataset_test_base.h"
 
 namespace tensorflow {
@@ -31,7 +34,7 @@ class ReduceDatasetParams : public DatasetParams {
                       DataTypeVector type_state, DataTypeVector type_arguments,
                       DataTypeVector output_dtypes,
                       std::vector<PartialTensorShape> output_shapes,
-                      bool use_inter_op_parallelism, string node_name)
+                      bool use_inter_op_parallelism, std::string node_name)
       : DatasetParams(std::move(output_dtypes), std::move(output_shapes),
                       std::move(node_name)),
         initial_state_(std::move(initial_state)),
@@ -41,7 +44,7 @@ class ReduceDatasetParams : public DatasetParams {
         type_state_(std::move(type_state)),
         type_arguments_(std::move(type_arguments)),
         use_inter_op_parallelism_(use_inter_op_parallelism) {
-    input_dataset_params_.push_back(absl::make_unique<T>(input_dataset_params));
+    input_dataset_params_.push_back(std::make_unique<T>(input_dataset_params));
     iterator_prefix_ =
         name_utils::IteratorPrefix(input_dataset_params.dataset_type(),
                                    input_dataset_params.iterator_prefix());
@@ -54,19 +57,20 @@ class ReduceDatasetParams : public DatasetParams {
     return input_tensors;
   }
 
-  Status GetInputNames(std::vector<string>* input_names) const override {
+  absl::Status GetInputNames(
+      std::vector<std::string>* input_names) const override {
     input_names->clear();
     input_names->emplace_back("input_dataset");
     for (int i = 0; i < initial_state_.size(); ++i) {
-      input_names->emplace_back(strings::StrCat("initial_state_", i));
+      input_names->emplace_back(absl::StrCat("initial_state_", i));
     }
     for (int i = 0; i < other_arguments_.size(); ++i) {
-      input_names->emplace_back(strings::StrCat("other_arguments_", i));
+      input_names->emplace_back(absl::StrCat("other_arguments_", i));
     }
-    return Status::OK();
+    return absl::OkStatus();
   }
 
-  Status GetAttributes(AttributeVector* attr_vector) const override {
+  absl::Status GetAttributes(AttributeVector* attr_vector) const override {
     attr_vector->clear();
     *attr_vector = {{"f", func_},
                     {"Tstate", type_state_},
@@ -75,10 +79,10 @@ class ReduceDatasetParams : public DatasetParams {
                     {"output_shapes", output_shapes_},
                     {"use_inter_op_parallelism", use_inter_op_parallelism_},
                     {"metadata", ""}};
-    return Status::OK();
+    return absl::OkStatus();
   }
 
-  string dataset_type() const override { return "Reduce"; }
+  std::string dataset_type() const override { return "Reduce"; }
 
   std::vector<FunctionDef> func_lib() const override { return func_lib_; }
 

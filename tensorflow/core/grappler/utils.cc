@@ -15,26 +15,40 @@ limitations under the License.
 
 #include "tensorflow/core/grappler/utils.h"
 
-#include <iterator>
+#include <cstddef>
+#include <cstdint>
+#include <functional>
 #include <memory>
-#include <queue>
+#include <set>
+#include <string>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 #include "absl/container/flat_hash_set.h"
+#include "absl/log/check.h"
+#include "absl/log/log.h"
+#include "absl/status/status.h"
 #include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
+#include "absl/strings/string_view.h"
+#include "absl/synchronization/notification.h"
+#include "absl/time/time.h"
+#include "absl/types/span.h"
+#include "Eigen/Core"  // from @eigen_archive
 #include "tensorflow/core/framework/attr_value.pb.h"
 #include "tensorflow/core/framework/function.h"
+#include "tensorflow/core/framework/node_def.pb.h"
 #include "tensorflow/core/framework/node_def_util.h"
 #include "tensorflow/core/framework/op.h"
 #include "tensorflow/core/framework/op_def.pb.h"
 #include "tensorflow/core/framework/op_kernel.h"
+#include "tensorflow/core/framework/tensor.h"
 #include "tensorflow/core/framework/types.h"
-#include "tensorflow/core/lib/core/stringpiece.h"
-#include "tensorflow/core/lib/strings/numbers.h"
-#include "tensorflow/core/lib/strings/scanner.h"
-#include "tensorflow/core/lib/strings/strcat.h"
-#include "tensorflow/core/platform/notification.h"
+#include "tensorflow/core/framework/types.pb.h"
+#include "tensorflow/core/graph/tensor_id.h"
+#include "tensorflow/core/platform/errors.h"
+#include "tensorflow/core/platform/threadpool.h"
 #include "tensorflow/core/util/device_name_utils.h"
 
 namespace tensorflow {
@@ -67,36 +81,37 @@ bool SafeSetIntScalarTensorValue(int value, Tensor* tensor) {
 // TODO(ezhulenev): move to op_types.h. Requires to break circular dependency.
 // TODO(ezhulenev): what about Identity passing tensor to Shape consumer?
 bool IsShapeConsumer(const NodeDef& node) {
-  const string& op = node.op();
+  const std::string& op = node.op();
   return op == "Shape" || op == "ShapeN" || op == "Rank" || op == "Size";
 }
 
 }  // namespace
 
-string TensorIdToString(const TensorId& tensor_id) {
-  return tensor_id.index() == 0 ? string(tensor_id.node())
+std::string TensorIdToString(const TensorId& tensor_id) {
+  return tensor_id.index() == 0 ? std::string(tensor_id.node())
                                 : tensor_id.ToString();
 }
 
-string SafeTensorIdToString(const SafeTensorId& tensor_id) {
+std::string SafeTensorIdToString(const SafeTensorId& tensor_id) {
   return tensor_id.index() == 0 ? tensor_id.node() : tensor_id.ToString();
 }
 
-bool IsSameInput(const string& name1, const string& name2) {
+bool IsSameInput(const std::string& name1, const std::string& name2) {
   if (name1 == name2) return true;
   TensorId tensor1 = ParseTensorName(name1);
   TensorId tensor2 = ParseTensorName(name2);
   return tensor1 == tensor2;
 }
 
-bool IsControlInput(const string& name) {
+bool IsControlInput(absl::string_view name) {
   return !name.empty() && name[0] == '^';
 }
 
 bool IsControlInput(const TensorId& tensor_id) { return tensor_id.index() < 0; }
 
-string AddPrefixToNodeName(const string& name, const string& prefix,
-                           const string& delimiter) {
+std::string AddPrefixToNodeName(const std::string& name,
+                                const std::string& prefix,
+                                const std::string& delimiter) {
   if (!name.empty()) {
     if (name[0] == '^') {
       return absl::StrCat("^", prefix, delimiter, name.substr(1));
@@ -105,7 +120,8 @@ string AddPrefixToNodeName(const string& name, const string& prefix,
   return absl::StrCat(prefix, delimiter, name);
 }
 
-string AddPrefixToNodeName(const string& name, const string& prefix) {
+std::string AddPrefixToNodeName(const std::string& name,
+                                const std::string& prefix) {
   return AddPrefixToNodeName(name, prefix, "/");
 }
 
@@ -115,21 +131,20 @@ bool ExecuteWithTimeout(std::function<void()> fn, const int64_t timeout_in_ms,
     fn();
     return true;
   }
-  auto done = std::make_shared<Notification>();
+  auto done = std::make_shared<absl::Notification>();
   thread_pool->Schedule([done, fn]() {
     fn();
     done->Notify();
   });
-  const bool notified =
-      WaitForNotificationWithTimeout(done.get(), timeout_in_ms * 1000);
-  return notified;
+  return done->WaitForNotificationWithTimeout(
+      absl::Milliseconds(timeout_in_ms));
 }
 
-string AsControlDependency(const NodeDef& node) {
+std::string AsControlDependency(const NodeDef& node) {
   return absl::StrCat("^", node.name());
 }
 
-string AsControlDependency(const string& node_name) {
+std::string AsControlDependency(const std::string& node_name) {
   CHECK(!node_name.empty());
   return (!node_name.empty() && node_name[0] == '^')
              ? node_name
@@ -137,13 +152,13 @@ string AsControlDependency(const string& node_name) {
 }
 
 bool NodeIsOnCpu(const NodeDef* node) {
-  string task, device;
+  std::string task, device;
   return DeviceNameUtils::SplitDeviceName(node->device(), &task, &device) &&
          absl::StartsWith(device, DEVICE_CPU);
 }
 
 bool NodeIsOnGpu(const NodeDef* node) {
-  string task, device;
+  std::string task, device;
   return DeviceNameUtils::SplitDeviceName(node->device(), &task, &device) &&
          absl::StartsWith(device, DEVICE_GPU);
 }
@@ -192,7 +207,7 @@ bool HasRegularInputs(const NodeDef& node) {
 int NumNonControlInputs(const NodeDef& node) {
   int num_inputs = 0;
   for (; num_inputs < node.input_size(); ++num_inputs) {
-    const string& input = node.input(num_inputs);
+    const std::string& input = node.input(num_inputs);
     if (IsControlInput(input)) {
       return num_inputs;
     }
@@ -203,7 +218,7 @@ int NumNonControlInputs(const NodeDef& node) {
 int NumControlInputs(const NodeDef& node) {
   int num_inputs = 0;
   for (; num_inputs < node.input_size(); ++num_inputs) {
-    const string& input = node.input(node.input_size() - num_inputs - 1);
+    const std::string& input = node.input(node.input_size() - num_inputs - 1);
     if (!IsControlInput(input)) {
       return num_inputs;
     }
@@ -213,7 +228,7 @@ int NumControlInputs(const NodeDef& node) {
 
 bool HasRegularOutputs(const NodeDef& node, const NodeMap& node_map) {
   for (const NodeDef* output : node_map.GetOutputs(node.name())) {
-    for (const string& node_as_input : output->input()) {
+    for (const std::string& node_as_input : output->input()) {
       if (IsControlInput(node_as_input)) break;
 
       TensorId tensor = ParseTensorName(node_as_input);
@@ -228,7 +243,7 @@ bool HasRegularOutputs(const NodeDef& node, const NodeMap& node_map) {
 bool HasControlOutputs(const NodeDef& node, const NodeMap& node_map) {
   for (const NodeDef* output : node_map.GetOutputs(node.name())) {
     for (int idx = output->input_size() - 1; idx >= 0; --idx) {
-      const string& node_as_input = output->input(idx);
+      const std::string& node_as_input = output->input(idx);
       if (!IsControlInput(node_as_input)) break;
 
       TensorId tensor = ParseTensorName(node_as_input);
@@ -244,7 +259,7 @@ int NumControlOutputs(const NodeDef& node, const NodeMap& node_map) {
   int num_outputs = 0;
   for (const NodeDef* output : node_map.GetOutputs(node.name())) {
     for (int idx = output->input_size() - 1; idx >= 0; --idx) {
-      const string& node_as_input = output->input(idx);
+      const std::string& node_as_input = output->input(idx);
       if (!IsControlInput(node_as_input)) break;
 
       TensorId tensor = ParseTensorName(node_as_input);
@@ -259,7 +274,7 @@ int NumControlOutputs(const NodeDef& node, const NodeMap& node_map) {
 int NumNonControlOutputs(const NodeDef& node, const NodeMap& node_map) {
   int num_outputs = 0;
   for (const NodeDef* output : node_map.GetOutputs(node.name())) {
-    for (const string& node_as_input : output->input()) {
+    for (const std::string& node_as_input : output->input()) {
       if (IsControlInput(node_as_input)) {
         break;
       }
@@ -282,7 +297,7 @@ int NumNonControlDataOutputs(const NodeDef& node, const NodeMap& node_map) {
     if (IsShapeConsumer(*output)) continue;
 
     for (int i = 0; i < output->input_size(); ++i) {
-      const string& input = output->input(i);
+      const std::string& input = output->input(i);
       if (!IsControlInput(input) && NodeName(input) == node.name()) {
         ++num_data_outputs;
         break;
@@ -294,7 +309,8 @@ int NumNonControlDataOutputs(const NodeDef& node, const NodeMap& node_map) {
 
 // Returns the data type in attribute `attr_name` of `node`. If that attribute
 // doesn't exist, returns DT_INVALID.
-DataType GetDataTypeFromAttr(const NodeDef& node, const string& type_attr) {
+DataType GetDataTypeFromAttr(const NodeDef& node,
+                             const std::string& type_attr) {
   if (!node.attr().count(type_attr)) {
     return DT_INVALID;
   }
@@ -347,10 +363,10 @@ void PermuteNodesInPlace(GraphDef* graph, std::vector<int>* permutation,
 }
 
 void DedupControlInputs(NodeDef* node) {
-  absl::flat_hash_set<string> inputs;
+  absl::flat_hash_set<std::string> inputs;
   int pos = 0;
   while (pos < node->input_size()) {
-    const string& input = node->input(pos);
+    const std::string& input = node->input(pos);
     if (!inputs.insert(NodeName(input)).second && IsControlInput(input)) {
       node->mutable_input()->SwapElements(pos, node->input_size() - 1);
       node->mutable_input()->RemoveLast();
@@ -365,7 +381,7 @@ namespace {
 template <typename UniqueContainer>
 void EraseNodesFromGraphImpl(const UniqueContainer& nodes_to_delete,
                              GraphDef* graph) {
-  static_assert(std::is_same<typename UniqueContainer::value_type, int>::value,
+  static_assert(std::is_same_v<typename UniqueContainer::value_type, int>,
                 "Need to pass container of ints");
 
   int last = graph->node_size() - 1;
@@ -395,7 +411,7 @@ void EraseNodesFromGraph(std::vector<int>&& nodes_to_delete, GraphDef* graph) {
   EraseNodesFromGraphImpl(nodes_to_delete, graph);
 }
 
-void EraseNodesFromGraph(const std::set<string>& nodes_to_delete,
+void EraseNodesFromGraph(const std::set<std::string>& nodes_to_delete,
                          GraphDef* graph) {
   std::vector<int> nodes_idx_to_delete;
   nodes_idx_to_delete.reserve(nodes_to_delete.size());
@@ -424,12 +440,12 @@ void EraseNodesFromGraph(const std::set<string>& nodes_to_delete,
     }                                                                        \
     break
 
-Status SetTensorValue(DataType dtype, int value, Tensor* tensor) {
+absl::Status SetTensorValue(DataType dtype, int value, Tensor* tensor) {
   // TODO(rmlarsen): Support more general shapes.
   // TODO(lyandy): Change `value` to be int64 once int64 -> qint32 is supported.
   if (tensor->NumElements() != 1) {
-    return errors::InvalidArgument(
-        "Expected scalar tensor, got num_elements = ", tensor->NumElements());
+    return absl::InvalidArgumentError(absl::StrCat(
+        "Expected scalar tensor, got num_elements = ", tensor->NumElements()));
   }
   switch (dtype) {
     HANDLE_DOUBLE_CASE(DT_HALF);
@@ -451,45 +467,47 @@ Status SetTensorValue(DataType dtype, int value, Tensor* tensor) {
     HANDLE_INT_CASE(DT_QUINT16);
     HANDLE_INT_CASE(DT_QINT32);
     default:
-      return errors::InvalidArgument("Unsupported type ",
-                                     DataTypeString(dtype));
+      return absl::InvalidArgumentError(
+          absl::StrCat("Unsupported type ", DataTypeString(dtype)));
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 #undef HANDLE_CASE
 
-Status CheckAttrExists(const NodeDef& node, const string& key) {
+absl::Status CheckAttrExists(const NodeDef& node, const std::string& key) {
   if (!HasNodeAttr(node, key)) {
-    return errors::InvalidArgument("Node '", node.name(), "' lacks '", key,
-                                   "' attr: ", node.ShortDebugString());
+    return absl::InvalidArgumentError(
+        absl::StrCat("Node '", node.name(), "' lacks '", key,
+                     "' attr: ", node.ShortDebugString()));
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-Status CheckAttrsExist(const NodeDef& node, absl::Span<const string> keys) {
-  for (const string& key : keys) {
+absl::Status CheckAttrsExist(const NodeDef& node,
+                             absl::Span<const std::string> keys) {
+  for (const std::string& key : keys) {
     TF_RETURN_IF_ERROR(CheckAttrExists(node, key));
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-Status IsKernelRegisteredForNode(
+absl::Status IsKernelRegisteredForNode(
     absl::string_view node_name, bool has_experimental_debug_info,
     const NodeDef_ExperimentalDebugInfo& experimental_debug_info,
     absl::string_view node_op, absl::string_view node_device,
     AttrSlice node_attrs) {
   DeviceNameUtils::ParsedName parsed_name;
   if (!DeviceNameUtils::ParseFullName(node_device, &parsed_name)) {
-    return errors::InvalidArgument("Could not parse device name: ",
-                                   node_device);
+    return absl::InvalidArgumentError(
+        absl::StrCat("Could not parse device name: ", node_device));
   }
   return FindKernelDef(DeviceType(parsed_name.type), node_name,
                        has_experimental_debug_info, experimental_debug_info,
                        node_op, node_device, node_attrs, nullptr, nullptr);
 }
 
-Status IsKernelRegisteredForNode(const NodeDef& node) {
+absl::Status IsKernelRegisteredForNode(const NodeDef& node) {
   return IsKernelRegisteredForNode(node.name(),
                                    node.has_experimental_debug_info(),
                                    node.experimental_debug_info(), node.op(),
@@ -503,7 +521,7 @@ void RemoveAttributes(const std::vector<absl::string_view>& to_remove,
     node->clear_attr();
   } else {
     for (const auto& key : to_remove) {
-      node->mutable_attr()->erase(string(key));
+      node->mutable_attr()->erase(std::string(key));
     }
   }
 }
@@ -523,7 +541,7 @@ int EraseRegularNodeAttributes(NodeDef* node) {
 int EraseNodeOutputAttributes(NodeDef* node) {
   std::vector<absl::string_view> to_remove;
   for (const auto& attr : node->attr()) {
-    const string& attr_name = attr.first;
+    const std::string& attr_name = attr.first;
     if (attr_name == "_xla_inferred_shapes" ||
         absl::StartsWith(attr_name, "_output_")) {
       to_remove.push_back(attr_name);

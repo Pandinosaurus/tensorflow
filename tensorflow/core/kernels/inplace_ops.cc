@@ -30,19 +30,19 @@ typedef Eigen::ThreadPoolDevice CPUDevice;
 namespace functor {
 
 template <typename Device, typename T>
-Status DoParallelConcatUpdate(const Device& d, const Tensor& value, int32_t loc,
-                              Tensor* output) {
+absl::Status DoParallelConcatUpdate(const Device& d, const Tensor& value,
+                                    int32_t loc, Tensor* output) {
   auto Tvalue = value.shaped<T, 2>({1, value.NumElements()});
   auto Toutput = output->flat_outer_dims<T>();
   auto nrows = Toutput.dimension(0);
   auto r = (loc % nrows + nrows) % nrows;  // Guard index range.
   Toutput.template chip<0>(r).device(d) = Tvalue.template chip<0>(0);
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 template <>
-Status DoParallelConcat(const CPUDevice& d, const Tensor& value, int32_t loc,
-                        Tensor* output) {
+absl::Status DoParallelConcat(const CPUDevice& d, const Tensor& value,
+                              int32_t loc, Tensor* output) {
   CHECK_EQ(value.dtype(), output->dtype());
   switch (value.dtype()) {
 #define CASE(type)                  \
@@ -53,8 +53,8 @@ Status DoParallelConcat(const CPUDevice& d, const Tensor& value, int32_t loc,
     TF_CALL_variant(CASE);
 #undef CASE
     default:
-      return errors::InvalidArgument("Unsupported data type: ",
-                                     DataTypeString(value.dtype()));
+      return absl::InvalidArgumentError(absl::StrCat(
+          "Unsupported data type: ", DataTypeString(value.dtype())));
   }
 }
 
@@ -70,34 +70,58 @@ class ParallelConcatUpdate : public OpKernel {
   }
 
   void Compute(OpKernelContext* ctx) override {
-    auto value = ctx->input(0);
-    auto update = ctx->input(1);
+    const Tensor& value = ctx->input(0);
+    // Value should be at least rank 1. Also the 0th dimension should be
+    // at least loc_.
+    OP_REQUIRES(ctx, value.dims() >= 1,
+                absl::InvalidArgumentError("value should be at least rank 1."));
+    OP_REQUIRES(ctx, value.dim_size(0) > loc_,
+                absl::InvalidArgumentError(
+                    absl::StrCat("0th dimension of value = ", value.dim_size(0),
+                                 " must be greater than loc_ = ", loc_)));
 
-    OP_REQUIRES(
-        ctx, value.dims() == update.dims(),
-        errors::InvalidArgument("value and update shape doesn't match: ",
-                                value.shape().DebugString(), " vs. ",
-                                update.shape().DebugString()));
+    const Tensor& update = ctx->input(1);
+
+    OP_REQUIRES(ctx, value.dims() == update.dims(),
+                absl::InvalidArgumentError(
+                    absl::StrCat("value and update shape doesn't match: ",
+                                 value.shape().DebugString(), " vs. ",
+                                 update.shape().DebugString())));
     for (int i = 1; i < value.dims(); ++i) {
-      OP_REQUIRES(
-          ctx, value.dim_size(i) == update.dim_size(i),
-          errors::InvalidArgument("value and update shape doesn't match ",
-                                  value.shape().DebugString(), " vs. ",
-                                  update.shape().DebugString()));
+      OP_REQUIRES(ctx, value.dim_size(i) == update.dim_size(i),
+                  absl::InvalidArgumentError(
+                      absl::StrCat("value and update shape doesn't match ",
+                                   value.shape().DebugString(), " vs. ",
+                                   update.shape().DebugString())));
     }
-    OP_REQUIRES(ctx, 1 == update.dim_size(0),
-                errors::InvalidArgument("update shape doesn't match: ",
-                                        update.shape().DebugString()));
+    OP_REQUIRES(
+        ctx, 1 == update.dim_size(0),
+        absl::InvalidArgumentError(absl::StrCat("update shape doesn't match: ",
+                                                update.shape().DebugString())));
 
-    Tensor output = value;  // This creates an alias intentionally.
     const auto& d = ctx->eigen_device<Device>();
-    OP_REQUIRES_OK(
-        ctx, ::tensorflow::functor::DoParallelConcat(d, update, loc_, &output));
-    ctx->set_output(0, output);
+    if (value.dtype() == DT_STRING) {
+      int forwarded_input = -1;
+      Tensor* output_ptr = nullptr;
+      OP_REQUIRES_OK(ctx,
+                     ctx->forward_input_or_allocate_output(
+                         {0}, 0, value.shape(), &output_ptr, &forwarded_input));
+      if (forwarded_input == -1) {
+        OP_REQUIRES_OK(ctx,
+                       ::tensorflow::functor::DoCopy(d, value, output_ptr));
+      }
+      OP_REQUIRES_OK(ctx, ::tensorflow::functor::DoParallelConcat(
+                              d, update, loc_, output_ptr));
+    } else {
+      Tensor output = value;  // This creates an alias intentionally.
+      OP_REQUIRES_OK(ctx, ::tensorflow::functor::DoParallelConcat(
+                              d, update, loc_, &output));
+      ctx->set_output(0, output);
+    }
   }
 
  private:
-  int32 loc_;
+  int32_t loc_;
 };
 
 template <typename Device, typename T>
@@ -124,8 +148,8 @@ class FailureKernel : public OpKernel {
  public:
   explicit FailureKernel(OpKernelConstruction* ctx) : OpKernel(ctx) {
     OP_REQUIRES_OK(ctx,
-                   errors::Internal("Found instance of parallel_stack which "
-                                    "could not be properly replaced."));
+                   absl::InternalError("Found instance of parallel_stack which "
+                                       "could not be properly replaced."));
   }
 
   void Compute(OpKernelContext*) override {}
@@ -155,7 +179,6 @@ TF_CALL_POD_STRING_TYPES(REGISTER_EMPTY)
 TF_CALL_POD_STRING_TYPES(REGISTER_PARALLEL_CONCAT);
 #undef REGISTER_PARALLEL_CONCAT
 
-
 #if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 
 typedef Eigen::GpuDevice GPUDevice;
@@ -165,7 +188,7 @@ typedef Eigen::GpuDevice GPUDevice;
                               .Device(DEVICE_GPU)             \
                               .TypeConstraint<type>("dtype"), \
                           ParallelConcatStart<GPUDevice, type>);
-TF_CALL_GPU_NUMBER_TYPES(REGISTER_PARALLEL_CONCAT_START)
+TF_CALL_GPU_NUMBER_TYPES(REGISTER_PARALLEL_CONCAT_START);
 #undef REGISTER_PARALLEL_CONCAT_START
 
 #define REGISTER_PARALLEL_CONCAT(type)                                     \
@@ -180,7 +203,7 @@ TF_CALL_GPU_NUMBER_TYPES(REGISTER_PARALLEL_CONCAT);
                               .Device(DEVICE_GPU)         \
                               .TypeConstraint<type>("T"), \
                           ParallelConcatUpdate<GPUDevice>);
-TF_CALL_GPU_NUMBER_TYPES(REGISTER)
+TF_CALL_GPU_NUMBER_TYPES(REGISTER);
 #undef REGISTER
 
 // Register versions that operate on int32 data on the CPU even though the op
@@ -191,7 +214,7 @@ REGISTER_KERNEL_BUILDER(Name("_ParallelConcatUpdate")
                             .HostMemory("value")
                             .HostMemory("update")
                             .HostMemory("output")
-                            .TypeConstraint<int32>("T"),
+                            .TypeConstraint<int32_t>("T"),
                         ParallelConcatUpdate<CPUDevice>);
 #endif
 
@@ -200,40 +223,57 @@ class InplaceOpBase : public OpKernel {
   explicit InplaceOpBase(OpKernelConstruction* ctx) : OpKernel(ctx) {}
 
   void Compute(OpKernelContext* ctx) override {
-    auto x = ctx->input(0);
-    auto i = ctx->input(1);
-    auto v = ctx->input(2);
+    const Tensor& x = ctx->input(0);
+    const Tensor& i = ctx->input(1);
+    const Tensor& v = ctx->input(2);
 
     OP_REQUIRES(ctx, TensorShapeUtils::IsVector(i.shape()),
-                errors::InvalidArgument("i must be a vector. ",
-                                        i.shape().DebugString()));
-    OP_REQUIRES(ctx, x.dims() == v.dims(),
-                errors::InvalidArgument(
-                    "x and v shape doesn't match (ranks differ): ",
-                    x.shape().DebugString(), " vs. ", v.shape().DebugString()));
+                absl::InvalidArgumentError(absl::StrCat(
+                    "i must be a vector. ", i.shape().DebugString())));
+    OP_REQUIRES(
+        ctx, x.dims() == v.dims(),
+        absl::InvalidArgumentError(absl::StrCat(
+            "x and v shape doesn't match (ranks differ): ",
+            x.shape().DebugString(), " vs. ", v.shape().DebugString())));
     for (int i = 1; i < x.dims(); ++i) {
       OP_REQUIRES(
           ctx, x.dim_size(i) == v.dim_size(i),
-          errors::InvalidArgument("x and v shape doesn't match at index ", i,
-                                  " : ", x.shape().DebugString(), " vs. ",
-                                  v.shape().DebugString()));
+          absl::InvalidArgumentError(absl::StrCat(
+              "x and v shape doesn't match at index ", i, " : ",
+              x.shape().DebugString(), " vs. ", v.shape().DebugString())));
     }
-    OP_REQUIRES(ctx, i.dim_size(0) == v.dim_size(0),
-                errors::InvalidArgument(
-                    "i and x shape doesn't match at index 0: ",
-                    i.shape().DebugString(), " vs. ", v.shape().DebugString()));
+    OP_REQUIRES(
+        ctx, i.dim_size(0) == v.dim_size(0),
+        absl::InvalidArgumentError(absl::StrCat(
+            "i and x shape doesn't match at index 0: ", i.shape().DebugString(),
+            " vs. ", v.shape().DebugString())));
 
-    Tensor y = x;  // This creates an alias intentionally.
+    Tensor* y_ptr = nullptr;
+    Tensor aliased_y;
+    if (x.dtype() == DT_STRING) {
+      int forwarded_input = -1;
+      OP_REQUIRES_OK(ctx, ctx->forward_input_or_allocate_output(
+                              {0}, 0, x.shape(), &y_ptr, &forwarded_input));
+      if (forwarded_input == -1) {
+        OP_REQUIRES_OK(ctx, DoCopy(ctx, x, y_ptr));
+      }
+    } else {
+      aliased_y = x;  // This creates an alias intentionally.
+      ctx->set_output(0, aliased_y);
+      y_ptr = &aliased_y;
+    }
+
     // Skip processing if tensors are empty.
     if (x.NumElements() > 0 && v.NumElements() > 0) {
-      OP_REQUIRES_OK(ctx, DoCompute(ctx, i, v, &y));
+      OP_REQUIRES_OK(ctx, DoCompute(ctx, i, v, y_ptr));
     }
-    ctx->set_output(0, y);
   }
 
  protected:
-  virtual Status DoCompute(OpKernelContext* ctx, const Tensor& i,
-                           const Tensor& v, Tensor* y) = 0;
+  virtual absl::Status DoCompute(OpKernelContext* ctx, const Tensor& i,
+                                 const Tensor& v, Tensor* y) = 0;
+  virtual absl::Status DoCopy(OpKernelContext* ctx, const Tensor& x,
+                              Tensor* y) = 0;
 };
 
 }  // end namespace
@@ -243,7 +283,7 @@ namespace functor {
 template <typename T>
 void DoInplaceOp(const CPUDevice& d, InplaceOpType op, const Tensor& i,
                  const Tensor& v, Tensor* y) {
-  auto Ti = i.flat<int32>();
+  auto Ti = i.flat<int32_t>();
   auto Tv = v.flat_outer_dims<T>();
   auto Ty = y->flat_outer_dims<T>();
   auto nrows = Ty.dimension(0);
@@ -266,7 +306,7 @@ void DoInplaceOp(const CPUDevice& d, InplaceOpType op, const Tensor& i,
 // String type only supports inplace update.
 void DoInplaceStringUpdateOp(const CPUDevice& d, const Tensor& i,
                              const Tensor& v, Tensor* y) {
-  auto Ti = i.flat<int32>();
+  auto Ti = i.flat<int32_t>();
   auto Tv = v.flat_outer_dims<tstring>();
   auto Ty = y->flat_outer_dims<tstring>();
   auto nrows = Ty.dimension(0);
@@ -277,16 +317,16 @@ void DoInplaceStringUpdateOp(const CPUDevice& d, const Tensor& i,
 }
 
 template <>
-Status DoInplace(const CPUDevice& device, InplaceOpType op, const Tensor& i,
-                 const Tensor& v, Tensor* y) {
+absl::Status DoInplace(const CPUDevice& device, InplaceOpType op,
+                       const Tensor& i, const Tensor& v, Tensor* y) {
   CHECK_EQ(v.dtype(), y->dtype());
   if (op == I_UPDATE) {
     if (v.dtype() == DT_STRING) {
       DoInplaceStringUpdateOp(device, i, v, y);
-      return Status::OK();
+      return absl::OkStatus();
     } else if (v.dtype() == DT_BOOL) {
       DoInplaceOp<bool>(device, op, i, v, y);
-      return Status::OK();
+      return absl::OkStatus();
     }
   }
   switch (v.dtype()) {
@@ -297,10 +337,10 @@ Status DoInplace(const CPUDevice& device, InplaceOpType op, const Tensor& i,
     TF_CALL_NUMBER_TYPES(CASE);
 #undef CASE
     default:
-      return errors::InvalidArgument("Unsupported data type: ",
-                                     DataTypeString(v.dtype()));
+      return absl::InvalidArgumentError(
+          absl::StrCat("Unsupported data type: ", DataTypeString(v.dtype())));
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 }  // end namespace functor
@@ -312,10 +352,15 @@ class InplaceOp : public InplaceOpBase {
   explicit InplaceOp(OpKernelConstruction* ctx) : InplaceOpBase(ctx) {}
 
  protected:
-  Status DoCompute(OpKernelContext* ctx, const Tensor& i, const Tensor& v,
-                   Tensor* y) override {
+  absl::Status DoCompute(OpKernelContext* ctx, const Tensor& i, const Tensor& v,
+                         Tensor* y) override {
     const auto& d = ctx->eigen_device<Device>();
     return ::tensorflow::functor::DoInplace(d, op, i, v, y);
+  }
+  absl::Status DoCopy(OpKernelContext* ctx, const Tensor& x,
+                      Tensor* y) override {
+    const auto& d = ctx->eigen_device<Device>();
+    return ::tensorflow::functor::DoCopy(d, x, y);
   }
 };
 
@@ -324,15 +369,15 @@ class CopyOpBase : public OpKernel {
   explicit CopyOpBase(OpKernelConstruction* ctx) : OpKernel(ctx) {}
 
   void Compute(OpKernelContext* ctx) override {
-    auto x = ctx->input(0);
+    const Tensor& x = ctx->input(0);
     Tensor* y;
     OP_REQUIRES_OK(ctx, ctx->allocate_output(0, x.shape(), &y));
     OP_REQUIRES_OK(ctx, DoCompute(ctx, x, y));
   }
 
  protected:
-  virtual Status DoCompute(OpKernelContext* ctx, const Tensor& x,
-                           Tensor* y) = 0;
+  virtual absl::Status DoCompute(OpKernelContext* ctx, const Tensor& x,
+                                 Tensor* y) = 0;
 };
 
 template <typename Device>
@@ -341,7 +386,8 @@ class CopyOp : public CopyOpBase {
   explicit CopyOp(OpKernelConstruction* ctx) : CopyOpBase(ctx) {}
 
  protected:
-  Status DoCompute(OpKernelContext* ctx, const Tensor& x, Tensor* y) override {
+  absl::Status DoCompute(OpKernelContext* ctx, const Tensor& x,
+                         Tensor* y) override {
     const auto& d = ctx->eigen_device<Device>();
     return ::tensorflow::functor::DoCopy(d, x, y);
   }
@@ -354,7 +400,7 @@ namespace functor {
 typedef Eigen::ThreadPoolDevice CPUDevice;
 
 template <>
-Status DoCopy(const CPUDevice& device, const Tensor& x, Tensor* y) {
+absl::Status DoCopy(const CPUDevice& device, const Tensor& x, Tensor* y) {
   CHECK_EQ(x.dtype(), y->dtype());
   switch (x.dtype()) {
 #define CASE(type)                                   \
@@ -367,10 +413,10 @@ Status DoCopy(const CPUDevice& device, const Tensor& x, Tensor* y) {
     TF_CALL_tstring(CASE);
 #undef CASE
     default:
-      return errors::InvalidArgument("Unsupported data type: ",
-                                     DataTypeString(x.dtype()));
+      return absl::InvalidArgumentError(
+          absl::StrCat("Unsupported data type: ", DataTypeString(x.dtype())));
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 }  // end namespace functor
@@ -385,14 +431,14 @@ class EmptyOp : public OpKernel {
 
   void Compute(OpKernelContext* ctx) override {
     const Tensor& shape = ctx->input(0);
-    OP_REQUIRES(
-        ctx, TensorShapeUtils::IsVector(shape.shape()),
-        errors::InvalidArgument("shape must be a vector of int32, got shape ",
-                                shape.shape().DebugString()));
-    auto dims = shape.flat<int32>();
+    OP_REQUIRES(ctx, TensorShapeUtils::IsVector(shape.shape()),
+                absl::InvalidArgumentError(
+                    absl::StrCat("shape must be a vector of int32, got shape ",
+                                 shape.shape().DebugString())));
+    auto dims = shape.flat<int32_t>();
     TensorShape out_shape;
     OP_REQUIRES_OK(ctx, TensorShapeUtils::MakeShape(
-                            reinterpret_cast<const int32*>(dims.data()),
+                            reinterpret_cast<const int32_t*>(dims.data()),
                             dims.size(), &out_shape));
     Tensor* out = nullptr;
     OP_REQUIRES_OK(ctx, ctx->allocate_output(0, out_shape, &out));
@@ -422,21 +468,16 @@ REGISTER_KERNEL_BUILDER(Name("DeepCopy").Device(DEVICE_CPU), CopyOp<CPUDevice>);
                               .TypeConstraint<type>("dtype"), \
                           EmptyOp<dev##Device, type>)
 
-REGISTER_EMPTY(float, CPU)
-REGISTER_EMPTY(bfloat16, CPU)
-REGISTER_EMPTY(double, CPU)
-REGISTER_EMPTY(Eigen::half, CPU)
-REGISTER_EMPTY(tstring, CPU)
-REGISTER_EMPTY(int32, CPU)
-REGISTER_EMPTY(int64_t, CPU)
-REGISTER_EMPTY(bool, CPU)
-REGISTER_EMPTY(uint8, CPU)
+#define REGISTER(TYPE) REGISTER_EMPTY(TYPE, CPU);
+TF_CALL_POD_STRING_TYPES(REGISTER);
+#undef REGISTER
 
 #if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 
 typedef Eigen::GpuDevice GPUDevice;
 
 #define REGISTER(TYPE)                                                    \
+  REGISTER_EMPTY(TYPE, GPU);                                              \
   REGISTER_KERNEL_BUILDER(                                                \
       Name("InplaceUpdate").Device(DEVICE_GPU).TypeConstraint<TYPE>("T"), \
       InplaceOp<GPUDevice, functor::I_UPDATE>);                           \
@@ -453,49 +494,48 @@ typedef Eigen::GpuDevice GPUDevice;
 REGISTER_KERNEL_BUILDER(
     Name("InplaceUpdate").Device(DEVICE_GPU).TypeConstraint<bool>("T"),
     InplaceOp<GPUDevice, functor::I_UPDATE>);
-REGISTER(float);
-REGISTER(double);
-REGISTER(Eigen::half);
+TF_CALL_GPU_NUMBER_TYPES(REGISTER);
+REGISTER(int8_t);
+REGISTER(uint8_t);
 REGISTER(int64_t);
+REGISTER(uint64_t);
+
+REGISTER_EMPTY(int32_t, GPU);
+#undef REGISTER
+
+#endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 
 REGISTER_KERNEL_BUILDER(Name("InplaceUpdate")
-                            .Device(DEVICE_GPU)
+                            .Device(DEVICE_DEFAULT)
                             .HostMemory("x")
                             .HostMemory("i")
                             .HostMemory("v")
                             .HostMemory("y")
-                            .TypeConstraint<int32>("T"),
+                            .TypeConstraint<int32_t>("T"),
                         InplaceOp<CPUDevice, functor::I_UPDATE>);
 REGISTER_KERNEL_BUILDER(Name("InplaceAdd")
-                            .Device(DEVICE_GPU)
+                            .Device(DEVICE_DEFAULT)
                             .HostMemory("x")
                             .HostMemory("i")
                             .HostMemory("v")
                             .HostMemory("y")
-                            .TypeConstraint<int32>("T"),
+                            .TypeConstraint<int32_t>("T"),
                         InplaceOp<CPUDevice, functor::I_ADD>);
 REGISTER_KERNEL_BUILDER(Name("InplaceSub")
-                            .Device(DEVICE_GPU)
+                            .Device(DEVICE_DEFAULT)
                             .HostMemory("x")
                             .HostMemory("i")
                             .HostMemory("v")
                             .HostMemory("y")
-                            .TypeConstraint<int32>("T"),
+                            .TypeConstraint<int32_t>("T"),
                         InplaceOp<CPUDevice, functor::I_SUB>);
 
 REGISTER_KERNEL_BUILDER(Name("DeepCopy")
-                            .Device(DEVICE_GPU)
+                            .Device(DEVICE_DEFAULT)
                             .HostMemory("x")
                             .HostMemory("y")
-                            .TypeConstraint<int32>("T"),
+                            .TypeConstraint<int32_t>("T"),
                         CopyOp<CPUDevice>);
-REGISTER_EMPTY(float, GPU);
-REGISTER_EMPTY(double, GPU);
-REGISTER_EMPTY(Eigen::half, GPU);
-REGISTER_EMPTY(int64_t, GPU);
-REGISTER_EMPTY(int32, GPU);
-
-#endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 
 }  // end namespace
 }  // end namespace tensorflow

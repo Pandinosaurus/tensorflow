@@ -14,6 +14,7 @@ limitations under the License.
 ==============================================================================*/
 #include "tensorflow/core/data/service/grpc_dispatcher_impl.h"
 
+#include <cstdint>
 #include <limits>
 #include <memory>
 #include <string>
@@ -25,6 +26,7 @@ limitations under the License.
 #include "grpcpp/security/credentials.h"
 #include "grpcpp/support/channel_arguments.h"
 #include "absl/strings/str_cat.h"
+#include "tensorflow/core/data/service/common.h"
 #include "tensorflow/core/data/service/common.pb.h"
 #include "tensorflow/core/data/service/credentials_factory.h"
 #include "tensorflow/core/data/service/dispatcher.pb.h"
@@ -48,7 +50,6 @@ using ::grpc::Channel;
 using ::grpc::ChannelArguments;
 using ::grpc::ChannelCredentials;
 using ::grpc::ClientContext;
-using ::tensorflow::data::testing::RangeSquareDataset;
 
 constexpr const char kHostAddress[] = "localhost";
 constexpr const char kProtocol[] = "grpc";
@@ -60,100 +61,136 @@ class GrpcDispatcherImplTest : public ::testing::Test {
     TF_ASSERT_OK(SetUpDispatcherClientStub());
   }
 
-  Status SetUpDispatcherServer() {
+  absl::Status SetUpDispatcherServer() {
     experimental::DispatcherConfig config;
     config.set_protocol(kProtocol);
     TF_RETURN_IF_ERROR(NewDispatchServer(config, dispatcher_server_));
     return dispatcher_server_->Start();
   }
 
-  Status SetUpDispatcherClientStub() {
+  absl::Status SetUpDispatcherClientStub() {
     std::shared_ptr<ChannelCredentials> credentials;
     TF_RETURN_IF_ERROR(
         CredentialsFactory::CreateClientCredentials(kProtocol, &credentials));
     ChannelArguments args;
-    args.SetMaxReceiveMessageSize(std::numeric_limits<int32>::max());
+    args.SetMaxReceiveMessageSize(std::numeric_limits<int32_t>::max());
     args.SetInt(GRPC_ARG_USE_LOCAL_SUBCHANNEL_POOL, true);
     std::shared_ptr<Channel> channel =
         ::grpc::CreateCustomChannel(GetDispatcherAddress(), credentials, args);
     dispatcher_client_stub_ = DispatcherService::NewStub(channel);
-    return Status::OK();
+    return absl::OkStatus();
   }
 
   std::string GetDispatcherAddress() const {
     return absl::StrCat(kHostAddress, ":", dispatcher_server_->BoundPort());
   }
 
-  StatusOr<GetOrRegisterDatasetResponse> RegisterDataset() {
-    GetOrRegisterDatasetRequest request;
-    GetOrRegisterDatasetResponse response;
-    *request.mutable_dataset() = RangeSquareDataset(/*range=*/10);
-    ClientContext context;
-    TF_RETURN_IF_ERROR(
-        FromGrpcStatus(dispatcher_client_stub_->GetOrRegisterDataset(
-            &context, request, &response)));
-    return response;
-  }
-
-  StatusOr<GetOrCreateJobResponse> CreateJob(const int64_t dataset_id) {
-    GetOrCreateJobRequest request;
-    GetOrCreateJobResponse response;
-    request.set_dataset_id(dataset_id);
-    request.mutable_processing_mode_def()->set_sharding_policy(
-        ProcessingModeDef::OFF);
-    ClientContext context;
-    TF_RETURN_IF_ERROR(FromGrpcStatus(
-        dispatcher_client_stub_->GetOrCreateJob(&context, request, &response)));
-    return response;
-  }
-
-  StatusOr<WorkerHeartbeatResponse> WorkerHeartbeat() {
-    WorkerHeartbeatRequest request;
-    WorkerHeartbeatResponse response;
-    request.set_worker_address(kHostAddress);
-    request.set_transfer_address(kHostAddress);
-    ClientContext client_ctx;
-    TF_RETURN_IF_ERROR(FromGrpcStatus(dispatcher_client_stub_->WorkerHeartbeat(
-        &client_ctx, request, &response)));
-    return response;
-  }
-
-  StatusOr<ClientHeartbeatResponse> ClientHeartbeat(
-      const int64_t job_client_id) {
-    ClientHeartbeatRequest request;
-    ClientHeartbeatResponse response;
-    request.set_job_client_id(job_client_id);
-    ClientContext client_ctx;
-    TF_RETURN_IF_ERROR(FromGrpcStatus(dispatcher_client_stub_->ClientHeartbeat(
-        &client_ctx, request, &response)));
-    return response;
-  }
-
   std::unique_ptr<DispatchGrpcDataServer> dispatcher_server_;
   std::unique_ptr<DispatcherService::Stub> dispatcher_client_stub_;
 };
 
-TEST_F(GrpcDispatcherImplTest, WorkerHeartbeat) {
-  TF_ASSERT_OK_AND_ASSIGN(GetOrRegisterDatasetResponse dataset_response,
-                          RegisterDataset());
-  TF_ASSERT_OK(CreateJob(dataset_response.dataset_id()).status());
-  TF_ASSERT_OK_AND_ASSIGN(WorkerHeartbeatResponse worker_response,
-                          WorkerHeartbeat());
-  ASSERT_EQ(worker_response.new_tasks().size(), 1);
-  EXPECT_EQ(worker_response.new_tasks(0).dataset_id(),
-            dataset_response.dataset_id());
+TEST_F(GrpcDispatcherImplTest, GrpcTest) {
+  ClientContext ctx;
+  GetVersionRequest req;
+  GetVersionResponse resp;
+  TF_ASSERT_OK(
+      FromGrpcStatus(dispatcher_client_stub_->GetVersion(&ctx, req, &resp)));
+  EXPECT_EQ(resp.version(), kDataServiceVersion);
 }
 
-TEST_F(GrpcDispatcherImplTest, ClientHeartbeat) {
-  TF_ASSERT_OK_AND_ASSIGN(GetOrRegisterDatasetResponse dataset_response,
-                          RegisterDataset());
-  TF_ASSERT_OK_AND_ASSIGN(GetOrCreateJobResponse job_response,
-                          CreateJob(dataset_response.dataset_id()));
-  TF_ASSERT_OK(WorkerHeartbeat().status());
-  TF_ASSERT_OK_AND_ASSIGN(ClientHeartbeatResponse client_response,
-                          ClientHeartbeat(job_response.job_client_id()));
-  ASSERT_EQ(client_response.task_info().size(), 1);
-  EXPECT_EQ(client_response.task_info(0).worker_address(), kHostAddress);
+TEST_F(GrpcDispatcherImplTest, GetSplitInvalidProviderIndex) {
+  // Register a dataset.
+  std::string dataset_id;
+  {
+    ClientContext ctx;
+    GetOrRegisterDatasetRequest req;
+    *req.mutable_dataset()->mutable_graph() = testing::RangeDataset(10).graph();
+    GetOrRegisterDatasetResponse resp;
+    TF_ASSERT_OK(FromGrpcStatus(
+        dispatcher_client_stub_->GetOrRegisterDataset(&ctx, req, &resp)));
+    dataset_id = resp.dataset_id();
+  }
+
+  // Create an iteration.
+  int64_t iteration_id = -1;
+  {
+    ClientContext ctx;
+    GetOrCreateJobRequest job_req;
+    job_req.set_dataset_id(dataset_id);
+    job_req.mutable_processing_mode_def()->set_sharding_policy(
+        ProcessingModeDef::DYNAMIC);
+    GetOrCreateJobResponse job_resp;
+    TF_ASSERT_OK(FromGrpcStatus(
+        dispatcher_client_stub_->GetOrCreateJob(&ctx, job_req, &job_resp)));
+
+    ClientContext iter_ctx;
+    GetOrCreateIterationRequest req;
+    req.set_job_id(job_resp.job_id());
+    req.set_repetition(0);
+    GetOrCreateIterationResponse resp;
+    TF_ASSERT_OK(FromGrpcStatus(
+        dispatcher_client_stub_->GetOrCreateIteration(&iter_ctx, req, &resp)));
+
+    // Dynamically find iteration_id
+    for (int i = 0; i < 10000; ++i) {
+      ClientContext ctx;
+      GetSplitRequest split_req;
+      split_req.set_iteration_id(i);
+      split_req.set_repetition(0);
+      split_req.set_split_provider_index(0);
+      GetSplitResponse split_resp;
+      ::grpc::Status status =
+          dispatcher_client_stub_->GetSplit(&ctx, split_req, &split_resp);
+      if (status.error_code() != ::grpc::StatusCode::NOT_FOUND) {
+        iteration_id = i;
+        break;
+      }
+    }
+    ASSERT_NE(iteration_id, -1)
+        << "Could not find iteration_id. Iteration was not created correctly?";
+  }
+
+  // GetSplit with invalid provider index (too small).
+  {
+    ClientContext ctx;
+    GetSplitRequest req;
+    req.set_iteration_id(iteration_id);
+    req.set_repetition(0);
+    req.set_split_provider_index(-1);
+    GetSplitResponse resp;
+    ::grpc::Status status = dispatcher_client_stub_->GetSplit(&ctx, req, &resp);
+    EXPECT_EQ(status.error_code(), ::grpc::StatusCode::INVALID_ARGUMENT);
+  }
+
+  // GetSplit with invalid provider index (too large).
+  {
+    ClientContext ctx;
+    GetSplitRequest req;
+    req.set_iteration_id(iteration_id);
+    req.set_repetition(0);
+    req.set_split_provider_index(1000000);
+    GetSplitResponse resp;
+    ::grpc::Status status = dispatcher_client_stub_->GetSplit(&ctx, req, &resp);
+    EXPECT_EQ(status.error_code(), ::grpc::StatusCode::INVALID_ARGUMENT);
+  }
+}
+
+TEST_F(GrpcDispatcherImplTest, GetOrRegisterDatasetInvalidDatasetId) {
+  const std::vector<std::string> invalid_ids = {
+      "..\\..\\etc\\passwd", "a\\b", "a/b", ".", "..",
+  };
+
+  for (const auto& id : invalid_ids) {
+    ClientContext ctx;
+    GetOrRegisterDatasetRequest req;
+    *req.mutable_dataset()->mutable_graph() = testing::RangeDataset(10).graph();
+    req.set_dataset_id(id);
+    GetOrRegisterDatasetResponse resp;
+    ::grpc::Status status =
+        dispatcher_client_stub_->GetOrRegisterDataset(&ctx, req, &resp);
+    EXPECT_EQ(status.error_code(), ::grpc::StatusCode::INVALID_ARGUMENT)
+        << "Dataset ID '" << id << "' should be rejected.";
+  }
 }
 
 }  // namespace

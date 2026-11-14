@@ -15,9 +15,11 @@ limitations under the License.
 
 #include "tensorflow/c/kernels/tensor_shape_utils.h"
 
+#include "absl/status/status.h"
 #include "tensorflow/c/tf_tensor_internal.h"
 #include "tensorflow/core/framework/tensor.h"
 #include "tensorflow/core/framework/tensor_shape.h"
+#include "tensorflow/core/framework/types.pb.h"
 #include "tensorflow/core/lib/core/status.h"
 #include "tensorflow/core/platform/test.h"
 #include "tensorflow/core/platform/types.h"
@@ -36,7 +38,7 @@ struct TF_TensorWrapper {
 
 void TestShapeMatch(TensorShape shape) {
   Tensor tensor(DT_FLOAT, shape);
-  Status status;
+  absl::Status status;
   TF_Tensor* tf_tensor = TF_TensorFromTensor(tensor, &status);
   TF_TensorWrapper tensor_wrapper = TF_TensorWrapper(tf_tensor);
   ASSERT_TRUE(status.ok()) << status.ToString();

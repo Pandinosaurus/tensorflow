@@ -20,9 +20,11 @@ limitations under the License.
 
 #include "tensorflow/core/platform/types.h"
 
-namespace tensorflow {
-
+namespace tsl {
 class Thread;
+}  // namespace tsl
+namespace tensorflow {
+using tsl::Thread;  // NOLINT
 
 // Virtual interface for an object that creates threads.
 class ThreadFactory {
@@ -33,7 +35,7 @@ class ThreadFactory {
   //
   // NOTE: The caller is responsible for ensuring that this `ThreadFactory`
   // outlives the returned `Thread`.
-  virtual std::unique_ptr<Thread> StartThread(const string& name,
+  virtual std::unique_ptr<Thread> StartThread(const std::string& name,
                                               std::function<void()> fn) = 0;
 };
 

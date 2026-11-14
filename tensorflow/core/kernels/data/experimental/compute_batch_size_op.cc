@@ -95,9 +95,9 @@ class ComputeBatchSizeOp : public OpKernel {
     DatasetBase* dataset;
     OP_REQUIRES_OK(ctx, GetDatasetFromVariantTensor(ctx->input(0), &dataset));
 
-    std::vector<std::pair<string, Tensor>> input_list;
+    std::vector<std::pair<std::string, Tensor>> input_list;
     GraphDef graph_def;
-    string dataset_node_name;
+    std::string dataset_node_name;
     OP_REQUIRES_OK(ctx, AsGraphDefForRewrite(ctx, dataset, &input_list,
                                              &graph_def, &dataset_node_name));
 
@@ -106,7 +106,7 @@ class ComputeBatchSizeOp : public OpKernel {
 
     const NodeDef* node = graph_view.GetNode(dataset_node_name);
     OP_REQUIRES(ctx, node != nullptr,
-                errors::InvalidArgument("Node does not exist in graph"));
+                absl::InvalidArgumentError("Node does not exist in graph"));
     int64_t batch_size = GetBatchSize(*node, graph_view);
     Tensor* result;
     OP_REQUIRES_OK(ctx, ctx->allocate_output(0, TensorShape({}), &result));
@@ -129,8 +129,8 @@ class ComputeBatchSizeOp : public OpKernel {
     auto s = GetScalarConstNodeValue(*batch_size_node, &batch_size);
     if (!s.ok()) {
       VLOG(1) << "Could not compute static batch size. Found batching dataset ("
-              << node.name() << "), but failed to get its input batch size: "
-              << s.error_message();
+              << node.name()
+              << "), but failed to get its input batch size: " << s.message();
       return -1;
     }
     return batch_size;

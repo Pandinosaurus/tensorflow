@@ -123,8 +123,7 @@ template <typename FaninViewT, typename FanoutViewT, typename GraphViewT,
           bool IsConst>
 class NodeViewInternal {
  private:
-  using NodeDefT =
-      typename std::conditional<IsConst, const NodeDef, NodeDef>::type;
+  using NodeDefT = std::conditional_t<IsConst, const NodeDef, NodeDef>;
 
  public:
   explicit NodeViewInternal(GraphViewT* graph_view, int node_index)
@@ -156,10 +155,10 @@ class NodeViewInternal {
   int node_index() const { return node_index_; }
 
   // Returns the name of the node.
-  const string& GetName() const { return node()->name(); }
+  const std::string& GetName() const { return node()->name(); }
 
   // Returns the op of the node.
-  const string& GetOp() const { return node()->op(); }
+  const std::string& GetOp() const { return node()->op(); }
 
   // Returns the device set for the node.
   const string& GetDevice() const { return node()->device(); }
@@ -275,8 +274,7 @@ template <typename NodeViewT, typename FaninViewT, typename FanoutViewT,
           bool IsConst>
 class GraphViewInternal {
  private:
-  using GraphDefT =
-      typename std::conditional<IsConst, const GraphDef, GraphDef>::type;
+  using GraphDefT = std::conditional_t<IsConst, const GraphDef, GraphDef>;
 
  public:
   explicit GraphViewInternal(GraphDefT* graph) : graph_(graph) {}
@@ -389,10 +387,10 @@ struct NodeViewDiff {
   // with `regular_inputs_to_remove` for if there will be any missing inputs
   // in the updated node.
   int num_regular_inputs_to_remove = 0;
-  absl::flat_hash_set<string> controlling_inputs_to_add;
+  absl::flat_hash_set<std::string> controlling_inputs_to_add;
   std::set<int> controlling_inputs_to_remove;
-  absl::flat_hash_map<string, AttrValue> attrs_to_add;
-  absl::flat_hash_set<string> attrs_to_remove;
+  absl::flat_hash_map<std::string, AttrValue> attrs_to_add;
+  absl::flat_hash_set<std::string> attrs_to_remove;
   // AttrValueMap constructor and destructor are very expensive, we will
   // initialize it lazily only if needed.
   absl::optional<AttrValueMap> processed_attrs;
@@ -406,7 +404,7 @@ inline bool UpdateName(NodeViewDiff<GraphViewT>* diff, absl::string_view name) {
     diff->name.clear();
     diff->update_name = false;
   } else {
-    diff->name = string(name);
+    diff->name = std::string(name);
     diff->update_name = true;
   }
   return true;
@@ -420,7 +418,7 @@ inline bool UpdateOp(NodeViewDiff<GraphViewT>* diff, absl::string_view op) {
     diff->op.clear();
     diff->update_op = false;
   } else {
-    diff->op = string(op);
+    diff->op = std::string(op);
     diff->update_op = true;
   }
   return true;
@@ -435,7 +433,7 @@ inline bool UpdateDevice(NodeViewDiff<GraphViewT>* diff,
     diff->device.clear();
     diff->update_device = false;
   } else {
-    diff->device = string(device);
+    diff->device = std::string(device);
     diff->update_device = true;
   }
   return true;
@@ -602,7 +600,7 @@ inline bool AddOrUpdateAttribute(NodeViewDiff<GraphViewT>* diff,
                                  absl::string_view attr_name,
                                  const AttrValue& attr_value) {
   diff->attrs_to_add.empty() ? 0 : diff->attrs_to_remove.erase(attr_name);
-  gtl::InsertOrUpdate(&diff->attrs_to_add, string(attr_name), attr_value);
+  gtl::InsertOrUpdate(&diff->attrs_to_add, std::string(attr_name), attr_value);
   return true;
 }
 
@@ -666,7 +664,7 @@ inline void Reset(NodeViewDiff<GraphViewT>* diff) {
   std::map<int, SafeTensorId>().swap(diff->regular_inputs_to_update);
   std::vector<bool>().swap(diff->regular_inputs_to_remove);
   diff->num_regular_inputs_to_remove = 0;
-  absl::flat_hash_set<string>().swap(diff->controlling_inputs_to_add);
+  absl::flat_hash_set<std::string>().swap(diff->controlling_inputs_to_add);
   std::set<int>().swap(diff->controlling_inputs_to_remove);
   absl::flat_hash_map<string, AttrValue>().swap(diff->attrs_to_add);
   absl::flat_hash_set<string>().swap(diff->attrs_to_remove);
@@ -726,7 +724,7 @@ inline bool IsWellFormed(
           return false;
         }
       } else {
-        const string& regular_name =
+        const std::string& regular_name =
             node_view->GetRegularFanin(i).node_view()->GetName();
         if (regular_name == node_name) {
           return false;
@@ -787,7 +785,7 @@ struct NewNode {
   NodeDef node;
   std::vector<SafeTensorId> regular_fanins;
   int num_regular_fanins = 0;
-  absl::flat_hash_set<string> controlling_fanins;
+  absl::flat_hash_set<std::string> controlling_fanins;
 };
 
 // Updates new node name.
@@ -817,7 +815,7 @@ inline void UpdateDevice(NewNode<GraphViewT>* new_node,
   if (device.empty()) {
     new_node->node.clear_device();
   } else {
-    new_node->node.set_device(string(device));
+    new_node->node.set_device(device);
   }
 }
 

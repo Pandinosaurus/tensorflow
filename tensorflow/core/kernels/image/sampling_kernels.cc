@@ -23,8 +23,8 @@ limitations under the License.
 namespace tensorflow {
 namespace functor {
 
-SamplingKernelType SamplingKernelTypeFromString(const StringPiece str) {
-  const string lower_case = absl::AsciiStrToLower(str);
+SamplingKernelType SamplingKernelTypeFromString(const absl::string_view str) {
+  const std::string lower_case = absl::AsciiStrToLower(str);
   if (lower_case == "lanczos1") return Lanczos1Kernel;
   if (lower_case == "lanczos3") return Lanczos3Kernel;
   if (lower_case == "lanczos5") return Lanczos5Kernel;

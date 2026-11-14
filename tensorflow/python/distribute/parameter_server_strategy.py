@@ -14,10 +14,6 @@
 # ==============================================================================
 """Class implementing a multi-worker parameter server tf.distribute strategy."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import copy
 
 
@@ -26,13 +22,15 @@ from tensorflow.python.distribute import device_util
 from tensorflow.python.distribute import distribute_lib
 from tensorflow.python.distribute import distribute_utils
 from tensorflow.python.distribute import input_lib
+from tensorflow.python.distribute import input_util
 from tensorflow.python.distribute import mirrored_run
 from tensorflow.python.distribute import multi_worker_util
 from tensorflow.python.distribute import numpy_dataset
 from tensorflow.python.distribute import ps_values
 from tensorflow.python.distribute import values
-from tensorflow.python.distribute.cluster_resolver import SimpleClusterResolver
-from tensorflow.python.distribute.cluster_resolver import TFConfigClusterResolver
+from tensorflow.python.distribute.cluster_resolver import cluster_resolver as cluster_resolver_lib
+from tensorflow.python.distribute.cluster_resolver import tfconfig_cluster_resolver
+from tensorflow.python.distribute.v1 import input_lib as input_lib_v1
 from tensorflow.python.eager import context
 from tensorflow.python.framework import device as tf_device
 from tensorflow.python.framework import ops
@@ -110,7 +108,7 @@ class ParameterServerStrategyV1(distribute_lib.StrategyV1):
         `tf.distribute.cluster_resolver.TFConfigClusterResolver`.
     """
     if cluster_resolver is None:
-      cluster_resolver = TFConfigClusterResolver()
+      cluster_resolver = tfconfig_cluster_resolver.TFConfigClusterResolver()
     super(ParameterServerStrategyV1, self).__init__(
         ParameterServerStrategyExtended(
             self, cluster_resolver=cluster_resolver))
@@ -204,7 +202,8 @@ class ParameterServerStrategyExtended(distribute_lib.StrategyExtendedV1):
     """
     # TODO(b/126786766): TFConfigClusterResolver returns wrong number of GPUs in
     # some cases.
-    if isinstance(cluster_resolver, TFConfigClusterResolver):
+    if isinstance(
+        cluster_resolver, tfconfig_cluster_resolver.TFConfigClusterResolver):
       num_gpus = context.num_gpus()
     else:
       num_gpus = cluster_resolver.num_accelerators().get("GPU", 0)
@@ -339,7 +338,7 @@ class ParameterServerStrategyExtended(distribute_lib.StrategyExtendedV1):
     distribute_utils.validate_colocate(colocate_with_variable, self)
 
   def _experimental_distribute_dataset(self, dataset, options):
-    return input_lib.get_distributed_dataset(
+    return input_util.get_distributed_dataset(
         dataset,
         self._input_workers_with_options(options),
         self._container_strategy(),
@@ -347,7 +346,7 @@ class ParameterServerStrategyExtended(distribute_lib.StrategyExtendedV1):
         options=options)
 
   def _make_dataset_iterator(self, dataset):
-    return input_lib.DatasetIterator(
+    return input_lib_v1.DatasetIterator(
         dataset,
         self._input_workers,
         self._container_strategy(),
@@ -370,9 +369,9 @@ class ParameterServerStrategyExtended(distribute_lib.StrategyExtendedV1):
         num_input_pipelines=num_input_pipelines,
         input_pipeline_id=input_pipeline_id,
         num_replicas_in_sync=self._num_replicas_in_sync)
-    return input_lib.InputFunctionIterator(input_fn, self._input_workers,
-                                           [input_context],
-                                           self._container_strategy())
+    return input_lib_v1.InputFunctionIterator(input_fn, self._input_workers,
+                                              [input_context],
+                                              self._container_strategy())
 
   def _experimental_make_numpy_dataset(self, numpy_input, session):
     return numpy_dataset.one_host_numpy_dataset(
@@ -393,7 +392,7 @@ class ParameterServerStrategyExtended(distribute_lib.StrategyExtendedV1):
         input_pipeline_id=input_pipeline_id,
         num_replicas_in_sync=self._num_replicas_in_sync)
 
-    return input_lib.get_distributed_datasets_from_function(
+    return input_util.get_distributed_datasets_from_function(
         dataset_fn,
         self._input_workers_with_options(options), [input_context],
         self._container_strategy(),
@@ -604,7 +603,7 @@ class ParameterServerStrategyExtended(distribute_lib.StrategyExtendedV1):
     if cluster_spec:
       # Use the num_gpus_per_worker recorded in constructor since _configure
       # doesn't take num_gpus.
-      cluster_resolver = SimpleClusterResolver(
+      cluster_resolver = cluster_resolver_lib.SimpleClusterResolver(
           cluster_spec=multi_worker_util.normalize_cluster_spec(cluster_spec),
           task_type=task_type,
           task_id=task_id,

@@ -23,7 +23,7 @@ limitations under the License.
 #include <unordered_map>
 #include <vector>
 
-#include "third_party/eigen3/Eigen/Core"
+#include "Eigen/Core"  // from @eigen_archive
 #include "tensorflow/lite/kernels/ctc/ctc_loss_util.h"
 
 namespace tflite {
@@ -134,7 +134,7 @@ class BeamRoot {
 template <class CTCBeamState = EmptyBeamState>
 class BeamComparer {
  public:
-  virtual ~BeamComparer() {}
+  virtual ~BeamComparer() = default;
   virtual bool inline operator()(const BeamEntry<CTCBeamState>* a,
                                  const BeamEntry<CTCBeamState>* b) const {
     return a->newp.total > b->newp.total;

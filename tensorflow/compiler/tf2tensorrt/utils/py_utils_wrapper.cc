@@ -15,7 +15,8 @@ limitations under the License.
 
 #include <tuple>
 
-#include "pybind11/pybind11.h"
+#include "pybind11/pybind11.h"  // from @pybind11
+#include "pybind11/stl.h"  // from @pybind11
 #include "tensorflow/compiler/tf2tensorrt/common/utils.h"
 #include "tensorflow/compiler/tf2tensorrt/utils/py_utils.h"
 
@@ -27,7 +28,7 @@ std::tuple<int, int, int> get_loaded_tensorrt_version() {
   return tensorflow::tensorrt::GetLoadedTensorRTVersion();
 }
 
-PYBIND11_MODULE(_pywrap_py_utils, m) {
+PYBIND11_MODULE(_pywrap_py_utils, m, pybind11::mod_gil_not_used()) {
   m.doc() = "_pywrap_py_utils: Various TensorRT utilities";
   m.def("get_linked_tensorrt_version", get_linked_tensorrt_version,
         "Return the compile time TensorRT library version as the tuple "
@@ -37,4 +38,7 @@ PYBIND11_MODULE(_pywrap_py_utils, m) {
         "(Major, Minor, Patch).");
   m.def("is_tensorrt_enabled", tensorflow::tensorrt::IsGoogleTensorRTEnabled,
         "Returns True if TensorRT is enabled.");
+  m.def("get_registered_op_converters",
+        tensorflow::tensorrt::GetRegisteredOpConverters,
+        "Return a list of registered op converters by operation name");
 }

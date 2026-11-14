@@ -16,6 +16,7 @@ limitations under the License.
 #include "tensorflow/core/grappler/utils/pattern_utils.h"
 
 #include <algorithm>
+#include <memory>
 
 #include "absl/container/flat_hash_set.h"
 
@@ -23,17 +24,31 @@ namespace tensorflow {
 namespace grappler {
 namespace utils {
 
-inline const bool IsCommutativeOp(const string& op) {
+const bool IsCommutativeOp(const std::string& op) {
   // TODO(intel-tf): Add more ops to this list if needed.
-  static const auto* commutative_ops =
-      new absl::flat_hash_set<string>({"Add", "AddV2", "Mul"});
-  return commutative_ops->contains(op);
+  std::vector<std::string> op_list = str_util::Split(op, '|');
+  static const auto* commutative_ops = new absl::flat_hash_set<std::string>(
+      {"Add", "AddV2", "Mul", "Maximum", "SquaredDifference"});
+  for (const std::string& op_ : op_list) {
+    if (commutative_ops->contains(op_)) return true;
+  }
+  return false;
 }
 
 // op1 is an op name in the pattern and it could be wildcard `*` or some
-// registered op in tensorflow. op2 is an op name in the computation graph and
+// registered op in tensorflow and may have multiple ops separated by '|'.
+// op2 is an op name in the computation graph and
 // is always one of the registered ops in tensorflow.
-inline bool IsSame(string op1, string op2) { return op1 == "*" || op1 == op2; }
+bool IsSame(std::string op1, std::string op2) {
+  if (op1 == "*") return true;
+
+  std::vector<std::string> op1_list = str_util::Split(op1, '|');
+  for (const std::string& op_1 : op1_list) {
+    if (op_1 == op2) return true;
+  }
+
+  return false;
+}
 
 // A subgraph pattern syntax implicitly defines a DAG having a single root. We
 // traverse the syntax DAG in DFS manner. This function finds a match for
@@ -43,9 +58,15 @@ template <>
 bool SubGraphMatcher<MatchingDirection::kFollowInputs>::DoesOpTypePatternMatch(
     const OpTypePattern& pattern, MutableNodeView* node_view,
     NodeViewMatch* match) {
-  // Currently no control inputs and outputs are allowed.
-  if (node_view->NumControllingFanins() > 0 ||
-      node_view->NumControlledFanouts() > 0)
+  // Currently the following cases are NOT allowed:
+  //  - If the node has control inputs and the node will NOT remain after the
+  //  fusion.
+  //  - If the node has control outputs and the node will be removed after the
+  //  fusion.
+  if ((node_view->NumControllingFanins() > 0 &&
+       pattern.node_status != NodeStatus::kRemain) ||
+      (node_view->NumControlledFanouts() > 0 &&
+       pattern.node_status == NodeStatus::kRemove))
     return false;
 
   bool op_type_matched = false;
@@ -54,8 +75,8 @@ bool SubGraphMatcher<MatchingDirection::kFollowInputs>::DoesOpTypePatternMatch(
   } else {
     // The op field string of current pattern might express an op among multiple
     // op types (mutually exclusive) separated by '|'.
-    std::vector<string> op_list = str_util::Split(pattern.op, '|');
-    for (const string& op : op_list) {
+    std::vector<std::string> op_list = str_util::Split(pattern.op, '|');
+    for (const std::string& op : op_list) {
       if (node_view->node()->op() == op) {
         op_type_matched = true;
         break;
@@ -117,12 +138,16 @@ bool SubGraphMatcher<MatchingDirection::kFollowInputs>::DoesOpTypePatternMatch(
       // match unless we look two level down the graphs.
       std::vector<int> pattern_child_indices(num_children);
       std::iota(pattern_child_indices.begin(), pattern_child_indices.end(), 0);
-      string op_name = pattern.op;
+      std::string op_name = pattern.op;
       if (IsCommutativeOp(op_name) && num_children == 2) {
         MutableNodeView* graph_child0_node_view =
             graph_view_->GetNode(graph_children[0].node_index());
-        if (!IsSame(pattern.children[0].op, graph_child0_node_view->GetOp()) &&
-            IsSame(pattern.children[1].op, graph_child0_node_view->GetOp()))
+        MutableNodeView* graph_child1_node_view =
+            graph_view_->GetNode(graph_children[1].node_index());
+        if ((!IsSame(pattern.children[0].op, graph_child0_node_view->GetOp()) &&
+             IsSame(pattern.children[1].op, graph_child0_node_view->GetOp())) ||
+            (!IsSame(pattern.children[1].op, graph_child1_node_view->GetOp()) &&
+             IsSame(pattern.children[0].op, graph_child1_node_view->GetOp())))
           std::swap(pattern_child_indices[0], pattern_child_indices[1]);
       }
       for (int i = 0; i < num_children; ++i) {
@@ -149,11 +174,11 @@ bool SubGraphMatcher<MatchingDirection::kFollowInputs>::DoesOpTypePatternMatch(
 template <>
 bool SubGraphMatcher<MatchingDirection::kFollowInputs>::GetMatchedNodes(
     const OpTypePattern& pattern,
-    const std::unordered_set<string>& nodes_to_preserve,
-    MutableNodeView* node_view, std::map<string, int>* matched_nodes_map,
+    const std::unordered_set<std::string>& nodes_to_preserve,
+    MutableNodeView* node_view, std::map<std::string, int>* matched_nodes_map,
     std::set<int>* remove_node_indices) {
   bool found_match = false;
-  match_.reset(new NodeViewMatch());
+  match_ = std::make_unique<NodeViewMatch>();
   if (DoesOpTypePatternMatch(pattern, node_view, match_.get())) {
     if (IsSafeNodesToRemove(nodes_to_preserve)) {
       found_match = true;

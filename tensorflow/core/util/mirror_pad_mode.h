@@ -22,6 +22,7 @@ limitations under the License.
 #include <string>
 
 #include "tensorflow/core/lib/core/status.h"
+#include "tensorflow/core/lib/core/stringpiece.h"
 
 namespace tensorflow {
 
@@ -38,14 +39,14 @@ enum class MirrorPadMode {
 
 // Return the string containing the list of valid padding modes, that can be
 // used as an Attr() in REGISTER_OP.
-string GetMirrorPadModeAttrString();
+std::string GetMirrorPadModeAttrString();
 
 // Forward declaration to avoid including core/framework/graph.proto.
 class NodeDef;
 
 // Specialization to parse an attribute directly into a MirrorPadMode enum.
-Status GetNodeAttr(const NodeDef& node_def, StringPiece attr_name,
-                   MirrorPadMode* value);
+absl::Status GetNodeAttr(const NodeDef& node_def, absl::string_view attr_name,
+                         MirrorPadMode* value);
 
 }  // end namespace tensorflow
 

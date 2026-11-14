@@ -21,7 +21,7 @@ namespace tensorflow {
 
 class DualLossUpdater {
  public:
-  virtual ~DualLossUpdater() {}
+  virtual ~DualLossUpdater() = default;
 
   // Compute update dual (alpha), based on a single example. Various strategies
   // can be employed here, like newton step and/or line search or approximate
@@ -52,7 +52,7 @@ class DualLossUpdater {
 
   // Converts binary example labels from 0.0 or 1.0 to appropriate range for
   // each loss function.
-  virtual Status ConvertLabel(float* const example_label) const = 0;
+  virtual absl::Status ConvertLabel(float* const example_label) const = 0;
 };
 
 }  // namespace tensorflow

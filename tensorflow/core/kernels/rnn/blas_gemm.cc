@@ -16,6 +16,7 @@ limitations under the License.
 #define EIGEN_USE_THREADS
 
 #if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
+#include "tensorflow/core/kernels/numeric_options_utils.h"
 #include "tensorflow/core/platform/stream_executor.h"
 #endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 
@@ -27,7 +28,7 @@ namespace tensorflow {
 namespace {
 template <typename T>
 se::DeviceMemory<T> AsDeviceMemory(const T* cuda_memory) {
-  se::DeviceMemoryBase wrapped(const_cast<T*>(cuda_memory));
+  stream_executor::DeviceAddressBase wrapped(const_cast<T*>(cuda_memory));
   se::DeviceMemory<T> typed(wrapped);
   return typed;
 }
@@ -37,10 +38,10 @@ se::DeviceMemory<T> AsDeviceMemory(const T* cuda_memory) {
 namespace functor {
 template <typename T>
 void TensorCuBlasGemm<T>::operator()(OpKernelContext* ctx, bool transa,
-                                     bool transb, uint64 m, uint64 n, uint64 k,
-                                     float alpha, const T* a, int lda,
-                                     const T* b, int ldb, float beta, T* c,
-                                     int ldc) {
+                                     bool transb, uint64_t m, uint64_t n,
+                                     uint64_t k, float alpha, const T* a,
+                                     int lda, const T* b, int ldb, float beta,
+                                     T* c, int ldc) {
 #if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
   se::blas::Transpose trans[] = {se::blas::Transpose::kNoTranspose,
                                  se::blas::Transpose::kTranspose};
@@ -48,11 +49,15 @@ void TensorCuBlasGemm<T>::operator()(OpKernelContext* ctx, bool transa,
   auto a_ptr = AsDeviceMemory(a);
   auto b_ptr = AsDeviceMemory(b);
   auto c_ptr = AsDeviceMemory(c);
+  auto* stream = ctx->op_device_context()->stream();
+  auto* blas = stream->parent()->AsBlas();
+  OP_REQUIRES(ctx, blas != nullptr, absl::InternalError("No BLAS for stream."));
 
   OP_REQUIRES_OK(
-      ctx, ctx->op_device_context()->stream()->ThenBlasGemm(
-               trans[transa], trans[transb], m, n, k, static_cast<T>(alpha),
-               a_ptr, lda, b_ptr, ldb, static_cast<T>(beta), &c_ptr, ldc));
+      ctx, blas->BlasGemm(stream, trans[transa], trans[transb], m, n, k,
+                          static_cast<T>(alpha), a_ptr, lda, b_ptr, ldb,
+                          static_cast<T>(beta), &c_ptr, ldc,
+                          GetNumericOptions(), se::blas::CallContext::kNone));
 #else
   ctx->SetStatus(errors::InvalidArgument("CuBlasGemm needs CUDA."));
 #endif

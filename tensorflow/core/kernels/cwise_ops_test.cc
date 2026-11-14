@@ -27,7 +27,7 @@ namespace {
 // Creates a Graph which applies a unary "func" on a 3D tensor of
 // type T with "num" elements.
 template <typename T>
-static Graph* Unary(const string& func, int num, DataType dtype) {
+static Graph* Unary(const std::string& func, int num, DataType dtype) {
   Graph* g = new Graph(OpRegistry::Global());
   Tensor data(dtype, TensorShape({64, 64, num / (64 * 64)}));
   CHECK_GT(data.NumElements(), 0);
@@ -55,6 +55,9 @@ int ColsFromArg(int arg) { return (arg % kRows); }
   BENCHMARK(BM_##DEVICE##_##FUNC##_##TYPE)                                 \
       ->UseRealTime()                                                      \
       ->Range(4 << 10, 1 << 20);
+
+BM_UNARY(cpu, LeakyRelu, float, DT_FLOAT);
+BM_UNARY(cpu, LeakyRelu, bfloat16, DT_BFLOAT16);
 
 BM_UNARY(cpu, Floor, float, DT_FLOAT);
 #if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
@@ -94,7 +97,7 @@ BM_UNARY(gpu, Round, float, DT_FLOAT);
 #endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 
 // data func scalar.
-Graph* BinaryScalar(int num, const string& func) {
+Graph* BinaryScalar(int num, const std::string& func) {
   Graph* g = new Graph(OpRegistry::Global());
   Tensor lhs(DT_FLOAT, TensorShape({64, 64, num / (64 * 64)}));
   lhs.flat<float>().setRandom();

@@ -14,12 +14,22 @@ limitations under the License.
 ==============================================================================*/
 #include "tensorflow/c/experimental/ops/gen/common/controller.h"
 
+#include <string>
+#include <vector>
+
+#include "absl/log/check.h"
 #include "absl/strings/substitute.h"
+#include "tensorflow/c/experimental/ops/gen/common/path_config.h"
+#include "tensorflow/c/experimental/ops/gen/common/source_code.h"
+#include "tensorflow/c/experimental/ops/gen/model/op_spec.h"
+#include "xla/tsl/platform/status.h"
+#include "tensorflow/core/framework/api_def.pb.h"
 #include "tensorflow/core/framework/op.h"
-#include "tensorflow/core/lib/io/path.h"
-#include "tensorflow/core/lib/strings/str_util.h"
+#include "tensorflow/core/framework/op_def.pb.h"
+#include "tensorflow/core/framework/op_gen_lib.h"
 #include "tensorflow/core/platform/env.h"
 #include "tensorflow/core/platform/logging.h"
+#include "tensorflow/core/platform/path.h"
 
 namespace tensorflow {
 namespace generator {
@@ -34,7 +44,7 @@ Controller::Controller(PathConfig path_config, Env* env)
 }
 Controller::~Controller() { delete api_def_map_; }
 
-const void Controller::WriteFile(const string& file_path,
+const void Controller::WriteFile(const std::string& file_path,
                                  const SourceCode& code) const {
   TF_CHECK_OK(WriteStringToFile(env_, file_path, code.Render())) << file_path;
 }
@@ -51,8 +61,9 @@ void Controller::InitializeOpApi() {
   api_def_map_ = new ApiDefMap(op_list_);
   for (const auto& op : op_list_.op()) {
     for (const auto& dir : path_config_.api_dirs) {
-      const string file_name = absl::Substitute("api_def_$0.pbtxt", op.name());
-      const string file_path = io::JoinPath(dir, file_name);
+      const std::string file_name =
+          absl::Substitute("api_def_$0.pbtxt", op.name());
+      const std::string file_path = io::JoinPath(dir, file_name);
       if (env_->FileExists(file_path).ok()) {
         TF_CHECK_OK(api_def_map_->LoadFile(env_, file_path)) << file_path;
       } else {

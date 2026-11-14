@@ -15,25 +15,30 @@ limitations under the License.
 #include "tensorflow/lite/tools/optimize/quantize_model.h"
 
 #include <algorithm>
+#include <cmath>
+#include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <limits>
+#include <map>
 #include <memory>
+#include <set>
 #include <string>
-#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
 
 #include "flatbuffers/flexbuffers.h"
 #include "absl/strings/str_cat.h"
+#include "flatbuffers/flatbuffer_builder.h"  // from @flatbuffers
+#include "tensorflow/compiler/mlir/lite/tools/optimize/operator_property.h"
 #include "tensorflow/lite/context.h"
 #include "tensorflow/lite/core/api/error_reporter.h"
+#include "tensorflow/lite/core/model.h"
 #include "tensorflow/lite/kernels/internal/cppmath.h"
-#include "tensorflow/lite/model.h"
 #include "tensorflow/lite/schema/schema_generated.h"
 #include "tensorflow/lite/schema/schema_utils.h"
 #include "tensorflow/lite/tools/optimize/model_utils.h"
-#include "tensorflow/lite/tools/optimize/operator_property.h"
 #include "tensorflow/lite/tools/optimize/quantization_utils.h"
 
 namespace tflite {
@@ -109,7 +114,7 @@ TfLiteStatus DuplicateBiasesWithMultipleUses(ModelT* model,
           new_tensor->type = bias_tensor->type;
           if (bias_tensor->quantization) {
             new_tensor->quantization =
-                absl::make_unique<QuantizationParametersT>();
+                std::make_unique<QuantizationParametersT>();
             new_tensor->quantization->scale.assign(
                 bias_tensor->quantization->scale.begin(),
                 bias_tensor->quantization->scale.end());
@@ -146,7 +151,8 @@ bool IsFloatTensor(const SubGraphT* subgraph, int32_t tensor_idx) {
 operator_property::OperatorProperty GetOperatorProperty(
     const std::unordered_set<string>& operator_names, const ModelT* model,
     int subgraph_index, int op_idx, const string& operator_name,
-    const TensorType& activations_type, bool disable_per_channel = false) {
+    const TensorType& activations_type, bool disable_per_channel = false,
+    bool disable_per_channel_quantization_for_dense_layers = false) {
   operator_property::OperatorProperty property =
       operator_property::GetOperatorProperty(model, subgraph_index, op_idx);
   const SubGraphT* subgraph = model->subgraphs[subgraph_index].get();
@@ -171,12 +177,48 @@ operator_property::OperatorProperty GetOperatorProperty(
       }
     }
   }
+  if (disable_per_channel_quantization_for_dense_layers &&
+      op_code == BuiltinOperator_FULLY_CONNECTED) {
+    for (auto& input : property.inputs) {
+      if (input.second.per_axis) {
+        input.second.per_axis = false;
+      }
+    }
+  }
   return property;
 }
 
 bool IsRealValueOp(const std::unordered_set<string>& real_value_op_set,
                    const string& operator_name) {
   return real_value_op_set.find(operator_name) != real_value_op_set.end();
+}
+
+// Utility function to determine if tensor is constant and only has one use.
+bool IsConstantWithOneUse(const ModelT* model, const SubGraphT* subgraph,
+                          const int tensor_id) {
+  if (!subgraph || (tensor_id >= subgraph->tensors.size())) {
+    return false;
+  }
+  const auto& tensor = subgraph->tensors[tensor_id];
+  if (!tensor || !model || (tensor->buffer < 0) ||
+      (tensor->buffer >= model->buffers.size()) ||
+      (!model->buffers[tensor->buffer]) ||
+      (model->buffers[tensor->buffer]->data.empty())) {
+    return false;
+  }
+  int uses = 0;
+  for (size_t op_idx = 0; op_idx < subgraph->operators.size(); op_idx++) {
+    const auto& op = subgraph->operators[op_idx];
+    if (!op) {
+      continue;
+    }
+    const std::vector<int32_t>& inputs = op->inputs;
+    if ((std::find(inputs.begin(), inputs.end(), tensor_id) != inputs.end()) &&
+        (++uses > 1)) {
+      return false;
+    }
+  }
+  return true;
 }
 
 // Creates a set that contains all quantizable ops that happen to take a
@@ -244,13 +286,62 @@ std::unordered_set<string> PopulateRealValueOpSet(
   return real_value_op_set;
 }
 
+// Set quantized_bias_type for CONV_2D/FULLY_CONNECTED/TRANSPOSE_CONV so that
+// the accumulator is initialized to the appropriate default value when the bias
+// is NULL.
+void SetOperatorPropertyBiasType(ModelT* model, const TensorType& bias_type) {
+  for (int subgraph_idx = 0, end = model->subgraphs.size(); subgraph_idx < end;
+       subgraph_idx++) {
+    SubGraphT* subgraph = model->subgraphs.at(subgraph_idx).get();
+    // Iterate backward to avoid messing with index.
+    for (int op_idx = subgraph->operators.size() - 1; op_idx >= 0; op_idx--) {
+      OperatorT* op = subgraph->operators[op_idx].get();
+      OperatorCodeT* op_code = model->operator_codes[op->opcode_index].get();
+      if (op_code && op_code->builtin_code == BuiltinOperator_FULLY_CONNECTED) {
+        auto* options = op->builtin_options.AsFullyConnectedOptions();
+        if (options) {
+          options->quantized_bias_type = bias_type;
+        }
+      } else if (op_code && op_code->builtin_code == BuiltinOperator_CONV_2D) {
+        auto* options = op->builtin_options.AsConv2DOptions();
+        if (options) {
+          options->quantized_bias_type = bias_type;
+        }
+      } else if (op_code &&
+                 op_code->builtin_code == BuiltinOperator_TRANSPOSE_CONV) {
+        auto* options = op->builtin_options.AsTransposeConvOptions();
+        if (options) {
+          options->quantized_bias_type = bias_type;
+        }
+      }
+    }
+  }
+}
+
 TfLiteStatus QuantizeBias(ModelT* model, const TensorT* input_tensor,
                           const TensorT* weight_tensor, TensorT* bias_tensor,
                           bool is_per_channel, int channel_dim_index,
-                          const TensorType& activations_type,
+                          const TensorType& bias_type,
                           ErrorReporter* error_reporter) {
   if (bias_tensor->shape.size() != 1) {
     TF_LITE_REPORT_ERROR(error_reporter, "Expected bias tensor shape to be 1.");
+    return kTfLiteError;
+  }
+
+  if (input_tensor->type == tflite::TensorType_INT8 &&
+      bias_type != tflite::TensorType_INT32) {
+    TF_LITE_REPORT_ERROR(
+        error_reporter,
+        "Expected bias type to be TensorType_INT32 for Int8Quant.");
+    return kTfLiteError;
+  }
+
+  if (input_tensor->type == tflite::TensorType_INT16 &&
+      bias_type != tflite::TensorType_INT32 &&
+      bias_type != tflite::TensorType_INT64) {
+    TF_LITE_REPORT_ERROR(error_reporter,
+                         "Expected bias type to be TensorType_INT32 or "
+                         "TensorType_INT64 for Int16Quant.");
     return kTfLiteError;
   }
 
@@ -279,7 +370,7 @@ TfLiteStatus QuantizeBias(ModelT* model, const TensorT* input_tensor,
                            weight_scales.size());
       return kTfLiteError;
     }
-    if (activations_type == tflite::TensorType_INT16) {
+    if (bias_type == tflite::TensorType_INT64) {
       return utils::SymmetricPerChannelBiasQuantize<std::int64_t>(
           model, bias_tensor, input_tensor->quantization->scale[0],
           weight_scales.data(), channel_dim_size, error_reporter);
@@ -296,7 +387,7 @@ TfLiteStatus QuantizeBias(ModelT* model, const TensorT* input_tensor,
           weight_scales.size());
       return kTfLiteError;
     }
-    if (activations_type == tflite::TensorType_INT16) {
+    if (bias_type == tflite::TensorType_INT64) {
       return utils::SymmetricPerLayerBiasQuantize<std::int64_t>(
           model, bias_tensor,
           input_tensor->quantization->scale[0] * weight_scales[0],
@@ -492,6 +583,7 @@ int32_t SetOutputType(ModelT* model, SubGraphT* subgraph,
 TfLiteStatus SetInputAndOutputTypes(ModelT* model, const TensorType& input_type,
                                     const TensorType& output_type,
                                     const TensorType& activations_type,
+                                    bool handle_external_state,
                                     ErrorReporter* error_reporter) {
   for (int subgraph_idx = 0; subgraph_idx < model->subgraphs.size();
        subgraph_idx++) {
@@ -514,8 +606,13 @@ TfLiteStatus SetInputAndOutputTypes(ModelT* model, const TensorType& input_type,
             EnumNameTensorType(tensor->type));
         return kTfLiteError;
       }
+      // Keeps the state input tensors in their original type(same as activation
+      // type). But changes the input type of input data/features.
       const int32_t input_idx = SetInputType(
-          model, subgraph, subgraph->inputs[i], input_type, activations_type);
+          model, subgraph, subgraph->inputs[i],
+          ((i > 0 && handle_external_state) ? activations_type : input_type),
+          activations_type);
+
       if (input_idx < 0) {
         continue;
       }
@@ -540,8 +637,12 @@ TfLiteStatus SetInputAndOutputTypes(ModelT* model, const TensorType& input_type,
             EnumNameTensorType(tensor->type));
         return kTfLiteError;
       }
+      // Keeps the state output tensors in their original type. Avoids extra OP.
       const int32_t output_idx = SetOutputType(
-          model, subgraph, subgraph->outputs[i], output_type, activations_type);
+          model, subgraph, subgraph->outputs[i],
+          ((i > 0 && handle_external_state) ? activations_type : output_type),
+          activations_type);
+
       if (output_idx < 0) {
         continue;
       }
@@ -557,6 +658,82 @@ TfLiteStatus SetInputAndOutputTypes(ModelT* model, const TensorType& input_type,
     }
   }
   return kTfLiteOk;
+}
+
+// Requantize a constant quantized tensor.
+template <typename TensorDataType>
+TfLiteStatus RequantizeConstant(
+    const std::vector<uint8_t>& buffer_data, const TensorT* tensor,
+    const std::unique_ptr<QuantizationParametersT>& new_quantization,
+    std::vector<uint8_t>& new_buffer_data) {
+  if (new_buffer_data.size() != buffer_data.size()) {
+    new_buffer_data.resize(buffer_data.size());
+  }
+  const auto& quantization = tensor->quantization;
+  const std::vector<float>& scales = quantization->scale;
+  if (scales.empty()) {
+    // No existing quantization, assumes that new quantization parameters
+    // are correct.
+    new_buffer_data.assign(buffer_data.begin(), buffer_data.end());
+    return kTfLiteOk;
+  }
+  const std::vector<int64_t>& zero_points = quantization->zero_point;
+  const int num_elements = buffer_data.size() / sizeof(TensorDataType);
+  std::vector<float> float_values(num_elements);
+  const TensorDataType* buffer_values =
+      reinterpret_cast<const TensorDataType*>(buffer_data.data());
+  // This logic is for per-channel quantization, but works for per-tensor.
+  const int kPerChannelMaxDim = 4;
+  const std::vector<int32_t>& tensor_shape = tensor->shape;
+  RuntimeShape unextended_tensor_dims(tensor_shape.size(), tensor_shape.data());
+  RuntimeShape tensor_dims =
+      RuntimeShape::ExtendedShape(kPerChannelMaxDim, unextended_tensor_dims);
+  const int channel_dim_index = quantization->quantized_dimension +
+                                kPerChannelMaxDim -
+                                unextended_tensor_dims.DimensionsCount();
+  int indices[kPerChannelMaxDim];
+  for (indices[0] = 0; indices[0] < tensor_dims.Dims(0); indices[0]++) {
+    for (indices[1] = 0; indices[1] < tensor_dims.Dims(1); indices[1]++) {
+      for (indices[2] = 0; indices[2] < tensor_dims.Dims(2); indices[2]++) {
+        for (indices[3] = 0; indices[3] < tensor_dims.Dims(3); indices[3]++) {
+          const float scale = scales.size() > 1
+                                  ? scales[indices[channel_dim_index]]
+                                  : scales[0];
+          const int64_t zp = zero_points.size() > 1
+                                 ? zero_points[indices[channel_dim_index]]
+                                 : zero_points[0];
+          const int index = Offset(tensor_dims, indices);
+          float_values[index] = scale * (buffer_values[index] - zp);
+        }
+      }
+    }
+  }
+
+  // Only have to deal with per-tensor for new parameters.
+  if (tensor->type == TensorType_INT16) {
+    std::vector<int16_t> requant_int16 = utils::SymmetricQuantizeFloatsToInt16(
+        float_values.data(), float_values.size(), new_quantization->scale[0]);
+    uint8_t* uint8_buffer = reinterpret_cast<uint8_t*>(requant_int16.data());
+    new_buffer_data.assign(uint8_buffer, uint8_buffer + buffer_data.size());
+    return kTfLiteOk;
+  } else if (tensor->type == TensorType_INT8) {
+    const int32_t q_min = std::numeric_limits<int8_t>::min();
+    const int32_t q_max = std::numeric_limits<int8_t>::max();
+    const float scaling_factor = new_quantization->scale[0];
+    const int32_t zp = new_quantization->zero_point[0];
+    const auto& rescale = [&scaling_factor, &zp, &q_min,
+                           &q_max](float f) -> uint8_t {
+      const float scaling_factor_inv =
+          (scaling_factor == 0) ? 0 : 1.0 / scaling_factor;
+      int32_t q_i32 = TfLiteRound(f * scaling_factor_inv) + zp;
+      int8_t q = std::min(std::max(q_i32, q_min), q_max);
+      return *(reinterpret_cast<uint8_t*>(&q));
+    };
+    std::transform(float_values.begin(), float_values.end(),
+                   new_buffer_data.begin(), rescale);
+    return kTfLiteOk;
+  }
+  return kTfLiteError;
 }
 
 // Apply constraints to ops if they have any.
@@ -584,13 +761,13 @@ TfLiteStatus ApplyConstraints(
           !IsRealValueOp(real_value_op_set, operator_name)) {
         continue;
       }
+      TensorT* output_tensor = subgraph->tensors[op->outputs[0]].get();
       if (!property.arbitrary_inputs ||
-          !property.restrict_same_input_output_scale) {
+          !property.restrict_same_input_output_scale(output_tensor->type)) {
         continue;
       }
       // If ApplyConstraints and requant is needed, use the min of min and max
       // of max, which means using the scale and zero point of output.
-      TensorT* output_tensor = subgraph->tensors[op->outputs[0]].get();
       if (!utils::QuantizationParametersExist(output_tensor)) {
         TF_LITE_REPORT_ERROR(
             error_reporter,
@@ -613,6 +790,30 @@ TfLiteStatus ApplyConstraints(
             input_tensor->quantization->zero_point[0] == output_zp) {
           // This input does not need to be requantized.
           continue;
+        }
+
+        if (IsConstantWithOneUse(model, subgraph, op->inputs[input_idx])) {
+          auto quantization = std::make_unique<QuantizationParametersT>();
+          quantization->scale.push_back(output_scale);
+          quantization->zero_point.push_back(output_zp);
+          const std::vector<uint8_t>& buffer_data =
+              model->buffers[input_tensor->buffer]->data;
+          std::vector<uint8_t> new_buffer_data;
+          TfLiteStatus requant_status = kTfLiteError;
+          if (input_tensor->type == TensorType_INT8) {
+            requant_status = RequantizeConstant<int8_t>(
+                buffer_data, input_tensor, quantization, new_buffer_data);
+          } else if (input_tensor->type == TensorType_INT16) {
+            requant_status = RequantizeConstant<int16_t>(
+                buffer_data, input_tensor, quantization, new_buffer_data);
+          }
+          if (requant_status == kTfLiteOk) {
+            model->buffers[input_tensor->buffer]->data = new_buffer_data;
+            input_tensor->quantization = std::move(quantization);
+            continue;
+          } else {
+            quantization.release();
+          }
         }
 
         std::unique_ptr<TensorT> additional_tensor;
@@ -706,11 +907,11 @@ std::vector<std::pair<int, operator_property::TensorProperty>> GetOutputs(
 }
 
 bool ShouldRestrictSameInputOutputScale(
-    operator_property::OperatorProperty property) {
+    operator_property::OperatorProperty property, TensorType tensor_type) {
   // Ops with multiple inputs (i.e. concat, max and min) gets restricted in
   // ApplyConstraints.
   return (!property.arbitrary_inputs &&
-          property.restrict_same_input_output_scale);
+          property.restrict_same_input_output_scale(tensor_type));
 }
 
 bool IsSubgraphInput(SubGraphT* subgraph, int32_t index) {
@@ -758,7 +959,7 @@ TfLiteStatus QuantizeOpInput(
       // per-channel and one per-layer.
       bool quantize_const_input = false;
       if (activations_type == TensorType_INT16 &&
-          (property.restrict_same_input_output_scale ||
+          (property.restrict_same_input_output_scale(tensor->type) ||
            property.quantize_input_as_activations)) {
         quantize_const_input = true;
       }
@@ -873,7 +1074,7 @@ TfLiteStatus QuantizeOpInput(
         utils::MakeTensor(tensor->name + "_" + type_string, tensor->shape,
                           tensor->shape_signature, activations_type,
                           &op_output);
-        op_output->quantization = absl::make_unique<QuantizationParametersT>();
+        op_output->quantization = std::make_unique<QuantizationParametersT>();
         op_output->quantization->min.push_back(tensor->quantization->min[0]);
         op_output->quantization->max.push_back(tensor->quantization->max[0]);
         TF_LITE_ENSURE_STATUS(utils::QuantizeActivation(
@@ -947,7 +1148,7 @@ TfLiteStatus QuantizeOpOutput(
     // Skip output if it has been quantized.
     return kTfLiteOk;
   }
-  if (ShouldRestrictSameInputOutputScale(property)) {
+  if (ShouldRestrictSameInputOutputScale(property, output_tensor->type)) {
     // Copy quantization parameter. For average pool, max pool, etc
     // min/max can be different but we want them to be the same.
     // Get scale and zero point of input.
@@ -976,7 +1177,7 @@ TfLiteStatus QuantizeOpOutput(
     const int32_t input_zero_point = input_tensor->quantization->zero_point[0];
 
     // Apply to output.
-    output_tensor->quantization = absl::make_unique<QuantizationParametersT>();
+    output_tensor->quantization = std::make_unique<QuantizationParametersT>();
     output_tensor->quantization->scale.push_back(input_scale);
     output_tensor->quantization->zero_point.push_back(input_zero_point);
     if (!input_tensor->quantization->min.empty()) {
@@ -994,7 +1195,7 @@ TfLiteStatus QuantizeOpOutput(
                                   : tensor_property.restricted_value_int8;
 
     // Apply to output.
-    output_tensor->quantization = absl::make_unique<QuantizationParametersT>();
+    output_tensor->quantization = std::make_unique<QuantizationParametersT>();
     output_tensor->quantization->scale.push_back(scale_and_zp.first);
     output_tensor->quantization->zero_point.push_back(scale_and_zp.second);
     output_tensor->type = activations_type;
@@ -1122,7 +1323,7 @@ TfLiteStatus QuantizeSharedRange(ModelT* model, ErrorReporter* error_reporter) {
 
           // Asmmetric quantization to 8 bit.
           auto quantization_params =
-              absl::make_unique<QuantizationParametersT>();
+              std::make_unique<QuantizationParametersT>();
           utils::GetAsymmetricQuantizationParams(
               min_of_min, max_of_max, -128, 127, quantization_params.get());
 
@@ -1130,7 +1331,7 @@ TfLiteStatus QuantizeSharedRange(ModelT* model, ErrorReporter* error_reporter) {
           const float scale = quantization_params->scale[0];
           const int32 zero_point = quantization_params->zero_point[0];
           for (TensorT* tensor : {tensor_1, tensor_2}) {
-            tensor->quantization = absl::make_unique<QuantizationParametersT>();
+            tensor->quantization = std::make_unique<QuantizationParametersT>();
             tensor->quantization->scale.push_back(scale);
             tensor->quantization->zero_point.push_back(zero_point);
             tensor->type = TensorType_INT8;
@@ -1288,7 +1489,7 @@ TfLiteStatus QuantizeResources(ModelT* model,
         }
         if (!var_tensor->quantization) {
           var_tensor->quantization =
-              absl::make_unique<QuantizationParametersT>();
+              std::make_unique<QuantizationParametersT>();
           var_tensor->quantization->min.push_back(
               resource_min_max_map[name].first);
           var_tensor->quantization->max.push_back(
@@ -1322,6 +1523,7 @@ TfLiteStatus QuantizeWeightsInputOutput(
     const std::unordered_set<string>& operator_names,
     const std::unordered_set<string>& real_value_op_set,
     const TensorType& activations_type, bool disable_per_channel,
+    bool disable_per_channel_quantization_for_dense_layers,
     ErrorReporter* error_reporter) {
   // Flag to track unsupported ops.
   bool quantization_not_supported = false;
@@ -1342,7 +1544,8 @@ TfLiteStatus QuantizeWeightsInputOutput(
                                        : subgraph->tensors[op->inputs[0]]->name;
       operator_property::OperatorProperty property = GetOperatorProperty(
           operator_names, model, subgraph_idx, op_idx, operator_name,
-          activations_type, disable_per_channel);
+          activations_type, disable_per_channel,
+          disable_per_channel_quantization_for_dense_layers);
       if (!IsRealValueOp(real_value_op_set, operator_name)) {
         continue;
       }
@@ -1392,12 +1595,13 @@ TfLiteStatus QuantizeWeightsInputOutput(
 }
 
 // Quantize bias.
-TfLiteStatus QuantizeBiases(ModelT* model,
-                            const std::unordered_set<string>& operator_names,
-                            const std::unordered_set<string>& real_value_op_set,
-                            const TensorType& activations_type,
-                            bool disable_per_channel,
-                            ErrorReporter* error_reporter) {
+TfLiteStatus QuantizeBiases(
+    ModelT* model, const std::unordered_set<string>& operator_names,
+    const std::unordered_set<string>& real_value_op_set,
+    const TensorType& activations_type, const TensorType& bias_type,
+    bool disable_per_channel,
+    bool disable_per_channel_quantization_for_dense_layers,
+    ErrorReporter* error_reporter) {
   for (size_t subgraph_idx = 0; subgraph_idx < model->subgraphs.size();
        subgraph_idx++) {
     SubGraphT* subgraph = model->subgraphs.at(subgraph_idx).get();
@@ -1411,7 +1615,8 @@ TfLiteStatus QuantizeBiases(ModelT* model,
       const string operator_name = subgraph->tensors[op->outputs[0]]->name;
       operator_property::OperatorProperty property = GetOperatorProperty(
           operator_names, model, subgraph_idx, op_idx, operator_name,
-          activations_type, disable_per_channel);
+          activations_type, disable_per_channel,
+          disable_per_channel_quantization_for_dense_layers);
       if (!property.quantizable ||
           !IsRealValueOp(real_value_op_set, operator_name)) {
         continue;
@@ -1435,16 +1640,21 @@ TfLiteStatus QuantizeBiases(ModelT* model,
                                    subgraph_idx);
               return kTfLiteError;
             }
-            TensorT* input_tensor =
-                subgraph->tensors[op->inputs[property.inputs[0].first]].get();
-            TensorT* weight_tensor =
-                subgraph->tensors[op->inputs[property.inputs[1].first]].get();
+            const int32_t input_tensor_idx =
+                op->inputs[property.inputs[0].first];
+            TensorT* input_tensor = subgraph->tensors[input_tensor_idx].get();
+            const int32_t weight_tensor_idx =
+                op->inputs[property.inputs[1].first];
+            TensorT* weight_tensor = subgraph->tensors[weight_tensor_idx].get();
             operator_property::TensorProperty weight_property =
                 property.inputs[1].second;
+
+            const bool per_axis =
+                weight_property.per_axis &&
+                utils::HasBuffer(model, subgraph, weight_tensor_idx);
             TF_LITE_ENSURE_STATUS(QuantizeBias(
-                model, input_tensor, weight_tensor, bias_tensor,
-                weight_property.per_axis, weight_property.per_axis_index,
-                activations_type, error_reporter));
+                model, input_tensor, weight_tensor, bias_tensor, per_axis,
+                weight_property.per_axis_index, bias_type, error_reporter));
           }
         } else {
           // If bias is already quantized, make sure it is quantized to 32 bit.
@@ -1487,6 +1697,7 @@ TfLiteStatus FillQuantizationParams(
     ModelT* model, const std::unordered_set<string>& operator_names,
     const std::unordered_set<string>& real_value_op_set,
     const TensorType& activations_type, bool disable_per_channel,
+    bool disable_per_channel_quantization_for_dense_layers,
     ErrorReporter* error_reporter) {
   for (size_t subgraph_idx = 0; subgraph_idx < model->subgraphs.size();
        subgraph_idx++) {
@@ -1500,9 +1711,10 @@ TfLiteStatus FillQuantizationParams(
       }
       if (!op->outputs.empty()) {
         const string operator_name = subgraph->tensors[op->outputs[0]]->name;
-        property = GetOperatorProperty(operator_names, model, subgraph_idx,
-                                       op_idx, operator_name, activations_type,
-                                       disable_per_channel);
+        property = GetOperatorProperty(
+            operator_names, model, subgraph_idx, op_idx, operator_name,
+            activations_type, disable_per_channel,
+            disable_per_channel_quantization_for_dense_layers);
         if (!IsRealValueOp(real_value_op_set, operator_name)) {
           continue;
         }
@@ -1529,24 +1741,15 @@ TfLiteStatus FillQuantizationParams(
               reinterpret_cast<const float*>(buffer->data.data());
 
           if (tensor->quantization == nullptr) {
-            tensor->quantization = absl::make_unique<QuantizationParametersT>();
+            tensor->quantization = std::make_unique<QuantizationParametersT>();
           }
 
           // Fill per channel max and min with respect to channel_dim_index.
           if (input.second.per_axis) {
-            if (tensor->shape.size() == 4) {
-              int32_t channel_dim_index = input.second.per_axis_index;
-              TF_LITE_ENSURE_STATUS(utils::FillPerChannelMinMax(
-                  float_input_data, tensor->shape, channel_dim_index,
-                  tensor->quantization.get(), error_reporter));
-            } else {
-              TF_LITE_REPORT_ERROR(
-                  error_reporter,
-                  "Could not fill max min for tensor as the dimension is %d "
-                  "and not 4 as expected.",
-                  tensor->shape.size());
-              return kTfLiteError;
-            }
+            int32_t channel_dim_index = input.second.per_axis_index;
+            TF_LITE_ENSURE_STATUS(utils::FillPerChannelMinMax(
+                float_input_data, tensor->shape, channel_dim_index,
+                tensor->quantization.get(), error_reporter));
 
             // Fill per layer max and min.
           } else if (!utils::HasMinMax(tensor) && !input.second.per_axis &&
@@ -1595,8 +1798,8 @@ TfLiteStatus FillQuantizationParams(
           return kTfLiteError;
         }
       }  // loop over op inputs
-    }    // loop over ops
-  }      // loop over subgraphs
+    }  // loop over ops
+  }  // loop over subgraphs
   return kTfLiteOk;
 }
 
@@ -1605,6 +1808,7 @@ TfLiteStatus EnsureBiasScaleCompatibility(
     ModelT* model, const std::unordered_set<string>& operator_names,
     const std::unordered_set<string>& real_value_op_set,
     const TensorType& activations_type, bool disable_per_channel,
+    bool disable_per_channel_quantization_for_dense_layers,
     ErrorReporter* error_reporter) {
   for (size_t subgraph_idx = 0; subgraph_idx < model->subgraphs.size();
        subgraph_idx++) {
@@ -1617,7 +1821,8 @@ TfLiteStatus EnsureBiasScaleCompatibility(
       const string operator_name = subgraph->tensors[op->outputs[0]]->name;
       operator_property::OperatorProperty property = GetOperatorProperty(
           operator_names, model, subgraph_idx, op_idx, operator_name,
-          activations_type, disable_per_channel);
+          activations_type, disable_per_channel,
+          disable_per_channel_quantization_for_dense_layers);
       if (!IsRealValueOp(real_value_op_set, operator_name)) {
         continue;
       }
@@ -1646,10 +1851,11 @@ TfLiteStatus EnsureBiasScaleCompatibility(
 
         if (!property.arbitrary_inputs && property.quantizable) {
           // Get input and weight tensors.
-          TensorT* input_tensor =
-              subgraph->tensors[op->inputs[property.inputs[0].first]].get();
-          TensorT* weight_tensor =
-              subgraph->tensors[op->inputs[property.inputs[1].first]].get();
+          const int32_t input_tensor_idx = op->inputs[property.inputs[0].first];
+          TensorT* input_tensor = subgraph->tensors[input_tensor_idx].get();
+          const int32_t weight_tensor_idx =
+              op->inputs[property.inputs[1].first];
+          TensorT* weight_tensor = subgraph->tensors[weight_tensor_idx].get();
           operator_property::TensorProperty weight_property =
               property.inputs[1].second;
           TF_LITE_ENSURE(error_reporter, input_tensor->quantization);
@@ -1685,7 +1891,8 @@ TfLiteStatus EnsureBiasScaleCompatibility(
           }
 
           // Ensure the tensor dimensions are compatible.
-          if (weight_property.per_axis) {
+          if (weight_property.per_axis &&
+              utils::HasBuffer(model, subgraph, weight_tensor_idx)) {
             if (bias_tensor->shape[0] !=
                 weight_tensor->shape[weight_property.per_axis_index]) {
               TF_LITE_REPORT_ERROR(
@@ -1749,22 +1956,25 @@ TfLiteStatus EnsureBiasScaleCompatibility(
 }  // namespace
 
 // Assumes that the operators in the model have been topologically sorted.
-TfLiteStatus QuantizeModel(flatbuffers::FlatBufferBuilder* builder,
-                           ModelT* model, const TensorType& input_type,
-                           const TensorType& output_type, bool allow_float,
-                           const std::unordered_set<string>& operator_names,
-                           const TensorType& activations_type,
-                           bool disable_per_channel,
-                           ErrorReporter* error_reporter) {
+TfLiteStatus QuantizeModel(
+    flatbuffers::FlatBufferBuilder* builder, ModelT* model,
+    const TensorType& input_type, const TensorType& output_type,
+    bool allow_float, const std::unordered_set<string>& operator_names,
+    const TensorType& activations_type, const TensorType& bias_type,
+    bool disable_per_channel,
+    bool disable_per_channel_quantization_for_dense_layers,
+    ErrorReporter* error_reporter, bool handle_external_state = false) {
   auto real_value_op_set =
       PopulateRealValueOpSet(model, operator_names, activations_type);
   TF_LITE_ENSURE_STATUS(DuplicateBiasesWithMultipleUses(model, error_reporter));
   TF_LITE_ENSURE_STATUS(FillQuantizationParams(
       model, operator_names, real_value_op_set, activations_type,
-      disable_per_channel, error_reporter));
+      disable_per_channel, disable_per_channel_quantization_for_dense_layers,
+      error_reporter));
   TF_LITE_ENSURE_STATUS(EnsureBiasScaleCompatibility(
       model, operator_names, real_value_op_set, activations_type,
-      disable_per_channel, error_reporter));
+      disable_per_channel, disable_per_channel_quantization_for_dense_layers,
+      error_reporter));
   TF_LITE_ENSURE_STATUS(
       QuantizeIntermediateTensors(model, activations_type, error_reporter));
   TF_LITE_ENSURE_STATUS(QuantizeSharedRange(model, error_reporter));
@@ -1772,16 +1982,20 @@ TfLiteStatus QuantizeModel(flatbuffers::FlatBufferBuilder* builder,
       QuantizeResources(model, activations_type, error_reporter));
   TF_LITE_ENSURE_STATUS(QuantizeWeightsInputOutput(
       model, allow_float, operator_names, real_value_op_set, activations_type,
-      disable_per_channel, error_reporter));
+      disable_per_channel, disable_per_channel_quantization_for_dense_layers,
+      error_reporter));
   TF_LITE_ENSURE_STATUS(ApplyConstraints(model, operator_names,
                                          real_value_op_set, activations_type,
                                          error_reporter));
-  TF_LITE_ENSURE_STATUS(QuantizeBiases(model, operator_names, real_value_op_set,
-                                       activations_type, disable_per_channel,
-                                       error_reporter));
+  SetOperatorPropertyBiasType(model, bias_type);
+  TF_LITE_ENSURE_STATUS(QuantizeBiases(
+      model, operator_names, real_value_op_set, activations_type, bias_type,
+      disable_per_channel, disable_per_channel_quantization_for_dense_layers,
+      error_reporter));
   utils::SetOperatorCodeVersion(model);
-  TF_LITE_ENSURE_STATUS(SetInputAndOutputTypes(
-      model, input_type, output_type, activations_type, error_reporter));
+  TF_LITE_ENSURE_STATUS(
+      SetInputAndOutputTypes(model, input_type, output_type, activations_type,
+                             handle_external_state, error_reporter));
   SetOperatorPropertyADDSUBOperator(model, activations_type);
   flatbuffers::Offset<Model> output_model_location =
       Model::Pack(*builder, model);
@@ -1796,32 +2010,42 @@ TfLiteStatus QuantizeModel(flatbuffers::FlatBufferBuilder* builder,
                            const TensorType& output_type, bool allow_float,
                            const std::unordered_set<string>& operator_names,
                            const TensorType& activations_type,
+                           const TensorType& bias_type,
                            ErrorReporter* error_reporter) {
-  return QuantizeModel(builder, model, input_type, output_type, allow_float,
-                       operator_names, activations_type,
-                       /*disable_per_channel=*/false, error_reporter);
-}
-
-TfLiteStatus QuantizeModelAllOperators(flatbuffers::FlatBufferBuilder* builder,
-                                       ModelT* model,
-                                       const TensorType& input_type,
-                                       const TensorType& output_type,
-                                       bool allow_float,
-                                       const TensorType& activations_type,
-                                       ErrorReporter* error_reporter) {
-  return QuantizeModel(builder, model, input_type, output_type, allow_float,
-                       GetAllOperatorOutputs(model), activations_type,
-                       /*disable_per_channel=*/false, error_reporter);
+  return QuantizeModel(
+      builder, model, input_type, output_type, allow_float, operator_names,
+      activations_type,
+      /*bias_type=*/bias_type,
+      /*disable_per_channel=*/false,
+      /*disable_per_channel_quantization_for_dense_layers=*/false,
+      error_reporter);
 }
 
 TfLiteStatus QuantizeModelAllOperators(
     flatbuffers::FlatBufferBuilder* builder, ModelT* model,
     const TensorType& input_type, const TensorType& output_type,
     bool allow_float, const TensorType& activations_type,
-    bool disable_per_channel, ErrorReporter* error_reporter) {
+    const TensorType& bias_type, ErrorReporter* error_reporter) {
+  return QuantizeModel(
+      builder, model, input_type, output_type, allow_float,
+      GetAllOperatorOutputs(model), activations_type, bias_type,
+      /*disable_per_channel=*/false,
+      /*disable_per_channel_quantization_for_dense_layers=*/false,
+      error_reporter);
+}
+
+TfLiteStatus QuantizeModelAllOperators(
+    flatbuffers::FlatBufferBuilder* builder, ModelT* model,
+    const TensorType& input_type, const TensorType& output_type,
+    bool allow_float, const TensorType& activations_type,
+    const TensorType& bias_type, bool disable_per_channel,
+    bool disable_per_channel_quantization_for_dense_layers,
+    ErrorReporter* error_reporter) {
   return QuantizeModel(builder, model, input_type, output_type, allow_float,
                        GetAllOperatorOutputs(model), activations_type,
-                       disable_per_channel, error_reporter);
+                       bias_type, disable_per_channel,
+                       disable_per_channel_quantization_for_dense_layers,
+                       error_reporter);
 }
 
 TfLiteStatus QuantizeModel(flatbuffers::FlatBufferBuilder* builder,
@@ -1829,8 +2053,40 @@ TfLiteStatus QuantizeModel(flatbuffers::FlatBufferBuilder* builder,
                            const TensorType& output_type, bool allow_float,
                            ErrorReporter* error_reporter) {
   return QuantizeModel(builder, model, input_type, output_type, allow_float,
-                       GetAllOperatorOutputs(model), TensorType_INT8,
+                       GetAllOperatorOutputs(model),
+                       /*activations_type=*/TensorType_INT8,
+                       /*bias_type=*/TensorType_INT32, error_reporter);
+}
+TfLiteStatus QuantizeModel(
+    flatbuffers::FlatBufferBuilder* builder, ModelT* model,
+    const TensorType& input_type, const TensorType& output_type,
+    bool allow_float, bool disable_per_channel,
+    bool disable_per_channel_quantization_for_dense_layers,
+    ErrorReporter* error_reporter) {
+  return QuantizeModel(builder, model, input_type, output_type, allow_float,
+                       GetAllOperatorOutputs(model),
+                       /*activations_type=*/TensorType_INT8,
+                       /*bias_type=*/TensorType_INT32,
+                       /*disable_per_channel=*/disable_per_channel,
+                       /*disable_per_channel_quantization_for_dense_layers=*/
+                       disable_per_channel_quantization_for_dense_layers,
                        error_reporter);
+}
+
+TfLiteStatus QuantizeModel(
+    flatbuffers::FlatBufferBuilder* builder, ModelT* model,
+    const TensorType& input_type, const TensorType& output_type,
+    bool allow_float, bool disable_per_channel,
+    bool disable_per_channel_quantization_for_dense_layers,
+    ErrorReporter* error_reporter, bool handle_external_state) {
+  return QuantizeModel(builder, model, input_type, output_type, allow_float,
+                       GetAllOperatorOutputs(model),
+                       /*activations_type=*/TensorType_INT8,
+                       /*bias_type=*/TensorType_INT32,
+                       /*disable_per_channel=*/disable_per_channel,
+                       /*disable_per_channel_quantization_for_dense_layers=*/
+                       disable_per_channel_quantization_for_dense_layers,
+                       error_reporter, handle_external_state);
 }
 
 TfLiteStatus QuantizeModel(flatbuffers::FlatBufferBuilder* builder,

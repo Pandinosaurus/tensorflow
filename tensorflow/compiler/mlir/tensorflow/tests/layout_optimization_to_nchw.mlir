@@ -1,7 +1,21 @@
+// Copyright 2026 Google Inc. All Rights Reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+// ==============================================================================
 // RUN: tf-opt %s -tf-layout-optimization=force-data-format=NCHW -verify-diagnostics | FileCheck %s --dump-input=always
 
 // CHECK-LABEL: func @transposeConv2D
-func @transposeConv2D(%arg0: tensor<1x3x32x32xf32>, %arg1: tensor<1x1x3x8xf32>) -> tensor<1x8x32x32xf32> {
+func.func @transposeConv2D(%arg0: tensor<1x3x32x32xf32>, %arg1: tensor<1x1x3x8xf32>) -> tensor<1x8x32x32xf32> {
 
   // Convert input: NCHW -> NHWC
   %0 = "tf.Const"() {value = dense<[0, 2, 3, 1]> : tensor<4xi32>} : () -> tensor<4xi32>
@@ -29,5 +43,5 @@ func @transposeConv2D(%arg0: tensor<1x3x32x32xf32>, %arg1: tensor<1x1x3x8xf32>) 
 
   // CHECK: return %[[CONV]]
 
-  return %4 : tensor<1x8x32x32xf32>
+  func.return %4 : tensor<1x8x32x32xf32>
 }

@@ -14,6 +14,8 @@ limitations under the License.
 ==============================================================================*/
 #include "tensorflow/core/kernels/tensor_list.h"
 
+#include <limits>
+
 #include "tensorflow/core/framework/tensor_shape.h"
 #include "tensorflow/core/framework/tensor_shape.pb.h"
 #include "tensorflow/core/framework/variant_op_registry.h"
@@ -35,90 +37,138 @@ void TensorList::Encode(VariantTensorData* data) const {
       invalid_indices.push_back(i);
     }
   }
-  string metadata;
+  std::string metadata;
   // TODO(b/118838800): Add a proto for storing the metadata.
   // Metadata format:
   // <num_invalid_tensors><invalid_indices><element_dtype><element_shape_proto>
-  core::PutVarint64(&metadata, static_cast<uint64>(invalid_indices.size()));
+  core::PutVarint64(&metadata, static_cast<uint64_t>(invalid_indices.size()));
   for (size_t i : invalid_indices) {
-    core::PutVarint64(&metadata, static_cast<uint64>(i));
+    core::PutVarint64(&metadata, static_cast<uint64_t>(i));
   }
-  core::PutVarint64(&metadata, static_cast<uint64>(element_dtype));
-  core::PutVarint64(&metadata, static_cast<uint64>(max_num_elements));
+  core::PutVarint64(&metadata, static_cast<uint64_t>(element_dtype));
+  core::PutVarint64(&metadata, static_cast<uint64_t>(max_num_elements));
   TensorShapeProto element_shape_proto;
   element_shape.AsProto(&element_shape_proto);
   element_shape_proto.AppendToString(&metadata);
   data->set_metadata(metadata);
 }
 
-static Status TensorListDeviceCopy(
-    const TensorList& from, TensorList* to,
-    const UnaryVariantOpRegistry::AsyncTensorDeviceCopyFn& copy) {
-  to->element_shape = from.element_shape;
-  to->element_dtype = from.element_dtype;
-  to->max_num_elements = from.max_num_elements;
-  to->tensors().reserve(from.tensors().size());
-  for (const Tensor& t : from.tensors()) {
-    to->tensors().emplace_back(t.dtype());
-    if (t.dtype() != DT_INVALID) {
-      TF_RETURN_IF_ERROR(copy(t, &to->tensors().back()));
-    }
-  }
-  return Status::OK();
-}
-
-#define REGISTER_LIST_COPY(DIRECTION)                                         \
-  INTERNAL_REGISTER_UNARY_VARIANT_DEVICE_COPY_FUNCTION(TensorList, DIRECTION, \
-                                                       TensorListDeviceCopy)
-
-REGISTER_LIST_COPY(VariantDeviceCopyDirection::HOST_TO_DEVICE);
-REGISTER_LIST_COPY(VariantDeviceCopyDirection::DEVICE_TO_HOST);
-REGISTER_LIST_COPY(VariantDeviceCopyDirection::DEVICE_TO_DEVICE);
-
-REGISTER_UNARY_VARIANT_DECODE_FUNCTION(TensorList, TensorList::kTypeName);
-
 bool TensorList::Decode(const VariantTensorData& data) {
   // TODO(srbs): Change the signature to Decode(VariantTensorData data) so
   // that we do not have to copy each tensor individually below. This would
   // require changing VariantTensorData::tensors() as well.
-  string metadata;
+  std::string metadata;
   data.get_metadata(&metadata);
-  uint64 scratch;
-  StringPiece iter(metadata);
-  std::vector<size_t> invalid_indices;
-  core::GetVarint64(&iter, &scratch);
-  size_t num_invalid_tensors = static_cast<size_t>(scratch);
-  invalid_indices.resize(num_invalid_tensors);
-  for (size_t i = 0; i < num_invalid_tensors; i++) {
-    core::GetVarint64(&iter, &scratch);
-    invalid_indices[i] = static_cast<size_t>(scratch);
+  uint64_t scratch;
+  absl::string_view iter(metadata);
+  if (!core::GetVarint64(&iter, &scratch)) return false;
+  if (scratch > std::numeric_limits<size_t>::max()) return false;
+  const size_t num_invalid_tensors = static_cast<size_t>(scratch);
+  // Each invalid index takes at least one byte of the remaining metadata, so a
+  // larger count is malformed. Reject it here, before storage is reserved for
+  // that many elements below.
+  if (num_invalid_tensors > iter.size()) return false;
+
+  if (num_invalid_tensors >
+      std::numeric_limits<size_t>::max() - data.tensors().size()) {
+    return false;
+  }
+  const size_t total_num_tensors = data.tensors().size() + num_invalid_tensors;
+
+  std::vector<Tensor> decoded_tensors;
+  if (total_num_tensors > decoded_tensors.max_size()) return false;
+  decoded_tensors.reserve(total_num_tensors);
+
+  size_t output_index = 0;
+  size_t tensor_index = 0;
+  bool have_previous_invalid_index = false;
+  size_t previous_invalid_index = 0;
+  for (size_t i = 0; i < num_invalid_tensors; ++i) {
+    if (!core::GetVarint64(&iter, &scratch)) return false;
+    if (scratch > std::numeric_limits<size_t>::max()) return false;
+    const size_t invalid_index = static_cast<size_t>(scratch);
+    if (invalid_index >= total_num_tensors) return false;
+    if (have_previous_invalid_index &&
+        invalid_index <= previous_invalid_index) {
+      return false;
+    }
+
+    while (output_index < invalid_index) {
+      if (tensor_index >= data.tensors().size()) return false;
+      decoded_tensors.emplace_back(data.tensors()[tensor_index]);
+      ++tensor_index;
+      ++output_index;
+    }
+    decoded_tensors.emplace_back(Tensor(DT_INVALID));
+    ++output_index;
+    previous_invalid_index = invalid_index;
+    have_previous_invalid_index = true;
   }
 
-  size_t total_num_tensors = data.tensors().size() + num_invalid_tensors;
-  tensors().reserve(total_num_tensors);
-  std::vector<size_t>::iterator invalid_indices_it = invalid_indices.begin();
-  std::vector<Tensor>::const_iterator tensors_it = data.tensors().begin();
-  for (size_t i = 0; i < total_num_tensors; i++) {
-    if (invalid_indices_it != invalid_indices.end() &&
-        *invalid_indices_it == i) {
-      tensors().emplace_back(Tensor(DT_INVALID));
-      invalid_indices_it++;
-    } else if (tensors_it != data.tensors().end()) {
-      tensors().emplace_back(*tensors_it);
-      tensors_it++;
-    } else {
-      // VariantTensorData is corrupted.
+  while (output_index < total_num_tensors) {
+    if (tensor_index >= data.tensors().size()) return false;
+    decoded_tensors.emplace_back(data.tensors()[tensor_index]);
+    ++tensor_index;
+    ++output_index;
+  }
+  if (tensor_index != data.tensors().size()) return false;
+
+  if (!core::GetVarint64(&iter, &scratch)) return false;
+  if (scratch > std::numeric_limits<int>::max()) return false;
+  const DataType decoded_element_dtype = static_cast<DataType>(scratch);
+
+  if (!core::GetVarint64(&iter, &scratch)) return false;
+  int decoded_max_num_elements;
+  if (scratch == std::numeric_limits<uint64_t>::max()) {
+    decoded_max_num_elements = -1;
+  } else {
+    if (scratch > std::numeric_limits<int>::max()) return false;
+    decoded_max_num_elements = static_cast<int>(scratch);
+  }
+  // When max_num_elements is set it caps the list size (TensorListPushBack and
+  // TensorListSetItem enforce it on insertion), so reject a list that already
+  // exceeds its own cap.
+  if (decoded_max_num_elements != -1 &&
+      total_num_tensors > static_cast<size_t>(decoded_max_num_elements)) {
+    return false;
+  }
+
+  TensorShapeProto element_shape_proto;
+  if (!element_shape_proto.ParseFromString(iter)) return false;
+  // The PartialTensorShape constructor calls AddDim(), which fatally CHECKs on
+  // a malformed rank or dimension size. BuildPartialTensorShape is not a safe
+  // substitute here: for partial shapes it silently coerces any dimension below
+  // -1 to unknown instead of rejecting it. The proto is untrusted, so validate
+  // it with IsValid (which also rejects dims < -1 and excessive rank) before
+  // constructing the shape.
+  if (!PartialTensorShape::IsValid(element_shape_proto)) return false;
+  const PartialTensorShape decoded_element_shape(element_shape_proto);
+
+  // Every element stored in a list must match its element_dtype and be
+  // compatible with its element_shape; the mutation paths (TensorListPushBack,
+  // TensorListSetItem) enforce this on insertion. The serialized data is
+  // untrusted, so re-establish the same invariant here. Consumers such as
+  // TensorListStack and TensorListGather skip the per-element shape check when
+  // element_shape is fully defined and then treat each element's count as the
+  // output element count, so a decoded element that does not match would
+  // overrun the output buffer.
+  for (const Tensor& t : decoded_tensors) {
+    if (t.dtype() == DT_INVALID) continue;  // Unset element placeholder.
+    // Any element reaching here is a concrete tensor, so it must match the
+    // list's dtype. If decoded_element_dtype is DT_INVALID a concrete element
+    // is itself inconsistent, so reject it rather than letting it through.
+    if (t.dtype() != decoded_element_dtype) {
+      return false;
+    }
+    if (!decoded_element_shape.IsCompatibleWith(t.shape())) {
       return false;
     }
   }
 
-  core::GetVarint64(&iter, &scratch);
-  element_dtype = static_cast<DataType>(scratch);
-  core::GetVarint64(&iter, &scratch);
-  max_num_elements = static_cast<int>(scratch);
-  TensorShapeProto element_shape_proto;
-  element_shape_proto.ParseFromString(string(iter.data(), iter.size()));
-  element_shape = PartialTensorShape(element_shape_proto);
+  element_dtype = decoded_element_dtype;
+  max_num_elements = decoded_max_num_elements;
+  tensors() = std::move(decoded_tensors);
+  element_shape = decoded_element_shape;
   return true;
 }
 

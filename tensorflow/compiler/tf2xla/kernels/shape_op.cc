@@ -15,22 +15,33 @@ limitations under the License.
 
 // XLA-specific Shape Ops.
 
-#include "absl/strings/str_format.h"
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <limits>
+#include <vector>
+
+#include "absl/container/flat_hash_set.h"
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
+#include "absl/strings/str_cat.h"
 #include "tensorflow/compiler/tf2xla/kernels/shape_util.h"
 #include "tensorflow/compiler/tf2xla/kernels/tensor_list_utils.h"
-#include "tensorflow/compiler/tf2xla/shape_util.h"
-#include "tensorflow/compiler/tf2xla/type_util.h"
 #include "tensorflow/compiler/tf2xla/xla_helpers.h"
 #include "tensorflow/compiler/tf2xla/xla_op_kernel.h"
 #include "tensorflow/compiler/tf2xla/xla_op_registry.h"
-#include "tensorflow/compiler/xla/client/lib/constants.h"
-#include "tensorflow/compiler/xla/client/xla_builder.h"
-#include "tensorflow/compiler/xla/literal.h"
-#include "tensorflow/compiler/xla/shape_util.h"
+#include "xla/hlo/builder/lib/constants.h"
+#include "xla/hlo/builder/xla_builder.h"
+#include "xla/literal.h"
+#include "xla/literal_util.h"
+#include "xla/shape.h"
 #include "tensorflow/core/framework/bounds_check.h"
-#include "tensorflow/core/framework/kernel_def_builder.h"
 #include "tensorflow/core/framework/op_kernel.h"
+#include "tensorflow/core/framework/op_requires.h"
 #include "tensorflow/core/framework/tensor_shape.h"
+#include "tensorflow/core/framework/types.pb.h"
+#include "tensorflow/core/platform/errors.h"
+#include "tensorflow/core/platform/types.h"
 
 namespace tensorflow {
 namespace {
@@ -98,11 +109,10 @@ class XlaSetBoundOp : public XlaOpKernel {
                                 bound_shape.DebugString()));
     int64_t bound;
     OP_REQUIRES_OK(ctx, ctx->ConstantInputAsIntScalar("bound", &bound));
-    xla::Literal bound_literal = xla::LiteralUtil::CreateR0<int32>(bound);
-    xla::XlaOp result =
-        xla::CustomCall(ctx->builder(), "SetBound", {ctx->Input("input")},
-                        ctx->InputXlaShape("input").ValueOrDie(), "", false, {},
-                        &bound_literal);
+    xla::Literal bound_literal = xla::LiteralUtil::CreateR0<int32_t>(bound);
+    xla::XlaOp result = xla::CustomCall(
+        ctx->builder(), "SetBound", {ctx->Input("input")},
+        ctx->InputXlaShape("input").value(), "", false, {}, &bound_literal);
     ctx->SetOutput(0, result);
   }
 };
@@ -218,7 +228,7 @@ class RankOp : public XlaOpKernel {
     const TensorShape input_shape = ctx->InputShape(0);
     const int rank = input_shape.dims();
     Tensor rank_constant(DT_INT32, TensorShape({}));
-    rank_constant.scalar<int32>()() = rank;
+    rank_constant.scalar<int32_t>()() = rank;
 
     ctx->SetConstantOutput(0, rank_constant);
   }
@@ -232,21 +242,25 @@ class SizeOp : public XlaOpKernel {
 
   void Compile(XlaOpKernelContext* ctx) override {
     const TensorShape input_shape = ctx->InputShape(0);
-    OP_REQUIRES(ctx,
-                FastBoundsCheck(input_shape.num_elements(),
-                                std::numeric_limits<int32>::max()),
-                errors::InvalidArgument("Size does not work for tensors > "
-                                        "int32 max."));
-    Tensor size_constant(DT_INT32, TensorShape({}));
-    const int rank = input_shape.dims();
     xla::XlaBuilder* builder = ctx->builder();
-    auto size = xla::One(builder, xla::U32);
-    for (int64_t i = 0; i < rank; ++i) {
-      size = xla::Mul(
-          size, xla::ConvertElementType(xla::GetDimensionSize(ctx->Input(0), i),
-                                        xla::U32));
+    auto size = xla::One(builder, ctx->output_xla_type(0));
+
+    const int rank = input_shape.dims();
+    for (int64_t dim = 0; dim < rank; ++dim) {
+      OP_REQUIRES(
+          ctx,
+          FastBoundsCheck(input_shape.dim_size(dim),
+                          std::numeric_limits<int32_t>::max()),
+          absl::InvalidArgumentError(absl::StrCat(
+              "Size Op: XLA supported tensors must have <= int32max elements "
+              "on all dimensions, found ",
+              input_shape.dim_size(dim), " elements on dimension ", dim)));
+
+      size = xla::Mul(size, xla::ConvertElementType(
+                                xla::GetDimensionSize(ctx->Input(0), dim),
+                                ctx->output_xla_type(0)));
     }
-    size = xla::ConvertElementType(size, ctx->output_xla_type(0));
+
     ctx->SetOutput(0, size);
   }
 };
@@ -275,6 +289,12 @@ class ExpandDimsOp : public XlaOpKernel {
                                         " for tensor with ", input_shape.dims(),
                                         " dimensions."));
 
+    OP_REQUIRES(ctx, input_shape.dims() < TensorShape::MaxDimensions(),
+                errors::InvalidArgument(
+                    "Cannot expand a tensor of rank ", input_shape.dims(),
+                    ": expanding would exceed the maximum supported rank of ",
+                    TensorShape::MaxDimensions(), "."));
+
     auto existing_dims = input_shape.dim_sizes();
     // Safe - # elements in tensor dims bounded.
     const int existing_dims_size = static_cast<int>(existing_dims.size());
@@ -290,7 +310,7 @@ class ExpandDimsOp : public XlaOpKernel {
     }
 
     // Clamp to the end if needed.
-    dim = std::min<int32>(dim, existing_dims_size);
+    dim = std::min<int32_t>(dim, existing_dims_size);
     new_shape.emplace(new_shape.begin() + dim, 1);
 
     ctx->SetOutput(0, xla::Reshape(ctx->Input("input"), new_shape));
@@ -302,35 +322,39 @@ REGISTER_XLA_OP(Name("ExpandDims").CompileTimeConstantInput("dim"),
 class SqueezeOp : public XlaOpKernel {
  public:
   explicit SqueezeOp(OpKernelConstruction* ctx) : XlaOpKernel(ctx) {
-    std::vector<int32> squeeze_dims;
+    std::vector<int32_t> squeeze_dims;
     OP_REQUIRES_OK(ctx, ctx->GetAttr("squeeze_dims", &squeeze_dims));
     squeeze_dims_.insert(squeeze_dims.begin(), squeeze_dims.end());
   }
 
   void Compile(XlaOpKernelContext* ctx) override {
-    const TensorShape input_shape = ctx->InputShape(0);
-    auto existing_dims = input_shape.dim_sizes();
-    int existing_dims_size = input_shape.dims();
-    std::vector<int64_t> new_shape;
+    absl::StatusOr<xla::Shape> input_shape =
+        ctx->builder()->GetShape(ctx->Input(0));
+    OP_REQUIRES_OK(ctx, input_shape.status());
+    xla::Shape shape = input_shape.value();
+    int64_t rank = shape.dimensions().size();
 
-    std::unordered_set<int32> wrapped_squeeze_dims;
+    absl::flat_hash_set<int32_t> wrapped_squeeze_dims;
     wrapped_squeeze_dims.reserve(squeeze_dims_.size());
+    std::vector<int64_t> new_shape;
+    std::vector<xla::XlaOp> output_dim_sizes;
+    std::vector<bool> dims_are_dynamic;
     // Validate squeeze dims against the input.
     for (int32_t dim : squeeze_dims_) {
-      OP_REQUIRES(ctx, (dim >= -input_shape.dims() && dim < input_shape.dims()),
-                  errors::InvalidArgument("Tried to squeeze dim index ", dim,
-                                          " for tensor with ",
-                                          input_shape.dims(), " dimensions."));
+      OP_REQUIRES(
+          ctx, (dim >= -rank && dim < rank),
+          errors::InvalidArgument("Tried to squeeze dim index ", dim,
+                                  " for tensor with ", rank, " dimensions."));
       // If dim is < 0, we wrap around (-1 means the last element).
       if (dim < 0) {
-        dim = existing_dims_size + dim;
+        dim = rank + dim;
       }
 
       wrapped_squeeze_dims.insert(dim);
     }
 
-    for (int i = 0; i < existing_dims_size; ++i) {
-      auto existing_dim = existing_dims[i];
+    for (int i = 0; i < rank; ++i) {
+      auto existing_dim = shape.dimensions(i);
 
       // If squeeze_set is non-empty, only squeeze those dimensions.
       if (!wrapped_squeeze_dims.empty()) {
@@ -342,20 +366,35 @@ class SqueezeOp : public XlaOpKernel {
         } else {
           // This dimension is not being squeezed.
           new_shape.push_back(existing_dim);
+          if (!shape.is_static()) {
+            output_dim_sizes.push_back(xla::GetDimensionSize(ctx->Input(0), i));
+            dims_are_dynamic.push_back(shape.is_dynamic_dimension(i));
+          }
         }
       } else {
-        // Copy over all non-1-length dimensions.
-        if (existing_dim != 1) {
+        // Copy over all dimensions that are not guaranteed to be 1.
+        // If a dimension is dynamic, its size is not statically known to be 1,
+        // so we cannot squeeze it. We must keep it.
+        if (shape.is_dynamic_dimension(i) || existing_dim != 1) {
           new_shape.push_back(existing_dim);
+          if (!shape.is_static()) {
+            output_dim_sizes.push_back(xla::GetDimensionSize(ctx->Input(0), i));
+            dims_are_dynamic.push_back(shape.is_dynamic_dimension(i));
+          }
         }
       }
     }
 
-    ctx->SetOutput(0, xla::Reshape(ctx->Input(0), new_shape));
+    if (shape.is_static()) {
+      ctx->SetOutput(0, xla::Reshape(ctx->Input(0), new_shape));
+    } else {
+      ctx->SetOutput(0, xla::DynamicReshape(ctx->Input(0), output_dim_sizes,
+                                            new_shape, dims_are_dynamic));
+    }
   }
 
  private:
-  std::unordered_set<int32> squeeze_dims_;
+  absl::flat_hash_set<int32_t> squeeze_dims_;
 };
 
 REGISTER_XLA_OP(Name("Squeeze"), SqueezeOp);
@@ -379,15 +418,16 @@ class ZerosLikeOp : public XlaOpKernel {
 
       auto list_shape_or = ctx->builder()->GetShape(list);
       OP_REQUIRES_OK(ctx, list_shape_or.status());
-      const xla::Shape& list_shape = list_shape_or.ValueOrDie();
+      const xla::Shape& list_shape = list_shape_or.value();
       std::vector<std::vector<xla::XlaOp>> list_dynamic_dims;
-      list_dynamic_dims.reserve(list_shape.tuple_shapes_size() - 1);
-      for (int64_t i = 0; i < list_shape.tuple_shapes_size() - 1; ++i) {
+      list_dynamic_dims.reserve(list_shape.tuple_shapes().size() - 1);
+      for (int i = 0; i < list_shape.tuple_shapes().size() - 1; ++i) {
         // Set dynamic dimension size to 0 for initialization value.
         std::vector<xla::XlaOp> dynamic_dims;
         const xla::Shape& shape = list_shape.tuple_shapes(i);
         auto sub_element = xla::GetTupleElement(list, i);
-        for (int64_t dim = 0; dim < shape.dimensions_size(); ++dim) {
+        dynamic_dims.reserve(shape.dimensions().size());
+        for (int64_t dim = 0; dim < shape.dimensions().size(); ++dim) {
           dynamic_dims.push_back(xla::GetDimensionSize(sub_element, dim));
         }
         list_dynamic_dims.push_back(dynamic_dims);
@@ -407,11 +447,11 @@ class ZerosLikeOp : public XlaOpKernel {
     } else {
       auto zero = XlaHelpers::Zero(ctx->builder(), input_type(0));
       xla::XlaOp input = ctx->Input(0);
-      auto input_shape = ctx->InputXlaShape(0).ValueOrDie();
+      auto input_shape = ctx->InputXlaShape(0).value();
       auto result = xla::Broadcast(zero, input_shape.dimensions());
 
       // Setting up dynamic dimensions of the broadcast.
-      for (int64_t i = 0; i < input_shape.dimensions_size(); ++i) {
+      for (int64_t i = 0; i < input_shape.dimensions().size(); ++i) {
         if (input_shape.is_dynamic_dimension(i)) {
           xla::XlaOp input_dynamic_dim = xla::GetDimensionSize(input, i);
           result = xla::SetDimensionSize(result, input_dynamic_dim, i);

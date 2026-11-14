@@ -15,15 +15,63 @@
 
 """Utilities for using the TensorFlow C API."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
+import contextlib
 from tensorflow.core.framework import api_def_pb2
 from tensorflow.core.framework import op_def_pb2
 from tensorflow.python.client import pywrap_tf_session as c_api
 from tensorflow.python.util import compat
 from tensorflow.python.util import tf_contextlib
+
+
+class AlreadyGarbageCollectedError(Exception):
+
+  def __init__(self, name, obj_type):
+    super(AlreadyGarbageCollectedError,
+          self).__init__(f"{name} of type {obj_type} has already been garbage "
+                         f"collected and cannot be called.")
+
+
+# FIXME(b/235488206): Convert all Scoped objects to the context manager
+# to protect against deletion during use when the object is attached to
+# an attribute.
+class UniquePtr(object):
+  """Wrapper around single-ownership C-API objects that handles deletion."""
+
+  __slots__ = ["_obj", "deleter", "name", "type_name"]
+
+  def __init__(self, name, obj, deleter):
+    # '_' prefix marks _obj private, but unclear if it is required also to
+    # maintain a special CPython destruction order.
+    self._obj = obj
+    self.name = name
+    # Note: when we're destructing the global context (i.e when the process is
+    # terminating) we may have already deleted other modules. By capturing the
+    # DeleteGraph function here, we retain the ability to cleanly destroy the
+    # graph at shutdown, which satisfies leak checkers.
+    self.deleter = deleter
+    self.type_name = str(type(obj))
+
+  @contextlib.contextmanager
+  def get(self):
+    """Yields the managed C-API Object, guaranteeing aliveness.
+
+    This is a context manager. Inside the context the C-API object is
+    guaranteed to be alive.
+
+    Raises:
+      AlreadyGarbageCollectedError: if the object is already deleted.
+    """
+    # Thread-safety: self.__del__ never runs during the call of this function
+    # because there is a reference to self from the argument list.
+    if self._obj is None:
+      raise AlreadyGarbageCollectedError(self.name, self.type_name)
+    yield self._obj
+
+  def __del__(self):
+    obj = self._obj
+    if obj is not None:
+      self._obj = None
+      self.deleter(obj)
 
 
 class ScopedTFStatus(object):
@@ -39,23 +87,6 @@ class ScopedTFStatus(object):
     # terminating) we can have already deleted other modules.
     if c_api is not None and c_api.TF_DeleteStatus is not None:
       c_api.TF_DeleteStatus(self.status)
-
-
-class ScopedTFGraph(object):
-  """Wrapper around TF_Graph that handles deletion."""
-
-  __slots__ = ["graph", "deleter"]
-
-  def __init__(self):
-    self.graph = c_api.TF_NewGraph()
-    # Note: when we're destructing the global context (i.e when the process is
-    # terminating) we may have already deleted other modules. By capturing the
-    # DeleteGraph function here, we retain the ability to cleanly destroy the
-    # graph at shutdown, which satisfies leak checkers.
-    self.deleter = c_api.TF_DeleteGraph
-
-  def __del__(self):
-    self.deleter(self.graph)
 
 
 class ScopedTFImportGraphDefOptions(object):
@@ -74,7 +105,7 @@ class ScopedTFImportGraphDefOptions(object):
 
 
 class ScopedTFImportGraphDefResults(object):
-  """Wrapper around TF_ImportGraphDefOptions that handles deletion."""
+  """Wrapper around TF_ImportGraphDefResults that handles deletion."""
 
   __slots__ = ["results"]
 
@@ -88,27 +119,12 @@ class ScopedTFImportGraphDefResults(object):
       c_api.TF_DeleteImportGraphDefResults(self.results)
 
 
-class ScopedTFFunction(object):
+class ScopedTFFunction(UniquePtr):
   """Wrapper around TF_Function that handles deletion."""
 
-  __slots__ = ["func", "deleter"]
-
-  def __init__(self, func):
-    self.func = func
-    # Note: when we're destructing the global context (i.e when the process is
-    # terminating) we may have already deleted other modules. By capturing the
-    # DeleteFunction function here, we retain the ability to cleanly destroy the
-    # Function at shutdown, which satisfies leak checkers.
-    self.deleter = c_api.TF_DeleteFunction
-
-  @property
-  def has_been_garbage_collected(self):
-    return self.func is None
-
-  def __del__(self):
-    if not self.has_been_garbage_collected:
-      self.deleter(self.func)
-      self.func = None
+  def __init__(self, func, name):
+    super(ScopedTFFunction, self).__init__(
+        name=name, obj=func, deleter=c_api.TF_DeleteFunction)
 
 
 class ScopedTFBuffer(object):
@@ -120,11 +136,23 @@ class ScopedTFBuffer(object):
     self.buffer = c_api.TF_NewBufferFromString(compat.as_bytes(buf_string))
 
   def __del__(self):
-    c_api.TF_DeleteBuffer(self.buffer)
+    # Note: when we're destructing the global context (i.e when the process is
+    # terminating) we can have already deleted other modules.
+    # Also guard against __init__ having failed before `self.buffer` was
+    # ever assigned (e.g. compat.as_bytes raising on bad input): __del__
+    # still runs on a partially-constructed object, and accessing
+    # self.buffer directly would raise a second, masking AttributeError.
+    buffer = getattr(self, "buffer", None)
+    if (
+        buffer is not None
+        and c_api is not None
+        and c_api.TF_DeleteBuffer is not None
+    ):
+      c_api.TF_DeleteBuffer(buffer)
 
 
 class ApiDefMap(object):
-  """Wrapper around Tf_ApiDefMap that handles querying and deletion.
+  """Wrapper around TF_ApiDefMap that handles querying and deletion.
 
   The OpDef protos are also stored in this class so that they could
   be queried by op name.
@@ -157,6 +185,8 @@ class ApiDefMap(object):
   def get_api_def(self, op_name):
     api_def_proto = api_def_pb2.ApiDef()
     buf = c_api.TF_ApiDefMapGet(self._api_def_map, op_name, len(op_name))
+    if buf is None:
+      raise ValueError(f"No api_def found for op name {op_name}.")
     try:
       api_def_proto.ParseFromString(c_api.TF_GetBuffer(buf))
     finally:
@@ -219,41 +249,3 @@ def tf_output(c_op, index):
   ret.oper = c_op
   ret.index = index
   return ret
-
-
-def tf_operations(graph):
-  """Generator that yields every TF_Operation in `graph`.
-
-  Args:
-    graph: Graph
-
-  Yields:
-    wrapped TF_Operation
-  """
-  # pylint: disable=protected-access
-  pos = 0
-  c_op, pos = c_api.TF_GraphNextOperation(graph._c_graph, pos)
-  while c_op is not None:
-    yield c_op
-    c_op, pos = c_api.TF_GraphNextOperation(graph._c_graph, pos)
-  # pylint: enable=protected-access
-
-
-def new_tf_operations(graph):
-  """Generator that yields newly-added TF_Operations in `graph`.
-
-  Specifically, yields TF_Operations that don't have associated Operations in
-  `graph`. This is useful for processing nodes added by the C API.
-
-  Args:
-    graph: Graph
-
-  Yields:
-    wrapped TF_Operation
-  """
-  # TODO(b/69679162): do this more efficiently
-  for c_op in tf_operations(graph):
-    try:
-      graph._get_operation_by_tf_operation(c_op)  # pylint: disable=protected-access
-    except KeyError:
-      yield c_op

@@ -16,7 +16,9 @@ limitations under the License.
 #ifndef TENSORFLOW_CORE_KERNELS_DATA_EXPERIMENTAL_SNAPSHOT_DATASET_OP_H_
 #define TENSORFLOW_CORE_KERNELS_DATA_EXPERIMENTAL_SNAPSHOT_DATASET_OP_H_
 
+#include <memory>
 #include <string>
+#include <vector>
 
 #include "absl/container/flat_hash_map.h"
 #include "tensorflow/core/data/captured_function.h"
@@ -82,7 +84,7 @@ class SnapshotDatasetV2Op : public UnaryDatasetOpKernel {
   std::string reader_prefix_;
   std::string writer_prefix_;
   bool hash_valid_;
-  uint64 hash_;
+  uint64_t hash_;
 
   std::shared_ptr<FunctionMetadata> reader_func_metadata_;
   std::shared_ptr<FunctionMetadata> shard_func_metadata_;

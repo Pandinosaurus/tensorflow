@@ -13,11 +13,12 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include <limits>
 #include <vector>
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
-#include "tensorflow/lite/interpreter.h"
+#include "tensorflow/lite/core/interpreter.h"
 #include "tensorflow/lite/kernels/test_util.h"
 #include "tensorflow/lite/schema/schema_generated.h"
 #include "tensorflow/lite/testing/util.h"
@@ -62,7 +63,7 @@ TEST(CumsumOpTest, SimpleIntTest) {
   m.PopulateTensor<int>(m.input(), {1, 2, 3, 4, 5, 6, 7, 8});
   m.PopulateTensor<int>(m.axis(), {1});
 
-  m.Invoke();
+  ASSERT_EQ(m.Invoke(), kTfLiteOk);
 
   EXPECT_THAT(m.GetOutput(),
               testing::ElementsAreArray({1, 3, 6, 10, 5, 11, 18, 26}));
@@ -77,7 +78,7 @@ TEST(CumsumOpTest, SimpleInt64Test) {
                   100000000005l, 100000000006l, 100000000007l, 100000000008l});
   m.PopulateTensor<int>(m.axis(), {1});
 
-  m.Invoke();
+  ASSERT_EQ(m.Invoke(), kTfLiteOk);
 
   EXPECT_THAT(m.GetOutput(), testing::ElementsAreArray(
                                  {100000000001l, 200000000003l, 300000000006l,
@@ -92,7 +93,7 @@ TEST(CumsumOpTest, SimpleIntAxis0Test) {
   m.PopulateTensor<int>(m.input(), {1, 2, 3, 4, 5, 6, 7, 8});
   m.PopulateTensor<int>(m.axis(), {0});
 
-  m.Invoke();
+  ASSERT_EQ(m.Invoke(), kTfLiteOk);
 
   EXPECT_THAT(m.GetOutput(),
               testing::ElementsAreArray({1, 2, 3, 4, 6, 8, 10, 12}));
@@ -105,7 +106,7 @@ TEST(CumsumOpTest, Simple1DIntTest) {
   m.PopulateTensor<int>(m.input(), {1, 2, 3, 4, 5, 6, 7, 8});
   m.PopulateTensor<int>(m.axis(), {0});
 
-  m.Invoke();
+  ASSERT_EQ(m.Invoke(), kTfLiteOk);
 
   EXPECT_THAT(m.GetOutput(),
               testing::ElementsAreArray({1, 3, 6, 10, 15, 21, 28, 36}));
@@ -118,7 +119,7 @@ TEST(CumsumOpTest, SimpleIntReverseTest) {
   m.PopulateTensor<int>(m.input(), {1, 2, 3, 4, 5, 6, 7, 8});
   m.PopulateTensor<int>(m.axis(), {1});
 
-  m.Invoke();
+  ASSERT_EQ(m.Invoke(), kTfLiteOk);
 
   EXPECT_THAT(m.GetOutput(),
               testing::ElementsAreArray({10, 9, 7, 4, 26, 21, 15, 8}));
@@ -131,7 +132,7 @@ TEST(CumsumOpTest, SimpleIntExclusiveTest) {
   m.PopulateTensor<int>(m.input(), {1, 2, 3, 4, 5, 6, 7, 8});
   m.PopulateTensor<int>(m.axis(), {1});
 
-  m.Invoke();
+  ASSERT_EQ(m.Invoke(), kTfLiteOk);
 
   EXPECT_THAT(m.GetOutput(),
               testing::ElementsAreArray({0, 1, 3, 6, 0, 5, 11, 18}));
@@ -144,10 +145,56 @@ TEST(CumsumOpTest, SimpleFloatTest) {
   m.PopulateTensor<float>(m.input(), {1, 2, 3, 4, 5, 6, 7, 8});
   m.PopulateTensor<int>(m.axis(), {1});
 
-  m.Invoke();
+  ASSERT_EQ(m.Invoke(), kTfLiteOk);
 
   EXPECT_THAT(m.GetOutput(), testing::ElementsAreArray(
                                  ArrayFloatNear({1, 3, 6, 10, 5, 11, 18, 26})));
+}
+
+TEST(CumsumOpTest, Rank64SmallTensorWorks) {
+  std::vector<int> input_shape(64, 1);
+  input_shape.back() = 2;
+  CumsumOpModel<int32_t> m({TensorType_INT32, input_shape},
+                           {TensorType_INT32, {}}, false, false);
+
+  m.PopulateTensor<int32_t>(m.input(), {1, 2});
+  m.PopulateTensor<int32_t>(m.axis(), {-1});
+
+  ASSERT_EQ(m.Invoke(), kTfLiteOk);
+  EXPECT_THAT(m.GetOutput(), testing::ElementsAreArray({1, 3}));
+}
+
+TEST(CumsumOpTest, InvalidAxisRejected) {
+  CumsumOpModel<int32_t> m({TensorType_INT32, {2}}, {TensorType_INT32, {}},
+                           false, false);
+
+  m.PopulateTensor<int32_t>(m.input(), {1, 2});
+  m.PopulateTensor<int32_t>(m.axis(), {1});
+
+  EXPECT_EQ(m.Invoke(), kTfLiteError);
+}
+
+TEST(CumsumOpTest, ZeroInputWithHugeNonAxisDimReturnsOk) {
+  CumsumOpModel<int32_t> m(
+      {TensorType_INT32, {0, std::numeric_limits<int>::max()}},
+      {TensorType_INT32, {}}, false, false);
+
+  m.PopulateTensor<int32_t>(m.axis(), {1});
+
+  EXPECT_EQ(m.Invoke(), kTfLiteOk);
+  EXPECT_THAT(m.GetOutput(), testing::IsEmpty());
+}
+
+TEST(CumsumOpTest, ZeroInputWithHugePostAxisDimsReturnsOk) {
+  CumsumOpModel<int32_t> m({TensorType_INT32,
+                            {0, 1, std::numeric_limits<int>::max(),
+                             std::numeric_limits<int>::max()}},
+                           {TensorType_INT32, {}}, false, false);
+
+  m.PopulateTensor<int32_t>(m.axis(), {1});
+
+  EXPECT_EQ(m.Invoke(), kTfLiteOk);
+  EXPECT_THAT(m.GetOutput(), testing::IsEmpty());
 }
 
 }  // namespace

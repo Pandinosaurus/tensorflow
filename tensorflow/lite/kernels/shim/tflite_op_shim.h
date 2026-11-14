@@ -22,7 +22,7 @@ limitations under the License.
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_join.h"
 #include "flatbuffers/flexbuffers.h"  // from @flatbuffers
-#include "tensorflow/lite/c/common.h"
+#include "tensorflow/lite/core/c/common.h"
 #include "tensorflow/lite/kernels/kernel_util.h"
 #include "tensorflow/lite/kernels/shim/op_kernel.h"
 #include "tensorflow/lite/kernels/shim/shape.h"
@@ -54,7 +54,8 @@ class TfLiteInvokeContext : public InvokeContext<TfLiteInvokeContext> {
   TfLiteInvokeContext(TfLiteContext* context_, TfLiteNode* node_);
   // Read an input tensor
   ConstTensorViewOr GetInput(const int idx) const;
-  // Get a mutable output tensor
+  // Get a mutable output tensor. For output string tensors, this should only
+  // be called once.
   TensorViewOr GetOutput(const int idx, const Shape& shape) const;
   // Number of input tensors
   int NumInputs() const;
@@ -111,10 +112,10 @@ Shape TfLiteShapeToShape(const TfLiteIntArray* tflite_shape);
 
 // An op kernel base class which is an adapter between an Op implementation
 // (OpKernelShim subclass) and TFLite runtime
-template <template <Runtime> typename Impl>
+template <template <Runtime, typename...> typename Impl, typename... Ts>
 class TfLiteOpKernel {
  public:
-  using ImplType = Impl<Runtime::kTfLite>;
+  using ImplType = Impl<Runtime::kTfLite, Ts...>;
 
   // Builds a TfLiteRegistration object to register this with the TfLite runtime
   static TfLiteRegistration* GetTfLiteRegistration() {
@@ -125,11 +126,11 @@ class TfLiteOpKernel {
 
   // Adds this op kernel to the passed in op resolver
   static void Add(MutableOpResolver* resolver) {
-    resolver->AddCustom(ImplType::kOpName, GetTfLiteRegistration());
+    resolver->AddCustom(ImplType::OpName(), GetTfLiteRegistration());
   }
 
   // The operation name
-  static const char* OpName() { return ImplType::kOpName; }
+  static const char* OpName() { return ImplType::OpName(); }
 
  protected:
   // The data that is stored in node::user_data.
@@ -152,8 +153,8 @@ class TfLiteOpKernel {
     const flexbuffers::Map* attr_map = nullptr;
 
     ~UserData() {
-      if (impl) delete impl;
-      if (attr_map) delete attr_map;
+      delete impl;
+      delete attr_map;
     }
   };
 
@@ -166,7 +167,7 @@ class TfLiteOpKernel {
   }
 
   static void Free(TfLiteContext* context, void* buffer) {
-    if (buffer) delete static_cast<UserData*>(buffer);
+    delete static_cast<UserData*>(buffer);
   }
 
   // Resizes the Output Tensor to their shape. There are two cases:

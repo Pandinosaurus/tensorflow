@@ -2,38 +2,38 @@ path: "tensorflow.optimizers.schedules"
 tf_module {
   member {
     name: "CosineDecay"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "CosineDecayRestarts"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "ExponentialDecay"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "InverseTimeDecay"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "LearningRateSchedule"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "PiecewiseConstantDecay"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "PolynomialDecay"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member_method {
     name: "deserialize"
-    argspec: "args=[\'config\', \'custom_objects\'], varargs=None, keywords=None, defaults=[\'None\'], "
+    argspec: "args=[\'config\', \'custom_objects\', \'use_legacy_format\'], varargs=None, keywords=None, defaults=[\'None\', \'False\'], "
   }
   member_method {
     name: "serialize"
-    argspec: "args=[\'learning_rate_schedule\'], varargs=None, keywords=None, defaults=None"
+    argspec: "args=[\'learning_rate_schedule\', \'use_legacy_format\'], varargs=None, keywords=None, defaults=[\'False\'], "
   }
 }

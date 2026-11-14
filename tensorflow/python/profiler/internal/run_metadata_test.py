@@ -14,13 +14,7 @@
 # ==============================================================================
 """test the RunMetadata proto."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 from collections import defaultdict
-
-import six
 
 from tensorflow.core.protobuf import config_pb2
 from tensorflow.core.protobuf import rewriter_config_pb2
@@ -118,9 +112,6 @@ class RunMetadataTest(test.TestCase):
   # work as expected. Since we now run this test with SOFTWARE_TRACE
   # (see _run_model routine above), this test will / should fail since
   # GPU device tracers are not enabled
-  @test.disable_with_predicate(
-      pred=test.is_built_with_rocm,
-      skip_message='Test fails on ROCm when run without FULL_TRACE')
   @test_util.run_deprecated_v1
   def testGPU(self):
     if not test.is_gpu_available(cuda_only=True):
@@ -218,7 +209,7 @@ class RunMetadataTest(test.TestCase):
       else:
         forward_op.add(op.name)
 
-    for _, f in six.iteritems(back_to_forward):
+    for _, f in back_to_forward.items():
       self.assertTrue(f in forward_op)
 
   # This test requires HARDWARE_TRACE or FULL_TRACE to be specified to

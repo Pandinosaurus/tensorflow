@@ -13,15 +13,17 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include <vector>
+#include <cstdint>
+
+#include "tensorflow/core/framework/types.pb.h"
 
 #define EIGEN_USE_THREADS
 
-#include "third_party/eigen3/Eigen/Core"
-#include "third_party/eigen3/Eigen/SparseCholesky"
-#include "third_party/eigen3/Eigen/SparseCore"
-#include "third_party/eigen3/Eigen/OrderingMethods"
-#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
+#include "Eigen/Core"  // from @eigen_archive
+#include "Eigen/SparseCholesky"  // from @eigen_archive
+#include "Eigen/SparseCore"  // from @eigen_archive
+#include "Eigen/OrderingMethods"  // from @eigen_archive
+#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
 #include "tensorflow/core/framework/allocator.h"
 #include "tensorflow/core/framework/op.h"
 #include "tensorflow/core/framework/op_kernel.h"
@@ -71,16 +73,18 @@ class CSROrderingAMDCPUOp : public OpKernel {
     const Tensor& dense_shape = input_matrix->dense_shape();
     const int rank = dense_shape.dim_size(0);
     OP_REQUIRES(ctx, rank == 2 || rank == 3,
-                errors::InvalidArgument("sparse matrix must have rank 2 or 3; ",
-                                        "but dense_shape has size ", rank));
+                absl::InvalidArgumentError(
+                    absl::StrCat("sparse matrix must have rank 2 or 3; ",
+                                 "but dense_shape has size ", rank)));
 
     auto dense_shape_vec = dense_shape.vec<int64_t>();
     const int64_t num_rows = dense_shape_vec((rank == 2) ? 0 : 1);
     const int64_t num_cols = dense_shape_vec((rank == 2) ? 1 : 2);
 
     OP_REQUIRES(ctx, num_rows == num_cols,
-                errors::InvalidArgument("sparse matrix must be square; got: ",
-                                        num_rows, " != ", num_cols));
+                absl::InvalidArgumentError(absl::StrCat(
+                    "sparse matrix must be square; got: ", num_rows,
+                    " != ", num_cols)));
 
     // Allocate the output permutation indices.
     const int batch_size = input_matrix->batch_size();

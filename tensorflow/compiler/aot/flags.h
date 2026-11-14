@@ -27,26 +27,32 @@ namespace tfcompile {
 // Flags for the tfcompile binary.  See *.cc file for descriptions.
 
 struct MainFlags {
-  string graph;
-  string debug_info;
-  string debug_info_path_begin_marker;
-  string config;
+  std::string graph;
+  std::string debug_info;
+  std::string debug_info_path_begin_marker;
+  std::string config;
   bool dump_fetch_nodes = false;
-  string target_triple;
-  string target_cpu;
-  string target_features;
-  string entry_point;
-  string cpp_class;
-  string out_function_object;
-  string out_metadata_object;
-  string out_header;
-  string out_session_module;
-  string mlir_components;
+  std::string target_triple;
+  std::string target_cpu;
+  std::string target_features;
+  std::string entry_point;
+  std::string cpp_class;
+  std::string out_function_object;
+  std::string out_metadata_object;
+  std::string out_header;
+  std::string out_constant_buffers_object;
+  std::string out_session_module;
+  std::string mlir_components;
   bool experimental_quantize = false;
+
+  // Sanitizer pass options
+  bool sanitize_dataflow = false;
+  std::string sanitize_abilists_dataflow;
 
   // C++ codegen options
   bool gen_name_to_index = false;
   bool gen_program_shape = false;
+  bool use_xla_nanort_runtime = false;
 };
 
 // Appends to flag_list a tensorflow::Flag for each field in MainFlags.

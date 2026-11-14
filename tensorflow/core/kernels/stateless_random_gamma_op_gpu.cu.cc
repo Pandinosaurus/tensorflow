@@ -18,6 +18,7 @@ limitations under the License.
 #define EIGEN_USE_GPU
 
 #include "tensorflow/core/framework/register_types.h"
+#include "tensorflow/core/kernels/random_ops_util.h"
 #include "tensorflow/core/kernels/stateless_random_gamma_op.h"
 #include "tensorflow/core/lib/random/random_distributions.h"
 #include "tensorflow/core/util/gpu_kernel_helper.h"
@@ -43,9 +44,14 @@ static constexpr int kReservedSamplesPerOutput = 256;
 
 template <typename T>
 __global__ void __launch_bounds__(1024)
-    FillKernel(int64 num_samples, int64 num_alphas, int64 samples_per_alpha,
-               random::PhiloxRandom random, T* samples_flat,
-               const T* alpha_flat) {
+    FillKernel(int64_t num_samples, int64_t num_alphas,
+               int64_t samples_per_alpha, const uint64_t* key,
+               const uint64_t* counter, random::PhiloxRandom random,
+               T* samples_flat, const T* alpha_flat) {
+  if (key != nullptr && counter != nullptr) {
+    random = GetPhiloxRandomFromCounterKeyMem(counter, key);
+  }
+
   using Eigen::numext::exp;
   using Eigen::numext::log;
   using Eigen::numext::log1p;
@@ -60,9 +66,9 @@ __global__ void __launch_bounds__(1024)
   RandomSampleBuffer<Normal> normal_buffer(&normal);
   RandomSampleBuffer<Uniform> uniform_buffer(&uniform);
 
-  for (int64 output_idx : GpuGridRangeX(num_samples)) {
-    int64 alpha_idx = output_idx / samples_per_alpha;
-    int64 sample_idx = output_idx % samples_per_alpha;
+  for (int64_t output_idx : GpuGridRangeX(num_samples)) {
+    int64_t alpha_idx = output_idx / samples_per_alpha;
+    int64_t sample_idx = output_idx % samples_per_alpha;
 
     const double alpha = static_cast<double>(alpha_flat[alpha_idx]);
 
@@ -139,7 +145,7 @@ __global__ void __launch_bounds__(1024)
         }
       }  // while: true
     }    // if (alpha == 1.0)
-  }      // for: output_idx
+  }  // for: output_idx
 }
 
 }  // namespace
@@ -148,18 +154,20 @@ namespace functor {
 
 template <typename T>
 struct StatelessRandomGammaFunctor<GPUDevice, T> {
-  static Status Fill(OpKernelContext* ctx, const T* alpha_flat,
-                     int64 num_samples, int64 num_alphas,
-                     int64 samples_per_alpha,
-                     const random::PhiloxRandom& random, T* samples_flat) {
+  static absl::Status Fill(OpKernelContext* ctx, const T* alpha_flat,
+                           int64_t num_samples, int64_t num_alphas,
+                           int64_t samples_per_alpha, const uint64_t* key,
+                           const uint64_t* counter,
+                           const random::PhiloxRandom& random,
+                           T* samples_flat) {
     const GPUDevice& d = ctx->eigen_device<GPUDevice>();
     GpuLaunchConfig cfg = GetGpuLaunchConfig(num_samples, d);
 
     TF_CHECK_OK(GpuLaunchKernel(FillKernel<T>, cfg.block_count,
                                 cfg.thread_per_block, 0, d.stream(),
-                                num_samples, num_alphas, samples_per_alpha,
-                                random, samples_flat, alpha_flat));
-    return Status::OK();
+                                num_samples, num_alphas, samples_per_alpha, key,
+                                counter, random, samples_flat, alpha_flat));
+    return absl::OkStatus();
   }
 };
 

@@ -1,131 +1,135 @@
 path: "tensorflow.metrics.Metric"
 tf_class {
-  is_instance: "<class \'keras.metrics.Metric\'>"
-  is_instance: "<class \'keras.engine.base_layer.Layer\'>"
+  is_instance: "<class \'tf_keras.metrics.base_metric.Metric\'>"
+  is_instance: "<class \'tf_keras.engine.base_layer.Layer\'>"
   is_instance: "<class \'tensorflow.python.module.module.Module\'>"
-  is_instance: "<class \'tensorflow.python.training.tracking.tracking.AutoTrackable\'>"
-  is_instance: "<class \'tensorflow.python.training.tracking.base.Trackable\'>"
-  is_instance: "<class \'keras.utils.version_utils.LayerVersionSelector\'>"
-  is_instance: "<type \'object\'>"
+  is_instance: "<class \'tensorflow.python.trackable.autotrackable.AutoTrackable\'>"
+  is_instance: "<class \'tensorflow.python.trackable.base.Trackable\'>"
+  is_instance: "<class \'tf_keras.utils.version_utils.LayerVersionSelector\'>"
+  is_instance: "<class \'object\'>"
   member {
     name: "activity_regularizer"
-    mtype: "<type \'property\'>"
+    mtype: "<class \'property\'>"
   }
   member {
     name: "compute_dtype"
-    mtype: "<type \'property\'>"
+    mtype: "<class \'property\'>"
   }
   member {
     name: "dtype"
-    mtype: "<type \'property\'>"
+    mtype: "<class \'property\'>"
   }
   member {
     name: "dtype_policy"
-    mtype: "<type \'property\'>"
+    mtype: "<class \'property\'>"
   }
   member {
     name: "dynamic"
-    mtype: "<type \'property\'>"
+    mtype: "<class \'property\'>"
   }
   member {
     name: "inbound_nodes"
-    mtype: "<type \'property\'>"
+    mtype: "<class \'property\'>"
   }
   member {
     name: "input"
-    mtype: "<type \'property\'>"
+    mtype: "<class \'property\'>"
   }
   member {
     name: "input_mask"
-    mtype: "<type \'property\'>"
+    mtype: "<class \'property\'>"
   }
   member {
     name: "input_shape"
-    mtype: "<type \'property\'>"
+    mtype: "<class \'property\'>"
   }
   member {
     name: "input_spec"
-    mtype: "<type \'property\'>"
+    mtype: "<class \'property\'>"
   }
   member {
     name: "losses"
-    mtype: "<type \'property\'>"
+    mtype: "<class \'property\'>"
   }
   member {
     name: "metrics"
-    mtype: "<type \'property\'>"
+    mtype: "<class \'property\'>"
   }
   member {
     name: "name"
-    mtype: "<type \'property\'>"
+    mtype: "<class \'property\'>"
   }
   member {
     name: "name_scope"
-    mtype: "<type \'property\'>"
+    mtype: "<class \'property\'>"
   }
   member {
     name: "non_trainable_variables"
-    mtype: "<type \'property\'>"
+    mtype: "<class \'property\'>"
   }
   member {
     name: "non_trainable_weights"
-    mtype: "<type \'property\'>"
+    mtype: "<class \'property\'>"
   }
   member {
     name: "outbound_nodes"
-    mtype: "<type \'property\'>"
+    mtype: "<class \'property\'>"
   }
   member {
     name: "output"
-    mtype: "<type \'property\'>"
+    mtype: "<class \'property\'>"
   }
   member {
     name: "output_mask"
-    mtype: "<type \'property\'>"
+    mtype: "<class \'property\'>"
   }
   member {
     name: "output_shape"
-    mtype: "<type \'property\'>"
+    mtype: "<class \'property\'>"
   }
   member {
     name: "stateful"
-    mtype: "<type \'property\'>"
+    mtype: "<class \'property\'>"
   }
   member {
     name: "submodules"
-    mtype: "<type \'property\'>"
+    mtype: "<class \'property\'>"
   }
   member {
     name: "supports_masking"
-    mtype: "<type \'property\'>"
+    mtype: "<class \'property\'>"
   }
   member {
     name: "trainable"
-    mtype: "<type \'property\'>"
+    mtype: "<class \'property\'>"
   }
   member {
     name: "trainable_variables"
-    mtype: "<type \'property\'>"
+    mtype: "<class \'property\'>"
   }
   member {
     name: "trainable_weights"
-    mtype: "<type \'property\'>"
+    mtype: "<class \'property\'>"
   }
   member {
     name: "updates"
-    mtype: "<type \'property\'>"
+    mtype: "<class \'property\'>"
   }
   member {
     name: "variable_dtype"
-    mtype: "<type \'property\'>"
+    mtype: "<class \'property\'>"
   }
   member {
     name: "variables"
-    mtype: "<type \'property\'>"
+    mtype: "<class \'property\'>"
   }
   member {
     name: "weights"
-    mtype: "<type \'property\'>"
+    mtype: "<class \'property\'>"
+  }
+  member_method {
+    name: "__call__"
+    argspec: "args=[\'self\'], varargs=args, keywords=kwargs, defaults=None"
   }
   member_method {
     name: "__init__"
@@ -141,7 +145,7 @@ tf_class {
   }
   member_method {
     name: "add_update"
-    argspec: "args=[\'self\', \'updates\', \'inputs\'], varargs=None, keywords=None, defaults=[\'None\'], "
+    argspec: "args=[\'self\', \'updates\'], varargs=None, keywords=None, defaults=None"
   }
   member_method {
     name: "add_variable"
@@ -152,12 +156,12 @@ tf_class {
     argspec: "args=[\'self\', \'name\', \'shape\', \'aggregation\', \'synchronization\', \'initializer\', \'dtype\'], varargs=None, keywords=None, defaults=[\'()\', \'VariableAggregationV2.SUM\', \'VariableSynchronization.ON_READ\', \'None\', \'None\'], "
   }
   member_method {
-    name: "apply"
-    argspec: "args=[\'self\', \'inputs\'], varargs=args, keywords=kwargs, defaults=None"
-  }
-  member_method {
     name: "build"
     argspec: "args=[\'self\', \'input_shape\'], varargs=None, keywords=None, defaults=None"
+  }
+  member_method {
+    name: "build_from_config"
+    argspec: "args=[\'self\', \'config\'], varargs=None, keywords=None, defaults=None"
   }
   member_method {
     name: "call"
@@ -186,6 +190,11 @@ tf_class {
   member_method {
     name: "from_config"
     argspec: "args=[\'cls\', \'config\'], varargs=None, keywords=None, defaults=None"
+    method_kind: CLASS
+  }
+  member_method {
+    name: "get_build_config"
+    argspec: "args=[\'self\'], varargs=None, keywords=None, defaults=None"
   }
   member_method {
     name: "get_config"
@@ -204,10 +213,6 @@ tf_class {
     argspec: "args=[\'self\', \'node_index\'], varargs=None, keywords=None, defaults=None"
   }
   member_method {
-    name: "get_losses_for"
-    argspec: "args=[\'self\', \'inputs\'], varargs=None, keywords=None, defaults=None"
-  }
-  member_method {
     name: "get_output_at"
     argspec: "args=[\'self\', \'node_index\'], varargs=None, keywords=None, defaults=None"
   }
@@ -220,12 +225,12 @@ tf_class {
     argspec: "args=[\'self\', \'node_index\'], varargs=None, keywords=None, defaults=None"
   }
   member_method {
-    name: "get_updates_for"
-    argspec: "args=[\'self\', \'inputs\'], varargs=None, keywords=None, defaults=None"
-  }
-  member_method {
     name: "get_weights"
     argspec: "args=[\'self\'], varargs=None, keywords=None, defaults=None"
+  }
+  member_method {
+    name: "load_own_variables"
+    argspec: "args=[\'self\', \'store\'], varargs=None, keywords=None, defaults=None"
   }
   member_method {
     name: "merge_state"
@@ -244,6 +249,10 @@ tf_class {
     argspec: "args=[\'self\'], varargs=None, keywords=None, defaults=None"
   }
   member_method {
+    name: "save_own_variables"
+    argspec: "args=[\'self\', \'store\'], varargs=None, keywords=None, defaults=None"
+  }
+  member_method {
     name: "set_weights"
     argspec: "args=[\'self\', \'weights\'], varargs=None, keywords=None, defaults=None"
   }
@@ -254,5 +263,6 @@ tf_class {
   member_method {
     name: "with_name_scope"
     argspec: "args=[\'cls\', \'method\'], varargs=None, keywords=None, defaults=None"
+    method_kind: CLASS
   }
 }

@@ -17,7 +17,9 @@ limitations under the License.
 
 #define EIGEN_USE_GPU
 
-#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
+#include <type_traits>
+
+#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/register_types.h"
 #include "tensorflow/core/framework/tensor.h"
@@ -34,18 +36,19 @@ typedef Eigen::GpuDevice GPUDevice;
 
 template <typename T, bool useSharedMem>
 __global__ void BucketizeCustomKernel(
-    const int32 size_in, const T* __restrict__ in, const int32 size_boundaries,
-    GpuDeviceArrayStruct<float> boundaries_array, int32* __restrict__ out) {
+    const int32_t size_in, const T* __restrict__ in,
+    const int32_t size_boundaries, GpuDeviceArrayStruct<float> boundaries_array,
+    int32_t* __restrict__ out) {
   const float* boundaries = GetGpuDeviceArrayOnDevice(&boundaries_array);
 
   GPU_DYNAMIC_SHARED_MEM_DECL(sizeof(float), unsigned char, shared_mem);
   float* shared_mem_boundaries = reinterpret_cast<float*>(shared_mem);
 
   if (useSharedMem) {
-    int32 lidx = threadIdx.y * blockDim.x + threadIdx.x;
-    int32 blockSize = blockDim.x * blockDim.y;
+    int32_t lidx = threadIdx.y * blockDim.x + threadIdx.x;
+    int32_t blockSize = blockDim.x * blockDim.y;
 
-    for (int32 i = lidx; i < size_boundaries; i += blockSize) {
+    for (int32_t i = lidx; i < size_boundaries; i += blockSize) {
       shared_mem_boundaries[i] = boundaries[i];
     }
 
@@ -54,15 +57,21 @@ __global__ void BucketizeCustomKernel(
     boundaries = shared_mem_boundaries;
   }
 
+  // For double input, compare as double. For float and integer inputs, compare
+  // as float to match CPU and XLA behavior without truncating fractional
+  // boundaries.
+  using CompType = std::conditional_t<std::is_same_v<T, double>, double, float>;
+
   GPU_1D_KERNEL_LOOP(i, size_in) {
     T value = in[i];
-    int32 bucket = 0;
-    int32 count = size_boundaries;
+    CompType value_cast = static_cast<CompType>(value);
+    int32_t bucket = 0;
+    int32_t count = size_boundaries;
     while (count > 0) {
-      int32 l = bucket;
-      int32 step = count / 2;
+      int32_t l = bucket;
+      int32_t step = count / 2;
       l += step;
-      if (!(value < static_cast<T>(boundaries[l]))) {
+      if (!(value_cast < static_cast<CompType>(boundaries[l]))) {
         bucket = ++l;
         count -= step + 1;
       } else {
@@ -78,10 +87,10 @@ namespace functor {
 template <typename T>
 struct BucketizeFunctor<GPUDevice, T> {
   // PRECONDITION: boundaries_vector must be sorted.
-  static Status Compute(OpKernelContext* context,
-                        const typename TTypes<T, 1>::ConstTensor& input,
-                        const std::vector<float>& boundaries_vector,
-                        typename TTypes<int32, 1>::Tensor& output) {
+  static absl::Status Compute(OpKernelContext* context,
+                              const typename TTypes<T, 1>::ConstTensor& input,
+                              const std::vector<float>& boundaries_vector,
+                              typename TTypes<int32_t, 1>::Tensor& output) {
     const GPUDevice& d = context->eigen_device<GPUDevice>();
 
     GpuDeviceArrayOnHost<float> boundaries_array(context,
@@ -93,8 +102,8 @@ struct BucketizeFunctor<GPUDevice, T> {
     TF_RETURN_IF_ERROR(boundaries_array.Finalize());
 
     GpuLaunchConfig config = GetGpuLaunchConfig(input.size(), d);
-    int32 shared_mem_size = sizeof(float) * boundaries_vector.size();
-    const int32 kMaxSharedMemBytes = 16384;
+    int32_t shared_mem_size = sizeof(float) * boundaries_vector.size();
+    const int32_t kMaxSharedMemBytes = 16384;
     if (shared_mem_size < d.sharedMemPerBlock() &&
         shared_mem_size < kMaxSharedMemBytes) {
       TF_CHECK_OK(GpuLaunchKernel(BucketizeCustomKernel<T, true>,
@@ -108,7 +117,7 @@ struct BucketizeFunctor<GPUDevice, T> {
           config.thread_per_block, 0, d.stream(), input.size(), input.data(),
           boundaries_vector.size(), boundaries_array.data(), output.data()));
     }
-    return Status::OK();
+    return absl::OkStatus();
   }
 };
 }  // namespace functor
@@ -116,8 +125,8 @@ struct BucketizeFunctor<GPUDevice, T> {
 #define REGISTER_GPU_SPEC(type) \
   template struct functor::BucketizeFunctor<GPUDevice, type>;
 
-REGISTER_GPU_SPEC(int32);
-REGISTER_GPU_SPEC(int64);
+REGISTER_GPU_SPEC(int32_t);
+REGISTER_GPU_SPEC(int64_t);
 REGISTER_GPU_SPEC(float);
 REGISTER_GPU_SPEC(double);
 #undef REGISTER_GPU_SPEC

@@ -63,9 +63,9 @@ TEST_F(SparseAddOpTest, TwoD_AddSparseTensorWithSelf) {
 
   const auto indices_shape = TensorShape({4, 2});
   std::initializer_list<int64_t> in{0, 1, 1, 0, 2, 0, 2, 1};
-  const gtl::ArraySlice<int64_t> indices(in);
+  const absl::Span<const int64_t> indices(in);
   std::initializer_list<int64_t> sh{3, 2};
-  const gtl::ArraySlice<int64_t> shape(sh);
+  const absl::Span<const int64_t> shape(sh);
 
 #define ADD_TENSOR_INPUT()                                  \
   AddInputFromArray<int64_t>(indices_shape, indices);       \
@@ -166,13 +166,13 @@ RUN_TEST(complex128);
                                                                          \
     auto AddSparseTensor = [indices, indices_shape, shape,               \
                             this](bool negate) {                         \
-      AddInputFromArray<int64>(indices_shape, indices);                  \
+      AddInputFromArray<int64_t>(indices_shape, indices);                \
       if (!negate) {                                                     \
         AddInputFromArray<VALTYPE>(TensorShape({4}), {1, 2, 3, 4});      \
       } else {                                                           \
         AddInputFromArray<VALTYPE>(TensorShape({4}), {-1, -2, -3, -4});  \
       }                                                                  \
-      AddInputFromArray<int64>(TensorShape({2}), shape);                 \
+      AddInputFromArray<int64_t>(TensorShape({2}), shape);               \
     };                                                                   \
     AddSparseTensor(false);                                              \
     AddSparseTensor(true);                                               \

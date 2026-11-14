@@ -1,4 +1,4 @@
-/* Copyright 2016 The TensorFlow Authors All Rights Reserved.
+/* Copyright 2016 The TensorFlow Authors. All Rights Reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -25,8 +25,6 @@ limitations under the License.
 #include <string>
 #include <vector>
 
-#include "tensorflow/c/checkpoint_reader.h"
-#include "tensorflow/core/framework/graph.pb.h"
 #include "tensorflow/core/lib/core/errors.h"
 #include "tensorflow/core/profiler/internal/tfprof_node.h"
 #include "tensorflow/core/profiler/internal/tfprof_show_multi.h"
@@ -42,7 +40,7 @@ namespace tfprof {
 class TFOp : public TFMultiShow {
  public:
   explicit TFOp() : TFMultiShow() {}
-  ~TFOp() override {}
+  ~TFOp() override = default;
 
   void AddNode(TFGraphNode* node) override;
 
@@ -52,8 +50,8 @@ class TFOp : public TFMultiShow {
   const ShowMultiNode* ShowInternal(const Options& opts,
                                     Timeline* timeline) override;
 
-  int64_t SearchRoot(const std::vector<OpNode*> nodes,
-                     const std::vector<string>& regexes);
+  int64_t SearchRoot(std::vector<OpNode*> nodes,
+                     const std::vector<std::string>& regexes);
 
   bool ShouldShowIfExtra(const ShowMultiNode* node, const Options& opts,
                          int depth) const override {
@@ -64,13 +62,14 @@ class TFOp : public TFMultiShow {
     return true;
   }
 
-  string FormatNode(OpNode* node, OpNode* root, const Options& opts) const;
-  string FormatMemoryNode(int64_t node_total_bytes, int64_t root_total_bytes,
-                          int64_t node_bytes) const;
+  std::string FormatNode(OpNode* node, OpNode* root, const Options& opts) const;
+  std::string FormatMemoryNode(int64_t node_total_bytes,
+                               int64_t root_total_bytes,
+                               int64_t node_bytes) const;
 
   std::unique_ptr<OpNode> root_;
-  std::map<string, std::unique_ptr<OpNode>> cnodes_map_;
-  std::map<string, std::unique_ptr<TFMultiGraphNode>> tfcnodes_map_;
+  std::map<std::string, std::unique_ptr<OpNode>> cnodes_map_;
+  std::map<std::string, std::unique_ptr<TFMultiGraphNode>> tfcnodes_map_;
 };
 
 }  // namespace tfprof

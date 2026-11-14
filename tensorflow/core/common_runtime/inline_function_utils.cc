@@ -70,11 +70,11 @@ struct Endpoint {
   int index;
 
   // Returns the string name represents this endpoint.
-  string name() const {
+  std::string name() const {
     if (index == 0) {
       return node->name();
     } else {
-      return strings::StrCat(node->name(), ":", index);
+      return absl::StrCat(node->name(), ":", index);
     }
   }
 
@@ -82,7 +82,7 @@ struct Endpoint {
 };
 
 struct EndpointHash {
-  uint64 operator()(const Endpoint& x) const {
+  uint64_t operator()(const Endpoint& x) const {
     return Hash64(reinterpret_cast<const char*>(&x.node), sizeof(Node*),
                   x.index);
   }
@@ -96,39 +96,39 @@ struct EndpointEq {
 
 // The following Add* routines are used to add a few graph nodes while
 // functions are transformed.
-static Node* AddNoOp(StringPiece name, Graph* g) {
+static Node* AddNoOp(absl::string_view name, Graph* g) {
   NodeDef ndef;
   ndef.set_name(g->NewName(absl::StrCat(kNodeLabel, "/", name)));
   ndef.set_op("NoOp");
-  Status s;
+  absl::Status s;
   Node* ret = g->AddNode(ndef, &s);
   TF_CHECK_OK(s);
   return ret;
 }
 
-static Node* AddIdentity(StringPiece name, Graph* g, Endpoint input) {
+static Node* AddIdentity(absl::string_view name, Graph* g, Endpoint input) {
   DCHECK_LT(0, input.dtype());
   NodeDef ndef;
   ndef.set_name(g->NewName(absl::StrCat(kNodeLabel, "/", name)));
   ndef.set_op("Identity");
   ndef.add_input(input.name());
   AddNodeAttr("T", BaseType(input.dtype()), &ndef);
-  Status s;
+  absl::Status s;
   Node* ret = g->AddNode(ndef, &s);
   TF_CHECK_OK(s);
   g->AddEdge(input.node, input.index, ret, 0);
   return ret;
 }
 
-std::vector<string> InputDevices(const Node& caller) {
-  std::vector<string> input_devices(caller.in_edges().size());
-  std::vector<string> input_tensors(caller.in_edges().size());
+std::vector<std::string> InputDevices(const Node& caller) {
+  std::vector<std::string> input_devices(caller.in_edges().size());
+  std::vector<std::string> input_tensors(caller.in_edges().size());
 
   for (const Edge* edge : caller.in_edges()) {
     if (edge->IsControlEdge()) continue;
-    const string& input_device = edge->src()->has_assigned_device_name()
-                                     ? edge->src()->assigned_device_name()
-                                     : edge->src()->requested_device();
+    const std::string& input_device = edge->src()->has_assigned_device_name()
+                                          ? edge->src()->assigned_device_name()
+                                          : edge->src()->requested_device();
     input_devices[edge->dst_input()] = input_device;
     input_tensors[edge->dst_input()] =
         absl::StrCat(edge->src()->name(), ":", edge->src_output());
@@ -154,22 +154,24 @@ class DefaultFunctionBodyPlacer : public InlinedFunctionBodyPlacer {
   explicit DefaultFunctionBodyPlacer(const Node& caller)
       : input_devices_(InputDevices(caller)) {}
 
-  absl::optional<string> InputNodeDevice(int input_index) const override {
+  absl::optional<std::string> InputNodeDevice(int input_index) const override {
     return input_devices_[input_index];
   }
-  absl::optional<string> OutputNodeDevice(int output_index) const override {
-    return absl::nullopt;
+  absl::optional<std::string> OutputNodeDevice(
+      int output_index) const override {
+    return std::nullopt;
   }
   bool ColocateInputOutputIdentities() const override { return false; }
-  absl::optional<string> ControlNodeDevice() const override {
-    return absl::nullopt;
+  absl::optional<std::string> ControlNodeDevice() const override {
+    return std::nullopt;
   }
-  absl::optional<string> BodyNodeDevice(const NodeDef& ndef) const override {
-    return absl::nullopt;
+  absl::optional<std::string> BodyNodeDevice(
+      const NodeDef& ndef) const override {
+    return std::nullopt;
   }
 
  private:
-  const std::vector<string> input_devices_;
+  const std::vector<std::string> input_devices_;
 };
 
 // Place all nodes on the same device as caller node.
@@ -178,22 +180,24 @@ class SingleDeviceFunctionBodyPlacer : public InlinedFunctionBodyPlacer {
   explicit SingleDeviceFunctionBodyPlacer(const Node& caller)
       : caller_device_(caller.def().device()) {}
 
-  absl::optional<string> InputNodeDevice(int input_index) const override {
+  absl::optional<std::string> InputNodeDevice(int input_index) const override {
     return caller_device_;
   }
-  absl::optional<string> OutputNodeDevice(int output_index) const override {
+  absl::optional<std::string> OutputNodeDevice(
+      int output_index) const override {
     return caller_device_;
   }
   bool ColocateInputOutputIdentities() const override { return false; }
-  absl::optional<string> ControlNodeDevice() const override {
+  absl::optional<std::string> ControlNodeDevice() const override {
     return caller_device_;
   }
-  absl::optional<string> BodyNodeDevice(const NodeDef& ndef) const override {
+  absl::optional<std::string> BodyNodeDevice(
+      const NodeDef& ndef) const override {
     return caller_device_;
   }
 
  private:
-  const string caller_device_;
+  const std::string caller_device_;
 };
 
 // Place input nodes on the same device as the corresponding caller input
@@ -209,17 +213,19 @@ class MultiDeviceFunctionBodyPlacer : public InlinedFunctionBodyPlacer {
         DeviceNameUtils::ParseFullName(caller_device_, &caller_parsed_device_);
   }
 
-  absl::optional<string> InputNodeDevice(int input_index) const override {
+  absl::optional<std::string> InputNodeDevice(int input_index) const override {
     return input_devices_[input_index];
   }
-  absl::optional<string> OutputNodeDevice(int output_index) const override {
-    return absl::nullopt;
+  absl::optional<std::string> OutputNodeDevice(
+      int output_index) const override {
+    return std::nullopt;
   }
   bool ColocateInputOutputIdentities() const override { return true; }
-  absl::optional<string> ControlNodeDevice() const override {
+  absl::optional<std::string> ControlNodeDevice() const override {
     return caller_device_;
   }
-  absl::optional<string> BodyNodeDevice(const NodeDef& ndef) const override {
+  absl::optional<std::string> BodyNodeDevice(
+      const NodeDef& ndef) const override {
     // LINT.IfChange
     // TODO(ezhulenev): If function would have been instantiated as a
     // multi-device function and executed via FunctionLibraryRuntime, it could
@@ -240,10 +246,10 @@ class MultiDeviceFunctionBodyPlacer : public InlinedFunctionBodyPlacer {
   }
 
  private:
-  string caller_device_;
+  std::string caller_device_;
   bool has_parsed_caller_device_;
   DeviceNameUtils::ParsedName caller_parsed_device_;
-  std::vector<string> input_devices_;
+  std::vector<std::string> input_devices_;
 };
 
 }  // namespace
@@ -252,33 +258,33 @@ std::unique_ptr<InlinedFunctionBodyPlacer>
 InlinedFunctionBodyPlacer::DefaultPlacer(const Graph& graph,
                                          const Node& caller) {
   VLOG(3) << "Create default placer for inlined function body.";
-  return absl::make_unique<DefaultFunctionBodyPlacer>(caller);
+  return std::make_unique<DefaultFunctionBodyPlacer>(caller);
 }
 
 std::unique_ptr<InlinedFunctionBodyPlacer>
 InlinedFunctionBodyPlacer::SingleDevicePlacer(const Graph& graph,
                                               const Node& caller) {
   VLOG(3) << "Create single device placer for inlined function body.";
-  return absl::make_unique<SingleDeviceFunctionBodyPlacer>(caller);
+  return std::make_unique<SingleDeviceFunctionBodyPlacer>(caller);
 }
 
 std::unique_ptr<InlinedFunctionBodyPlacer>
 InlinedFunctionBodyPlacer::MultiDevicePlacer(const Graph& graph,
                                              const Node& caller) {
   VLOG(3) << "Create multi device placer for inlined function body.";
-  return absl::make_unique<MultiDeviceFunctionBodyPlacer>(caller);
+  return std::make_unique<MultiDeviceFunctionBodyPlacer>(caller);
 }
 
 namespace {
 
-Status ValidateNoInline(const FunctionBody* fbody) {
-  const auto attr = AttrSlice(&fbody->fdef.attr());
+absl::Status ValidateNoInline(const FunctionBody* fbody) {
+  const auto attr = AttrSlice(&fbody->record->fdef().attr());
   bool noinline = false;
   if (TryGetNodeAttr(attr, kNoInlineAttr, &noinline) && noinline) {
-    return errors::InvalidArgument(
+    return absl::InvalidArgumentError(
         "Can't inline function marked with '_noinline'");
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 using OutputControlSrc = InlineFunctionBodyOptions::OutputControlSource;
@@ -286,7 +292,7 @@ using OutputControlSrc = InlineFunctionBodyOptions::OutputControlSource;
 // Propagate the debug info of `nodes` in function `func` to the `target` node.
 // If the debug info of any node is missing, its node name and function name
 // is used.
-void PropagateDebugInfoToNode(const string& func,
+void PropagateDebugInfoToNode(const std::string& func,
                               const std::vector<const Node*>& nodes,
                               NodeDef* target) {
   if (nodes.empty() || target->has_experimental_debug_info()) {
@@ -306,10 +312,10 @@ void PropagateDebugInfoToNode(const string& func,
 }
 }  // namespace
 
-string InlineFunctionBodyOptions::DebugString() const {
+std::string InlineFunctionBodyOptions::DebugString() const {
   const auto true_false = [](bool b) { return b ? "true" : "false"; };
 
-  const auto keep_caller_node_str = [this]() -> string {
+  const auto keep_caller_node_str = [this]() -> std::string {
     switch (keep_caller_node) {
       case KeepCallerNode::kDoNotKeep:
         return "DoNotKeep";
@@ -332,8 +338,8 @@ string InlineFunctionBodyOptions::DebugString() const {
       ", uniquify_frame_names=", true_false(uniquify_frame_names));
 }
 
-Status ValidateInlining(const Node* node, const FunctionBody* fbody,
-                        const InlineFunctionBodyOptions& options) {
+absl::Status ValidateInlining(const Node* node, const FunctionBody* fbody,
+                              const InlineFunctionBodyOptions& options) {
   // TODO(ezhulenev): Currently common_runtime function inlining can't guarantee
   // that all side-effectful ops will be executed after inlining. See Grappler
   // function_optimizer for details. Unify all function inlining mechanism.
@@ -344,48 +350,49 @@ Status ValidateInlining(const Node* node, const FunctionBody* fbody,
 
   if (num_node_inputs != fbody->arg_types.size() ||
       num_node_inputs != fbody->arg_nodes.size()) {
-    return errors::InvalidArgument(
+    return absl::InvalidArgumentError(absl::StrCat(
         "Node inputs do not match function arguments: inputs=", num_node_inputs,
         " arg_types=", fbody->arg_types.size(),
-        " arg_nodes=", fbody->arg_nodes.size());
+        " arg_nodes=", fbody->arg_nodes.size()));
   }
 
   if (num_node_outputs != fbody->ret_types.size() ||
       num_node_outputs != fbody->ret_nodes.size()) {
-    return errors::InvalidArgument(
-        "Node outputs do not match function returns: outputs=",
-        num_node_outputs, " ret_types=", fbody->ret_types.size(),
-        " ret_nodes=", fbody->ret_nodes.size());
+    return absl::InvalidArgumentError(
+        absl::StrCat("Node outputs do not match function returns: outputs=",
+                     num_node_outputs, " ret_types=", fbody->ret_types.size(),
+                     " ret_nodes=", fbody->ret_nodes.size()));
   }
 
   for (int i = 0; i < node->num_inputs(); ++i) {
     if (node->input_type(i) != fbody->arg_types[i]) {
-      return errors::InvalidArgument(
+      return absl::InvalidArgumentError(absl::StrCat(
           "Node input type doesn't match function argument type: ",
-          node->input_type(i), " != ", fbody->arg_types[i], " @ index=", i);
+          node->input_type(i), " != ", fbody->arg_types[i], " @ index=", i));
     }
   }
   for (int i = 0; i < node->num_outputs(); ++i) {
     if (node->output_type(i) != fbody->ret_types[i]) {
-      return errors::InvalidArgument(
+      return absl::InvalidArgumentError(absl::StrCat(
           "Node output type doesn't match function return type: ",
-          node->output_type(i), " != ", fbody->ret_types[i], " @ index=", i);
+          node->output_type(i), " != ", fbody->ret_types[i], " @ index=", i));
     }
   }
 
   if (options.disable_inlining) {
-    return errors::InvalidArgument(
+    return absl::InvalidArgumentError(
         "Function inlining explicitly disabled by 'options.disable_inlining'");
   }
 
   if (!options.inline_impl_selection_group_functions) {
     bool is_impl_selection_group_function =
-        fbody->fdef.attr().find("api_implements") != fbody->fdef.attr().end();
+        fbody->record->fdef().attr().find("api_implements") !=
+        fbody->record->fdef().attr().end();
     if (is_impl_selection_group_function) {
-      return errors::InvalidArgument(
+      return absl::InvalidArgumentError(absl::StrCat(
           "Inlining of implementation selection group function ",
-          fbody->fdef.signature().name(),
-          " is disabled by options.inline_impl_selection_group_functions");
+          fbody->record->fdef().signature().name(),
+          " is disabled by options.inline_impl_selection_group_functions"));
     }
   }
 
@@ -393,7 +400,7 @@ Status ValidateInlining(const Node* node, const FunctionBody* fbody,
     TF_RETURN_IF_ERROR(ValidateNoInline(fbody));
   }
 
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 // Function inlining must preserve function execution semantics with regards to
@@ -475,18 +482,21 @@ Status ValidateInlining(const Node* node, const FunctionBody* fbody,
 // a single device).
 //
 // TODO(ezhulenev): Documentation above is ahead of implementation below.
-Status InlineFunctionBody(const FunctionLibraryDefinition& flib_def, Graph* g,
-                          Node* caller, const FunctionBody* fbody,
-                          const InlineFunctionBodyOptions& options) {
+absl::Status InlineFunctionBody(const FunctionLibraryDefinition& flib_def,
+                                Graph* g, Node* caller,
+                                const FunctionBody* fbody,
+                                const InlineFunctionBodyOptions& options) {
   VLOG(3) << "Inline function call: " << SummarizeNode(*caller) << " ["
           << options.DebugString() << "]";
-  VLOG(4) << "Inlining function: " << fbody->fdef.DebugString();
+  VLOG(4) << "Inlining function: "
+          << fbody->record->fdef().DebugString();  // NOLINT
   VLOG(4) << "Current graphdef: " << g->ToGraphDefDebug().DebugString();
   VLOG(4) << "Caller: " << caller->DebugString();
 
-  Status validation = ValidateInlining(caller, fbody, options);
+  absl::Status validation = ValidateInlining(caller, fbody, options);
   if (!validation.ok()) {
-    return errors::Internal("Inlining mismatch: ", validation.error_message());
+    return absl::InternalError(
+        absl::StrCat("Inlining mismatch: ", validation.message()));
   }
 
   // Placer is responsible for assigning devices for all nodes that we will add
@@ -503,39 +513,39 @@ Status InlineFunctionBody(const FunctionLibraryDefinition& flib_def, Graph* g,
   // control nodes and inlined function inputs and outputs.
 
   // Add a NoOp node for function control inputs/outputs.
-  const auto no_op = [&](StringPiece name) -> Node* {
+  const auto no_op = [&](absl::string_view name) -> Node* {
     Node* node = AddNoOp(absl::StrCat(caller->name(), "/", name), g);
-    const absl::optional<string> device = placer->ControlNodeDevice();
+    const absl::optional<std::string> device = placer->ControlNodeDevice();
     if (device.has_value()) node->set_requested_device(*device);
     return node;
   };
 
   // Add an Identity node for function input.
-  const auto input_identity = [&](StringPiece name, Endpoint input,
+  const auto input_identity = [&](absl::string_view name, Endpoint input,
                                   int index) -> Node* {
     Node* node = AddIdentity(absl::StrCat(caller->name(), "/", name), g, input);
-    const absl::optional<string> device = placer->InputNodeDevice(index);
+    const absl::optional<std::string> device = placer->InputNodeDevice(index);
     if (device.has_value()) node->set_requested_device(*device);
     bool colocate_identity = placer->ColocateInputOutputIdentities();
     if (colocate_identity) {
       node->AddAttr(kColocationAttrName,
-                    std::vector<string>{absl::StrCat(kColocationGroupPrefix,
-                                                     input.node->name())});
+                    std::vector<std::string>{absl::StrCat(
+                        kColocationGroupPrefix, input.node->name())});
     }
     return node;
   };
 
   // Add an Identity node for function output.
-  const auto output_identity = [&](StringPiece name, Endpoint input,
+  const auto output_identity = [&](absl::string_view name, Endpoint input,
                                    int index) -> Node* {
     Node* node = AddIdentity(absl::StrCat(caller->name(), "/", name), g, input);
-    const absl::optional<string> device = placer->OutputNodeDevice(index);
+    const absl::optional<std::string> device = placer->OutputNodeDevice(index);
     if (device.has_value()) node->set_requested_device(*device);
     bool colocate_identity = placer->ColocateInputOutputIdentities();
     if (colocate_identity) {
       node->AddAttr(kColocationAttrName,
-                    std::vector<string>{absl::StrCat(kColocationGroupPrefix,
-                                                     input.node->name())});
+                    std::vector<std::string>{absl::StrCat(
+                        kColocationGroupPrefix, input.node->name())});
     }
     return node;
   };
@@ -578,9 +588,12 @@ Status InlineFunctionBody(const FunctionLibraryDefinition& flib_def, Graph* g,
   std::vector<Node*> input_nodes;
   std::map<absl::string_view, absl::string_view> input_node_name_map;
   for (std::size_t i = 0; i < fbody->arg_nodes.size(); ++i) {
+    if (inputs[i].node == nullptr)
+      return absl::InternalError(absl::StrCat("Null node found for input ", i));
+
     Node* n = input_identity("input", inputs[i], i);
-    input_node_name_map[arg_name(fbody->fdef.signature().input_arg(), i)] =
-        n->name();
+    input_node_name_map[arg_name(fbody->record->fdef().signature().input_arg(),
+                                 i)] = n->name();
     input_nodes.push_back(n);
   }
 
@@ -591,7 +604,7 @@ Status InlineFunctionBody(const FunctionLibraryDefinition& flib_def, Graph* g,
   //
   // If 'x' is a node in fbody->graph and its copy in 'g' is 'y', we
   // remember 'y' in node_map[x->id()].
-  std::unordered_set<string> fn_nodes;
+  std::unordered_set<std::string> fn_nodes;
   for (Node* n : fbody->graph->op_nodes()) {
     fn_nodes.insert(n->name());
   }
@@ -600,17 +613,18 @@ Status InlineFunctionBody(const FunctionLibraryDefinition& flib_def, Graph* g,
     NodeDef ndef = n->def();
 
     // Maybe override requested node device assignment.
-    const absl::optional<string> device = placer->BodyNodeDevice(ndef);
+    const absl::optional<std::string> device = placer->BodyNodeDevice(ndef);
     if (device.has_value()) ndef.set_device(*device);
 
     // Add inlined function name to inlined node debug information.
-    PropagateDebugInfoToNode(fbody->fdef.signature().name(), {n}, &ndef);
+    PropagateDebugInfoToNode(fbody->record->fdef().signature().name(), {n},
+                             &ndef);
 
     // Add the function node name as a prefix:
     //  1) to node name to avoid collisions
     //  2) to frame name to avoid multiple LoopCond nodes in one frame
     //  3) to colocation attribute
-    const string prefix = strings::StrCat(caller->name(), "/");
+    const std::string prefix = absl::StrCat(caller->name(), "/");
     TF_RETURN_IF_ERROR(AddPrefixAndSuffixToNode(prefix, /*suffix=*/"", &ndef,
                                                 options.uniquify_frame_names));
 
@@ -622,8 +636,8 @@ Status InlineFunctionBody(const FunctionLibraryDefinition& flib_def, Graph* g,
     TF_RETURN_IF_ERROR(
         MaybeAddPrefixToColocationConstraints(fn_nodes, prefix, &ndef));
 
-    Status added_node;
-    Node* clone = g->AddNode(ndef, &added_node);
+    absl::Status added_node;
+    Node* clone = g->AddNode(std::move(ndef), &added_node);
     TF_CHECK_OK(added_node);
     node_map[n->id()] = clone;
     clone->SetStackTrace(n->GetStackTrace());
@@ -698,8 +712,8 @@ Status InlineFunctionBody(const FunctionLibraryDefinition& flib_def, Graph* g,
     Node* arg = node_map[fbody->arg_nodes[i]->id()];
     Node* n = input_nodes[i];
     VLOG(4) << "    [index " << i << "] "
-            << arg_name(fbody->fdef.signature().input_arg(), i) << " as "
-            << n->name() << " (input: " << inputs[i].name()
+            << arg_name(fbody->record->fdef().signature().input_arg(), i)
+            << " as " << n->name() << " (input: " << inputs[i].name()
             << ", requested_device: " << n->requested_device() << ")";
 
     if (input_control_node) {
@@ -750,9 +764,10 @@ Status InlineFunctionBody(const FunctionLibraryDefinition& flib_def, Graph* g,
     Node* n = output_identity("output", data, i);
     outputs[i] = n;
     VLOG(4) << "    [index " << i << "] "
-            << arg_name(fbody->fdef.signature().output_arg(), i) << " as "
-            << n->name() << " (ret: " << data.node->name() << ":" << data.index
-            << ", requested_device: " << n->requested_device() << ")";
+            << arg_name(fbody->record->fdef().signature().output_arg(), i)
+            << " as " << n->name() << " (ret: " << data.node->name() << ":"
+            << data.index << ", requested_device: " << n->requested_device()
+            << ")";
     for (const Edge* e : ret->in_edges()) {
       if (e->IsControlEdge()) {
         g->AddControlEdge(e->src(), n, kDoNotCheckDuplicates);
@@ -850,7 +865,7 @@ Status InlineFunctionBody(const FunctionLibraryDefinition& flib_def, Graph* g,
 
   VLOG(4) << "Final graph: " << g->ToGraphDefDebug().DebugString();
 
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 bool ExpandInlineFunctions(FunctionLibraryRuntime* lib, Graph* graph,
@@ -871,9 +886,9 @@ bool ExpandInlineFunctions(FunctionLibraryRuntime* lib, Graph* graph,
       continue;
     }
     FunctionLibraryRuntime::Handle handle;
-    Status s = InstantiateFunctionCall(node->def(), lib, &handle);
+    absl::Status s = InstantiateFunctionCall(node->def(), lib, &handle);
     if (!s.ok()) {
-      LOG(ERROR) << "Failed to instantiate a function:  " << s.error_message();
+      LOG(ERROR) << "Failed to instantiate a function:  " << s.message();
       continue;
     }
     const FunctionBody* fbody = lib->GetFunctionBody(handle);
@@ -883,15 +898,15 @@ bool ExpandInlineFunctions(FunctionLibraryRuntime* lib, Graph* graph,
 
   bool inlined_any = false;
   for (const auto& p : candidates) {
-    Status inlined = InlineFunctionBody(*fld, graph, p.first, p.second,
-                                        p.first->IsPartitionedCall()
-                                            ? options.multi_device_options
-                                            : options.native_options);
+    absl::Status inlined = InlineFunctionBody(*fld, graph, p.first, p.second,
+                                              p.first->IsPartitionedCall()
+                                                  ? options.multi_device_options
+                                                  : options.native_options);
     if (inlined.ok()) {
       inlined_any = true;
     } else {
       VLOG(1) << "Failed to inline function call: node=" << p.first->name()
-              << " error=" << inlined.error_message();
+              << " error=" << inlined.message();
     }
   }
 

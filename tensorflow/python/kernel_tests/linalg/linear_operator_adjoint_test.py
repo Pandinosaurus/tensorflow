@@ -13,12 +13,9 @@
 # limitations under the License.
 # ==============================================================================
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import numpy as np
 
+from tensorflow.python.framework import config
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import test_util
 from tensorflow.python.ops import array_ops
@@ -38,7 +35,12 @@ class LinearOperatorAdjointTest(
     linear_operator_test_util.SquareLinearOperatorDerivedClassTest):
   """Most tests done in the base class LinearOperatorDerivedClassTest."""
 
+  def tearDown(self):
+    config.enable_tensor_float_32_execution(self.tf32_keep_)
+
   def setUp(self):
+    self.tf32_keep_ = config.tensor_float_32_execution_enabled()
+    config.enable_tensor_float_32_execution(False)
     self._atol[dtypes.complex64] = 1e-5
     self._rtol[dtypes.complex64] = 1e-5
 
@@ -79,10 +81,21 @@ class LinearOperatorAdjointTest(
         is_positive_definite=True,
         is_non_singular=True,
         is_self_adjoint=False)
-    operator_adjoint = LinearOperatorAdjoint(operator)
+    operator_adjoint = operator.adjoint()
+    self.assertIsInstance(operator_adjoint, LinearOperatorAdjoint)
     self.assertTrue(operator_adjoint.is_positive_definite)
     self.assertTrue(operator_adjoint.is_non_singular)
     self.assertFalse(operator_adjoint.is_self_adjoint)
+
+  def test_adjoint_of_adjoint_is_operator(self):
+    # The matrix values do not effect auto-setting of the flags.
+    matrix = [[1., 0.], [1., 1.]]
+    operator = linalg.LinearOperatorFullMatrix(matrix)
+    operator_adjoint = operator.adjoint()
+    self.assertIsInstance(operator_adjoint, LinearOperatorAdjoint)
+    adjoint_of_op_adjoint = operator_adjoint.adjoint()
+    self.assertIsInstance(adjoint_of_op_adjoint,
+                          linalg.LinearOperatorFullMatrix)
 
   def test_supplied_hint_used(self):
     # The matrix values do not effect auto-setting of the flags.

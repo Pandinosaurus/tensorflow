@@ -14,19 +14,18 @@
 # ==============================================================================
 """A tf.distribute.Strategy for running on a single device."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 from tensorflow.python.distribute import device_util
 from tensorflow.python.distribute import distribute_lib
 from tensorflow.python.distribute import distribute_utils
 from tensorflow.python.distribute import input_lib
+from tensorflow.python.distribute import input_util
 from tensorflow.python.distribute import numpy_dataset
+from tensorflow.python.distribute.v1 import input_lib as input_lib_v1
 from tensorflow.python.framework import constant_op
 from tensorflow.python.framework import ops
 from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import control_flow_ops
+from tensorflow.python.ops import while_loop
 from tensorflow.python.util import nest
 from tensorflow.python.util.tf_export import tf_export
 
@@ -240,9 +239,10 @@ class OneDeviceStrategy(distribute_lib.Strategy):
 @tf_export(v1=["distribute.OneDeviceStrategy"])  # pylint: disable=empty-docstring
 class OneDeviceStrategyV1(distribute_lib.StrategyV1):
 
-  __doc__ = OneDeviceStrategy.__doc__.replace(
+  __doc__ = (OneDeviceStrategy.__doc__ or "").replace(
       "For example:\n  ```",
-      "For example:\n  ```\n  tf.enable_eager_execution()")
+      "For example:\n  ```\n  tf.enable_eager_execution()",
+  )
 
   def __init__(self, device):
     super(OneDeviceStrategyV1, self).__init__(OneDeviceExtended(self, device))
@@ -290,16 +290,16 @@ class OneDeviceExtended(distribute_lib.StrategyExtendedV1):
     """Make iterator from dataset without splitting the batch."""
     # Note that split_batch_by argument is not passed because it is always 1 in
     # this strategy, and adding it adds unnecessary overhead to the dataset.
-    return input_lib.DatasetIterator(dataset, self._input_workers,
-                                     self._container_strategy())
+    return input_lib_v1.DatasetIterator(dataset, self._input_workers,
+                                        self._container_strategy())
 
   def _make_input_fn_iterator(
       self,
       input_fn,
       replication_mode=distribute_lib.InputReplicationMode.PER_WORKER):
-    return input_lib.InputFunctionIterator(input_fn, self._input_workers,
-                                           [distribute_lib.InputContext()],
-                                           self._container_strategy())
+    return input_lib_v1.InputFunctionIterator(input_fn, self._input_workers,
+                                              [distribute_lib.InputContext()],
+                                              self._container_strategy())
 
   def _experimental_make_numpy_dataset(self, numpy_input, session):
     return numpy_dataset.one_host_numpy_dataset(
@@ -319,7 +319,7 @@ class OneDeviceExtended(distribute_lib.StrategyExtendedV1):
           "is only supported in  "
           "`experimental_distribute_datasets_from_function`."
       )
-    return input_lib.get_distributed_dataset(
+    return input_util.get_distributed_dataset(
         dataset,
         self._input_workers_with_options(options),
         self._container_strategy(),
@@ -333,7 +333,7 @@ class OneDeviceExtended(distribute_lib.StrategyExtendedV1):
           "is only supported in "
           "`experimental_distribute_datasets_from_function` "
           "of tf.distribute.MirroredStrategy")
-    return input_lib.get_distributed_datasets_from_function(
+    return input_util.get_distributed_datasets_from_function(
         dataset_fn,
         self._input_workers_with_options(options),
         [distribute_lib.InputContext()],
@@ -373,9 +373,13 @@ class OneDeviceExtended(distribute_lib.StrategyExtendedV1):
     # TODO(priyag): Use max_iterations instead of an explicit counter.
     cond = lambda i, *args: i < iterations
     i = constant_op.constant(0)
-    loop_result = control_flow_ops.while_loop(
-        cond, body, [i] + initial_loop_values, name="",
-        parallel_iterations=1, back_prop=False, swap_memory=False,
+    loop_result = while_loop.while_loop(
+        cond,
+        body, [i] + initial_loop_values,
+        name="",
+        parallel_iterations=1,
+        back_prop=False,
+        swap_memory=False,
         return_same_structure=True)
     del self._outer_control_flow_context
 

@@ -15,9 +15,11 @@ limitations under the License.
 
 // See docs in ../ops/io_ops.cc.
 
-#include <memory>
+#include <string>
 
+#include "absl/status/status.h"
 #include "absl/strings/escaping.h"
+#include "absl/strings/str_cat.h"
 #include "tensorflow/core/framework/reader_base.h"
 #include "tensorflow/core/framework/reader_base.pb.h"
 #include "tensorflow/core/framework/reader_op_kernel.h"
@@ -30,35 +32,35 @@ namespace tensorflow {
 
 class IdentityReader : public ReaderBase {
  public:
-  explicit IdentityReader(const string& node_name)
-      : ReaderBase(strings::StrCat("IdentityReader '", node_name, "'")) {}
+  explicit IdentityReader(const std::string& node_name)
+      : ReaderBase(absl::StrCat("IdentityReader '", node_name, "'")) {}
 
-  Status ReadLocked(tstring* key, tstring* value, bool* produced,
-                    bool* at_end) override {
+  absl::Status ReadLocked(tstring* key, tstring* value, bool* produced,
+                          bool* at_end) override {
     *key = current_work();
     *value = current_work();
     *produced = true;
     *at_end = true;
-    return Status::OK();
+    return absl::OkStatus();
   }
 
   // Stores state in a ReaderBaseState proto, since IdentityReader has
   // no additional state beyond ReaderBase.
-  Status SerializeStateLocked(tstring* state) override {
+  absl::Status SerializeStateLocked(tstring* state) override {
     ReaderBaseState base_state;
     SaveBaseState(&base_state);
     SerializeToTString(base_state, state);
-    return Status::OK();
+    return absl::OkStatus();
   }
 
-  Status RestoreStateLocked(const tstring& state) override {
+  absl::Status RestoreStateLocked(const tstring& state) override {
     ReaderBaseState base_state;
     if (!ParseProtoUnlimited(&base_state, state)) {
-      return errors::InvalidArgument("Could not parse state for ", name(), ": ",
-                                     absl::CEscape(state));
+      return absl::InvalidArgumentError(absl::StrCat(
+          "Could not parse state for ", name(), ": ", absl::CEscape(state)));
     }
     TF_RETURN_IF_ERROR(RestoreBaseState(base_state));
-    return Status::OK();
+    return absl::OkStatus();
   }
 };
 

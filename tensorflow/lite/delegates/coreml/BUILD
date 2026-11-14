@@ -13,9 +13,18 @@
 # limitations under the License.
 # ==============================================================================
 
-package(default_visibility = [
-    "//visibility:public",
-])
+load("@build_bazel_rules_apple//apple:ios.bzl", "ios_unit_test")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_cc//cc:objc_library.bzl", "objc_library")
+load("//tensorflow/lite:build_def.bzl", "CXX17_BAZEL_ONLY_COPTS")
+load("//tensorflow/lite:special_rules.bzl", "tflite_ios_lab_runner")
+
+package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:LICENSE"],
+    default_visibility = [
+        "//visibility:public",
+    ],
+)
 
 licenses(["notice"])
 
@@ -25,13 +34,12 @@ objc_library(
     name = "coreml_executor",
     srcs = ["coreml_executor.mm"],
     hdrs = ["coreml_executor.h"],
+    copts = CXX17_BAZEL_ONLY_COPTS,
     sdk_frameworks = [
-        "Foundation",
         "CoreML",
+        "Foundation",
     ],
-    deps = [
-        ":mlmodel_proto_cc",
-    ],
+    deps = ["@coremltools//:mlmodel_cc_proto"],
 )
 
 cc_library(
@@ -45,23 +53,25 @@ objc_library(
     name = "coreml_delegate",
     srcs = ["coreml_delegate.mm"],
     hdrs = ["coreml_delegate.h"],
+    copts = CXX17_BAZEL_ONLY_COPTS,
+    defines = select({
+        "//tensorflow/lite/delegates:tflite_debug_delegate": ["TFLITE_DEBUG_DELEGATE"],
+        "//conditions:default": [],
+    }),
     module_name = "TensorFlowLiteCCoreML",
-    # By setting CoreML as weak_framework, the TensorFlow Lite can be built for older iOS versions.
-    weak_sdk_frameworks = [
-        "CoreML",
-    ],
     deps = [
         ":coreml_delegate_kernel",
         ":mlmodel_proto_cc",
         "//tensorflow/lite:kernel_api",
         "//tensorflow/lite:minimal_logging",
-        "//tensorflow/lite/c:common",
+        "//tensorflow/lite/core/c:common",
         "//tensorflow/lite/delegates:utils",
         "//tensorflow/lite/delegates/coreml/builders:op_builder",
         "//tensorflow/lite/delegates/coreml/builders:op_validator",
         "//tensorflow/lite/delegates/coreml/builders:util",
         "//tensorflow/lite/kernels:kernel_util",
     ],
+    alwayslink = 1,
 )
 
 objc_library(
@@ -72,14 +82,39 @@ objc_library(
     hdrs = [
         "coreml_delegate_kernel.h",
     ],
+    copts = CXX17_BAZEL_ONLY_COPTS,
     deps = [
         ":coreml_executor",
-        ":mlmodel_proto_cc",
         "//tensorflow/lite:kernel_api",
-        "//tensorflow/lite/c:common",
+        "//tensorflow/lite:minimal_logging",
+        "//tensorflow/lite/core/c:common",
         "//tensorflow/lite/delegates/coreml/builders:op_builder",
         "//tensorflow/lite/kernels:kernel_util",
         "//tensorflow/lite/kernels/internal:optimized_base",
         "//tensorflow/lite/kernels/internal:types",
+        "//tensorflow/lite/types:half",
     ],
+)
+
+objc_library(
+    name = "coreml_delegate_test_lib",
+    testonly = 1,
+    srcs = ["coreml_delegate_test.mm"],
+    copts = CXX17_BAZEL_ONLY_COPTS,
+    sdk_frameworks = ["XCTest"],
+    deps = [":coreml_delegate"],
+)
+
+ios_unit_test(
+    name = "coreml_delegate_test",
+    testonly = 1,
+    minimum_os_version = "15.0",
+    runner = tflite_ios_lab_runner("IOS_LATEST"),
+    tags = [
+        "noasan",
+        "nomsan",
+        "notsan",
+        "tflite_not_portable_android",
+    ],
+    deps = [":coreml_delegate_test_lib"],
 )

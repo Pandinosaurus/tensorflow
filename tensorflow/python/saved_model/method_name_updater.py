@@ -17,10 +17,6 @@
 Utility functions for manipulating signature_def.method_names.
 """
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 from tensorflow.python.lib.io import file_io
 from tensorflow.python.platform import tf_logging
 from tensorflow.python.saved_model import constants
@@ -119,7 +115,7 @@ class MethodNameUpdater(object):
 
     Args:
       new_export_dir: Path where the updated `SavedModel` will be saved. If
-          None, the input `SavedModel` will be overriden with the updates.
+        None, the input `SavedModel` will be overridden with the updates.
 
     Raises:
       errors.OpError: If there are errors during the file save operation.

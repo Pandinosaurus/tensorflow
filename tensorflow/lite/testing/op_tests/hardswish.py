@@ -13,14 +13,11 @@
 # limitations under the License.
 # ==============================================================================
 """Test configs for hardswish."""
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import functools
 
 import numpy as np
-import tensorflow.compat.v1 as tf
+import tensorflow as tf
+from tensorflow.lite.python import lite
 from tensorflow.lite.testing.zip_test_utils import create_tensor_data
 from tensorflow.lite.testing.zip_test_utils import make_zip_of_tests
 from tensorflow.lite.testing.zip_test_utils import register_make_test_function
@@ -34,7 +31,7 @@ def _tflite_convert_verify_num_ops(tflite_convert_function, *args, **kwargs):
   if not result[0]:
     tf.compat.v1.logging.error(result[1])  # stderr from running tflite_convert.
     raise RuntimeError("Failed to build model: \n\n" + result[1])
-  interpreter = tf.lite.Interpreter(model_content=tflite_model_binary)
+  interpreter = lite.Interpreter(model_content=tflite_model_binary)
   interpreter.allocate_tensors()
   if len(interpreter.get_tensor_details()) != num_ops:
     raise RuntimeError(
@@ -73,7 +70,7 @@ def make_hardswish_tests(options):
     return [input_values], sess.run(
         outputs, feed_dict=dict(zip(inputs, [input_values])))
 
-  # Add additional validation if we are using toco.
+  # Add additional validation if we are using converter.
   # Flex doesn't yet support this.
   if not options.run_with_flex:
     options.tflite_convert_function = functools.partial(

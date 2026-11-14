@@ -15,6 +15,8 @@ limitations under the License.
 #ifndef TENSORFLOW_C_EAGER_IMMEDIATE_EXECUTION_CONTEXT_H_
 #define TENSORFLOW_C_EAGER_IMMEDIATE_EXECUTION_CONTEXT_H_
 
+#include <functional>
+#include <map>
 #include <memory>
 #include <vector>
 
@@ -66,7 +68,7 @@ class ImmediateExecutionContext : public AbstractContext {
  public:
   // Optimized scalar creation functions
   virtual AbstractTensorInterface* CreateInt64Scalar(int64_t value) = 0;
-  virtual AbstractTensorInterface* CreateUint64Scalar(uint64 value) = 0;
+  virtual AbstractTensorInterface* CreateUint64Scalar(uint64_t value) = 0;
   virtual AbstractTensorInterface* CreateInt32Scalar(int32_t value) = 0;
   virtual AbstractTensorInterface* CreateFloatScalar(float value) = 0;
   virtual AbstractTensorInterface* CreateDoubleScalar(double value) = 0;
@@ -94,7 +96,7 @@ class ImmediateExecutionContext : public AbstractContext {
   // Copy the handle to another device.
   virtual ImmediateExecutionTensorHandle* CopyTensorHandleToDevice(
       ImmediateExecutionTensorHandle* handle, const char* device_name,
-      Status* status) = 0;
+      absl::Status* status) = 0;
 
   // Create an operation to perform op execution
   ImmediateExecutionOperation* CreateOperation() override = 0;
@@ -109,34 +111,49 @@ class ImmediateExecutionContext : public AbstractContext {
 
   // Add `devices` into context's device manager. Context's device manager
   // will take ownership and maintain devices' lifetime.
-  virtual Status AddDevices(std::vector<std::unique_ptr<Device>> devices) = 0;
+  virtual absl::Status AddDevices(
+      std::vector<std::unique_ptr<Device>> devices) = 0;
 
   // Block until all pending nodes are finished.
-  virtual Status AsyncWait() = 0;
+  virtual absl::Status AsyncWait() = 0;
 
   // Add a function (serialized FunctionDef protocol buffer) so that it can
   // be executed as an op. Return error if the function with the same name
   // already exists.
-  virtual Status AddFunctionDef(const FunctionDef& fdef) = 0;
+  virtual absl::Status AddFunctionDef(const FunctionDef& fdef) = 0;
+
+  // Notifies about the function removal.
+  virtual absl::Status AddRemoveFunctionNotifier(
+      const std::string& func, std::function<void()> notifier) = 0;
 
   // Same as `AddFunctionDef`, but additionally saves the `stack_traces` under
   // the key of the function definition name (to be retrieved during function
   // instantiation).
-  virtual Status AddFunctionDefWithStackTraces(
+  virtual absl::Status AddFunctionDefWithStackTraces(
       const FunctionDef& fdef, const StackTracesMap& stack_traces) = 0;
 
   // Find and return a added function by its name.
-  virtual const FunctionDef* FindFunctionDef(const string& name) const = 0;
+  virtual const FunctionDef* FindFunctionDef(const std::string& name) const = 0;
+
+  // Find and return a function record added by its name.
+  virtual core::RefCountPtr<FunctionRecord> FindRecord(
+      const std::string& name) const = 0;
 
   // Return the ParsedName of Host CPU device.
   virtual const DeviceNameUtils::ParsedName& HostCPUParsedName() const = 0;
-  virtual const string& HostCPUName() const = 0;
+  virtual const std::string& HostCPUName() const = 0;
 
   // Configure soft device placement policy.
   virtual void SetAllowSoftPlacement(bool enable) = 0;
 
   // Configure device placement policy logging.
   virtual void SetLogDevicePlacement(bool enable) = 0;
+
+  // Enables running eager ops as functions.
+  virtual void SetRunEagerOpAsFunction(bool enable) = 0;
+
+  // Enables rewriting jit_compile functions.
+  virtual void SetJitCompileRewrite(bool enable) = 0;
 
   // Sets the device placement policy for the current thread.
   virtual void SetThreadLocalDevicePlacementPolicy(
@@ -161,23 +178,19 @@ class ImmediateExecutionContext : public AbstractContext {
   //===--------------------------------------------------------------------===//
   virtual CustomDeviceOpHandler& GetCustomDeviceOpHandler() = 0;
 
+  // Returns whether `device_name` is registered as a custom device.
+  virtual bool IsCustomDevice(const std::string& device_name) = 0;
+
   // Register a custom device. It will return error is the device name is
   // already registered.
   // TODO(tfrt-devs): Remove this method. Let caller register it directly into
   // CustomDeviceOpHandler.
-  virtual Status RegisterCustomDevice(const string& name,
-                                      std::unique_ptr<CustomDevice> device) = 0;
+  virtual absl::Status RegisterCustomDevice(
+      const std::string& name, std::unique_ptr<CustomDevice> device) = 0;
 
   // Return FunctionLibraryDefinition. Transformations need to use it to use it
   // to invoke MLIR compiler passes.
   virtual FunctionLibraryDefinition* FuncLibDef() = 0;
-
-  // When tensor transfer across functions/eager executions using send/recv ops
-  // are required, `reuse_rendezvous_for_functions_` can be set to true so that
-  // function executions and eager executions use the same rendezvous instance,
-  // instead of creating new instance per function calls.
-  virtual void SetReuseRendezvousForFunctions(
-      bool reuse_rendezvous_for_functions) = 0;
 
   // Resets the global rendezvous used for functions.
   virtual void ResetGlobalRendezvousForFunction() = 0;
@@ -228,7 +241,15 @@ class ImmediateExecutionContext : public AbstractContext {
   virtual std::vector<std::string> GetLoggedOpsTestonly() { return {}; }
 
   // Get a list of the names of functions that have been registered.
-  virtual std::vector<string> ListFunctionNames() = 0;
+  virtual std::vector<std::string> ListFunctionNames() = 0;
+
+  struct CacheStats {
+    int64_t kernel_cache_size;
+    int64_t device_cache_size;
+    std::map<std::string, int64_t> func_kernel_cache_entries;
+    int64_t local_rendezvous_cache_active_size;
+  };
+  virtual CacheStats GetCacheStats() = 0;
 
   //===--------------------------------------------------------------------===//
   // Distributed runtime related functions.
@@ -238,7 +259,7 @@ class ImmediateExecutionContext : public AbstractContext {
   // all tasks in the cluster.
   // This call internally coordinates with other tasks to initialize the eager
   // context and TF server for multi-client execution.
-  virtual Status EnableCollectiveOps(const ServerDef& server_def) = 0;
+  virtual absl::Status EnableCollectiveOps(const ServerDef& server_def) = 0;
 
   // Set a distributed manager that helps set up, update, and check liveness
   // of member tasks in the cluster.
@@ -251,7 +272,7 @@ class ImmediateExecutionContext : public AbstractContext {
  protected:
   explicit ImmediateExecutionContext(AbstractContextKind kind)
       : AbstractContext(kind) {}
-  ~ImmediateExecutionContext() override {}
+  ~ImmediateExecutionContext() override = default;
 };
 
 namespace internal {

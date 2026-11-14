@@ -13,15 +13,21 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include <utility>
-
 #include "tensorflow/core/util/example_proto_fast_parsing.h"
 
+#include <cstdint>
+#include <unordered_set>
+#include <utility>
+#include <vector>
+
+#include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
 #include "tensorflow/core/example/example.pb.h"
 #include "tensorflow/core/example/feature.pb.h"
 #include "tensorflow/core/lib/random/philox_random.h"
 #include "tensorflow/core/lib/random/simple_philox.h"
 #include "tensorflow/core/platform/protobuf.h"
+#include "tensorflow/core/platform/status_matchers.h"
 #include "tensorflow/core/platform/test.h"
 #include "tensorflow/core/platform/test_benchmark.h"
 #include "tensorflow/core/util/example_proto_fast_parsing_test.pb.h"
@@ -38,25 +44,25 @@ constexpr char kSparseInt64Key[] = "sparse_int64";
 constexpr char kSparseFloatKey[] = "sparse_float";
 constexpr char kSparseStringKey[] = "sparse_string";
 
-string SerializedToReadable(string serialized) {
-  string result;
+std::string SerializedToReadable(std::string serialized) {
+  std::string result;
   result += '"';
   for (char c : serialized)
-    result += strings::StrCat("\\x", strings::Hex(c, strings::kZeroPad2));
+    absl::StrAppend(&result, "\\x", absl::Hex(c, absl::kZeroPad2));
   result += '"';
   return result;
 }
 
 template <class T>
-string Serialize(const T& example) {
-  string serialized;
+std::string Serialize(const T& example) {
+  std::string serialized;
   example.SerializeToString(&serialized);
   return serialized;
 }
 
 // Tests that serialized gets parsed identically by TestFastParse(..)
 // and the regular Example.ParseFromString(..).
-void TestCorrectness(const string& serialized) {
+void TestCorrectness(const std::string& serialized) {
   Example example;
   Example fast_example;
   EXPECT_TRUE(example.ParseFromString(serialized));
@@ -95,7 +101,7 @@ TEST(FastParse, IgnoresPrecedingUnknownTopLevelFields) {
       .mutable_int64_list()
       ->add_value(94043);
 
-  TestCorrectness(strings::StrCat(Serialize(example), Serialize(context)));
+  TestCorrectness(absl::StrCat(Serialize(example), Serialize(context)));
 }
 
 TEST(FastParse, IgnoresTrailingUnknownTopLevelFields) {
@@ -119,7 +125,7 @@ TEST(FastParse, IgnoresTrailingUnknownTopLevelFields) {
       .mutable_int64_list()
       ->add_value(1337);
 
-  TestCorrectness(strings::StrCat(Serialize(example), Serialize(context)));
+  TestCorrectness(absl::StrCat(Serialize(example), Serialize(context)));
 }
 
 TEST(FastParse, SingleInt64WithContext) {
@@ -133,7 +139,7 @@ TEST(FastParse, SingleInt64WithContext) {
       .mutable_int64_list()
       ->add_value(94043);
 
-  TestCorrectness(strings::StrCat(Serialize(example), Serialize(context)));
+  TestCorrectness(absl::StrCat(Serialize(example), Serialize(context)));
 }
 
 TEST(FastParse, DenseInt64WithContext) {
@@ -147,7 +153,7 @@ TEST(FastParse, DenseInt64WithContext) {
       .mutable_int64_list()
       ->add_value(15);
 
-  string serialized = Serialize(example) + Serialize(context);
+  std::string serialized = Serialize(example) + Serialize(context);
 
   {
     Example deserialized;
@@ -170,16 +176,20 @@ TEST(FastParse, Packed) {
       "\x0a\x0d\x0a\x0b\x0a\x03\x61\x67\x65\x12\x04\x1a\x02\x08\x0d");
 }
 
+TEST(FastParse, ValueBeforeKeyInMap) {
+  TestCorrectness("\x0a\x12\x0a\x10\x12\x09\x0a\x07\x0a\x05value\x0a\x03key");
+}
+
 TEST(FastParse, EmptyFeatures) {
   Example example;
   example.mutable_features();
   TestCorrectness(Serialize(example));
 }
 
-void TestCorrectnessJson(const string& json) {
+void TestCorrectnessJson(const std::string& json) {
   auto resolver = protobuf::util::NewTypeResolverForDescriptorPool(
       "type.googleapis.com", protobuf::DescriptorPool::generated_pool());
-  string serialized;
+  std::string serialized;
   auto s = protobuf::util::JsonToBinaryString(
       resolver, "type.googleapis.com/tensorflow.Example", json, &serialized);
   EXPECT_TRUE(s.ok()) << s;
@@ -213,7 +223,7 @@ TEST(FastParse, SingleInt64) {
   TestCorrectness(Serialize(example));
 }
 
-static string ExampleWithSomeFeatures() {
+static std::string ExampleWithSomeFeatures() {
   Example example;
 
   (*example.mutable_features()->mutable_feature())[""];
@@ -321,13 +331,13 @@ TEST(FastParse, StatsCollection) {
   }
 }
 
-string RandStr(random::SimplePhilox* rng) {
+std::string RandStr(random::SimplePhilox* rng) {
   static const char key_char_lookup[] =
       "0123456789{}~`!@#$%^&*()"
       "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
       "abcdefghijklmnopqrstuvwxyz";
   auto len = 1 + rng->Rand32() % 200;
-  string str;
+  std::string str;
   str.reserve(len);
   while (len-- > 0) {
     str.push_back(
@@ -340,18 +350,18 @@ string RandStr(random::SimplePhilox* rng) {
 void Fuzz(random::SimplePhilox* rng) {
   // Generate keys.
   auto num_keys = 1 + rng->Rand32() % 100;
-  std::unordered_set<string> unique_keys;
+  std::unordered_set<std::string> unique_keys;
   for (auto i = 0; i < num_keys; ++i) {
     unique_keys.emplace(RandStr(rng));
   }
 
   // Generate serialized example.
   Example example;
-  string serialized_example;
+  std::string serialized_example;
   auto num_concats = 1 + rng->Rand32() % 4;
   std::vector<Feature::KindCase> feat_types(
       {Feature::kBytesList, Feature::kFloatList, Feature::kInt64List});
-  std::vector<string> all_keys(unique_keys.begin(), unique_keys.end());
+  std::vector<std::string> all_keys(unique_keys.begin(), unique_keys.end());
   while (num_concats--) {
     example.Clear();
     auto num_active_keys = 1 + rng->Rand32() % all_keys.size();
@@ -403,7 +413,7 @@ void Fuzz(random::SimplePhilox* rng) {
 }
 
 TEST(FastParse, FuzzTest) {
-  const uint64 seed = 1337;
+  const uint64_t seed = 1337;
   random::PhiloxRandom philox(seed);
   random::SimplePhilox rng(&philox);
   auto num_runs = 200;
@@ -417,10 +427,599 @@ TEST(TestFastParseExample, Empty) {
   Result result;
   FastParseExampleConfig config;
   config.sparse.push_back({"test", DT_STRING});
-  Status status =
-      FastParseExample(config, gtl::ArraySlice<tstring>(),
-                       gtl::ArraySlice<tstring>(), nullptr, &result);
+  absl::Status status =
+      FastParseExample(config, absl::Span<const tstring>(),
+                       absl::Span<const tstring>(), nullptr, &result);
   EXPECT_TRUE(status.ok()) << status;
+}
+
+TEST(FastParse, OOB_Write_Vulnerability_NonPacked_FloatList) {
+  FastParseExampleConfig config;
+  AddDenseFeature("f", DT_FLOAT, {1}, false, 1, &config);
+
+  auto encode_varint = [](uint32_t v, std::string* out) {
+    while (v >= 0x80) {
+      out->push_back((v & 0x7f) | 0x80);
+      v >>= 7;
+    }
+    out->push_back(v);
+  };
+
+  std::string float_list_data;
+  int num_elements = 10000;  // Large number to force crash
+  for (int i = 0; i < num_elements; ++i) {
+    float_list_data.push_back(13);  // kFixed32Tag(1)
+    float v = 1.0f;
+    const char* p = reinterpret_cast<const char*>(&v);
+    float_list_data.append(p, 4);
+  }
+
+  std::string serialized_feature;
+  serialized_feature.push_back(18);  // kDelimitedTag(2) for float_list
+  encode_varint(float_list_data.size(), &serialized_feature);
+  serialized_feature.append(float_list_data);
+
+  std::string map_entry;
+  map_entry.push_back(10);  // kDelimitedTag(1) for key
+  map_entry.push_back(1);
+  map_entry.push_back('f');
+  map_entry.push_back(18);  // kDelimitedTag(2) for value
+  encode_varint(serialized_feature.size(), &map_entry);
+  map_entry.append(serialized_feature);
+
+  std::string features_msg;
+  features_msg.push_back(10);  // kDelimitedTag(1) for map entry
+  encode_varint(map_entry.size(), &features_msg);
+  features_msg.append(map_entry);
+
+  std::string serialized_example;
+  serialized_example.push_back(10);  // kDelimitedTag(1) for features
+  encode_varint(features_msg.size(), &serialized_example);
+  serialized_example.append(features_msg);
+
+  Result result;
+  std::vector<tstring> serialized_vec = {tstring(serialized_example)};
+  absl::Status parse_status =
+      FastParseExample(config, serialized_vec, {}, nullptr, &result);
+
+  // We expect this to fail with INVALID_ARGUMENT due to size mismatch,
+  // but WITHOUT crashing.
+  EXPECT_THAT(parse_status,
+              absl_testing::StatusIs(
+                  absl::StatusCode::kInvalidArgument,
+                  ::testing::HasSubstr(
+                      "Key: f, Index: 0.  Number of float values != expected.  "
+                      "Values size: 10000 but output shape: [1]")));
+}
+
+namespace {
+void AppendVarint(uint32_t v, std::string* out) {
+  while (v >= 0x80) {
+    out->push_back((v & 0x7f) | 0x80);
+    v >>= 7;
+  }
+  out->push_back(v);
+}
+
+// Returns a serialized Example with a single feature "f" whose Feature has the
+// given oneof tag and holds `list`, declared as `declared_list_length` bytes.
+std::string ExampleWithFeatureList(char feature_oneof_tag,
+                                   uint32_t declared_list_length,
+                                   const std::string& list) {
+  std::string feature;
+  feature.push_back(feature_oneof_tag);
+  AppendVarint(declared_list_length, &feature);
+  feature.append(list);
+
+  std::string map_entry;
+  map_entry.push_back(10);  // kDelimitedTag(1): map key
+  map_entry.push_back(1);
+  map_entry.push_back('f');
+  map_entry.push_back(18);  // kDelimitedTag(2): map value
+  AppendVarint(feature.size(), &map_entry);
+  map_entry.append(feature);
+
+  std::string features;
+  features.push_back(10);  // kDelimitedTag(1): map entry
+  AppendVarint(map_entry.size(), &features);
+  features.append(map_entry);
+
+  std::string example;
+  example.push_back(10);  // kDelimitedTag(1): Features
+  AppendVarint(features.size(), &example);
+  example.append(features);
+  return example;
+}
+
+// Returns a serialized Example with a single feature "f" whose Feature has the
+// given oneof tag and a list holding one length-delimited field 1 that declares
+// `declared_length` bytes but is followed by `payload` only.
+std::string ExampleWithDeclaredListLength(char feature_oneof_tag,
+                                          uint32_t declared_length,
+                                          const std::string& payload) {
+  std::string list;
+  list.push_back(10);  // kDelimitedTag(1): BytesList.value / packed FloatList
+  AppendVarint(declared_length, &list);
+  list.append(payload);
+  return ExampleWithFeatureList(feature_oneof_tag, list.size(), list);
+}
+
+constexpr char kBytesListTag = 10;  // kDelimitedTag(1)
+constexpr char kFloatListTag = 18;  // kDelimitedTag(2)
+constexpr char kInt64ListTag = 26;  // kDelimitedTag(3)
+
+absl::Status ParseSparse(DataType dtype, const std::string& serialized,
+                         Result* result) {
+  FastParseExampleConfig config;
+  AddSparseFeature("f", dtype, &config);
+  return FastParseExample(config, {tstring(serialized)}, {}, nullptr, result);
+}
+
+// The error FastParseExample returns when feature "f" of the first example
+// can't be parsed.
+auto IsBatchParseError() {
+  return absl_testing::StatusIs(
+      absl::StatusCode::kInvalidArgument,
+      ::testing::HasSubstr(
+          "Key: f, Index: 0.  Can't parse serialized Example."));
+}
+
+// The error FastParseSingleExample returns when feature "f" can't be parsed.
+auto IsSingleParseError(absl::string_view description) {
+  return absl_testing::StatusIs(
+      absl::StatusCode::kInvalidArgument,
+      ::testing::HasSubstr(absl::StrCat(
+          "Key: f.  Can't parse serialized Example: ", description)));
+}
+}  // namespace
+
+// ReadRaw() takes an int, so a declared length of 2^31 or more turned into a
+// negative size and an out-of-bounds memcpy. A length past the end of the input
+// must be rejected before any allocation or copy.
+TEST(FastParse, BytesListLengthPastEndOfInput) {
+  const std::string payload = "A";
+  Result result;
+  absl::Status status = ParseSparse(
+      DT_STRING, ExampleWithDeclaredListLength(kBytesListTag, 1, payload),
+      &result);
+  ASSERT_TRUE(status.ok()) << status;
+  EXPECT_EQ(result.sparse_values[0].flat<tstring>()(0), "A");
+
+  for (uint32_t length : {2u, 0x7fffffffu, 0x80000000u, 0xffffffffu}) {
+    Result result;
+    EXPECT_THAT(ParseSparse(DT_STRING,
+                            ExampleWithDeclaredListLength(kBytesListTag, length,
+                                                          payload),
+                            &result),
+                IsBatchParseError())
+        << length;
+  }
+}
+
+TEST(FastParse, PackedFloatListLengthPastEndOfInput) {
+  float value = 1.5f;
+  const std::string payload(reinterpret_cast<const char*>(&value),
+                            sizeof(value));
+  Result result;
+  absl::Status status = ParseSparse(
+      DT_FLOAT, ExampleWithDeclaredListLength(kFloatListTag, 4, payload),
+      &result);
+  ASSERT_TRUE(status.ok()) << status;
+  EXPECT_EQ(result.sparse_values[0].flat<float>()(0), 1.5f);
+
+  for (uint32_t length : {8u, 0x7fffffffu, 0x80000000u, 0xffffffffu}) {
+    Result result;
+    EXPECT_THAT(ParseSparse(DT_FLOAT,
+                            ExampleWithDeclaredListLength(kFloatListTag, length,
+                                                          payload),
+                            &result),
+                IsBatchParseError())
+        << length;
+  }
+}
+
+TEST(FastParse, SingleExamplePackedFloatListLengthPastEndOfInput) {
+  FastParseSingleExampleConfig config;
+  AddSparseFeature("f", DT_FLOAT, &config);
+  float value = 1.5f;
+  const std::string payload(reinterpret_cast<const char*>(&value),
+                            sizeof(value));
+  Result result;
+  absl::Status status = FastParseSingleExample(
+      config, ExampleWithDeclaredListLength(kFloatListTag, 4, payload),
+      &result);
+  ASSERT_TRUE(status.ok()) << status;
+  EXPECT_EQ(result.sparse_values[0].flat<float>()(0), 1.5f);
+
+  for (uint32_t length : {8u, 0x7fffffffu, 0x80000000u, 0xffffffffu}) {
+    Result result;
+    EXPECT_THAT(FastParseSingleExample(config,
+                                       ExampleWithDeclaredListLength(
+                                           kFloatListTag, length, payload),
+                                       &result),
+                IsSingleParseError("Parsing float_list failed."))
+        << length;
+  }
+}
+
+// The length of the list itself must not run past the Feature either: a list
+// that declares more bytes than the Feature holds is malformed, as the proto
+// parser reports, for every list type and both of its encodings.
+TEST(FastParse, ListLengthPastEndOfFeature) {
+  float value = 1.5f;
+  const std::string float_bytes(reinterpret_cast<const char*>(&value),
+                                sizeof(value));
+  struct Case {
+    const char* name;
+    DataType dtype;
+    char feature_oneof_tag;
+    std::string list;
+    // FastParseSingleExample's description of the failure.
+    const char* single_error;
+  };
+  const std::vector<Case> cases = {
+      // BytesList {value: "A"}
+      {"bytes", DT_STRING, kBytesListTag,
+       std::string("\x0a\x01"
+                   "A",
+                   3),
+       "Could not get num elements in bytes_list."},
+      // FloatList {value: [1.5]}, packed and non-packed
+      {"packed float", DT_FLOAT, kFloatListTag,
+       std::string("\x0a\x04", 2) + float_bytes, "Parsing float_list failed."},
+      {"float", DT_FLOAT, kFloatListTag, std::string("\x0d", 1) + float_bytes,
+       "Parsing float_list failed."},
+      // Int64List {value: [5]}, packed and non-packed
+      {"packed int64", DT_INT64, kInt64ListTag, std::string("\x0a\x01\x05", 3),
+       "Parsing int64_list failed."},
+      {"int64", DT_INT64, kInt64ListTag, std::string("\x08\x05", 2),
+       "Parsing int64_list failed."},
+  };
+  for (const Case& c : cases) {
+    SCOPED_TRACE(c.name);
+    FastParseExampleConfig config;
+    AddSparseFeature("f", c.dtype, &config);
+    FastParseSingleExampleConfig single_config;
+    AddSparseFeature("f", c.dtype, &single_config);
+
+    const std::string valid =
+        ExampleWithFeatureList(c.feature_oneof_tag, c.list.size(), c.list);
+    Result result;
+    absl::Status status =
+        FastParseExample(config, {tstring(valid)}, {}, nullptr, &result);
+    ASSERT_TRUE(status.ok()) << status;
+    EXPECT_EQ(result.sparse_values[0].NumElements(), 1);
+    Result single_result;
+    status = FastParseSingleExample(single_config, valid, &single_result);
+    ASSERT_TRUE(status.ok()) << status;
+    EXPECT_EQ(single_result.sparse_values[0].NumElements(), 1);
+
+    for (uint32_t length : {static_cast<uint32_t>(c.list.size() + 1),
+                            0x7fffffffu, 0x80000000u, 0xffffffffu}) {
+      const std::string serialized =
+          ExampleWithFeatureList(c.feature_oneof_tag, length, c.list);
+      Result result;
+      EXPECT_THAT(
+          FastParseExample(config, {tstring(serialized)}, {}, nullptr, &result),
+          IsBatchParseError())
+          << length;
+      Result single_result;
+      EXPECT_THAT(
+          FastParseSingleExample(single_config, serialized, &single_result),
+          IsSingleParseError(c.single_error))
+          << length;
+    }
+  }
+}
+
+TEST(FastParse, DenseFloat_TooManyElements_ReportsError) {
+  FastParseExampleConfig config;
+  AddDenseFeature("f", DT_FLOAT, {1}, false, 1, &config);
+
+  auto encode_varint = [](uint32_t v, std::string* out) {
+    while (v >= 0x80) {
+      out->push_back((v & 0x7f) | 0x80);
+      v >>= 7;
+    }
+    out->push_back(v);
+  };
+
+  std::string float_list_data;
+  int num_elements = 5;  // Expecting 1, but providing 5
+  for (int i = 0; i < num_elements; ++i) {
+    float_list_data.push_back(13);  // kFixed32Tag(1)
+    float v = 1.0f;
+    const char* p = reinterpret_cast<const char*>(&v);
+    float_list_data.append(p, 4);
+  }
+
+  std::string serialized_feature;
+  serialized_feature.push_back(18);  // kDelimitedTag(2) for float_list
+  encode_varint(float_list_data.size(), &serialized_feature);
+  serialized_feature.append(float_list_data);
+
+  std::string map_entry;
+  map_entry.push_back(10);  // kDelimitedTag(1) for key
+  map_entry.push_back(1);
+  map_entry.push_back('f');
+  map_entry.push_back(18);  // kDelimitedTag(2) for value
+  encode_varint(serialized_feature.size(), &map_entry);
+  map_entry.append(serialized_feature);
+
+  std::string features_msg;
+  features_msg.push_back(10);  // kDelimitedTag(1) for map entry
+  encode_varint(map_entry.size(), &features_msg);
+  features_msg.append(map_entry);
+
+  std::string serialized_example;
+  serialized_example.push_back(10);  // kDelimitedTag(1) for features
+  encode_varint(features_msg.size(), &serialized_example);
+  serialized_example.append(features_msg);
+
+  Result result;
+  std::vector<tstring> serialized_vec = {tstring(serialized_example)};
+  absl::Status parse_status =
+      FastParseExample(config, serialized_vec, {}, nullptr, &result);
+
+  EXPECT_FALSE(parse_status.ok());
+  EXPECT_TRUE(absl::IsInvalidArgument(parse_status));
+  EXPECT_NE(parse_status.ToString().find("Number of float values != expected"),
+            std::string::npos);
+}
+
+TEST(FastParse, DenseFloat_TooFewElements_ReportsError) {
+  FastParseExampleConfig config;
+  // Expecting 3 elements per stride
+  AddDenseFeature("f", DT_FLOAT, {3}, false, 3, &config);
+
+  auto encode_varint = [](uint32_t v, std::string* out) {
+    while (v >= 0x80) {
+      out->push_back((v & 0x7f) | 0x80);
+      v >>= 7;
+    }
+    out->push_back(v);
+  };
+
+  std::string float_list_data;
+  int num_elements = 1;  // Providing only 1
+  for (int i = 0; i < num_elements; ++i) {
+    float_list_data.push_back(13);  // kFixed32Tag(1)
+    float v = 1.0f;
+    const char* p = reinterpret_cast<const char*>(&v);
+    float_list_data.append(p, 4);
+  }
+
+  std::string serialized_feature;
+  serialized_feature.push_back(18);  // kDelimitedTag(2) for float_list
+  encode_varint(float_list_data.size(), &serialized_feature);
+  serialized_feature.append(float_list_data);
+
+  std::string map_entry;
+  map_entry.push_back(10);  // kDelimitedTag(1) for key
+  map_entry.push_back(1);
+  map_entry.push_back('f');
+  map_entry.push_back(18);  // kDelimitedTag(2) for value
+  encode_varint(serialized_feature.size(), &map_entry);
+  map_entry.append(serialized_feature);
+
+  std::string features_msg;
+  features_msg.push_back(10);  // kDelimitedTag(1) for map entry
+  encode_varint(map_entry.size(), &features_msg);
+  features_msg.append(map_entry);
+
+  std::string serialized_example;
+  serialized_example.push_back(10);  // kDelimitedTag(1) for features
+  encode_varint(features_msg.size(), &serialized_example);
+  serialized_example.append(features_msg);
+
+  Result result;
+  std::vector<tstring> serialized_vec = {tstring(serialized_example)};
+  absl::Status parse_status =
+      FastParseExample(config, serialized_vec, {}, nullptr, &result);
+
+  EXPECT_FALSE(parse_status.ok());
+  EXPECT_TRUE(absl::IsInvalidArgument(parse_status));
+  EXPECT_NE(parse_status.ToString().find("Number of float values != expected"),
+            std::string::npos);
+}
+
+TEST(FastParse, OobWriteVulnerabilityMalformedSparseSequenceExample) {
+  FastParseExampleConfig context_config;
+  FastParseExampleConfig sequence_config;
+  AddSparseFeature("s", DT_STRING, &sequence_config);
+
+  // Serialized SequenceExample with a malformed bytes list in feature list "s".
+  // The bytes list value declares a length of 100 bytes (0x64), but the stream
+  // terminates immediately, causing CodedInputStream::Skip to fail.
+  const std::vector<tstring> serialized = {
+      tstring("\x12\x0d\x0a\x0b\x0a\x01s\x12\x06\x0a\x04\x0a\x02\x0a\x64", 15)};
+
+  Result context_result, sequence_result;
+  std::vector<Tensor> dense_lengths;
+  const absl::Status status = FastParseSequenceExample(
+      context_config, sequence_config, serialized, {}, nullptr, &context_result,
+      &sequence_result, &dense_lengths);
+
+  EXPECT_FALSE(status.ok());
+  EXPECT_TRUE(absl::IsInvalidArgument(status));
+}
+
+TEST(FastParse, SequenceExampleFillsAllOutputKinds) {
+  // Two SequenceExamples with a different number of rows and values each, so
+  // that dense feature lists are padded and sparse/ragged ones are packed.
+  SequenceExample examples[2];
+  (*examples[0].mutable_context()->mutable_feature())["c"]
+      .mutable_int64_list()
+      ->add_value(11);
+  (*examples[1].mutable_context()->mutable_feature())["c"]
+      .mutable_int64_list()
+      ->add_value(12);
+  auto* lists0 = examples[0].mutable_feature_lists()->mutable_feature_list();
+  auto* lists1 = examples[1].mutable_feature_lists()->mutable_feature_list();
+  // Adds one row holding `values` to a float feature list.
+  auto add_float_row = [](FeatureList* list, std::vector<float> values) {
+    auto* float_list = list->add_feature()->mutable_float_list();
+    for (float v : values) float_list->add_value(v);
+  };
+  add_float_row(&(*lists0)["d"], {1, 2});
+  add_float_row(&(*lists0)["d"], {3, 4});
+  add_float_row(&(*lists1)["d"], {5, 6});
+  (*lists0)["s"].add_feature()->mutable_int64_list()->add_value(7);
+  auto* s01 = (*lists0)["s"].add_feature()->mutable_int64_list();
+  s01->add_value(8);
+  s01->add_value(9);
+  (*lists1)["s"].add_feature()->mutable_int64_list()->add_value(10);
+  (*lists0)["r"].add_feature()->mutable_bytes_list()->add_value("a");
+  auto* r01 = (*lists0)["r"].add_feature()->mutable_bytes_list();
+  r01->add_value("b");
+  r01->add_value("c");
+  const std::vector<tstring> serialized = {Serialize(examples[0]),
+                                           Serialize(examples[1])};
+
+  FastParseExampleConfig context_config;
+  context_config.dense.emplace_back("c", DT_INT64, PartialTensorShape({1}),
+                                    Tensor(DT_INT64, TensorShape({0})),
+                                    /*variable_length=*/false,
+                                    /*elements_per_stride=*/1);
+  FastParseExampleConfig sequence_config;
+  sequence_config.dense.emplace_back("d", DT_FLOAT, PartialTensorShape({2}),
+                                     Tensor(DT_FLOAT, TensorShape({0})),
+                                     /*variable_length=*/true,
+                                     /*elements_per_stride=*/2);
+  AddSparseFeature("s", DT_INT64, &sequence_config);
+  sequence_config.ragged.emplace_back("r", DT_STRING, DT_INT64);
+
+  Result context_result, sequence_result;
+  std::vector<Tensor> dense_lengths;
+  const absl::Status status = FastParseSequenceExample(
+      context_config, sequence_config, serialized, {}, nullptr, &context_result,
+      &sequence_result, &dense_lengths);
+  ASSERT_TRUE(status.ok()) << status;
+
+  auto expect_values = [](const Tensor& t, std::vector<int64_t> shape,
+                          auto expected) {
+    EXPECT_EQ(t.shape(), TensorShape(shape));
+    using T = typename decltype(expected)::value_type;
+    auto flat = t.flat<T>();
+    ASSERT_EQ(flat.size(), expected.size());
+    for (int i = 0; i < flat.size(); ++i) {
+      EXPECT_EQ(flat(i), expected[i]) << "i=" << i;
+    }
+  };
+  expect_values(context_result.dense_values[0], {2, 1},
+                std::vector<int64_t>{11, 12});
+  // The second example's missing row is padded with zeros.
+  expect_values(sequence_result.dense_values[0], {2, 2, 2},
+                std::vector<float>{1, 2, 3, 4, 5, 6, 0, 0});
+  expect_values(dense_lengths[0], {2}, std::vector<int64_t>{2, 1});
+  expect_values(sequence_result.sparse_values[0], {4},
+                std::vector<int64_t>{7, 8, 9, 10});
+  expect_values(sequence_result.sparse_indices[0], {4, 3},
+                std::vector<int64_t>{0, 0, 0, 0, 1, 0, 0, 1, 1, 1, 0, 0});
+  expect_values(sequence_result.sparse_shapes[0], {3},
+                std::vector<int64_t>{2, 2, 2});
+  expect_values(sequence_result.ragged_values[0], {3},
+                std::vector<tstring>{"a", "b", "c"});
+  expect_values(sequence_result.ragged_splits[0], {3},
+                std::vector<int64_t>{0, 1, 3});
+  expect_values(sequence_result.ragged_outer_splits[0], {3},
+                std::vector<int64_t>{0, 2, 2});
+}
+
+TEST(FastParse, ParseFeatureRejectsValuesThatDoNotFit) {
+  Feature floats, ints, bytes;
+  for (float v : {1, 2, 3}) floats.mutable_float_list()->add_value(v);
+  for (int64_t v : {1, 2, 3}) ints.mutable_int64_list()->add_value(v);
+  for (const char* v : {"a", "b", "c"})
+    bytes.mutable_bytes_list()->add_value(v);
+  for (const auto& [dtype, feature] :
+       {std::pair{DT_FLOAT, &floats}, std::pair{DT_INT64, &ints},
+        std::pair{DT_STRING, &bytes}}) {
+    // Room for two of the three values after the offset.
+    Tensor out(dtype, TensorShape({3}));
+    size_t out_offset = 1;
+    EXPECT_EQ(TestParseFeature(dtype, feature->SerializeAsString(), &out,
+                               &out_offset),
+              -1)
+        << DataTypeString(dtype);
+    EXPECT_EQ(out_offset, 1);
+
+    Tensor fits(dtype, TensorShape({4}));
+    out_offset = 1;
+    EXPECT_EQ(TestParseFeature(dtype, feature->SerializeAsString(), &fits,
+                               &out_offset),
+              3)
+        << DataTypeString(dtype);
+    EXPECT_EQ(out_offset, 4);
+  }
+}
+
+TEST(FastParse, ParseFeatureIntoEmptyTensor) {
+  Feature feature;
+  feature.mutable_float_list()->add_value(1);
+  Tensor out(DT_FLOAT, TensorShape({0}));
+  size_t out_offset = 0;
+  EXPECT_EQ(TestParseFeature(DT_FLOAT, feature.SerializeAsString(), &out,
+                             &out_offset),
+            -1);
+  EXPECT_EQ(out_offset, 0);
+
+  // A feature without values still fits.
+  feature.mutable_float_list()->clear_value();
+  EXPECT_EQ(TestParseFeature(DT_FLOAT, feature.SerializeAsString(), &out,
+                             &out_offset),
+            0);
+  EXPECT_EQ(out_offset, 0);
+}
+
+TEST(FastParse, PadFeatureRejectsPaddingThatDoesNotFit) {
+  Tensor out(DT_INT64, TensorShape({3}));
+  size_t out_offset = 1;
+  EXPECT_FALSE(TestPadFeature(DT_INT64, 3, &out, &out_offset));
+  EXPECT_EQ(out_offset, 1);
+  EXPECT_TRUE(TestPadFeature(DT_INT64, 2, &out, &out_offset));
+  EXPECT_EQ(out_offset, 3);
+}
+
+TEST(FastParse, HelpersRejectUnexpectedDataType) {
+  Feature feature;
+  feature.mutable_int64_list()->add_value(1);
+  const std::string serialized = feature.SerializeAsString();
+  Tensor src(DT_BOOL, TensorShape({2}));
+  Tensor out(DT_BOOL, TensorShape({4}));
+  size_t out_offset = 1;
+#ifdef NDEBUG
+  // ReportUnexpectedDataType() only DCHECKs, so the helpers must fail on
+  // their own and leave the offset alone.
+  EXPECT_EQ(TestParseFeature(DT_BOOL, serialized, &out, &out_offset), -1);
+  EXPECT_FALSE(TestPadFeature(DT_BOOL, 2, &out, &out_offset));
+  EXPECT_FALSE(TestCopyTensorIntoTensor(DT_BOOL, src, &out, &out_offset));
+  EXPECT_EQ(out_offset, 1);
+#else
+  EXPECT_DEATH(TestParseFeature(DT_BOOL, serialized, &out, &out_offset),
+               "unexpected DataType");
+  EXPECT_DEATH(TestPadFeature(DT_BOOL, 2, &out, &out_offset),
+               "unexpected DataType");
+  EXPECT_DEATH(TestCopyTensorIntoTensor(DT_BOOL, src, &out, &out_offset),
+               "unexpected DataType");
+#endif
+}
+
+TEST(FastParse, CopyTensorIntoTensorRejectsSourceThatDoesNotFit) {
+  // A context dense default with more values than the output has room for.
+  Tensor default_value(DT_INT64, TensorShape({3}));
+  default_value.flat<int64_t>().setConstant(7);
+  Tensor out(DT_INT64, TensorShape({2}));
+  size_t out_offset = 0;
+  EXPECT_FALSE(
+      TestCopyTensorIntoTensor(DT_INT64, default_value, &out, &out_offset));
+  EXPECT_EQ(out_offset, 0);
+
+  Tensor fits(DT_INT64, TensorShape({4}));
+  out_offset = 1;
+  EXPECT_TRUE(
+      TestCopyTensorIntoTensor(DT_INT64, default_value, &fits, &out_offset));
+  EXPECT_EQ(out_offset, 4);
 }
 
 }  // namespace

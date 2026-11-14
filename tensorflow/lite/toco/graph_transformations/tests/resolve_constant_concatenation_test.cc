@@ -12,6 +12,8 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
+#include <algorithm>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -19,7 +21,6 @@ limitations under the License.
 #include <gtest/gtest.h>
 #include "tensorflow/lite/toco/graph_transformations/graph_transformations.h"
 #include "tensorflow/lite/toco/model.h"
-#include "tensorflow/lite/toco/tooling_util.h"
 
 namespace toco {
 
@@ -101,7 +102,7 @@ std::vector<testing::Matcher<float>> ArrayFloatNear(
 
 class ResolveConstantConcatenationTest : public ::testing::Test {
  protected:
-  ResolveConstantConcatenationTest() {}
+  ResolveConstantConcatenationTest() = default;
 
   // Prepare a hypothetical TOCO model with one Concatenation operator in it
   // together with 4 arrays as its inputs.

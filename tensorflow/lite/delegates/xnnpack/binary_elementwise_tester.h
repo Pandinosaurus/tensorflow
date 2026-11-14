@@ -17,10 +17,11 @@ limitations under the License.
 #define TENSORFLOW_LITE_DELEGATES_XNNPACK_BINARY_ELEMENTWISE_TESTER_H_
 
 #include <cstdint>
+#include <utility>
 #include <vector>
 
 #include <gtest/gtest.h>
-#include "tensorflow/lite/c/common.h"
+#include "tensorflow/lite/core/c/common.h"
 #include "tensorflow/lite/schema/schema_generated.h"
 
 namespace tflite {
@@ -32,12 +33,11 @@ class BinaryElementwiseTester {
   BinaryElementwiseTester(const BinaryElementwiseTester&) = delete;
   BinaryElementwiseTester& operator=(const BinaryElementwiseTester&) = delete;
 
-  inline BinaryElementwiseTester& Input1Shape(
-      std::initializer_list<int32_t> shape) {
+  inline BinaryElementwiseTester& Input1Shape(std::vector<int32_t> shape) {
     for (auto it = shape.begin(); it != shape.end(); ++it) {
       EXPECT_GT(*it, 0);
     }
-    input1_shape_ = std::vector<int32_t>(shape.begin(), shape.end());
+    input1_shape_ = std::move(shape);
     return *this;
   }
 
@@ -45,12 +45,11 @@ class BinaryElementwiseTester {
     return input1_shape_;
   }
 
-  inline BinaryElementwiseTester& Input2Shape(
-      std::initializer_list<int32_t> shape) {
+  inline BinaryElementwiseTester& Input2Shape(std::vector<int32_t> shape) {
     for (auto it = shape.begin(); it != shape.end(); ++it) {
       EXPECT_GT(*it, 0);
     }
-    input2_shape_ = std::vector<int32_t>(shape.begin(), shape.end());
+    input2_shape_ = std::move(shape);
     return *this;
   }
 
@@ -88,6 +87,15 @@ class BinaryElementwiseTester {
 
   inline bool INT8Weights() const { return int8_weights_; }
 
+  inline BinaryElementwiseTester& INT8ChannelWiseWeights() {
+    int8_channel_wise_weights_ = true;
+    return *this;
+  }
+
+  inline bool INT8ChannelWiseWeights() const {
+    return int8_channel_wise_weights_;
+  }
+
   inline BinaryElementwiseTester& SparseWeights() {
     sparse_weights_ = true;
     return *this;
@@ -95,30 +103,28 @@ class BinaryElementwiseTester {
 
   inline bool SparseWeights() const { return sparse_weights_; }
 
-  inline BinaryElementwiseTester& ReluActivation() {
-    activation_ = ::tflite::ActivationFunctionType_RELU;
+  inline BinaryElementwiseTester& Activation(
+      ActivationFunctionType activation) {
+    activation_ = activation;
     return *this;
   }
 
-  inline BinaryElementwiseTester& Relu6Activation() {
-    activation_ = ::tflite::ActivationFunctionType_RELU6;
+  BinaryElementwiseTester& RelativeTolerance(float relative_tolerance) {
+    relative_tolerance_ = relative_tolerance;
     return *this;
   }
 
-  inline BinaryElementwiseTester& ReluMinus1To1Activation() {
-    activation_ = ::tflite::ActivationFunctionType_RELU_N1_TO_1;
+  BinaryElementwiseTester& AbsoluteTolerance(float absolute_tolerance) {
+    absolute_tolerance_ = absolute_tolerance;
     return *this;
   }
+  float AbsoluteTolerance() const { return absolute_tolerance_; }
 
-  inline BinaryElementwiseTester& TanhActivation() {
-    activation_ = ::tflite::ActivationFunctionType_TANH;
+  BinaryElementwiseTester& ExpectFp16Precision(bool fp16_precision = true) {
+    yield_fp16_precision_ = fp16_precision;
     return *this;
   }
-
-  inline BinaryElementwiseTester& SignBitActivation() {
-    activation_ = ::tflite::ActivationFunctionType_SIGN_BIT;
-    return *this;
-  }
+  bool ExpectFp16Precision() const { return yield_fp16_precision_; }
 
   void Test(tflite::BuiltinOperator binary_op, TfLiteDelegate* delegate) const;
 
@@ -137,9 +143,13 @@ class BinaryElementwiseTester {
   bool input2_static_ = false;
   bool fp16_weights_ = false;
   bool int8_weights_ = false;
+  bool int8_channel_wise_weights_ = false;
   bool sparse_weights_ = false;
   ::tflite::ActivationFunctionType activation_ =
       ::tflite::ActivationFunctionType_NONE;
+  float relative_tolerance_ = 0.0f;
+  float absolute_tolerance_ = 0.0f;
+  bool yield_fp16_precision_ = false;
 };
 
 }  // namespace xnnpack

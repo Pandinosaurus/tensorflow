@@ -14,10 +14,6 @@
 # ==============================================================================
 """Functional tests for XLA TensorArray Ops."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import numpy as np
 
 from tensorflow.compiler.tests import xla_test
@@ -124,13 +120,13 @@ class TensorArrayTest(xla_test.XLATestCase):
 
         w0 = ta.write(0, convert([[4.0, 5.0], [104.0, 105.0]]))
         w1 = w0.write(1, convert([[6.0, 7.0], [106.0, 107.0]]))
-        w2 = w1.write(2, convert([[8.0, 9.0], [204.0, 205.0]]))
+        w2 = w1.write(2, convert([[8.0, 9.0], [124.0, 125.0]]))
 
         return w2.concat()
 
       self.assertAllEqual(
           convert([[4.0, 5.0], [104.0, 105.0], [6.0, 7.0], [106.0, 107.0],
-                   [8.0, 9.0], [204.0, 205.0]]),
+                   [8.0, 9.0], [124.0, 125.0]]),
           self.evaluate(xla.compile(fn)[0]))
 
   @test_util.disable_control_flow_v2("b/122315751 (concat)")
@@ -458,8 +454,11 @@ class TensorArrayTest(xla_test.XLATestCase):
             infer_shape=False)
         return ta.split([1.0, 2.0, 3.0], [1, 2, 3]).flow
 
-      with self.assertRaisesOpError(
-          r"lengths must be equal: 1 vs. 2"):
+      with self.assertRaisesRegex(
+          ValueError,
+          r"Expected sum of lengths to be equal to values.shape\[0\], "
+          r"but sum of lengths is 6 and value's shape is: \[3\]",
+      ):
         xla.compile(fn)[0].eval()
 
       def fn():
@@ -470,8 +469,10 @@ class TensorArrayTest(xla_test.XLATestCase):
             infer_shape=False)
         return ta.split(1.0, [1]).flow
 
-      with self.assertRaisesOpError(
-          r"value must have rank >= 1"):
+      with self.assertRaisesRegex(
+          ValueError,
+          r"Expected value to be at least a vector, but received shape: \[\]",
+      ):
         xla.compile(fn)[0].eval()
 
       def fn():
@@ -780,7 +781,7 @@ class TensorArrayTest(xla_test.XLATestCase):
 
   #     def body(time, ta_t, state):
   #       sliced = array_ops.slice(
-  #           v0, begin=array_ops.stack([time, 0]), size=[1, -1])
+  #           v0, begin=array_ops_stack.stack([time, 0]), size=[1, -1])
   #       sliced = array_ops.squeeze(sliced)
   #       out = sliced + var + state
   #       state += sliced
@@ -864,7 +865,7 @@ class TensorArrayTest(xla_test.XLATestCase):
   #     c = lambda i, acc: i < 5
 
   #     def b(i, acc):
-  #       x1 = control_flow_ops.cond(
+  #       x1 = cond.cond(
   #           math_ops.equal(i, 0), lambda: x,
   #           lambda: math_ops.multiply(acc.read(i - 1), 2.0))
   #       return i + 1, acc.write(i, x1)
@@ -1168,6 +1169,22 @@ class TensorArrayTest(xla_test.XLATestCase):
       self.assertEqual(read1_v, 1)
       self.assertEqual(size0_v, 2)
       self.assertEqual(size1_v, 4)
+
+  @test_util.disable_control_flow_v2("TensorArray.scatter in XLA")
+  def testTensorArrayScatterScalarRaisesError(self):
+    with self.session() as session, self.test_scope():
+      scalar = array_ops.placeholder(dtypes.float32, shape=None)
+
+      def fn():
+        ta = tensor_array_ops.TensorArray(dtype=dtypes.float32, size=3)
+        return ta.scatter(indices=[0], value=scalar).flow
+
+      with self.assertRaisesRegex(
+          errors.InvalidArgumentError,
+          "scatter/unstack requires value to have rank >= 1, got scalar",
+      ):
+        session.run(xla.compile(fn), feed_dict={scalar: 1.0})
+
 
 if __name__ == "__main__":
   test.main()

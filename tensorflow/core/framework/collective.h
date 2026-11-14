@@ -19,16 +19,17 @@ limitations under the License.
 #include <vector>
 
 #include "absl/container/flat_hash_set.h"
+#include "tensorflow/core/framework/cancellation.h"
 #include "tensorflow/core/framework/device_attributes.pb.h"
 #include "tensorflow/core/framework/device_base.h"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/lib/core/refcount.h"
 #include "tensorflow/core/lib/core/status.h"
+#include "tensorflow/core/platform/intrusive_ptr.h"
 
 namespace tensorflow {
 
 class BufRendezvous;
-class CancellationManager;
 class CompleteGroupRequest;
 class CompleteGroupResponse;
 class CompleteInstanceRequest;
@@ -47,6 +48,7 @@ enum CollectiveType {
   GATHER_COLLECTIVE,
   PERMUTE_COLLECTIVE,
   ALL_TO_ALL_COLLECTIVE,
+  REDUCE_SCATTER_COLLECTIVE,
   UNDEFINED_COLLECTIVE,
 };
 
@@ -54,32 +56,37 @@ enum CollectiveType {
 // the OpKernel.  Currently, this struct is used to set communicator key for
 // NCCL-based collective implementation.
 struct CollGroupRuntimeDetails {
-  string communicator_key;  // for communicator-based techniques e.g. NCCL
-  string ToString() const;
+  std::string communicator_key;  // for communicator-based techniques e.g. NCCL
+  std::string ToString() const;
 };
 
 struct CollGroupMember {
   DeviceAttributes device;
-  string task;
+  std::string task;
   bool is_local;
+  // User provided rank
+  int32_t rank = -1;
 };
 
 // Data common to all members of a device group.
 // All members share the same device set but its order is
 // particular to an instance so it is stored there.
 struct CollGroupParams {
-  int32 group_key;
-  int32 group_size;
+  // Inputs from Collective ops:
+  int32_t group_key;
+  int32_t group_size;
   DeviceType device_type;
+  int user_specified_rank = -1;  // rank provided by the user.
+  // Generated from Collective Group Resolver:
   // Members in this group, in default rank order.
   std::vector<CollGroupMember> members;
   // True if every task has the same number of devices.
   bool same_num_devices_per_task = false;
   // Task -> number of devices on that task.
-  std::unordered_map<string, int32> num_devices_per_task;
-  int32 num_tasks;  // number of distinct tasks in group
+  std::unordered_map<std::string, int32_t> num_devices_per_task;
+  int32_t num_tasks;  // number of distinct tasks in group
   CollGroupRuntimeDetails runtime_details;
-  string ToString() const;
+  std::string ToString() const;
   CollGroupParams()
       : group_key(0), group_size(0), device_type(DEVICE_CPU), num_tasks(0) {}
 };
@@ -92,7 +99,7 @@ struct CollGroupParams {
 // interpretation.  On first execution the runtime will update this
 // structure with decisions that will guide all subsequent executions.
 struct CollImplDetails {
-  string collective_name;
+  std::string collective_name;
   std::vector<std::vector<int>> subdiv_permutations;
   // subdiv_offsets and max_subdivs_per_device are used together as follows:
   // When subdiv_offsets is provided (non-empty) it is used as is. When
@@ -103,10 +110,10 @@ struct CollImplDetails {
   int max_subdivs_per_device = -1;  // Upper bound on subdivisions per device.
   std::vector<int> subdiv_offsets;
   std::vector<int> subdiv_source_rank;  // rank of source in each subdiv
-  std::vector<int32>
-      dependencies;           // collective instances on which this node depends
-  string communication_hint;  // user-supplied hint for implementation choice,
-                              // e.g. ring or nccl
+  std::vector<int32_t>
+      dependencies;  // collective instances on which this node depends
+  std::string communication_hint;  // user-supplied hint for implementation
+                                   // choice, e.g. ring or nccl
   float timeout_seconds;      // If non zero, set a completion timeout for the
                               // collective op to detect staleness.
 };
@@ -115,14 +122,16 @@ struct CollImplDetails {
 // TODO(b/163171014) Refactor this struct to not be a union of all fields.
 struct CollInstanceParams {
   // Identifies all participating graph nodes.
-  int32 instance_key = -1;
+  int32_t instance_key = -1;
+  // The full identifier includes both instance_key and step_id.
+  int64_t step_id = 0;
   CollectiveType type = UNDEFINED_COLLECTIVE;
   DataType data_type = DT_FLOAT;
   TensorShape shape = {0};
   CollImplDetails impl_details;
-  string ToString() const;
+  std::string ToString() const;
   CollInstanceParams& operator=(const struct CollInstanceParams& other);
-  std::vector<string> devices;  // permuter only
+  std::vector<std::string> devices;  // permuter only
 
   // For permuter only
   // Each rank in the permutation is a receiver.
@@ -139,7 +148,7 @@ struct CollectiveParams : public core::RefCounted {
   CollGroupParams group;
   CollInstanceParams instance;
 
-  string name = "";        // node name used only for log or error messages
+  std::string name = "";   // node name used only for log or error messages
   int default_rank = -1;   // index of this op within device_names
   bool is_source = false;  // broadcast only
   int source_rank = -1;    // broadcast only
@@ -147,8 +156,9 @@ struct CollectiveParams : public core::RefCounted {
   std::vector<int> subdiv_rank;
   OpKernel* merge_op = nullptr;  // reduction only
   OpKernel* final_op = nullptr;  // reduction only
-  string ToString() const;
+  std::string ToString() const;
   bool run_group_initialization = true;
+  bool is_stateless = false;
 };
 
 class CollectiveExecutor;
@@ -156,26 +166,26 @@ class CollectiveExecutor;
 // Interface that provides resolution of device localities.
 class DeviceResolverInterface {
  public:
-  virtual ~DeviceResolverInterface() {}
+  virtual ~DeviceResolverInterface() = default;
 
   // Populates *attributes with the DeviceAttributes of the specified device.
-  virtual Status GetDeviceAttributes(const string& device,
-                                     DeviceAttributes* attributes) = 0;
+  virtual absl::Status GetDeviceAttributes(const std::string& device,
+                                           DeviceAttributes* attributes) = 0;
 
   // Returns all device attributes of a task.
-  virtual Status GetAllDeviceAttributes(
-      const string& task, std::vector<DeviceAttributes>* attributes) = 0;
+  virtual absl::Status GetAllDeviceAttributes(
+      const std::string& task, std::vector<DeviceAttributes>* attributes) = 0;
 
   // Updates device attributes. It returns error if any device already
   // exists in the DeviceResolver and has a different incarnation.
-  virtual Status UpdateDeviceAttributes(
+  virtual absl::Status UpdateDeviceAttributes(
       const std::vector<DeviceAttributes>& attributes) = 0;
 };
 
 // Interface that provides resolution of shared CollectiveParams fields.
 class ParamResolverInterface {
  public:
-  virtual ~ParamResolverInterface() {}
+  virtual ~ParamResolverInterface() = default;
 
   // Called by each collective op at first execution in order to fill out
   // the CollectiveParams structure with data gathered from the full
@@ -201,8 +211,13 @@ class ParamResolverInterface {
                                      CancellationManager* cancel_mgr,
                                      const StatusCallback& done) = 0;
 
+  // Looks up a group. It returns an error if the group is not ready or not
+  // found.
+  virtual absl::Status LookupGroup(int32_t group_key,
+                                   CollGroupParams* group) = 0;
+
   // Aborts the resolver. After abortion the resolver can no longer be used.
-  virtual void StartAbort(const Status& s) = 0;
+  virtual void StartAbort(const absl::Status& s) = 0;
 };
 
 // Graphs which utilize Collective Ops in a common instance must
@@ -211,7 +226,7 @@ class ParamResolverInterface {
 // coordinated step_ids to use in such cases.
 class StepSequenceInterface {
  public:
-  virtual ~StepSequenceInterface() {}
+  virtual ~StepSequenceInterface() = default;
 
   // Used with a distributed implementation to coordinate step_id
   // sequences across tasks.
@@ -241,7 +256,7 @@ class NcclCommunicatorInterface;
 // instances and various distributed resolution capabilities.
 class CollectiveExecutorMgrInterface : public StepSequenceInterface {
  public:
-  virtual ~CollectiveExecutorMgrInterface() {}
+  ~CollectiveExecutorMgrInterface() override = default;
 
   // Returns the step-specific CollectiveExecutor, creating if one does not
   // already exist.  The caller assumes ownership of one Ref on the object.
@@ -250,6 +265,9 @@ class CollectiveExecutorMgrInterface : public StepSequenceInterface {
   // If there is a CollectiveExecutor for step_id, remove it from the
   // table.
   virtual void Cleanup(int64_t step_id) = 0;
+
+  // Cleanup the entire table, removing all entries for step_ids.
+  virtual void CleanupAll() = 0;
 
   virtual ParamResolverInterface* GetParamResolver() const = 0;
 
@@ -264,21 +282,19 @@ class CollectiveExecutorMgrInterface : public StepSequenceInterface {
 // types.
 class CollectiveRemoteAccess {
  public:
-  virtual ~CollectiveRemoteAccess() {}
+  virtual ~CollectiveRemoteAccess() = default;
 
-  virtual void RecvFromPeer(const string& peer_device, const string& peer_task,
-                            bool peer_is_local, const string& key,
-                            Device* to_device, DeviceContext* to_device_ctx,
-                            const AllocatorAttributes& to_alloc_attr,
-                            Tensor* to_tensor,
-                            const DeviceLocality& client_locality,
-                            int dev_to_dev_stream_index,
-                            CancellationManager* cancellation_manager,
-                            const StatusCallback& done) = 0;
+  virtual void RecvFromPeer(
+      const std::string& peer_device, const std::string& peer_task,
+      bool peer_is_local, const std::string& key, Device* to_device,
+      DeviceContext* to_device_ctx, const AllocatorAttributes& to_alloc_attr,
+      Tensor* to_tensor, const DeviceLocality& client_locality,
+      int dev_to_dev_stream_index, CancellationManager* cancellation_manager,
+      const StatusCallback& done) = 0;
 
-  virtual void PostToPeer(const string& peer_device, const string& peer_task,
-                          const string& key, Device* from_device,
-                          DeviceContext* from_device_ctx,
+  virtual void PostToPeer(const std::string& peer_device,
+                          const std::string& peer_task, const std::string& key,
+                          Device* from_device, DeviceContext* from_device_ctx,
                           const AllocatorAttributes& from_alloc_attr,
                           const Tensor* from_tensor,
                           const DeviceLocality& client_locality,
@@ -288,24 +304,25 @@ class CollectiveRemoteAccess {
   // Checks the health of a collective peer. It probes the peer to see if it is
   // alive. Note that if a peer has restarted, it's considered a different one,
   // so CheckPeerHealth fails.
-  virtual void CheckPeerHealth(const string& peer_task, int64_t timeout_in_ms,
+  virtual void CheckPeerHealth(const std::string& peer_task,
+                               int64_t timeout_in_ms,
                                const StatusCallback& done) = 0;
 
   virtual BufRendezvous* buf_rendezvous() = 0;
 
-  virtual void StartAbort(const Status& s) = 0;
+  virtual void StartAbort(const absl::Status& s) = 0;
 };
 
 // A step-specific object that can execute a collective operation completely
 // described by a CollectiveParams object.
 class CollectiveExecutor : public core::RefCounted {
  public:
-  virtual void StartAbort(const Status& s) {}
+  virtual void StartAbort(const absl::Status& s) {}
 
   virtual void ExecuteAsync(OpKernelContext* ctx,
                             const CollectiveParams* col_params,
-                            const string& exec_key, StatusCallback done) {
-    done(errors::Internal(
+                            const std::string& exec_key, StatusCallback done) {
+    done(absl::InternalError(
         "A collective Op has been called in a context in which "
         "a CollectiveExecutor has not been provided."));
   }
@@ -314,7 +331,7 @@ class CollectiveExecutor : public core::RefCounted {
                                    CollectiveParams* cp,
                                    CancellationManager* cancel_mgr,
                                    StatusCallback done) {
-    done(errors::Internal(
+    done(absl::InternalError(
         "A collective Op has been called in a context in which "
         "a CollectiveExecutor has not been provided."));
   }
@@ -325,6 +342,10 @@ class CollectiveExecutor : public core::RefCounted {
                                   StatusCallback done) {
     return cem_->GetParamResolver()->CompleteGroupAsync(device, group_params,
                                                         cancel_mgr, done);
+  }
+
+  virtual absl::Status LookupGroup(int32_t group_key, CollGroupParams* group) {
+    return cem_->GetParamResolver()->LookupGroup(group_key, group);
   }
 
   // Runs the potentially-blocking closure/expensive callback.
@@ -371,7 +392,8 @@ class CollectiveExecutor : public core::RefCounted {
   static OpKernelContext::Params* CtxParams(OpKernelContext* ctx);
   CollectiveExecutorMgrInterface* cem_;
 
-  TF_DISALLOW_COPY_AND_ASSIGN(CollectiveExecutor);
+  CollectiveExecutor(const CollectiveExecutor&) = delete;
+  void operator=(const CollectiveExecutor&) = delete;
 };
 
 struct CollectiveContext {
@@ -380,33 +402,34 @@ struct CollectiveContext {
   const DeviceMgr* dev_mgr;                      // Not owned
   OpKernelContext* op_ctx;                       // Not owned
   OpKernelContext::Params* op_params;            // Not owned
-  const CollectiveParams* col_params;            // Not owned
-  const string exec_key;
+  core::IntrusivePtr<const CollectiveParams> col_params;
+  const std::string exec_key;
   const int64_t step_id;
   const Tensor* input;  // Not owned
   Tensor* output;       // Not owned
   Device* device;       // The device for which this instance labors
-  const string device_name;
+  const std::string device_name;
   DeviceLocality device_locality;
 
   CollectiveContext(CollectiveExecutor* col_exec,
                     NcclCommunicatorInterface* nccl_communicator,
                     const DeviceMgr* dev_mgr, OpKernelContext* ctx,
                     OpKernelContext::Params* op_params,
-                    const CollectiveParams* col_params, const string& exec_key,
-                    int64_t step_id, const Tensor* input, Tensor* output);
+                    const CollectiveParams* col_params,
+                    const std::string& exec_key, int64_t step_id,
+                    const Tensor* input, Tensor* output);
 };
 
 class NcclCommunicatorInterface {
  public:
   virtual ~NcclCommunicatorInterface() = default;
 
-  virtual string GenerateCommunicatorKey() = 0;
+  virtual std::string GenerateCommunicatorKey() = 0;
 
   virtual void Enqueue(std::shared_ptr<CollectiveContext> col_ctx,
                        StatusCallback done) = 0;
 
-  virtual void StartAbort(const Status& s) = 0;
+  virtual void StartAbort(const absl::Status& s) = 0;
 };
 
 // Interface of a Collective Op implementation.  Each specific CollectiveOp will
@@ -415,7 +438,7 @@ class NcclCommunicatorInterface {
 // common_runtime/hierarchical_tree_broadcaster for examples.
 class CollectiveImplementationInterface : public core::RefCounted {
  public:
-  virtual ~CollectiveImplementationInterface() = default;
+  ~CollectiveImplementationInterface() override = default;
 
   // Initializes the portions of `col_params` specific to this
   // implementation.  Called exactly once for every Collective instance during
@@ -425,13 +448,14 @@ class CollectiveImplementationInterface : public core::RefCounted {
   // `col_params` passed in and should not manipulate any data members.  However
   // because it is virtual and needs to be implemented by every derived class we
   // do not mark it as static.
-  virtual Status InitializeCollectiveParams(CollectiveParams* col_params) = 0;
+  virtual absl::Status InitializeCollectiveParams(
+      CollectiveParams* col_params) = 0;
 
   // Prepares the CollectiveContext for executing this CollectiveImplementation.
   // Called from CollectiveExecutor right before calling Run().  The
   // CollectiveContext passed in must outlive the CollectiveImplementation
   // object.
-  virtual Status InitializeCollectiveContext(
+  virtual absl::Status InitializeCollectiveContext(
       std::shared_ptr<CollectiveContext> col_ctx) = 0;
 
   // Processes and moves data according to the logic of this Collective
@@ -449,15 +473,16 @@ class CollectiveRegistry {
   // Looks up a previously registered CollectiveImplementation under
   // `collective_name`.  If found, creates an instance of the implementation and
   // assign to `implementation`.
-  static Status Lookup(const string& collective_name,
-                       CollectiveImplementationInterface** implementation);
+  static absl::Status Lookup(
+      const std::string& collective_name,
+      CollectiveImplementationInterface** implementation);
 
   // Looks up a previously registered CollectiveImplementation under
   // `collective_name`.  If found, returns the static instance of this
   // implementation via `implementation`.  This instance should only be used to
   // call InitializateCollectiveParams.
-  static Status LookupParamResolverInstance(
-      const string& collective_name,
+  static absl::Status LookupParamResolverInstance(
+      const std::string& collective_name,
       CollectiveImplementationInterface** implementation);
 
   // Returns all registered collective implementations.
@@ -471,18 +496,19 @@ class CollectiveRegistry {
   // the CollectiveImplementation.  Also creates a static instance of the
   // implementation - this instance is used during param resolution and should
   // only be used to call InitializeCollectiveParams.
-  static Status Register(const string& collective_name, Factory factory);
+  static absl::Status Register(const std::string& collective_name,
+                               Factory factory);
 
-  static Status LookupHelper(const string& collective_name,
-                             CollectiveImplementationInterface** implementation,
-                             bool param_resolver);
+  static absl::Status LookupHelper(
+      const std::string& collective_name,
+      CollectiveImplementationInterface** implementation, bool param_resolver);
 };
 
 // Class used to call CollectiveRegistry::Register.  This should only be used to
 // create a global static object.
 class CollectiveRegistration {
  public:
-  CollectiveRegistration(const string& collective_name,
+  CollectiveRegistration(const std::string& collective_name,
                          CollectiveRegistry::Factory factory) {
     TF_CHECK_OK(CollectiveRegistry::Register(collective_name, factory));
   }

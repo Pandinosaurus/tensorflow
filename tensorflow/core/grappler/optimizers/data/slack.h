@@ -31,32 +31,34 @@ class Slack : public TFDataOptimizerBase {
   Slack() = default;
   ~Slack() override = default;
 
-  string name() const override { return "slack"; };
+  std::string name() const override { return "slack"; };
 
   bool UsesFunctionLibrary() const override { return false; }
 
-  Status Init(
+  absl::Status Init(
       const tensorflow::RewriterConfig_CustomGraphOptimizer* config) override {
-    if (!config) return errors::InvalidArgument("Config parameter required.");
+    if (!config)
+      return absl::InvalidArgumentError("Config parameter required.");
 
-    const string& slack_period_param =
+    const std::string& slack_period_param =
         config->parameter_map().at("slack_period").s();
     if (!absl::SimpleAtoi(slack_period_param, &slack_period_)) {
-      return errors::InvalidArgument("Invalid `slack_period` parameter: ",
-                                     slack_period_param);
+      return absl::InvalidArgumentError(absl::StrCat(
+          "Invalid `slack_period` parameter: ", slack_period_param));
     }
-    return Status::OK();
+    return absl::OkStatus();
   }
 
-  Status OptimizeAndCollectStats(Cluster* cluster, const GrapplerItem& item,
-                                 GraphDef* output,
-                                 OptimizationStats* stats) override;
+  absl::Status OptimizeAndCollectStats(Cluster* cluster,
+                                       const GrapplerItem& item,
+                                       GraphDef* output,
+                                       OptimizationStats* stats) override;
 
  private:
   int64_t slack_period_ = -1;
 
-  Status RecursivelyHandleOp(const MutableGraphView& graph,
-                             NodeDef* dataset_node);
+  absl::Status RecursivelyHandleOp(const MutableGraphView& graph,
+                                   NodeDef* dataset_node);
 };
 
 }  // namespace grappler

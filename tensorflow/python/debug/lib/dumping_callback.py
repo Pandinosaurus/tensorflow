@@ -14,10 +14,6 @@
 # ==============================================================================
 """Dumping op callbacks: Enables dump-based features in tfdbg v2."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import atexit
 import os
 import re
@@ -25,11 +21,9 @@ import socket
 import threading
 import uuid
 
-from six.moves import xrange  # pylint: disable=redefined-builtin
-
+from tensorflow.core.framework import graph_debug_info_pb2
 from tensorflow.core.framework import tensor_pb2
 from tensorflow.core.protobuf import debug_event_pb2
-from tensorflow.core.protobuf import graph_debug_info_pb2
 from tensorflow.python.debug.lib import debug_events_writer
 from tensorflow.python.debug.lib import op_callbacks_common
 from tensorflow.python.debug.lib import source_utils
@@ -43,6 +37,7 @@ from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import gen_debug_ops
 from tensorflow.python.platform import tf_logging as logging
 from tensorflow.python.util import compat
+from tensorflow.python.util import object_identity
 from tensorflow.python.util import tf_stack
 from tensorflow.python.util.tf_export import tf_export
 
@@ -121,26 +116,15 @@ class _DumpingCallback(object):
     # Used only under V1 graph mode, where we can't rely on auto control
     # dependency to execute the debug tensors and hence need to attach the debug
     # tensors as control dependencies of the ops that consume the Placeholder.
-    self._placeholder_to_debug_tensor = dict()
+    self._placeholder_to_debug_tensor = (
+        object_identity.ObjectIdentityDictionary())
     self._writer = None
 
-  def function_callback(self, function, name, graph, inputs, outputs):
-    """A callback to be called on creation of Functions.
-
-    Used to establish a join between function name and graph (context) ID.
-
-    Args:
-      function: The just-created Function.
-      name: Name of the function.
-      graph: FuncGraph, the graph containing the operations in the function.
-      inputs: the tensors in the graph to be used as inputs to the function
-      outputs: the tensors in the graph which will be outputs from the function
-    """
-    del name, inputs, outputs
-
-    graph_id = self._get_context_id(graph)
+  def function_callback(self, function):
+    """A callback to be called on creation of ConcreteFunctions."""
+    graph_id = self._get_context_id(function.graph)
     with self._context_lock:
-      # NOTE(cais): We currently store the function (_EagerDefinedFunction)
+      # NOTE(cais): We currently store the function (ConcreteFunction)
       # as keys of this dict, because weakrefs to them sometimes become
       # unreferenceable by the time the op callback is called. This approach
       # may cause memory leaks due to the holding of the functions. If that's
@@ -610,7 +594,7 @@ class _DumpingCallback(object):
       tensor: The graph tensor to look up the name for.
 
     Returns:
-      Name of the orignal instrumented tensor as known to the debugger.
+      Name of the original instrumented tensor as known to the debugger.
     """
     return self._tensor_aliases.get(tensor.name, tensor.name)
 
@@ -653,7 +637,7 @@ class _DumpingCallback(object):
     tensor_ids = []
     if num_tensors:
       with self._symbolic_tensor_counter_lock:
-        for _ in xrange(num_tensors):
+        for _ in range(num_tensors):
           self._symbolic_tensor_counter += 1
           tensor_ids.append(self._symbolic_tensor_counter)
     return tensor_ids
@@ -859,7 +843,7 @@ def enable_dump_debug_info(dump_root,
                                                op_regex,
                                                tensor_dtypes)
     op_callbacks.add_op_callback(_state.dumping_callback.callback)
-    function_lib.add_function_callback(
+    function_lib.CONCRETE_FUNCTION_CALLBACKS.append(
         _state.dumping_callback.function_callback)
 
   if _state.dumping_callback.dump_root != dump_root:
@@ -890,8 +874,13 @@ def disable_dump_debug_info():
     tfdbg_run_id = _state.dumping_callback.tfdbg_run_id
     debug_events_writer.DebugEventsWriter(dump_root, tfdbg_run_id).Close()
     op_callbacks.remove_op_callback(_state.dumping_callback.callback)
-    function_lib.remove_function_callback(
-        _state.dumping_callback.function_callback)
+    if (
+        _state.dumping_callback.function_callback
+        in function_lib.CONCRETE_FUNCTION_CALLBACKS
+    ):
+      function_lib.CONCRETE_FUNCTION_CALLBACKS.remove(
+          _state.dumping_callback.function_callback
+      )
     delattr(_state, "dumping_callback")
     logging.info("Disabled dumping callback in thread %s (dump root: %s)",
                  threading.current_thread().name, dump_root)

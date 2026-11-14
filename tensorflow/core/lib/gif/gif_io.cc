@@ -20,6 +20,7 @@ limitations under the License.
 #include <algorithm>
 
 #include "absl/strings/str_cat.h"
+#include "gif_lib.h"  // from @gif
 #include "tensorflow/core/lib/gtl/cleanup.h"
 #include "tensorflow/core/platform/gif.h"
 #include "tensorflow/core/platform/logging.h"
@@ -55,11 +56,13 @@ static const char* GifErrorStringNonNull(int error_code) {
   return error_string;
 }
 
-uint8* Decode(const void* srcdata, int datasize,
-              const std::function<uint8*(int, int, int, int)>& allocate_output,
-              string* error_string, bool expand_animations) {
+uint8_t* Decode(
+    const void* srcdata, int datasize,
+    const std::function<uint8_t*(int, int, int, int)>& allocate_output,
+    std::string* error_string, bool expand_animations) {
   int error_code = D_GIF_SUCCEEDED;
-  InputBufferInfo info = {reinterpret_cast<const uint8*>(srcdata), datasize};
+  InputBufferInfo info = {reinterpret_cast<const uint8_t*>(srcdata), datasize};
+  /// NOTE: After this, gif file is mostly not initialized!
   GifFileType* gif_file =
       DGifOpen(static_cast<void*>(&info), &input_callback, &error_code);
   const auto cleanup = gtl::MakeCleanup([gif_file]() {
@@ -74,17 +77,43 @@ uint8* Decode(const void* srcdata, int datasize,
                                  GifErrorStringNonNull(error_code));
     return nullptr;
   }
+
+  // Reject implausibly large logical-screen sizes before DGifSlurp. Note that
+  // giflib allocates RasterBits per frame (from each frame's ImageDesc), and
+  // the output tensor is sized from the frames, not from the logical screen,
+  // so this is only a cheap early rejection of pathological headers; the
+  // op-level check on the total output size is the actual allocation bound.
+  // A 0x0 logical screen is valid (the output uses the frame sizes), so only
+  // the upper bound is enforced here.
+  {
+    const int64_t screen_w = static_cast<int64_t>(gif_file->SWidth);
+    const int64_t screen_h = static_cast<int64_t>(gif_file->SHeight);
+    const int64_t screen_bytes = screen_w * screen_h * 3;
+    if (screen_bytes >= (1LL << 30)) {
+      *error_string = absl::StrCat(
+          "GIF logical screen too large: ", gif_file->SWidth, "x",
+          gif_file->SHeight, ". Canvas must be less than 2^30 bytes (RGB)");
+      return nullptr;
+    }
+  }
+
   if (DGifSlurp(gif_file) != GIF_OK) {
     *error_string = absl::StrCat("failed to slurp gif file: ",
                                  GifErrorStringNonNull(gif_file->Error));
-    return nullptr;
+    // Stop load if no images are detected or the allocation of the last image
+    // buffer was failed.
+    if (gif_file->ImageCount <= 0 ||
+        gif_file->SavedImages[gif_file->ImageCount - 1].RasterBits == nullptr) {
+      return nullptr;
+    }
+    LOG(ERROR) << *error_string;
   }
-  if (gif_file->ImageCount <= 0) {
+  int target_num_frames = gif_file->ImageCount;
+
+  if (target_num_frames <= 0) {
     *error_string = "gif file does not contain any image";
     return nullptr;
   }
-
-  int target_num_frames = gif_file->ImageCount;
 
   // Don't request more memory than needed for each frame, preventing OOM
   int max_frame_width = 0;
@@ -102,11 +131,11 @@ uint8* Decode(const void* srcdata, int datasize,
   const int channel = 3;
   if (!expand_animations) target_num_frames = 1;
 
-  uint8* const dstdata =
+  uint8_t* const dstdata =
       allocate_output(target_num_frames, width, height, channel);
   if (!dstdata) return nullptr;
-  for (int k = 0; k < target_num_frames; k++) {
-    uint8* this_dst = dstdata + k * width * channel * height;
+  for (int64_t k = 0; k < target_num_frames; k++) {
+    uint8_t* this_dst = dstdata + k * width * channel * height;
 
     SavedImage* this_image = &gif_file->SavedImages[k];
     GifImageDesc* img_desc = &this_image->ImageDesc;
@@ -124,11 +153,11 @@ uint8* Decode(const void* srcdata, int datasize,
     int imgBottom = img_desc->Top + img_desc->Height;
 
     if (k > 0) {
-      uint8* last_dst = dstdata + (k - 1) * width * channel * height;
-      for (int i = 0; i < height; ++i) {
-        uint8* p_dst = this_dst + i * width * channel;
-        uint8* l_dst = last_dst + i * width * channel;
-        for (int j = 0; j < width; ++j) {
+      uint8_t* last_dst = dstdata + (k - 1) * width * channel * height;
+      for (int64_t i = 0; i < height; ++i) {
+        uint8_t* p_dst = this_dst + i * width * channel;
+        uint8_t* l_dst = last_dst + i * width * channel;
+        for (int64_t j = 0; j < width; ++j) {
           p_dst[j * channel + 0] = l_dst[j * channel + 0];
           p_dst[j * channel + 1] = l_dst[j * channel + 1];
           p_dst[j * channel + 2] = l_dst[j * channel + 2];
@@ -141,9 +170,9 @@ uint8* Decode(const void* srcdata, int datasize,
       // If the first frame does not fill the entire canvas then fill the
       // unoccupied canvas with zeros (black).
       if (k == 0) {
-        for (int i = 0; i < height; ++i) {
-          uint8* p_dst = this_dst + i * width * channel;
-          for (int j = 0; j < width; ++j) {
+        for (int64_t i = 0; i < height; ++i) {
+          uint8_t* p_dst = this_dst + i * width * channel;
+          for (int64_t j = 0; j < width; ++j) {
             p_dst[j * channel + 0] = 0;
             p_dst[j * channel + 1] = 0;
             p_dst[j * channel + 2] = 0;
@@ -165,24 +194,29 @@ uint8* Decode(const void* srcdata, int datasize,
       return nullptr;
     }
 
-    for (int i = imgTop; i < imgBottom; ++i) {
-      uint8* p_dst = this_dst + i * width * channel;
-      for (int j = imgLeft; j < imgRight; ++j) {
+    for (int64_t i = imgTop; i < imgBottom; ++i) {
+      uint8_t* p_dst = this_dst + i * width * channel;
+      for (int64_t j = imgLeft; j < imgRight; ++j) {
         GifByteType color_index =
             this_image->RasterBits[(i - img_desc->Top) * (img_desc->Width) +
                                    (j - img_desc->Left)];
+
+        if (color_index == gcb.TransparentColor) {
+          // Use the pixel from the previous frame, or 0 if there was no
+          // previous frame.
+          if (k == 0) {
+            p_dst[j * channel + 0] = 0;
+            p_dst[j * channel + 1] = 0;
+            p_dst[j * channel + 2] = 0;
+          }
+          continue;
+        }
 
         if (color_index >= color_map->ColorCount) {
           *error_string = absl::StrCat("found color index ", color_index,
                                        " outside of color map range ",
                                        color_map->ColorCount);
           return nullptr;
-        }
-
-        if (color_index == gcb.TransparentColor) {
-          // Use the pixel from the previous frame. In other words, no need to
-          // update our canvas for this pixel.
-          continue;
         }
 
         const GifColorType& gif_color = color_map->Colors[color_index];

@@ -14,10 +14,6 @@
 # ==============================================================================
 """Tests for sparse ops."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 from absl.testing import parameterized
 import numpy as np
 
@@ -112,6 +108,36 @@ class SparseOpsTest(test_util.TensorFlowTestCase, parameterized.TestCase):
       (math_ops.negative, [1.0, -1.0, 3.0, -4.0], [-1.0, 1.0, -3.0, 4.0]),
       (math_ops.sign, [3.0, -2.0, 0.0, -4.0], [1.0, -1.0, 0.0, -1.0]),
       (math_ops.square, [1.0, -1.0, 3.0, -4.0], [1.0, 1.0, 9.0, 16.0]),
+      (
+          math_ops.asinh,
+          [1.0, -1.0, 3.0, -4.0],
+          [0.8813736, -0.8813736, 1.8184465, -2.0947125],
+      ),
+      (
+          math_ops.sin,
+          [1.0, -1.0, 3.0, -4.0],
+          [0.84147096, -0.84147096, 0.14112, 0.7568025],
+      ),
+      (
+          math_ops.asin,
+          [1.0, -1.0, 0.4, -0.5],
+          [1.5707964, -1.5707964, 0.41151685, -0.5235988],
+      ),
+      (
+          math_ops.tan,
+          [1.0, -1.0, 0.4, -0.5],
+          [1.5574077, -1.5574077, 0.42279324, -0.5463025],
+      ),
+      (
+          math_ops.atan,
+          [0.4, -0.4, 1.0, 0.5],
+          [0.3805064, -0.3805064, 0.7853982, 0.4636476],
+      ),
+      (
+          math_ops.atanh,
+          [0.4, -0.4, -0.5, 0.5],
+          [0.42364895, -0.42364895, -0.54930615, 0.54930615],
+      ),
   ])
   def testUnarySparseDispatch(self, op, values, expected):
     st = sparse_tensor.SparseTensor(
@@ -121,7 +147,7 @@ class SparseOpsTest(test_util.TensorFlowTestCase, parameterized.TestCase):
     result = op(st)
     result_value = self.evaluate(result)
     self.assertAllEqual(result_value.indices, st.indices)
-    self.assertAllEqual(result_value.values, expected)
+    self.assertAllClose(result_value.values, expected)
     self.assertAllEqual(result_value.dense_shape, st.dense_shape)
 
   def testSparseToDenseGradient(self):
@@ -183,6 +209,22 @@ class SparseOpsTest(test_util.TensorFlowTestCase, parameterized.TestCase):
         array_ops.transpose(dense_of_sparse))
     self.assertAllEqual(expected, result)
 
+  def testSparseTensorDenseMatMulNegativeShapeValueError(self):
+    sp = sparse_tensor.SparseTensor(
+        indices=[[0, 0]], values=[1.0], dense_shape=[-1, 4]
+    )
+    b = constant_op.constant([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0], [7.0, 8.0]])
+    with self.assertRaisesRegex(
+        ValueError, 'dense_shape must not contain negative values'
+    ):
+      self.evaluate(sparse_ops.sparse_tensor_dense_matmul(sp, b))
+
+    a = constant_op.constant([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]])
+    with self.assertRaisesRegex(
+        ValueError, 'dense_shape must not contain negative values'
+    ):
+      self.evaluate(sparse_ops.sparse_tensor_dense_matmul(a, sp))
+
   def testMapValues(self):
     # supplying no sparse tensor should result in ValueError
     with self.assertRaises(ValueError):
@@ -234,6 +276,18 @@ class SparseOpsTest(test_util.TensorFlowTestCase, parameterized.TestCase):
     self.assertAllEqual([[0], [1], [2], [3], [4]], result.indices)
     self.assertAllEqual([b'a', b'b', b'a', b'b', b'a'], result.values)
     self.assertAllEqual([5], result.dense_shape)
+
+  def testSparseTensorToDenseQint(self):
+    x = np.asarray([1, 2])
+    y = np.asarray([[1, 0, 0], [0, 0, 2]])
+    for dtype in [dtypes.qint8, dtypes.qint16, dtypes.quint8, dtypes.quint16]:
+      sp = sparse_tensor.SparseTensor(
+          indices=[[0, 0], [1, 2]],
+          values=x.astype(dtype.as_numpy_dtype),
+          dense_shape=[2, 3])
+      v = self.evaluate(sparse_ops.sparse_tensor_to_dense(sp))
+      self.assertAllEqual(
+          y.astype(dtype.as_numpy_dtype), v.astype(dtype.as_numpy_dtype))
 
 
 @test_util.run_all_in_graph_and_eager_modes

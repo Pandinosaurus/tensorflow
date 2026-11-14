@@ -19,12 +19,55 @@ limitations under the License.
 #include <cstdint>
 #include <vector>
 
+#include "tensorflow/lite/schema/schema_generated.h"
+
 namespace tflite {
+namespace profiling {
+class BufferedProfiler;
+}  // namespace profiling
+
 namespace xnnpack {
+
+bool HasConvertNode(::tflite::profiling::BufferedProfiler* profiler);
 
 int8_t QuantizeInt8(float value, int32_t zero_point, float scale);
 
+void QuantizeInt8PerChannel(const float* scale, const int64_t* zero_point,
+                            int32_t quantized_dimension,
+                            const float* input_data, int8_t* output_data,
+                            const std::vector<int32_t>& shape);
+
 float GetInt8QuantizationScale(const std::vector<float>& data);
+
+std::vector<float> GetInt8QuantizationScalePerChannel(
+    const float* data, int32_t quantized_dimension,
+    const std::vector<int32_t>& shape);
+
+template <class Tester>
+class ModelCache {
+ public:
+  virtual ~ModelCache() = default;
+
+  inline Tester& ReuseGeneratedModel(bool reuse) {
+    reuse_generated_model_ = reuse;
+    return *static_cast<Tester*>(this);
+  }
+
+  bool ReuseGeneratedModel() const { return reuse_generated_model_; }
+
+  const Model* GetModel() {
+    if (model_buffer_.empty() || !ReuseGeneratedModel()) {
+      model_buffer_ = CreateTfLiteModel();
+    }
+    return tflite::GetModel(model_buffer_.data());
+  }
+
+  virtual std::vector<char> CreateTfLiteModel() const = 0;
+
+ protected:
+  bool reuse_generated_model_ = false;
+  std::vector<char> model_buffer_;
+};
 
 }  // namespace xnnpack
 }  // namespace tflite

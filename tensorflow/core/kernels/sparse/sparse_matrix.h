@@ -22,13 +22,21 @@ limitations under the License.
 #define EIGEN_USE_GPU
 #endif
 
-#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
+#include <cstdint>
+#include <limits>
+
+#include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
+#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/tensor.h"
+#include "tensorflow/core/framework/tensor_shape.h"
 #include "tensorflow/core/framework/tensor_types.h"
 #include "tensorflow/core/framework/variant.h"
 #include "tensorflow/core/framework/variant_encode_decode.h"
 #include "tensorflow/core/framework/variant_op_registry.h"
+#include "tensorflow/core/platform/errors.h"
+#include "tensorflow/core/platform/logging.h"
 
 namespace tensorflow {
 
@@ -142,22 +150,21 @@ class CSRSparseMatrix {
     return *this;
   }
 
-  static Status CreateCSRSparseMatrix(DataType dtype,
-                                      const Tensor& dense_shape,     // on host
-                                      const Tensor& batch_pointers,  // on host
-                                      const Tensor& row_pointers,
-                                      const Tensor& col_indices,
-                                      const Tensor& values,
-                                      CSRSparseMatrix* matrix) {
+  static absl::Status CreateCSRSparseMatrix(
+      DataType dtype,
+      const Tensor& dense_shape,     // on host
+      const Tensor& batch_pointers,  // on host
+      const Tensor& row_pointers, const Tensor& col_indices,
+      const Tensor& values, CSRSparseMatrix* matrix) {
     *matrix = CSRSparseMatrix(dtype, dense_shape, batch_pointers, row_pointers,
                               col_indices, values);
-    Status s = matrix->Validate();
+    absl::Status s = matrix->Validate();
     matrix->metadata_.validated = s.ok();
     matrix->SetupVecs();
     return s;
   }
 
-  Status Validate() const {
+  absl::Status Validate() const {
     return ValidateTypesAndShapes(metadata_.dtype, dense_shape_,
                                   batch_pointers_, row_pointers_, col_indices_,
                                   values_);
@@ -216,40 +223,40 @@ class CSRSparseMatrix {
     return dense_shape_;
   }
 
-  inline TTypes<int32>::UnalignedVec row_pointers_vec(int batch) {
+  inline TTypes<int32_t>::UnalignedVec row_pointers_vec(int batch) {
     DCHECK(valid());
     DCHECK_LT(batch, batch_size());
     const int64_t rows = dense_shape().vec<int64_t>()((dims() == 2) ? 0 : 1);
     const int offset = batch * (rows + 1);
-    return TTypes<int32>::UnalignedVec(row_pointers_vec_->data() + offset,
-                                       rows + 1);
+    return TTypes<int32_t>::UnalignedVec(row_pointers_vec_->data() + offset,
+                                         rows + 1);
   }
 
-  inline TTypes<int32>::UnalignedConstVec row_pointers_vec(int batch) const {
+  inline TTypes<int32_t>::UnalignedConstVec row_pointers_vec(int batch) const {
     DCHECK(valid());
     DCHECK_LT(batch, batch_size());
     const int64_t rows = dense_shape().vec<int64_t>()((dims() == 2) ? 0 : 1);
     const int offset = batch * (rows + 1);
-    return TTypes<int32>::UnalignedConstVec(row_pointers_vec_->data() + offset,
-                                            rows + 1);
+    return TTypes<int32_t>::UnalignedConstVec(
+        row_pointers_vec_->data() + offset, rows + 1);
   }
 
-  inline TTypes<int32>::UnalignedVec col_indices_vec(int batch) {
+  inline TTypes<int32_t>::UnalignedVec col_indices_vec(int batch) {
     DCHECK(valid());
     DCHECK_LT(batch, batch_size());
     const int offset = (*batch_pointers_vec_)(batch);
     const int nnz_in_batch = nnz(batch);
-    return TTypes<int32>::UnalignedVec(col_indices_vec_->data() + offset,
-                                       nnz_in_batch);
+    return TTypes<int32_t>::UnalignedVec(col_indices_vec_->data() + offset,
+                                         nnz_in_batch);
   }
 
-  inline TTypes<int32>::UnalignedConstVec col_indices_vec(int batch) const {
+  inline TTypes<int32_t>::UnalignedConstVec col_indices_vec(int batch) const {
     DCHECK(valid());
     DCHECK_LT(batch, batch_size());
     const int offset = (*batch_pointers_vec_)(batch);
     const int nnz_in_batch = nnz(batch);
-    return TTypes<int32>::UnalignedConstVec(col_indices_vec_->data() + offset,
-                                            nnz_in_batch);
+    return TTypes<int32_t>::UnalignedConstVec(col_indices_vec_->data() + offset,
+                                              nnz_in_batch);
   }
 
   template <typename T>
@@ -346,10 +353,44 @@ class CSRSparseMatrix {
     Tensor col_indices(p.tensors_[3]);
     Tensor values(p.tensors_[4]);
 
+    // ValidateTypesAndShapes and the value checks below read dense_shape and
+    // the index arrays directly on the host (e.g. dense_shape.vec<int64_t>(),
+    // col_indices.flat<int32_t>().data()). A crafted or custom-pipeline variant
+    // could hand us device-resident tensors, or uninitialized ones whose buffer
+    // pointer is null, so reject both up front rather than dereference them
+    // from host.
+    auto is_invalid_for_host_check = [](const Tensor& t) {
+      if (!t.IsInitialized()) return true;
+      return t.NumElements() > 0 &&
+             t.GetMemoryType() == AllocatorMemoryType::kDevice;
+    };
+    if (is_invalid_for_host_check(dense_shape) ||
+        is_invalid_for_host_check(batch_pointers) ||
+        is_invalid_for_host_check(row_pointers) ||
+        is_invalid_for_host_check(col_indices)) {
+      return false;
+    }
+
     // Check that the validated bool is consistent with the data.
-    Status s = ValidateTypesAndShapes(dtype, dense_shape, batch_pointers,
-                                      row_pointers, col_indices, values);
+    absl::Status s = ValidateTypesAndShapes(dtype, dense_shape, batch_pointers,
+                                            row_pointers, col_indices, values);
     if (s.ok() != validated) return false;
+
+    // ValidateTypesAndShapes only checks the dtypes and sizes of the index
+    // arrays, not their contents. A matrix decoded from an untrusted variant
+    // can therefore carry out-of-range col_indices or non-monotonic
+    // batch/row pointers while still reporting validated == true, which the
+    // consuming ops use directly as read/write offsets. The tensors here are
+    // always host-resident, so validate the CSR structure before accepting it.
+    if (validated) {
+      absl::Status values_status = ValidateComponentValues(
+          dense_shape, batch_pointers, row_pointers, col_indices);
+      if (!values_status.ok()) {
+        VLOG(2) << "CSRSparseMatrix::Decode component validation failed: "
+                << values_status;
+        return false;
+      }
+    }
 
     // Save to this object.
     metadata_ = metadata;
@@ -379,7 +420,7 @@ class CSRSparseMatrix {
 
   // This static method copies CSRSparseMatrices in all directions:
   //   Host->Device, Device->Host, and Device->Device.
-  static Status DeviceCopy(
+  static absl::Status DeviceCopy(
       const CSRSparseMatrix& from, CSRSparseMatrix* to,
       const UnaryVariantOpRegistry::AsyncTensorDeviceCopyFn& copy) {
     VLOG(2) << "DeviceCopy from type: " << DataTypeString(from.dtype())
@@ -410,9 +451,11 @@ class CSRSparseMatrix {
   void SetupVecs() {
     if (!metadata_.validated) return;
     batch_pointers_vec_.reset(
-        new TTypes<int32>::Vec(batch_pointers_.vec<int32>()));
-    row_pointers_vec_.reset(new TTypes<int32>::Vec(row_pointers_.vec<int32>()));
-    col_indices_vec_.reset(new TTypes<int32>::Vec(col_indices_.vec<int32>()));
+        new TTypes<int32_t>::Vec(batch_pointers_.vec<int32_t>()));
+    row_pointers_vec_.reset(
+        new TTypes<int32_t>::Vec(row_pointers_.vec<int32_t>()));
+    col_indices_vec_.reset(
+        new TTypes<int32_t>::Vec(col_indices_.vec<int32_t>()));
   }
 
   void ClearVecs() {
@@ -421,109 +464,132 @@ class CSRSparseMatrix {
     col_indices_vec_.reset();
   }
 
-  static Status ValidateTypesAndShapes(DataType dtype,
-                                       const Tensor& dense_shape,
-                                       const Tensor& batch_pointers,
-                                       const Tensor& row_pointers,
-                                       const Tensor& col_indices,
-                                       const Tensor& values) {
+  // Validates the contents (not just the shapes) of the host-resident CSR
+  // index arrays: batch_pointers and per-batch row_pointers must start at 0,
+  // be non-decreasing, and end at the batch's non-zero count, and every
+  // col_indices entry must fall in [0, num_cols). Used by Decode() to reject
+  // structurally invalid matrices coming from untrusted variants.
+  static absl::Status ValidateComponentValues(const Tensor& dense_shape,
+                                              const Tensor& batch_pointers,
+                                              const Tensor& row_pointers,
+                                              const Tensor& col_indices);
+
+  static absl::Status ValidateTypesAndShapes(DataType dtype,
+                                             const Tensor& dense_shape,
+                                             const Tensor& batch_pointers,
+                                             const Tensor& row_pointers,
+                                             const Tensor& col_indices,
+                                             const Tensor& values) {
     // TODO(ebrevdo): Consider adding support for other floating point types
     // (namely, float16).
     if (dtype != DT_FLOAT && dtype != DT_DOUBLE && dtype != DT_COMPLEX64 &&
         dtype != DT_COMPLEX128) {
-      return errors::InvalidArgument(
+      return absl::InvalidArgumentError(absl::StrCat(
           "CSRSparseMatrix::Validate: dtype = ", DataTypeString(dtype),
-          " not in {float32, float64, complex64, complex128}");
+          " not in {float32, float64, complex64, complex128}"));
     }
     // dense_shape checks
     if (dense_shape.dtype() != DT_INT64) {
-      return errors::InvalidArgument(
-          "CSRSparseMatrix::Validate: dense_shape.dtype() = ",
-          DataTypeString(dense_shape.dtype()), " != int64");
+      return absl::InvalidArgumentError(
+          absl::StrCat("CSRSparseMatrix::Validate: dense_shape.dtype() = ",
+                       DataTypeString(dense_shape.dtype()), " != int64"));
     }
     if (dense_shape.dims() != 1) {
-      return errors::InvalidArgument(
+      return absl::InvalidArgumentError(absl::StrCat(
           "CSRSparseMatrix::Validate: dense_shape should be a vector, but saw "
           "tensor: ",
-          dense_shape.DebugString());
+          dense_shape.DebugString()));
     }
     int rank = dense_shape.dim_size(0);
     if (rank < 2 || rank > 3) {
-      return errors::InvalidArgument(
+      return absl::InvalidArgumentError(absl::StrCat(
           "CSRSparseMatrix::Validate: dense_shape should be a 2- or 3- vector, "
           "but saw: ",
-          dense_shape.SummarizeValue(5));
+          dense_shape.SummarizeValue(5)));
     }
     auto dense_shape_t = dense_shape.vec<int64_t>();
     const int64_t batch_size = (rank == 2) ? 1 : dense_shape_t(0);
     const int64_t num_rows = (rank == 2) ? dense_shape_t(0) : dense_shape_t(1);
+    const int64_t num_cols = (rank == 2) ? dense_shape_t(1) : dense_shape_t(2);
+    if (batch_size < 0 || num_rows < 0 || num_cols < 0) {
+      return absl::InvalidArgumentError(absl::StrCat(
+          "CSRSparseMatrix::Validate: dense_shape has a negative dimension: ",
+          dense_shape.SummarizeValue(5)));
+    }
+    if (num_rows == std::numeric_limits<int64_t>::max() ||
+        (batch_size > 0 &&
+         (num_rows + 1) > std::numeric_limits<int64_t>::max() / batch_size)) {
+      return absl::InvalidArgumentError(absl::StrCat(
+          "CSRSparseMatrix::Validate: dense_shape dimensions overflow int64: ",
+          dense_shape.SummarizeValue(5)));
+    }
 
     if (batch_pointers.dtype() != DT_INT32) {
-      return errors::InvalidArgument(
-          "CSRSparseMatrix::Validate: batch_pointers.dtype() = ",
-          DataTypeString(batch_pointers.dtype()), " != int32");
+      return absl::InvalidArgumentError(
+          absl::StrCat("CSRSparseMatrix::Validate: batch_pointers.dtype() = ",
+                       DataTypeString(batch_pointers.dtype()), " != int32"));
     }
     if (batch_pointers.dims() != 1) {
-      return errors::InvalidArgument(
+      return absl::InvalidArgumentError(absl::StrCat(
           "CSRSparseMatrix::Validate: batch_indices is not a vector, saw "
           "shape: ",
-          batch_pointers.shape().DebugString());
+          batch_pointers.shape().DebugString()));
     }
 
     // batch size checks
     if (batch_size != batch_pointers.NumElements() - 1) {
-      return errors::InvalidArgument(
-          "CSRSparseMatrix::Validate: dense_shape is ",
-          dense_shape.SummarizeValue(5),
-          " but batch pointers implies batch size is ",
-          batch_pointers.NumElements() - 1);
+      return absl::InvalidArgumentError(
+          absl::StrCat("CSRSparseMatrix::Validate: dense_shape is ",
+                       dense_shape.SummarizeValue(5),
+                       " but batch pointers implies batch size is ",
+                       batch_pointers.NumElements() - 1));
     }
 
     if (row_pointers.dtype() != DT_INT32) {
-      return errors::InvalidArgument(
-          "CSRSparseMatrix::Validate: row_pointers.dtype() = ",
-          DataTypeString(row_pointers.dtype()), " != int32");
+      return absl::InvalidArgumentError(
+          absl::StrCat("CSRSparseMatrix::Validate: row_pointers.dtype() = ",
+                       DataTypeString(row_pointers.dtype()), " != int32"));
     }
     if (row_pointers.dims() != 1) {
-      return errors::InvalidArgument(
+      return absl::InvalidArgumentError(absl::StrCat(
           "CSRSparseMatrix::Validate: row_pointers is not a vector, saw "
           "shape: ",
-          row_pointers.shape().DebugString());
+          row_pointers.shape().DebugString()));
     }
     if (row_pointers.dim_size(0) != batch_size * (num_rows + 1)) {
-      return errors::InvalidArgument(
+      return absl::InvalidArgumentError(absl::StrCat(
           "CSRSparseMatrix::Validate: row_pointers should have size batch_size "
           "* (num_rows + 1), saw shapes: ",
           dense_shape.DebugString(), " vs. ",
-          row_pointers.shape().DebugString());
+          row_pointers.shape().DebugString()));
     }
     if (col_indices.dtype() != DT_INT32) {
-      return errors::InvalidArgument(
-          "CSRSparseMatrix::Validate: col_indices.dtype() = ",
-          DataTypeString(col_indices.dtype()), " != int32");
+      return absl::InvalidArgumentError(
+          absl::StrCat("CSRSparseMatrix::Validate: col_indices.dtype() = ",
+                       DataTypeString(col_indices.dtype()), " != int32"));
     }
     if (col_indices.dims() != 1) {
-      return errors::InvalidArgument(
+      return absl::InvalidArgumentError(absl::StrCat(
           "CSRSparseMatrix::Validate: col_indices is not a vector, saw shape: ",
-          col_indices.shape().DebugString());
+          col_indices.shape().DebugString()));
     }
     if (values.dtype() != dtype) {
-      return errors::InvalidArgument(
-          "CSRSparseMatrix::Validate: values.dtype() = ",
-          DataTypeString(values.dtype()),
-          " != dtype = ", DataTypeString(dtype));
+      return absl::InvalidArgumentError(
+          absl::StrCat("CSRSparseMatrix::Validate: values.dtype() = ",
+                       DataTypeString(values.dtype()),
+                       " != dtype = ", DataTypeString(dtype)));
     }
     if (values.dims() != 1) {
-      return errors::InvalidArgument(
+      return absl::InvalidArgumentError(absl::StrCat(
           "CSRSparseMatrix::Validate: values is not a vector, saw shape: ",
-          values.shape().DebugString());
+          values.shape().DebugString()));
     }
     if (col_indices.dim_size(0) != values.dim_size(0)) {
-      return errors::InvalidArgument(
+      return absl::InvalidArgumentError(absl::StrCat(
           "CSRSparseMatrix::Validate: size(col_indices) = ",
-          col_indices.dim_size(0), " != size(values) = ", values.dim_size(0));
+          col_indices.dim_size(0), " != size(values) = ", values.dim_size(0)));
     }
-    return Status::OK();
+    return absl::OkStatus();
   }
 
   struct Metadata {
@@ -536,26 +602,26 @@ class CSRSparseMatrix {
   Tensor row_pointers_;
   Tensor col_indices_;
   Tensor values_;
-  std::unique_ptr<TTypes<int32>::Vec> batch_pointers_vec_;
-  std::unique_ptr<TTypes<int32>::Vec> row_pointers_vec_;
-  std::unique_ptr<TTypes<int32>::Vec> col_indices_vec_;
+  std::unique_ptr<TTypes<int32_t>::Vec> batch_pointers_vec_;
+  std::unique_ptr<TTypes<int32_t>::Vec> row_pointers_vec_;
+  std::unique_ptr<TTypes<int32_t>::Vec> col_indices_vec_;
 };
 
 // Call BinaryFunctor<Device, T>()(ctx, a, b, c)
 // where T depends on a.dtype().  T will be one of: float, double,
 // complex64, complex128.
 template <typename Device, template <typename, typename> class BinaryFunctor>
-Status CSRSparseMatrixBinaryHelper(OpKernelContext* ctx,
-                                   const CSRSparseMatrix& a,
-                                   const CSRSparseMatrix& b,
-                                   CSRSparseMatrix* c) {
+absl::Status CSRSparseMatrixBinaryHelper(OpKernelContext* ctx,
+                                         const CSRSparseMatrix& a,
+                                         const CSRSparseMatrix& b,
+                                         CSRSparseMatrix* c) {
   DataType dt = a.dtype();
   if (dt != b.dtype()) {
-    return errors::InvalidArgument(
+    return absl::InvalidArgumentError(absl::StrCat(
         "CSRSparseMatrixBinaryHelper: Inconsistent dtypes for input matrices, "
         "a "
         "dtype: ",
-        DataTypeString(dt), ", b dtype: ", DataTypeString(b.dtype()));
+        DataTypeString(dt), ", b dtype: ", DataTypeString(b.dtype())));
   }
   switch (dt) {
     case DT_FLOAT: {
@@ -575,9 +641,9 @@ Status CSRSparseMatrixBinaryHelper(OpKernelContext* ctx,
       return functor(a, b, c);
     }
     default:
-      return errors::InvalidArgument(
+      return absl::InvalidArgumentError(absl::StrCat(
           "CSRSparseMatrixBinaryHelper: a.dtype (", DataTypeString(dt),
-          ") is not one of: float, double, complex64, complex128");
+          ") is not one of: float, double, complex64, complex128"));
   }
 }
 
@@ -585,9 +651,9 @@ Status CSRSparseMatrixBinaryHelper(OpKernelContext* ctx,
 // where T depends on a.dtype().  T will be one of: float, double,
 // complex64, complex128.
 template <typename Device, template <typename, typename> class UnaryFunctor>
-Status CSRSparseMatrixUnaryHelper(OpKernelContext* ctx,
-                                  const CSRSparseMatrix& a,
-                                  CSRSparseMatrix* b) {
+absl::Status CSRSparseMatrixUnaryHelper(OpKernelContext* ctx,
+                                        const CSRSparseMatrix& a,
+                                        CSRSparseMatrix* b) {
   DataType dt = a.dtype();
   switch (dt) {
     case DT_FLOAT: {
@@ -607,41 +673,48 @@ Status CSRSparseMatrixUnaryHelper(OpKernelContext* ctx,
       return functor(a, b);
     }
     default:
-      return errors::InvalidArgument(
+      return absl::InvalidArgumentError(absl::StrCat(
           "CSRSparseMatrixUnaryHelper: a.dtype (", DataTypeString(dt),
-          ") is not one of: float, double, complex64, complex128");
+          ") is not one of: float, double, complex64, complex128"));
   }
 }
 
 template <typename T>
 struct ConstCSRComponent {
-  TTypes<int32>::UnalignedConstVec row_ptr;
-  TTypes<int32>::UnalignedConstVec col_ind;
+  TTypes<int32_t>::UnalignedConstVec row_ptr;
+  TTypes<int32_t>::UnalignedConstVec col_ind;
   typename TTypes<T>::UnalignedConstVec values;
   TTypes<int64_t>::ConstVec dense_shape_host;
 };
 
 template <typename T>
 struct CSRComponent {
-  TTypes<int32>::UnalignedVec row_ptr;
-  TTypes<int32>::UnalignedVec col_ind;
+  TTypes<int32_t>::UnalignedVec row_ptr;
+  TTypes<int32_t>::UnalignedVec col_ind;
   typename TTypes<T>::UnalignedVec values;
   TTypes<int64_t>::Vec dense_shape_host;
 };
 
 template <typename T>
-Status ExtractVariantFromInput(OpKernelContext* ctx, int index,
-                               const T** value) {
+absl::Status ExtractVariantFromInput(OpKernelContext* ctx, int index,
+                                     const T** value) {
   const Tensor& input_t = ctx->input(index);
+  if (!TensorShapeUtils::IsScalar(input_t.shape())) {
+    return absl::InvalidArgumentError(
+        absl::StrCat("Invalid input matrix: Shape must be rank 0 but is rank ",
+                     input_t.dims()));
+  }
   const Variant& input_variant = input_t.scalar<Variant>()();
   *value = input_variant.get<T>();
   if (*value == nullptr) {
-    return errors::InvalidArgument("Could not retrieve Variant input ", index);
+    return absl::InvalidArgumentError(
+        absl::StrCat("Could not retrieve Variant input ", index));
   }
   if (!(*value)->valid()) {
-    return errors::InvalidArgument("Variant input ", index, " is not valid.");
+    return absl::InvalidArgumentError(
+        absl::StrCat("Variant input ", index, " is not valid."));
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 }  // namespace tensorflow

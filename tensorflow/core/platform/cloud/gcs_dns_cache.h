@@ -16,7 +16,9 @@ limitations under the License.
 #ifndef TENSORFLOW_CORE_PLATFORM_CLOUD_GCS_DNS_CACHE_H_
 #define TENSORFLOW_CORE_PLATFORM_CLOUD_GCS_DNS_CACHE_H_
 
+#include <memory>
 #include <random>
+#include <vector>
 
 #include "tensorflow/core/platform/cloud/http_request.h"
 #include "tensorflow/core/platform/env.h"
@@ -51,9 +53,9 @@ class GcsDnsCache {
   void AnnotateRequest(HttpRequest* request);
 
  private:
-  static std::vector<string> ResolveName(const string& name);
-  static std::vector<std::vector<string>> ResolveNames(
-      const std::vector<string>& names);
+  static std::vector<std::string> ResolveName(const std::string& name);
+  static std::vector<std::vector<std::string>> ResolveNames(
+      const std::vector<std::string>& names);
   void WorkerThread();
 
   // Define a friend class for testing.
@@ -69,7 +71,7 @@ class GcsDnsCache {
   const int64_t refresh_rate_secs_;
 
   // Entries in this vector correspond to entries in kCachedDomainNames.
-  std::vector<std::vector<string>> addresses_ TF_GUARDED_BY(mu_);
+  std::vector<std::vector<std::string>> addresses_ TF_GUARDED_BY(mu_);
 };
 
 }  // namespace tensorflow

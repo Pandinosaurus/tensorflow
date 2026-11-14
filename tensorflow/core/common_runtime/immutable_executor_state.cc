@@ -68,12 +68,12 @@ void GetMaxPendingCounts(const Node* n, size_t* max_pending,
 }  // namespace
 
 ImmutableExecutorState::FrameInfo* ImmutableExecutorState::EnsureFrameInfo(
-    const string& fname) {
+    const std::string& fname) {
   auto iter = frame_info_.find(fname);
   if (iter != frame_info_.end()) {
     return iter->second.get();
   } else {
-    auto frame_info = absl::make_unique<FrameInfo>(fname);
+    auto frame_info = std::make_unique<FrameInfo>(fname);
     absl::string_view fname_view = frame_info->name;
     auto emplace_result =
         frame_info_.emplace(fname_view, std::move(frame_info));
@@ -81,7 +81,7 @@ ImmutableExecutorState::FrameInfo* ImmutableExecutorState::EnsureFrameInfo(
   }
 }
 
-Status ImmutableExecutorState::Initialize(const Graph& graph) {
+absl::Status ImmutableExecutorState::Initialize(const Graph& graph) {
   TF_RETURN_IF_ERROR(gview_.Initialize(&graph));
 
   // Build the information about frames in this subgraph.
@@ -90,7 +90,7 @@ Status ImmutableExecutorState::Initialize(const Graph& graph) {
 
   for (auto& it : cf_info.unique_frame_names) {
     EnsureFrameInfo(it)->nodes =
-        absl::make_unique<std::vector<const NodeItem*>>();
+        std::make_unique<std::vector<const NodeItem*>>();
   }
   root_frame_info_ = frame_info_[""].get();
 
@@ -110,8 +110,8 @@ Status ImmutableExecutorState::Initialize(const Graph& graph) {
       // TODO(mrry): Track whether control flow was present in the
       // pre-partitioned graph, and enable the caller (e.g.
       // `DirectSession`) to relax this constraint.
-      string send_device;
-      string recv_device;
+      std::string send_device;
+      std::string recv_device;
       TF_RETURN_IF_ERROR(GetNodeAttr(n->attrs(), "send_device", &send_device));
       TF_RETURN_IF_ERROR(GetNodeAttr(n->attrs(), "recv_device", &recv_device));
       if (send_device != recv_device) {
@@ -120,7 +120,7 @@ Status ImmutableExecutorState::Initialize(const Graph& graph) {
     }
 
     const int id = n->id();
-    const string& frame_name = cf_info.frame_names[id];
+    const std::string& frame_name = cf_info.frame_names[id];
     FrameInfo* frame_info = EnsureFrameInfo(frame_name);
 
     NodeItem* item = gview_.node(id);
@@ -129,8 +129,9 @@ Status ImmutableExecutorState::Initialize(const Graph& graph) {
     item->input_start = frame_info->total_inputs;
     frame_info->total_inputs += n->num_inputs();
 
-    Status s = params_.create_kernel(n->properties(), &item->kernel);
+    absl::Status s = params_.create_kernel(n->properties(), &item->kernel);
     if (!s.ok()) {
+      params_.delete_kernel(item->kernel);
       item->kernel = nullptr;
       s = AttachDef(s, *n);
       return s;
@@ -161,7 +162,7 @@ Status ImmutableExecutorState::Initialize(const Graph& graph) {
           GetNodeAttr(n->attrs(), "is_constant", &is_constant_enter));
       item->is_constant_enter = is_constant_enter;
 
-      string frame_name;
+      std::string frame_name;
       TF_RETURN_IF_ERROR(GetNodeAttr(n->attrs(), "frame_name", &frame_name));
       FrameInfo* frame_info = frame_info_[frame_name].get();
 
@@ -213,7 +214,7 @@ Status ImmutableExecutorState::Initialize(const Graph& graph) {
     // Initialize static information about the frames in the graph.
     frame_info->nodes->push_back(item);
     if (item->is_enter) {
-      string enter_name;
+      std::string enter_name;
       TF_RETURN_IF_ERROR(GetNodeAttr(n->attrs(), "frame_name", &enter_name));
       EnsureFrameInfo(enter_name)->input_count++;
     }
@@ -281,8 +282,8 @@ bool ExtractScopedAllocatorAttr(const std::vector<int>& sc_attr,
 }
 }  // namespace
 
-Status ImmutableExecutorState::BuildControlFlowInfo(const Graph* g,
-                                                    ControlFlowInfo* cf_info) {
+absl::Status ImmutableExecutorState::BuildControlFlowInfo(
+    const Graph* g, ControlFlowInfo* cf_info) {
   const int num_nodes = g->num_node_ids();
   cf_info->frame_names.resize(num_nodes);
   std::vector<Node*> parent_nodes;
@@ -290,7 +291,7 @@ Status ImmutableExecutorState::BuildControlFlowInfo(const Graph* g,
   std::vector<bool> visited;
   visited.resize(num_nodes);
 
-  string frame_name;
+  std::string frame_name;
   std::deque<Node*> ready;
 
   // Initialize with the root nodes.
@@ -316,6 +317,10 @@ Status ImmutableExecutorState::BuildControlFlowInfo(const Graph* g,
     } else if (IsExit(curr_node)) {
       // Exit to the parent frame.
       parent = parent_nodes[curr_id];
+      if (!parent) {
+        return absl::InvalidArgumentError(
+            "Invalid Exit op: Cannot find a corresponding Enter op.");
+      }
       frame_name = cf_info->frame_names[parent->id()];
       parent = parent_nodes[parent->id()];
     } else {
@@ -342,7 +347,7 @@ Status ImmutableExecutorState::BuildControlFlowInfo(const Graph* g,
     }
   }
 
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 void ImmutableExecutorState::InitializePending(const Graph* graph,
@@ -351,11 +356,11 @@ void ImmutableExecutorState::InitializePending(const Graph* graph,
     FrameInfo* finfo = EnsureFrameInfo(it);
     DCHECK_EQ(finfo->pending_counts.get(), nullptr);
     finfo->pending_counts =
-        absl::make_unique<PendingCounts>(finfo->pending_counts_layout);
+        std::make_unique<PendingCounts>(finfo->pending_counts_layout);
   }
 
   if (!requires_control_flow_) {
-    atomic_pending_counts_.reset(new std::atomic<int32>[gview_.num_nodes()]);
+    atomic_pending_counts_.reset(new std::atomic<int32_t>[gview_.num_nodes()]);
     std::fill(atomic_pending_counts_.get(),
               atomic_pending_counts_.get() + gview_.num_nodes(), 0);
   }
@@ -363,7 +368,7 @@ void ImmutableExecutorState::InitializePending(const Graph* graph,
   for (const Node* n : graph->nodes()) {
     if (IsSink(n)) continue;
     const int id = n->id();
-    const string& name = cf_info.frame_names[id];
+    const std::string& name = cf_info.frame_names[id];
     size_t max_pending, max_dead;
     GetMaxPendingCounts(n, &max_pending, &max_dead);
     auto& counts = EnsureFrameInfo(name)->pending_counts;

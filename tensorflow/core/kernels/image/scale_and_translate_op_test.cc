@@ -30,14 +30,13 @@ limitations under the License.
 #include "tensorflow/core/lib/strings/str_util.h"
 #include "tensorflow/core/platform/test.h"
 #include "tensorflow/core/public/session.h"
-#include "tensorflow/core/util/ptr_util.h"
 
 namespace tensorflow {
 using Eigen::Vector2f;
 
 class DynamicKernel {
  public:
-  virtual ~DynamicKernel() {}
+  virtual ~DynamicKernel() = default;
   virtual float Value(const float x) const = 0;
   virtual float Radius() const = 0;
 };
@@ -54,7 +53,7 @@ class TypedDynamicKernel : public DynamicKernel {
 
 template <typename KernelType>
 std::unique_ptr<const DynamicKernel> CreateKernel(const KernelType& kernel) {
-  return MakeUnique<TypedDynamicKernel<KernelType>>(kernel);
+  return std::make_unique<TypedDynamicKernel<KernelType>>(kernel);
 }
 
 std::unique_ptr<const DynamicKernel> Create(
@@ -194,7 +193,7 @@ void ScaleAndTranslateBaseline(const DynamicKernel& kernel,
 
 class ScaleAndTranslateOpTest : public OpsTestBase {
  protected:
-  void CreateOp(const string& kernel_type_str, const bool antialias) {
+  void CreateOp(const std::string& kernel_type_str, const bool antialias) {
     TF_EXPECT_OK(NodeDefBuilder("scale_and_translate_op", "ScaleAndTranslate")
                      .Input(FakeInput(DT_FLOAT))
                      .Input(FakeInput(DT_INT32))
@@ -245,11 +244,11 @@ class ScaleAndTranslateOpTest : public OpsTestBase {
 
   void RunTest(int output_image_height, int output_image_width,
                const Vector2f& scale, const Vector2f& translate) {
-    AddInputFromArray<int32>(TensorShape({2}),
-                             {output_image_height, output_image_width});
+    AddInputFromArray<int32_t>(TensorShape({2}),
+                               {output_image_height, output_image_width});
     AddInputFromArray<float>(TensorShape({2}), {scale[1], scale[0]});
     AddInputFromArray<float>(TensorShape({2}), {translate[1], translate[0]});
-    Status s = RunOpKernel();
+    absl::Status s = RunOpKernel();
     const int batch_size = GetOutput(0)->dim_size(0);
     const int channels = GetOutput(0)->dim_size(3);
     Tensor expected(allocator(), DT_FLOAT,
@@ -418,10 +417,10 @@ TEST_F(ScaleAndTranslateOpTest, NonAntialiasedScaleAndTranslationTest) {
 }
 
 TEST_F(ScaleAndTranslateOpTest, TestKernelTypes) {
-  const std::vector<string> kKernelTypes = {
+  const std::vector<std::string> kKernelTypes = {
       "lanczos1", "lanczos3",  "lanczos5",     "box",
       "triangle", "keyscubic", "mitchellcubic"};
-  for (const string& kernel_type : kKernelTypes) {
+  for (const std::string& kernel_type : kKernelTypes) {
     CreateOp(kernel_type, true);
     constexpr int64_t kBatchSize = 2;
     constexpr int64_t kNumRowSquares = 10;

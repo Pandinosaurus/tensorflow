@@ -1,8 +1,26 @@
-load("//tensorflow:tensorflow.bzl", "tf_cc_test", "tf_features_nolayering_check_if_android_or_ios")
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("//tensorflow:tensorflow.bzl", "tf_cc_test")
+load("//tensorflow:tensorflow.default.bzl", "get_compatible_with_portable")
 load("//tensorflow/lite:special_rules.bzl", "nonportable_visibility_allowlist")
 
 # Kernel for custom parse_example
 package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:LICENSE"],
     default_visibility = [
         "//visibility:public",
     ],
@@ -19,16 +37,21 @@ cc_library(
         "example_proto_fast_parsing.h",
         "parse_example.h",
     ],
-    features = tf_features_nolayering_check_if_android_or_ios(),
+    compatible_with = get_compatible_with_portable(),
     deps = [
-        "@com_google_absl//absl/base",
-        "@com_google_absl//absl/container:flat_hash_map",
-        "@flatbuffers",
         "//tensorflow/lite:framework",
-        "//tensorflow/lite/c:common",
+        "//tensorflow/lite:string_util",
+        "//tensorflow/lite/core/c:common",
         "//tensorflow/lite/kernels:kernel_util",
         "//tensorflow/lite/kernels/internal:tensor",
-        "//tensorflow/lite:string_util",
+        "@com_google_absl//absl/base",
+        "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/log:check",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/strings:string_view",
+        "@com_google_absl//absl/types:span",
+        "@flatbuffers",
     ] + select({
         "//tensorflow:android": [
             "//tensorflow/core:portable_tensorflow_lib_lite",
@@ -44,6 +67,7 @@ cc_library(
             "//tensorflow/core:lib",
             "//tensorflow/core:lib_internal",
             "//tensorflow/core:protos_all_cc",
+            "//tensorflow/core/platform:hash",
         ],
     }),
 )
@@ -51,18 +75,19 @@ cc_library(
 tf_cc_test(
     name = "parse_example_test",
     srcs = ["parse_example_test.cc"],
-    features = tf_features_nolayering_check_if_android_or_ios(),
     deps = [
         ":parse_example",
-        "@flatbuffers",
-        "//tensorflow/lite/c:common",
+        "//tensorflow/lite:framework",
+        "//tensorflow/lite:string_util",
+        "//tensorflow/lite/core:framework",
         "//tensorflow/lite/core/api:op_resolver",
-        "//tensorflow/lite/kernels:builtin_ops",
+        "//tensorflow/lite/core/c:common",
+        "//tensorflow/lite/core/kernels:builtin_ops",
         "//tensorflow/lite/kernels:test_main",
         "//tensorflow/lite/kernels:test_util",
         "//tensorflow/lite/schema:schema_fbs",
-        "//tensorflow/lite:framework",
-        "//tensorflow/lite:string_util",
+        "@com_google_googletest//:gtest",
+        "@flatbuffers",
     ] + select({
         "//tensorflow:android": [
             "//tensorflow/core:portable_tensorflow_lib_lite",
@@ -93,7 +118,6 @@ cc_library(
     ],
     visibility = nonportable_visibility_allowlist(),
     deps = [
-        "//tensorflow/core:core_cpu",
         "//tensorflow/core:feature_util",
         "//tensorflow/core:framework",
         "//tensorflow/core:framework_internal",
@@ -102,11 +126,16 @@ cc_library(
         "//tensorflow/core:protos_all_cc",
         "//tensorflow/lite:framework",
         "//tensorflow/lite:string_util",
-        "//tensorflow/lite/c:common",
+        "//tensorflow/lite/core/c:common",
         "//tensorflow/lite/kernels:kernel_util",
         "//tensorflow/lite/kernels/internal:tensor",
         "@com_google_absl//absl/base",
         "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/log:check",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/strings:string_view",
+        "@com_google_absl//absl/types:span",
         "@flatbuffers",
     ],
 )
@@ -123,11 +152,14 @@ tf_cc_test(
         "//tensorflow/lite:framework",
         "//tensorflow/lite:string_util",
         "//tensorflow/lite/c:common",
+        "//tensorflow/lite/core:framework",
         "//tensorflow/lite/core/api:op_resolver",
-        "//tensorflow/lite/kernels:builtin_ops",
+        "//tensorflow/lite/core/c:common",
+        "//tensorflow/lite/core/kernels:builtin_ops",
         "//tensorflow/lite/kernels:test_main",
         "//tensorflow/lite/kernels:test_util",
         "//tensorflow/lite/schema:schema_fbs",
+        "@com_google_googletest//:gtest",
         "@flatbuffers",
     ],
 )

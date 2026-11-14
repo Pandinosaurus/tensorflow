@@ -109,7 +109,7 @@ NodeDef MakeFilterNode(const NodeDef& fused_map,
   arg->set_description("predicate result computed in the fused map");
   arg->set_type(DT_BOOL);
   sig->set_description("returns the last argument");
-  (*func->mutable_ret())["predicate_result"] = strings::StrCat(
+  (*func->mutable_ret())["predicate_result"] = absl::StrCat(
       fused_sig.output_arg(fused_sig.output_arg_size() - 1).name(), ":0");
 
   (*filter_node.mutable_attr())["predicate"] =
@@ -147,7 +147,7 @@ NodeDef MakeMapNode(const NodeDef& updated_filter, const NodeDef& original_map,
   for (int i = 0; i < fused_sig.output_arg_size() - 1; ++i) {
     auto arg_i = fused_sig.output_arg(i);
     *(sig->add_output_arg()) = arg_i;
-    (*func->mutable_ret())[arg_i.name()] = strings::StrCat(arg_i.name(), ":0");
+    (*func->mutable_ret())[arg_i.name()] = absl::StrCat(arg_i.name(), ":0");
   }
   sig->set_description("drops the last argument");
 
@@ -158,10 +158,9 @@ NodeDef MakeMapNode(const NodeDef& updated_filter, const NodeDef& original_map,
 
 }  // namespace
 
-Status MapAndFilterFusion::OptimizeAndCollectStats(Cluster* cluster,
-                                                   const GrapplerItem& item,
-                                                   GraphDef* output,
-                                                   OptimizationStats* stats) {
+absl::Status MapAndFilterFusion::OptimizeAndCollectStats(
+    Cluster* cluster, const GrapplerItem& item, GraphDef* output,
+    OptimizationStats* stats) {
   GraphDef sorted_old_graph = item.graph;
   TF_RETURN_IF_ERROR(TopologicalSort(&sorted_old_graph));
   // TODO(prazek): We might have some problems with performance if we copy
@@ -169,7 +168,7 @@ Status MapAndFilterFusion::OptimizeAndCollectStats(Cluster* cluster,
   *output = sorted_old_graph;
 
   MutableGraphView graph(output);
-  absl::flat_hash_set<string> nodes_to_delete;
+  absl::flat_hash_set<std::string> nodes_to_delete;
   FunctionLibraryDefinition function_library(OpRegistry::Global(),
                                              item.graph.library());
   auto get_map_node = [](const NodeDef& node) -> const NodeDef* {
@@ -240,7 +239,7 @@ Status MapAndFilterFusion::OptimizeAndCollectStats(Cluster* cluster,
   }
 
   TF_RETURN_IF_ERROR(graph.DeleteNodes(nodes_to_delete));
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 REGISTER_GRAPH_OPTIMIZER_AS(MapAndFilterFusion, "map_and_filter_fusion");

@@ -23,7 +23,7 @@ limitations under the License.
 #include <memory>
 #include <vector>
 
-#include "third_party/eigen3/Eigen/Core"
+#include "Eigen/Core"  // from @eigen_archive
 #include "tensorflow/core/lib/core/errors.h"
 #include "tensorflow/core/lib/core/status.h"
 #include "tensorflow/core/lib/gtl/top_n.h"
@@ -96,20 +96,20 @@ class CTCBeamSearchDecoder : public CTCDecoder<T> {
     Reset();
   }
 
-  ~CTCBeamSearchDecoder() override {}
+  ~CTCBeamSearchDecoder() override = default;
 
   // Run the hibernating beam search algorithm on the given input.
-  Status Decode(const typename CTCDecoder<T>::SequenceLength& seq_len,
-                const std::vector<typename CTCDecoder<T>::Input>& input,
-                std::vector<typename CTCDecoder<T>::Output>* output,
-                typename CTCDecoder<T>::ScoreOutput* scores) override;
+  absl::Status Decode(const typename CTCDecoder<T>::SequenceLength& seq_len,
+                      const std::vector<typename CTCDecoder<T>::Input>& input,
+                      std::vector<typename CTCDecoder<T>::Output>* output,
+                      typename CTCDecoder<T>::ScoreOutput* scores) override;
 
   // Calculate the next step of the beam search and update the internal state.
   template <typename Vector>
   void Step(const Vector& log_input_t);
 
   template <typename Vector>
-  T GetTopK(const int K, const Vector& input, std::vector<T>* top_k_logits,
+  T GetTopK(int K, const Vector& input, std::vector<T>* top_k_logits,
             std::vector<int>* top_k_indices);
 
   // Retrieve the beam scorer instance used during decoding.
@@ -129,8 +129,8 @@ class CTCBeamSearchDecoder : public CTCDecoder<T> {
   void Reset();
 
   // Extract the top n paths at current time step
-  Status TopPaths(int n, std::vector<std::vector<int>>* paths,
-                  std::vector<T>* log_probs, bool merge_repeated) const;
+  absl::Status TopPaths(int n, std::vector<std::vector<int>>* paths,
+                        std::vector<T>* log_probs, bool merge_repeated) const;
 
  private:
   int beam_width_;
@@ -152,11 +152,12 @@ class CTCBeamSearchDecoder : public CTCDecoder<T> {
   std::unique_ptr<BeamRoot> beam_root_;
   BaseBeamScorer<T, CTCBeamState>* beam_scorer_;
 
-  TF_DISALLOW_COPY_AND_ASSIGN(CTCBeamSearchDecoder);
+  CTCBeamSearchDecoder(const CTCBeamSearchDecoder&) = delete;
+  void operator=(const CTCBeamSearchDecoder&) = delete;
 };
 
 template <typename T, typename CTCBeamState, typename CTCBeamComparer>
-Status CTCBeamSearchDecoder<T, CTCBeamState, CTCBeamComparer>::Decode(
+absl::Status CTCBeamSearchDecoder<T, CTCBeamState, CTCBeamComparer>::Decode(
     const typename CTCDecoder<T>::SequenceLength& seq_len,
     const std::vector<typename CTCDecoder<T>::Input>& input,
     std::vector<typename CTCDecoder<T>::Output>* output,
@@ -169,11 +170,11 @@ Status CTCBeamSearchDecoder<T, CTCBeamState, CTCBeamComparer>::Decode(
                   [this](const typename CTCDecoder<T>::Output& output) -> bool {
                     return output.size() < this->batch_size_;
                   })) {
-    return errors::InvalidArgument(
+    return absl::InvalidArgumentError(
         "output needs to be of size at least (top_n, batch_size).");
   }
   if (scores->rows() < this->batch_size_ || scores->cols() < top_n) {
-    return errors::InvalidArgument(
+    return absl::InvalidArgumentError(
         "scores needs to be of size at least (batch_size, top_n).");
   }
 
@@ -197,7 +198,7 @@ Status CTCBeamSearchDecoder<T, CTCBeamState, CTCBeamComparer>::Decode(
       leaves_.push(entry);
     }
 
-    Status status =
+    absl::Status status =
         TopPaths(top_n, &beams, &beam_log_probabilities, this->merge_repeated_);
     if (!status.ok()) {
       return status;
@@ -212,7 +213,7 @@ Status CTCBeamSearchDecoder<T, CTCBeamState, CTCBeamComparer>::Decode(
       (*scores)(b, i) = -beam_log_probabilities[i];
     }
   }  // for (int b...
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 template <typename T, typename CTCBeamState, typename CTCBeamComparer>
@@ -399,16 +400,17 @@ void CTCBeamSearchDecoder<T, CTCBeamState, CTCBeamComparer>::Reset() {
 }
 
 template <typename T, typename CTCBeamState, typename CTCBeamComparer>
-Status CTCBeamSearchDecoder<T, CTCBeamState, CTCBeamComparer>::TopPaths(
+absl::Status CTCBeamSearchDecoder<T, CTCBeamState, CTCBeamComparer>::TopPaths(
     int n, std::vector<std::vector<int>>* paths, std::vector<T>* log_probs,
     bool merge_repeated) const {
   CHECK_NOTNULL(paths)->clear();
   CHECK_NOTNULL(log_probs)->clear();
   if (n > beam_width_) {
-    return errors::InvalidArgument("requested more paths than the beam width.");
+    return absl::InvalidArgumentError(
+        "requested more paths than the beam width.");
   }
   if (n > leaves_.size()) {
-    return errors::InvalidArgument(
+    return absl::InvalidArgumentError(
         "Less leaves in the beam search than requested.");
   }
 
@@ -426,7 +428,7 @@ Status CTCBeamSearchDecoder<T, CTCBeamState, CTCBeamComparer>::TopPaths(
     paths->push_back(e->LabelSeq(merge_repeated));
     log_probs->push_back(e->newp.total);
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 }  // namespace ctc

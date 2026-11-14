@@ -27,7 +27,7 @@ limitations under the License.
 namespace tensorflow {
 
 bool WorkerCachePartial::GetDeviceLocalityNonBlocking(
-    const string& device_name, DeviceLocality* locality) {
+    const std::string& device_name, DeviceLocality* locality) {
   mutex_lock lock(mu_);  // could use reader lock
   auto iter = device_status_cache_.find(device_name);
   if (iter != device_status_cache_.end()) {
@@ -37,30 +37,32 @@ bool WorkerCachePartial::GetDeviceLocalityNonBlocking(
   return false;
 }
 
-void WorkerCachePartial::GetDeviceLocalityAsync(const string& device_name,
+void WorkerCachePartial::GetDeviceLocalityAsync(const std::string& device_name,
                                                 DeviceLocality* locality,
                                                 StatusCallback done) {
   if (!GetDeviceLocalityNonBlocking(device_name, locality)) {
     // If cache entry was empty, make one try to fill it by RPC.
     SchedClosure([this, &device_name, locality, done]() {
-      Status s = RefreshDeviceStatus(device_name);
+      absl::Status s = RefreshDeviceStatus(device_name);
       if (s.ok() && !GetDeviceLocalityNonBlocking(device_name, locality)) {
-        s = errors::Unavailable("No known remote device: ", device_name);
+        s = absl::UnavailableError(
+            absl::StrCat("No known remote device: ", device_name));
       }
       done(s);
     });
     return;
   }
-  done(Status::OK());
+  done(absl::OkStatus());
 }
 
-Status WorkerCachePartial::RefreshDeviceStatus(const string& device_name) {
-  string task;
-  string device;
-  Status s;
+absl::Status WorkerCachePartial::RefreshDeviceStatus(
+    const std::string& device_name) {
+  std::string task;
+  std::string device;
+  absl::Status s;
   if (!DeviceNameUtils::SplitDeviceName(device_name, &task, &device)) {
-    s = errors::InvalidArgument("Bad device name to RefreshDeviceStatus: ",
-                                device_name);
+    s = absl::InvalidArgumentError(
+        absl::StrCat("Bad device name to RefreshDeviceStatus: ", device_name));
   }
   auto deleter = [this, &task](WorkerInterface* wi) {
     ReleaseWorker(task, wi);
@@ -68,7 +70,8 @@ Status WorkerCachePartial::RefreshDeviceStatus(const string& device_name) {
   std::unique_ptr<WorkerInterface, decltype(deleter)> rwi(
       GetOrCreateWorker(task), deleter);
   if (s.ok() && !rwi) {
-    s = errors::Internal("RefreshDeviceStatus, unknown worker task: ", task);
+    s = absl::InternalError(
+        absl::StrCat("RefreshDeviceStatus, unknown worker task: ", task));
   }
 
   if (s.ok()) {

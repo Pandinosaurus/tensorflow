@@ -1,0 +1,554 @@
+/* Copyright 2025 The OpenXLA Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+==============================================================================*/
+
+#ifndef XLA_CODEGEN_XTILE_IR_XTILE_OPS
+#define XLA_CODEGEN_XTILE_IR_XTILE_OPS
+include "mlir/Dialect/Bufferization/IR/BufferizableOpInterface.td"
+include "mlir/Interfaces/CallInterfaces.td"
+include "mlir/Interfaces/ControlFlowInterfaces.td"
+include "mlir/Interfaces/FunctionInterfaces.td"
+include "mlir/Interfaces/InferTypeOpInterface.td"
+include "mlir/Interfaces/SideEffectInterfaces.td"
+include "mlir/IR/AttrTypeBase.td"
+include "mlir/IR/OpAsmInterface.td"
+include "mlir/IR/OpBase.td"
+include "mlir/IR/SymbolInterfaces.td"
+include "mlir/IR/Interfaces.td"
+include "xla/codegen/xtile/ir/xtile_dialect.td"
+include "xla/codegen/xtile/ir/xtile_attrs.td"
+
+class XTile_Op<string mnemonic, list<Trait> traits = []> :
+      Op<XTileDialect, mnemonic, traits> {
+}
+
+def TiledBufferInterface : OpInterface<"TiledBufferInterface",
+    [DeclareOpInterfaceMethods<BufferizableOpInterface,
+      ["bufferizesToMemoryRead",
+       "bufferizesToMemoryWrite",
+       "bufferizesToAllocation",
+       "getAliasingValues",
+       "getAliasingOpOperands",
+       "isWritable",
+       "bufferize"]>
+    ]> {
+  let description = [{
+
+  }];
+
+  let cppNamespace = "::xla::xtile";
+
+  let extraClassDeclaration = [{
+    // Returns the set of unit dimensions that are removed from the tile
+    // dimensions.
+    llvm::SmallDenseSet<unsigned> getReducedDimensions();
+  }];
+
+  let extraTraitClassDeclaration = [{
+    llvm::SmallDenseSet<unsigned> getReducedDimensions() {
+      return static_cast<TiledBufferInterface>($_op).getReducedDimensions();
+    }
+  }];
+
+  let methods = [
+    InterfaceMethod<"Get the memref value of the buffer.",
+                    "mlir::TypedValue<mlir::MemRefType>", "getBuffer">,
+    InterfaceMethod<"Get the tensor value of the tile.",
+                    "mlir::TypedValue<mlir::RankedTensorType>", "getTile">,
+    InterfaceMethod<"Get the offsets into the buffer.",
+                    "mlir::ValueRange", "getOffsets">,
+    InterfaceMethod<"Get the full unreduced tile shape.",
+                    "llvm::ArrayRef<int64_t>", "getFullTileShape">,
+    InterfaceMethod<"Get the stride lengths of the buffer.",
+                    "llvm::ArrayRef<int64_t>", "getStrides">,
+  ];
+}
+
+
+// Define your custom entry operation
+def EntryFuncOp : XTile_Op<"entry_func", [
+    SymbolName,
+    SymbolVisibility,
+    Symbol,
+    IsolatedFromAbove,
+    AutomaticAllocationScope,
+    FunctionOpInterface]>
+{
+  let summary = "My custom entry function operation";
+
+  let description = [{
+    This operation defines a custom entry function that is the starting
+    point for execution. It has a single-block region, takes a
+    variadic list of memrefs and exactly one tile id index arguments,
+    it has no return values.
+
+    Multi-GPU collective kernels can also take peer scratch buffers, a peer
+    signal buffer, and this device's rank right before `tile_id`:
+      `(io_buffers..., scratch_buffers..., signal_buffer, rank, tile_id)`
+    For example, on 2 GPUs with 1 input, 1 output, and 1 scratch table:
+      `(%in: memref<8xf32>, %out: memref<8xf32>, %scratch: memref<2xi64>, %signal: memref<2xi64>, %rank: index, %tile_id: index)`
+    Here `%scratch` and `%signal` are `memref<2xi64>` tables holding one
+    64-bit device address per GPU. `signal_buffer` and `rank` always come
+    together, and `scratch_buffers` are only allowed when both are present.
+  }];
+
+  let arguments = (ins SymbolNameAttr:$sym_name,
+                       TypeAttrOf<FunctionType>:$function_type,
+                       OptionalAttr<DictArrayAttr>:$arg_attrs,
+                       OptionalAttr<DictArrayAttr>:$res_attrs,
+                       // How many peer scratch pointer tables follow I/O buffers.
+                       OptionalAttr<I32Attr>:$num_scratch_buffers,
+                       // Whether a peer barrier signal table follows scratch buffers.
+                       UnitAttr:$has_signal_buffer,
+                       // Whether this device's rank is passed right before tile_id.
+                       UnitAttr:$has_rank,
+                       OptionalAttr<StrAttr>:$sym_visibility
+  );
+
+  // The entry function has no return values.
+  let results = (outs);
+
+  let regions = (region SizedRegion<1>:$body);
+
+  let builders = [OpBuilder<(ins
+    "mlir::StringRef":$name,
+    "mlir::ArrayRef<mlir::Type>":$io_buffer_types,
+    "mlir::ArrayRef<mlir::Type>":$scratch_buffer_types,
+    "mlir::Type":$signal_buffer_type,
+    "mlir::ArrayRef<mlir::NamedAttribute>":$attrs,
+    "mlir::ArrayRef<mlir::DictionaryAttr>":$io_arg_attrs)
+  >];
+
+  let extraClassDeclaration = [{
+  private:
+    template <typename T>
+    mlir::ArrayRef<T> sliceBuffers(mlir::ArrayRef<T> items) {
+      return items.drop_back(getNumTrailingIndexArgs());
+    }
+
+    template <typename T>
+    mlir::ArrayRef<T> sliceInputOutputBuffers(mlir::ArrayRef<T> items) {
+      return sliceBuffers(items).drop_back(
+          getScratchBufferCount() + (getHasSignalBuffer() ? 1 : 0));
+    }
+
+    template <typename T>
+    mlir::ArrayRef<T> sliceScratchBuffers(mlir::ArrayRef<T> items) {
+      return sliceBuffers(items)
+          .drop_back(getHasSignalBuffer() ? 1 : 0)
+          .take_back(getScratchBufferCount());
+    }
+
+  public:
+    //===------------------------------------------------------------------===//
+    // Helper Methods
+    //===------------------------------------------------------------------===//
+    // Trailing index arguments after all memrefs: tile_id, plus rank if set.
+    int64_t getNumTrailingIndexArgs() {
+      return 1 + (getHasRank() ? 1 : 0);
+    }
+
+    int32_t getScratchBufferCount() {
+      return getNumScratchBuffers().value_or(0);
+    }
+
+    int64_t getMinRequiredArgs() {
+      return getScratchBufferCount() + (getHasSignalBuffer() ? 1 : 0) +
+             getNumTrailingIndexArgs();
+    }
+
+    // All memref arguments: I/O buffers, scratch buffers, and signal buffer.
+    mlir::ArrayRef<mlir::BlockArgument> getBufferArgs() {
+      return sliceBuffers<mlir::BlockArgument>(getBody().getArguments());
+    }
+
+    // Regular HLO input and output buffers (excludes collective tables).
+    mlir::ArrayRef<mlir::BlockArgument> getInputOutputBuffers() {
+      return sliceInputOutputBuffers<mlir::BlockArgument>(
+          getBody().getArguments());
+    }
+    mlir::ArrayRef<mlir::Type> getInputOutputBufferTypes() {
+      return sliceInputOutputBuffers(getArgumentTypes());
+    }
+
+    // Peer scratch pointer tables (one memref<Nxi64> per scratch workspace).
+    mlir::ArrayRef<mlir::BlockArgument> getScratchBuffers() {
+      return sliceScratchBuffers<mlir::BlockArgument>(getBody().getArguments());
+    }
+    mlir::ArrayRef<mlir::Type> getScratchBufferTypes() {
+      return sliceScratchBuffers(getArgumentTypes());
+    }
+
+    // Peer signal pointer table (memref<Nxi64>) for cross-GPU barriers, or null.
+    mlir::TypedValue<mlir::MemRefType> getSignalBuffer() {
+      if (!getHasSignalBuffer()) {
+        return nullptr;
+      }
+      return mlir::cast<mlir::TypedValue<mlir::MemRefType>>(
+          getBufferArgs().back());
+    }
+    mlir::Type getSignalBufferType() {
+      return getHasSignalBuffer() ? sliceBuffers(getArgumentTypes()).back()
+                                  : mlir::Type();
+    }
+
+    // Trailing index argument types: (rank?, tile_id).
+    mlir::ArrayRef<mlir::Type> getTrailingArgTypes() {
+      return getArgumentTypes().take_back(getNumTrailingIndexArgs());
+    }
+
+    // This device's rank in the collective group, or null if absent.
+    mlir::BlockArgument getRank() {
+      if (!getHasRank()) {
+        return mlir::BlockArgument();
+      }
+      return getBody().getArgument(getBody().getNumArguments() - 2);
+    }
+
+    mlir::BlockArgument getProgramId() {
+      return getBody().getArguments().back();
+    }
+
+    //===------------------------------------------------------------------===//
+    // FunctionOpInterface Methods
+    //===------------------------------------------------------------------===//
+
+    /// Returns the region on the current operation that is callable.
+    mlir::Region *getCallableRegion() { return &getBody(); }
+
+    /// Returns the argument types of this function.
+    mlir::ArrayRef<mlir::Type> getArgumentTypes() { return getFunctionType().getInputs(); }
+
+    /// Returns the result types of this function.
+    mlir::ArrayRef<mlir::Type> getResultTypes() { return getFunctionType().getResults(); }
+  }];
+
+  let hasCustomAssemblyFormat = 1;
+  let hasVerifier = 1;
+}
+
+def EntryFuncReturnOp : XTile_Op<"return", [Pure, HasParent<"EntryFuncOp">,
+                                ReturnLike, Terminator]> {
+  let summary = "Terminates the entry function";
+
+  let description = [{
+    This operation terminates the entry function block. It has no operands
+    and produces no results.
+  }];
+
+  let arguments = (ins);
+  let results = (outs);
+
+  let assemblyFormat = "attr-dict";
+}
+
+def SelectBufferOp : XTile_Op<"select_buffer", [Pure]> {
+  let summary = "Selects a specific buffer from an array of buffers.";
+  let description = [{
+    Takes a source buffer (which is an array of pointers to disjoint buffers)
+    and an index (replica_id), and returns a new buffer handle representing
+    the selected disjoint buffer.
+
+    This is useful when the input to a kernel is a collection of disjoint
+    buffers and we want to select one of them based on the replica_id.
+
+    If `offset` is given, shifts the start of the selected buffer forward by
+    `offset` elements (for example, `offset = 128` on an `f32` buffer starts
+    at element 128).
+  }];
+  let arguments = (ins
+    AnyMemRef:$source,
+    Index:$replica_id,
+    Optional<Index>:$offset
+  );
+  let results = (outs AnyMemRef:$result);
+  let assemblyFormat = [{
+    $source `[` $replica_id `]` (`offset` $offset^)? `:` type($source) `->` type($result) attr-dict
+  }];
+  let hasVerifier = 1;
+}
+
+def MemRefBitcastOp : XTile_Op<"memref_bitcast",
+                               [Pure, SameOperandsAndResultShape]> {
+  let summary = "Reinterprets the element type of a memref.";
+  let description = [{
+    Shape, layout and memory space are unchanged, so no data is moved: this is
+    purely a change of how the bits of each element are interpreted.
+
+    Example:
+
+    ```mlir
+    %0 = xtile.memref_bitcast %arg0 : memref<4x16xbf16> -> memref<4x16xi16>
+    ```
+  }];
+
+  let arguments = (ins AnyMemRef:$source);
+  let results = (outs AnyMemRef:$result);
+
+  let assemblyFormat = [{
+    $source `:` type($source) `->` type($result) attr-dict
+  }];
+
+  let hasVerifier = 1;
+  let hasFolder = 1;
+}
+
+def ExtractTileOp : XTile_Op<"extract", [TiledBufferInterface]> {
+  let summary = "Extract a tile from a memref.";
+  let description = [{
+    Reads the elements `source[offsets[d] + i_d * strides[d]]` for every
+    `i_d` in `[0, full_tile_shape[d])`.
+
+    Neither the offsets nor the indices they address are required to be in
+    bounds: tiling may produce offsets past the end of a dimension (e.g. for
+    tiles of a high-padded operand), and even an in-bounds offset may address
+    indices `offsets[d] + i_d * strides[d]` past the end. Lowerings must never
+    access memory outside the `source` buffer. Elements whose index lies
+    outside `[0, dim_size)` in any dimension are not read and have an
+    unspecified value in the result.
+  }];
+
+  let arguments = (ins
+    AnyMemRef:$source,
+    Variadic<Index>:$offsets,
+    DenseI64ArrayAttr:$full_tile_shape,
+    DenseI64ArrayAttr:$strides
+  );
+
+
+  let results = (outs AnyRankedTensor:$result);
+
+  let assemblyFormat = [{
+    $source `[` $offsets `]` $full_tile_shape $strides
+    `:` type($source) `->` type($result) attr-dict
+  }];
+
+  let extraClassDeclaration = [{
+    mlir::TypedValue<mlir::MemRefType> getBuffer();
+    mlir::TypedValue<mlir::RankedTensorType> getTile();
+  }];
+
+  let hasVerifier = 1;
+}
+
+def InsertTileOp : XTile_Op<"insert", [TiledBufferInterface]> {
+  let summary = "Insert a tile into a memref.";
+  let description = [{
+    Writes the tile to `destination[offsets[d] + i_d * strides[d]]` for every
+    `i_d` in `[0, full_tile_shape[d])`.
+
+    Neither the offsets nor the indices they address are required to be in
+    bounds: e.g. the last tile of a dimension that is not a multiple of the
+    tile size starts in bounds but addresses indices
+    `offsets[d] + i_d * strides[d]` past the end. Lowerings must never access
+    memory outside the `destination` buffer. Elements whose index lies outside
+    `[0, dim_size)` in any dimension are not written.
+  }];
+
+  let arguments = (ins
+    AnyRankedTensor:$source,
+    AnyMemRef:$destination,
+    Variadic<Index>:$offsets,
+    DenseI64ArrayAttr:$full_tile_shape,
+    DenseI64ArrayAttr:$strides
+  );
+
+  let results = (outs);
+
+  let assemblyFormat = [{
+    $source `into` $destination `[` $offsets `]` $full_tile_shape $strides
+    `:` type($source) `->` type($destination) attr-dict
+  }];
+
+  let extraClassDeclaration = [{
+    mlir::TypedValue<mlir::MemRefType> getBuffer();
+    mlir::TypedValue<mlir::RankedTensorType> getTile();
+  }];
+
+  let hasVerifier = 1;
+}
+
+def MaskOp : XTile_Op<"mask",
+                      [Pure,
+                       AllTypesMatch<["source", "result"]>,
+                       TypesMatchWith<"mask type matches result element type",
+                          "result", "value", ElementType<"_self">.result>
+                      ]> {
+  let summary = "Mask the values of a tensor.";
+
+  let description = [{
+    Masks out the values of the input tensor that are outside the range of the
+    given mask upper bound. Masked values are set to the provided value.
+  }];
+
+
+  let arguments = (ins
+    AnyRankedTensor:$source,
+    DenseI64ArrayAttr:$bounds,
+    AnyType:$value
+  );
+
+  let results = (outs AnyRankedTensor:$result);
+
+  let assemblyFormat = [{
+    $source `bounds` $bounds `,` $value `:` type($result) attr-dict
+  }];
+
+  let extraClassDeclaration = [{
+    // Get the dimensions where the mask bound is smaller than the dimension
+    // size. The returned array is sorted in increasing order.
+    llvm::SmallVector<int64_t> getMaskedDimensions();
+  }];
+
+  let hasVerifier = 1;
+  let hasFolder = 1;
+}
+
+def YieldOp : XTile_Op<"yield", [Pure, ReturnLike, Terminator,
+                                   HasParent<"ScanOp">]> {
+  let summary = "Yield values from an xtile region";
+  let description = [{
+    This operation yields values from an xtile region, such as the body of
+    an xtile.scan operation. It can yield values of any type, including
+    scalars and tensors.
+  }];
+
+  let arguments = (ins Variadic<AnyType>:$results);
+  let assemblyFormat = "attr-dict ($results^ `:` type($results))?";
+}
+
+def ScanOp : XTile_Op<"scan", [Pure, AttrSizedOperandSegments, AttrSizedResultSegments]> {
+  let summary = "scan operation";
+  let description = [{
+    Mirrors HLO's kScan operation.
+
+    Unlike HLO, the inits and carries keep the scan dimension as a unit
+    dimension, i.e. they have the same rank as the inputs and outputs. This
+    avoids rank-zero carries for 1D scans, which Triton does not support, and
+    allows broadcasting a carry across a tile without changing its rank.
+
+    Example: for inputs of type `tensor<16x1024xf32>` and `dimension = 1`, the
+    inits and carries have type `tensor<16x1xf32>`.
+  }];
+
+  let arguments = (
+    ins
+    Variadic<AnyRankedTensor>:$inputs,
+    Variadic<AnyRankedTensor>:$inits,
+    I64Attr:$dimension,
+    I64Attr:$scan_dim_size,
+    DefaultValuedAttr<BoolAttr, "false">:$is_reverse
+  );
+
+  let results = (outs
+    Variadic<AnyRankedTensor>:$outputs,
+    Variadic<AnyRankedTensor>:$carries
+  );
+
+  let regions = (region SizedRegion<1>:$body);
+
+  let assemblyFormat = [{
+    `(` $inputs `)` `inits` `(` $inits `)`
+    `dimension` `=` $dimension
+    prop-dict attr-dict
+    `:` `(` type($inputs) `)` `,` `(` type($inits) `)` `->` `(` type($outputs) `)` `,` `(` type($carries) `)`
+    $body
+  }];
+
+  let hasVerifier = 1;
+}
+
+def ReduceScatterOp : XTile_Op<"reduce_scatter", [Pure]> {
+  let summary = "variadic reduce-scatter operation";
+  let description = [{
+    Mirrors HLO's kReduceScatter operation with one or more operands.
+
+    Output `k` on every replica is the element-wise reduction, over all
+    replicas of its replica group, of that replica's shard of input `k` along
+    `scatter_dimension`. The same binary reduction `computation` (a region
+    with two 0-d tensor arguments, terminated by `stablehlo.return`) is applied
+    to all operands.
+
+    This op exists because `stablehlo.reduce_scatter` takes exactly one operand
+    and produces one result, whereas HLO's reduce-scatter (like
+    `stablehlo.all_gather` and `stablehlo.all_reduce`) is variadic. Extending
+    StableHLO is out of scope for XTile, so reduce-scatters are emitted as this
+    op.
+
+    Example: for inputs of type `tensor<2x64xf32>`, `scatter_dimension = 0` and
+    a replica group of size 2, the outputs have type `tensor<1x64xf32>`.
+  }];
+
+  let arguments = (
+    ins
+    Variadic<AnyRankedTensor>:$inputs,
+    I64Attr:$scatter_dimension,
+    I64ElementsAttr:$replica_groups
+  );
+
+  let results = (outs Variadic<AnyRankedTensor>:$outputs);
+
+  let regions = (region SizedRegion<1>:$computation);
+
+  let assemblyFormat = [{
+    `(` $inputs `)` `scatter_dimension` `=` $scatter_dimension
+    prop-dict attr-dict
+    `:` `(` type($inputs) `)` `->` `(` type($outputs) `)`
+    $computation
+  }];
+
+  let hasVerifier = 1;
+}
+
+//
+// DotScaled Op
+//
+// TODO(basioli): This op was copied from the triton dialect. If we want to use 
+// it more we should probably consider documenting it properly, and including 
+// more checks (e.x. similar to the Triton DotOpInterface).
+def DotScaledOp : XTile_Op<"dot_scaled", [Pure, AttrSizedOperandSegments]> {
+    let summary = "dot_scaled";
+
+    let description = [{
+        $result = matrix_multiply(scale($lhs, $lhs_scale), scale($rhs, $rhs_scale)).
+        Where scale(x, s) is a function that applies the scale per block following microscaling spec.
+    }];
+
+    let arguments = (
+      ins
+      // Data operands carry logical element types separately from their tensor
+      // element types because packed operands use i8 storage.
+      RankedTensorOf<[AnyFloat,I8]>:$lhs,
+      RankedTensorOf<[AnyFloat,I8]>:$rhs,
+      Optional<RankedTensorOf<[AnyFloat,I8]>>:$lhs_scale,
+      Optional<RankedTensorOf<[AnyFloat,I8]>>:$rhs_scale,
+      BoolAttr:$fastMath,
+      DefaultValuedAttr<BoolAttr, "true">:$lhs_k_pack,
+      DefaultValuedAttr<BoolAttr, "true">:$rhs_k_pack,
+      TypeAttr:$lhs_elem_type,
+      TypeAttr:$rhs_elem_type,
+      OptionalAttr<AnyAttr>:$dot_dimension_numbers
+    );
+
+    let results = (outs RankedTensorOf<[AnyFloat]>:$result);
+
+    let assemblyFormat = [{
+      $lhs (`scale` $lhs_scale^)? `,` $rhs (`scale` $rhs_scale^)? prop-dict attr-dict
+      `:` type($lhs) (`,` type($lhs_scale)^)? `*` type($rhs) (`,` type($rhs_scale)^)? `->` type($result)
+    }];
+
+    let hasVerifier = 1;
+}
+
+#endif // XLA_CODEGEN_XTILE_IR_XTILE_OPS

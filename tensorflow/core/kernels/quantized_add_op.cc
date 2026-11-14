@@ -25,6 +25,7 @@ limitations under the License.
 
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/tensor.h"
+#include "tensorflow/core/framework/tensor_shape.h"
 #include "tensorflow/core/kernels/meta_support.h"
 #include "tensorflow/core/kernels/quantization_utils.h"
 #include "tensorflow/core/lib/core/errors.h"
@@ -78,9 +79,9 @@ void ScalarAddition(OpKernelContext* context, const quint8* full_input,
   const int32 input_mult_int32 = input_1_int64 - input_0_int64;
 
   const int64 lowest_quantized =
-      static_cast<int64>(Eigen::NumTraits<qint32>::lowest());
+      static_cast<int64_t>(Eigen::NumTraits<qint32>::lowest());
   const int64 highest_quantized =
-      static_cast<int64>(Eigen::NumTraits<qint32>::highest());
+      static_cast<int64_t>(Eigen::NumTraits<qint32>::highest());
 
   const int64x2_t input_0_64x2 = vmovq_n_s64(input_0_int64);
   const int32x2_t input_mult_32x2 = vmov_n_s32(input_mult_int32);
@@ -100,7 +101,7 @@ void ScalarAddition(OpKernelContext* context, const quint8* full_input,
     vst1q_s32(output_ptr + 4, result_high_32x4);
   }
   for (; i < num_elements; ++i) {
-    const int64 full_input_value = static_cast<int64>(full_input[i]);
+    const int64 full_input_value = static_cast<int64_t>(full_input[i]);
     int64 full_input_in_output_range_64 =
         input_0_int64 + (full_input_value * input_mult_int32);
     full_input_in_output_range_64 =
@@ -148,7 +149,7 @@ void ScalarAddition(OpKernelContext* context, const quint8* full_input,
     full_input_in_output_range_64 =
         std::min(full_input_in_output_range_64, highest_quantized);
     const int32_t full_input_in_output_range =
-        static_cast<int32>(full_input_in_output_range_64);
+        static_cast<int32_t>(full_input_in_output_range_64);
     output[i] = full_input_in_output_range + scalar_in_output_range;
   }
 }
@@ -193,9 +194,9 @@ void VectorAddition(OpKernelContext* context, const quint8* x_data, float min_x,
   const int32 y_mult_int32 = y_1_int64 - y_0_int64;
 
   const int64 lowest_quantized =
-      static_cast<int64>(Eigen::NumTraits<qint32>::lowest());
+      static_cast<int64_t>(Eigen::NumTraits<qint32>::lowest());
   const int64 highest_quantized =
-      static_cast<int64>(Eigen::NumTraits<qint32>::highest());
+      static_cast<int64_t>(Eigen::NumTraits<qint32>::highest());
 
   const int64x2_t x_0_64x2 = vmovq_n_s64(x_0_int64);
   const int32x2_t x_mult_32x2 = vmov_n_s32(x_mult_int32);
@@ -222,13 +223,13 @@ void VectorAddition(OpKernelContext* context, const quint8* x_data, float min_x,
   }
 
   for (; i < num_elements; ++i) {
-    const int64 x_value = static_cast<int64>(x_data[i]);
+    const int64 x_value = static_cast<int64_t>(x_data[i]);
     int64 x_in_output_range_64 = x_0_int64 + (x_value * x_mult_int32);
     x_in_output_range_64 = std::max(x_in_output_range_64, lowest_quantized);
     x_in_output_range_64 = std::min(x_in_output_range_64, highest_quantized);
     const int32 x_in_output_range = static_cast<int32>(x_in_output_range_64);
 
-    const int64 y_value = static_cast<int64>(y_data[i]);
+    const int64 y_value = static_cast<int64_t>(y_data[i]);
     int64 y_in_output_range_64 = y_0_int64 + (y_value * y_mult_int32);
     y_in_output_range_64 = std::max(y_in_output_range_64, lowest_quantized);
     y_in_output_range_64 = std::min(y_in_output_range_64, highest_quantized);
@@ -271,13 +272,15 @@ void VectorAddition(OpKernelContext* context, const quint8* x_data, float min_x,
     int64_t x_in_output_range_64 = x_0_int64 + (x_value * x_mult_int32);
     x_in_output_range_64 = std::max(x_in_output_range_64, lowest_quantized);
     x_in_output_range_64 = std::min(x_in_output_range_64, highest_quantized);
-    const int32_t x_in_output_range = static_cast<int32>(x_in_output_range_64);
+    const int32_t x_in_output_range =
+        static_cast<int32_t>(x_in_output_range_64);
 
     const int64_t y_value = static_cast<int64_t>(y_data[i]);
     int64_t y_in_output_range_64 = y_0_int64 + (y_value * y_mult_int32);
     y_in_output_range_64 = std::max(y_in_output_range_64, lowest_quantized);
     y_in_output_range_64 = std::min(y_in_output_range_64, highest_quantized);
-    const int32_t y_in_output_range = static_cast<int32>(y_in_output_range_64);
+    const int32_t y_in_output_range =
+        static_cast<int32_t>(y_in_output_range_64);
 
     output[i] = x_in_output_range + y_in_output_range;
   }
@@ -330,9 +333,9 @@ void VectorTensorAddition(const quint8* vector_data, float min_vector,
   const int32 tensor_mult_int32 = tensor_1_int64 - tensor_0_int64;
 
   const int64 lowest_quantized =
-      static_cast<int64>(Eigen::NumTraits<qint32>::lowest());
+      static_cast<int64_t>(Eigen::NumTraits<qint32>::lowest());
   const int64 highest_quantized =
-      static_cast<int64>(Eigen::NumTraits<qint32>::highest());
+      static_cast<int64_t>(Eigen::NumTraits<qint32>::highest());
 
   const int64x2_t vector_0_64x2 = vmovq_n_s64(vector_0_int64);
   const int32x2_t vector_mult_32x2 = vmov_n_s32(vector_mult_int32);
@@ -361,7 +364,7 @@ void VectorTensorAddition(const quint8* vector_data, float min_vector,
       vst1q_s32(output_ptr + 4, result_high_32x4);
     }
     for (; vector_i < vector_num_elements; ++vector_i, ++i) {
-      const int64 vector_value = static_cast<int64>(vector_data[vector_i]);
+      const int64 vector_value = static_cast<int64_t>(vector_data[vector_i]);
       int64 vector_in_output_range_64 =
           vector_0_int64 + (vector_value * vector_mult_int32);
       vector_in_output_range_64 =
@@ -371,7 +374,7 @@ void VectorTensorAddition(const quint8* vector_data, float min_vector,
       const int32 vector_in_output_range =
           static_cast<int32>(vector_in_output_range_64);
 
-      const int64 tensor_value = static_cast<int64>(tensor_data[i]);
+      const int64 tensor_value = static_cast<int64_t>(tensor_data[i]);
       int64 tensor_in_output_range_64 =
           tensor_0_int64 + (tensor_value * tensor_mult_int32);
       tensor_in_output_range_64 =
@@ -429,7 +432,7 @@ void VectorTensorAddition(const quint8* vector_data, float min_vector,
     vector_in_output_range_64 =
         std::min(vector_in_output_range_64, highest_quantized);
     const int32_t vector_in_output_range =
-        static_cast<int32>(vector_in_output_range_64);
+        static_cast<int32_t>(vector_in_output_range_64);
 
     const int64_t tensor_value = static_cast<int64_t>(tensor_data[i]);
     int64_t tensor_in_output_range_64 =
@@ -439,7 +442,7 @@ void VectorTensorAddition(const quint8* vector_data, float min_vector,
     tensor_in_output_range_64 =
         std::min(tensor_in_output_range_64, highest_quantized);
     const int32_t tensor_in_output_range =
-        static_cast<int32>(tensor_in_output_range_64);
+        static_cast<int32_t>(tensor_in_output_range_64);
 
     output[i] = vector_in_output_range + tensor_in_output_range;
   }
@@ -457,16 +460,38 @@ class QuantizedAddOp : public OpKernel {
   void Compute(OpKernelContext* context) override {
     const Tensor& x = context->input(0);
     const Tensor& y = context->input(1);
-    const float min_x = context->input(2).flat<float>()(0);
-    const float max_x = context->input(3).flat<float>()(0);
-    const float min_y = context->input(4).flat<float>()(0);
-    const float max_y = context->input(5).flat<float>()(0);
+    const Tensor& min_x_tensor = context->input(2);
+    const Tensor& max_x_tensor = context->input(3);
+    const Tensor& min_y_tensor = context->input(4);
+    const Tensor& max_y_tensor = context->input(5);
+
+    OP_REQUIRES(
+        context, TensorShapeUtils::IsScalar(min_x_tensor.shape()),
+        absl::InvalidArgumentError(absl::StrCat(
+            "`min_x` must be rank 0 but is rank ", min_x_tensor.dims())));
+    OP_REQUIRES(
+        context, TensorShapeUtils::IsScalar(max_x_tensor.shape()),
+        absl::InvalidArgumentError(absl::StrCat(
+            "`max_x` must be rank 0 but is rank ", max_x_tensor.dims())));
+    OP_REQUIRES(
+        context, TensorShapeUtils::IsScalar(min_y_tensor.shape()),
+        absl::InvalidArgumentError(absl::StrCat(
+            "`min_y` must be rank 0 but is rank ", min_y_tensor.dims())));
+    OP_REQUIRES(
+        context, TensorShapeUtils::IsScalar(max_y_tensor.shape()),
+        absl::InvalidArgumentError(absl::StrCat(
+            "`max_y` must be rank 0 but is rank ", max_y_tensor.dims())));
+
+    const float min_x = min_x_tensor.scalar<float>()();
+    const float max_x = max_x_tensor.scalar<float>()();
+    const float min_y = min_y_tensor.scalar<float>()();
+    const float max_y = max_y_tensor.scalar<float>()();
 
     BCast bcast(BCast::FromShape(x.shape()), BCast::FromShape(y.shape()));
     if (!bcast.IsValid()) {
-      context->SetStatus(errors::InvalidArgument(
-          "Incompatible shapes: ", x.shape().DebugString(), " vs. ",
-          y.shape().DebugString()));
+      context->SetStatus(absl::InvalidArgumentError(
+          absl::StrCat("Incompatible shapes: ", x.shape().DebugString(),
+                       " vs. ", y.shape().DebugString())));
       return;
     }
     Tensor* z;
@@ -477,9 +502,9 @@ class QuantizedAddOp : public OpKernel {
     // If the difference between the min and max is negative or zero, it makes
     // it hard to do meaningful intermediate operations on the values.
     OP_REQUIRES(context, (max_x > min_x),
-                errors::InvalidArgument("max_x must be larger than min_x."));
+                absl::InvalidArgumentError("max_x must be larger than min_x."));
     OP_REQUIRES(context, (max_y > min_y),
-                errors::InvalidArgument("max_y must be larger than min_y."));
+                absl::InvalidArgumentError("max_y must be larger than min_y."));
     const T* x_data = x.flat<T>().data();
     const T* y_data = y.flat<T>().data();
     Toutput* z_data = z->flat<Toutput>().data();
@@ -539,7 +564,7 @@ class QuantizedAddOp : public OpKernel {
         tensor_max = max_x;
       }
       OP_REQUIRES(context, vector_num_elements > 0,
-                  errors::InvalidArgument("Must have some elements to add"));
+                  absl::InvalidArgumentError("Must have some elements to add"));
       VectorTensorAddition<T, Toutput>(
           vector_data, vector_min, vector_max, vector_num_elements, tensor_data,
           tensor_min, tensor_max, tensor_num_elements, min_z_value, max_z_value,
@@ -555,10 +580,10 @@ class QuantizedAddOp : public OpKernel {
       LOG(INFO) << "bcast.y_bcast()="
                 << TensorShape(bcast.y_bcast()).DebugString();
 
-      context->SetStatus(errors::Unimplemented(
+      context->SetStatus(absl::UnimplementedError(absl::StrCat(
           "Broadcast between ", context->input(0).shape().DebugString(),
           " and ", context->input(1).shape().DebugString(),
-          " is not supported yet."));
+          " is not supported yet.")));
       return;
     }
 

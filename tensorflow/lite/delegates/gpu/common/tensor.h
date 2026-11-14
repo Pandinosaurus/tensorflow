@@ -22,6 +22,7 @@ limitations under the License.
 
 #include "tensorflow/lite/delegates/gpu/common/data_type.h"
 #include "tensorflow/lite/delegates/gpu/common/shape.h"
+#include "tensorflow/lite/delegates/gpu/common/types.h"
 
 namespace tflite {
 namespace gpu {
@@ -34,6 +35,11 @@ struct StorageType;
 template <>
 struct StorageType<DataType::FLOAT32> {
   using value = std::vector<float>;
+};
+
+template <>
+struct StorageType<DataType::FLOAT16> {
+  using value = std::vector<tflite::gpu::half>;
 };
 
 template <>
@@ -63,6 +69,11 @@ struct StorageType<DataType::UINT16> {
 
 template <>
 struct StorageType<DataType::UINT8> {
+  using value = std::vector<uint8_t>;
+};
+
+template <>
+struct StorageType<DataType::BOOL> {
   using value = std::vector<uint8_t>;
 };
 

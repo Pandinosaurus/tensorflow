@@ -1,4 +1,17 @@
-load("//tensorflow/core/platform:rules_cc.bzl", "cc_library")
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
 
 # This package contains written convenience helpers for Eager Operations
 # used by SavedModel. Once we autogenerate C++ Eager Op wrappers, we can remove these.
@@ -6,12 +19,13 @@ load(
     "//tensorflow:tensorflow.bzl",
     "tf_cc_test",
 )
+load("//tensorflow/core/platform:rules_cc.bzl", "cc_library")
 
 package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
     default_visibility = [
         # Restricting visibility for now
         "//tensorflow/c/experimental/saved_model/core:__subpackages__",
-        "//tensorflow/c/experimental/saved_model/internal:__subpackages__",
     ],
     licenses = ["notice"],
 )
@@ -30,10 +44,11 @@ cc_library(
         "//tensorflow/c/eager:immediate_execution_context",
         "//tensorflow/c/eager:immediate_execution_operation",
         "//tensorflow/c/eager:immediate_execution_tensor_handle",
-        "//tensorflow/core:framework",
         "//tensorflow/core:lib",
         "//tensorflow/core:protos_all_cc",
         "//tensorflow/core/lib/llvm_rtti",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/types:span",
     ],
 )
 
@@ -46,7 +61,6 @@ cc_library(
         "variable_ops.h",
     ],
     deps = [
-        "//tensorflow/c/eager:abstract_operation",
         "//tensorflow/c/eager:abstract_tensor_handle",
         "//tensorflow/c/eager:immediate_execution_context",
         "//tensorflow/c/eager:immediate_execution_operation",
@@ -55,6 +69,7 @@ cc_library(
         "//tensorflow/core:lib",
         "//tensorflow/core:protos_all_cc",
         "//tensorflow/core/lib/llvm_rtti",
+        "@com_google_absl//absl/status",
         "@com_google_absl//absl/types:span",
     ],
 )
@@ -70,13 +85,10 @@ tf_cc_test(
     deps = [
         ":restore_ops",
         "//tensorflow/c:tensor_interface",
-        "//tensorflow/c/eager:abstract_tensor_handle",
-        "//tensorflow/c/eager:immediate_execution_context",
         "//tensorflow/c/eager:immediate_execution_tensor_handle",
         "//tensorflow/c/experimental/saved_model/core:test_utils",
         "//tensorflow/cc/saved_model:constants",
         "//tensorflow/core:all_kernels",
-        "//tensorflow/core:framework",
         "//tensorflow/core:lib",
         "//tensorflow/core:protos_all_cc",
         "//tensorflow/core:test",
@@ -84,6 +96,8 @@ tf_cc_test(
         "//tensorflow/core/common_runtime:core_cpu_lib",
         "//tensorflow/core/common_runtime/eager:context",
         "//tensorflow/core/common_runtime/eager:core",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings:string_view",
     ],
 )
 
@@ -95,12 +109,9 @@ tf_cc_test(
     deps = [
         ":variable_ops",
         "//tensorflow/c:tensor_interface",
-        "//tensorflow/c/eager:abstract_tensor_handle",
-        "//tensorflow/c/eager:immediate_execution_context",
         "//tensorflow/c/eager:immediate_execution_tensor_handle",
         "//tensorflow/c/experimental/saved_model/core:test_utils",
         "//tensorflow/core:all_kernels",
-        "//tensorflow/core:framework",
         "//tensorflow/core:lib",
         "//tensorflow/core:protos_all_cc",
         "//tensorflow/core:test",
@@ -108,5 +119,6 @@ tf_cc_test(
         "//tensorflow/core/common_runtime:core_cpu_lib",
         "//tensorflow/core/common_runtime/eager:context",
         "//tensorflow/core/common_runtime/eager:core",
+        "@com_google_absl//absl/status",
     ],
 )

@@ -29,16 +29,16 @@ namespace grappler {
 // optimizations, such as removing nodes that are effectively noops.
 class DependencyOptimizer : public GraphOptimizer {
  public:
-  DependencyOptimizer() {}
+  DependencyOptimizer() = default;
   explicit DependencyOptimizer(RewriterConfig::Toggle opt_level) {}
-  ~DependencyOptimizer() override {}
+  ~DependencyOptimizer() override = default;
 
-  string name() const override { return "dependency_optimizer"; };
+  std::string name() const override { return "dependency_optimizer"; };
 
   bool UsesFunctionLibrary() const override { return false; }
 
-  Status Optimize(Cluster* cluster, const GrapplerItem& item,
-                  GraphDef* optimized_graph) override;
+  absl::Status Optimize(Cluster* cluster, const GrapplerItem& item,
+                        GraphDef* optimized_graph) override;
 
  private:
   // Returns true if bypassing node does not increase the number of edges or
@@ -64,16 +64,16 @@ class DependencyOptimizer : public GraphOptimizer {
                     std::set<int>* nodes_to_delete);
   // Eliminates redundant control dependencies by computing the transitive
   // reduction of the graph.
-  Status TransitiveReduction();
+  absl::Status TransitiveReduction();
   // Main driver of dependency optimizations.
-  Status OptimizeDependencies();
+  absl::Status OptimizeDependencies();
   // Replaces multiple cross-device control edges from the same device with a
   // single control edge.  If `host_granularity` is true then group control
   // edges from all devices on the same host.
   void GroupCrossDeviceControlEdges(bool host_granularity);
 
   bool fetch_nodes_known_;
-  std::unordered_set<string> nodes_to_preserve_;
+  std::unordered_set<std::string> nodes_to_preserve_;
   std::unique_ptr<NodeMap> node_map_;
   std::unordered_map<const NodeDef*, int> node_to_idx_;
   GraphDef* optimized_graph_;  // Not owned.

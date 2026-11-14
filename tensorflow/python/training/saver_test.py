@@ -14,10 +14,6 @@
 # =============================================================================
 """Tests for tensorflow.python.training.saver.py."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import glob
 import math
 import os
@@ -25,7 +21,6 @@ import random
 import time
 
 import numpy as np
-import six
 
 from google.protobuf.any_pb2 import Any
 
@@ -35,6 +30,7 @@ from tensorflow.core.protobuf import meta_graph_pb2
 from tensorflow.core.protobuf import queue_runner_pb2
 from tensorflow.core.protobuf import rewriter_config_pb2
 from tensorflow.core.protobuf import saver_pb2
+from tensorflow.python.checkpoint import checkpoint_management
 from tensorflow.python.client import session
 from tensorflow.python.data.ops import dataset_ops
 from tensorflow.python.data.ops import iterator_ops
@@ -50,6 +46,8 @@ from tensorflow.python.framework import ops as ops_lib
 from tensorflow.python.framework import test_util
 from tensorflow.python.lib.io import file_io
 from tensorflow.python.ops import array_ops
+from tensorflow.python.ops import array_ops_stack
+from tensorflow.python.ops import cond
 from tensorflow.python.ops import control_flow_ops
 from tensorflow.python.ops import data_flow_ops
 from tensorflow.python.ops import gradients_impl
@@ -60,20 +58,21 @@ from tensorflow.python.ops import random_ops
 from tensorflow.python.ops import resource_variable_ops
 from tensorflow.python.ops import sparse_ops
 from tensorflow.python.ops import variable_scope
+from tensorflow.python.ops import variable_v1
 from tensorflow.python.ops import variables
+from tensorflow.python.ops import while_loop
 import tensorflow.python.ops.nn_grad  # pylint: disable=unused-import
 from tensorflow.python.platform import gfile
 from tensorflow.python.platform import test
 from tensorflow.python.saved_model.pywrap_saved_model import metrics
 from tensorflow.python.summary import summary
+from tensorflow.python.trackable import base as trackable_base
 from tensorflow.python.training import adam
-from tensorflow.python.training import checkpoint_management
 from tensorflow.python.training import gradient_descent
 from tensorflow.python.training import py_checkpoint_reader
 from tensorflow.python.training import queue_runner_impl
 from tensorflow.python.training import saver as saver_module
 from tensorflow.python.training import saver_test_utils
-from tensorflow.python.training.tracking import base as trackable_base
 from tensorflow.python.util import compat
 
 
@@ -108,7 +107,7 @@ class SaverTest(test.TestCase):
               "v2": v2.saveable
           }, restore_sequentially=True)
       val = save.save(sess, save_path)
-      self.assertTrue(isinstance(val, six.string_types))
+      self.assertIsInstance(val, str)
       self.assertEqual(save_path, val)
 
     # Start a second session.  In that session the parameter nodes
@@ -312,8 +311,8 @@ class SaverTest(test.TestCase):
     with ops_lib.Graph().as_default():
       # Build a graph with 2 parameter nodes, and Save and
       # Restore nodes for them.
-      v0 = variables.VariableV1(10.0, name="v0")
-      v1 = variables.VariableV1(20.0, name="v1")
+      v0 = variable_v1.VariableV1(10.0, name="v0")
+      v1 = variable_v1.VariableV1(20.0, name="v1")
       v2 = saver_test_utils.CheckpointedOp(name="v2")
       v2_init = v2.insert("k1", 30.0)
       save = saver_module.Saver(
@@ -338,7 +337,7 @@ class SaverTest(test.TestCase):
 
         # Save the initialized values in the file at "save_path"
         val = save.save(sess, save_path1)
-        self.assertTrue(isinstance(val, six.string_types))
+        self.assertIsInstance(val, str)
         self.assertEqual(save_path1, val)
 
       self.assertEqual(
@@ -352,8 +351,8 @@ class SaverTest(test.TestCase):
       # Start a second session.  In that session the parameter nodes
       # have not been initialized either.
       with self.cached_session() as sess:
-        v0 = variables.VariableV1(-1.0, name="v0")
-        v1 = variables.VariableV1(-1.0, name="v1")
+        v0 = variable_v1.VariableV1(-1.0, name="v0")
+        v1 = variable_v1.VariableV1(-1.0, name="v1")
         v2 = saver_test_utils.CheckpointedOp(name="v2")
         save = saver_module.Saver({"v0": v0, "v1": v1, "v2": v2.saveable})
 
@@ -374,7 +373,7 @@ class SaverTest(test.TestCase):
   def testFilenameTensor(self):
     # train.Saver is V1 only API.
     with ops_lib.Graph().as_default():
-      v0 = variables.VariableV1(0, name="v0")
+      v0 = variable_v1.VariableV1(0, name="v0")
       filename = b"somerandomfilename"
       save = saver_module.Saver({"v0": v0}, filename=filename)
       with self.cached_session() as sess:
@@ -383,7 +382,7 @@ class SaverTest(test.TestCase):
         self.assertEqual(self.evaluate(tensor), filename)
 
   def testInvalidPath(self):
-    v0 = variables.VariableV1(0, name="v0")
+    v0 = variable_v1.VariableV1(0, name="v0")
     for ver in (saver_pb2.SaverDef.V1, saver_pb2.SaverDef.V2):
       with self.cached_session() as sess:
         save = saver_module.Saver({"v0": v0}, write_version=ver)
@@ -397,17 +396,17 @@ class SaverTest(test.TestCase):
 
     with self.cached_session() as sess:
       # Build a graph with 1 node, and save and restore for them.
-      v = variables.VariableV1(np.int64(15), name="v")
+      v = variable_v1.VariableV1(np.int64(15), name="v")
       save = saver_module.Saver({"v": v}, restore_sequentially=True)
       self.evaluate(variables.global_variables_initializer())
 
       # Save the initialized values in the file at "save_path"
       val = save.save(sess, save_path)
-      self.assertTrue(isinstance(val, six.string_types))
+      self.assertIsInstance(val, str)
       self.assertEqual(save_path, val)
 
       with self.cached_session() as sess:
-        v = variables.VariableV1(np.int64(-1), name="v")
+        v = variable_v1.VariableV1(np.int64(-1), name="v")
         save = saver_module.Saver({"v": v})
 
       with self.assertRaisesWithPredicateMatch(
@@ -421,9 +420,9 @@ class SaverTest(test.TestCase):
 
   def testSomeErrors(self):
     with ops_lib.Graph().as_default():
-      v0 = variables.VariableV1([10.0], name="v0")
-      v1 = variables.VariableV1([20.0], name="v1")
-      v2 = variables.VariableV1([20.0], name="v2")
+      v0 = variable_v1.VariableV1([10.0], name="v0")
+      v1 = variable_v1.VariableV1([20.0], name="v1")
+      v2 = variable_v1.VariableV1([20.0], name="v2")
       v2._set_save_slice_info(
           variables.Variable.SaveSliceInfo("v1", [1], [0], [1]))
 
@@ -451,7 +450,7 @@ class SaverTest(test.TestCase):
 
   def testSameName(self):
     with ops_lib.Graph().as_default():
-      v0 = variables.VariableV1([10.0], name="v0")
+      v0 = variable_v1.VariableV1([10.0], name="v0")
       v2 = saver_test_utils.CheckpointedOp(name="v2")
 
       # Saving one variable under two names raises an error.
@@ -474,8 +473,8 @@ class SaverTest(test.TestCase):
     with self.session(graph=ops_lib.Graph()) as sess:
       # Build a graph with 2 parameter nodes, and Save and
       # Restore nodes for them.
-      v0 = variables.VariableV1(10.0, name="v0")
-      v1 = variables.VariableV1(20.0, name="v1")
+      v0 = variable_v1.VariableV1(10.0, name="v0")
+      v1 = variable_v1.VariableV1(20.0, name="v1")
       v2 = saver_test_utils.CheckpointedOp(name="v2")
       v2_init = v2.insert("k1", 30.0)
       save = saver_module.Saver([v0, v1, v2.saveable])
@@ -490,14 +489,14 @@ class SaverTest(test.TestCase):
 
       # Save the initialized values in the file at "save_path"
       val = save.save(sess, save_path)
-      self.assertTrue(isinstance(val, six.string_types))
+      self.assertIsInstance(val, str)
       self.assertEqual(save_path, val)
 
     # Start a second session.  In that session the variables
     # have not been initialized either.
     with self.session(graph=ops_lib.Graph()) as sess:
-      v0 = variables.VariableV1(-1.0, name="v0")
-      v1 = variables.VariableV1(-1.0, name="v1")
+      v0 = variable_v1.VariableV1(-1.0, name="v0")
+      v1 = variable_v1.VariableV1(-1.0, name="v1")
       v2 = saver_test_utils.CheckpointedOp(name="v2")
       save = saver_module.Saver([v0, v1, v2.saveable])
 
@@ -521,8 +520,8 @@ class SaverTest(test.TestCase):
     # Build another graph with 2 nodes, initialized
     # differently, and a Restore node for them.
     with self.session(graph=ops_lib.Graph()) as sess:
-      v0_2 = variables.VariableV1(1000.0, name="v0")
-      v1_2 = variables.VariableV1(2000.0, name="v1")
+      v0_2 = variable_v1.VariableV1(1000.0, name="v0")
+      v1_2 = variable_v1.VariableV1(2000.0, name="v1")
       v2_2 = saver_test_utils.CheckpointedOp(name="v2")
       save2 = saver_module.Saver([v0_2, v1_2, v2_2.saveable])
       v2_2.insert("k1000", 3000.0).run()
@@ -581,14 +580,14 @@ class SaverTest(test.TestCase):
     save_path = os.path.join(self.get_temp_dir(), "gpu")
     with session.Session("", graph=ops_lib.Graph()) as sess:
       with sess.graph.device(test.gpu_device_name()):
-        v0_1 = variables.VariableV1(123.45)
+        v0_1 = variable_v1.VariableV1(123.45)
       save = saver_module.Saver({"v0": v0_1})
       self.evaluate(variables.global_variables_initializer())
       save.save(sess, save_path)
 
     with session.Session("", graph=ops_lib.Graph()) as sess:
       with sess.graph.device(test.gpu_device_name()):
-        v0_2 = variables.VariableV1(543.21)
+        v0_2 = variable_v1.VariableV1(543.21)
       save = saver_module.Saver({"v0": v0_2})
       self.evaluate(variables.global_variables_initializer())
 
@@ -598,22 +597,22 @@ class SaverTest(test.TestCase):
     save_path = os.path.join(self.get_temp_dir(), "gpu")
     with session.Session("", graph=ops_lib.Graph()) as sess:
       with sess.graph.device(test.gpu_device_name()):
-        v0_1 = variables.VariableV1(123.45)
+        v0_1 = variable_v1.VariableV1(123.45)
       save = saver_module.Saver({"v0": v0_1}, sharded=True, allow_empty=True)
       self.evaluate(variables.global_variables_initializer())
       save.save(sess, save_path)
 
     with session.Session("", graph=ops_lib.Graph()) as sess:
       with sess.graph.device(test.gpu_device_name()):
-        v0_2 = variables.VariableV1(543.21)
+        v0_2 = variable_v1.VariableV1(543.21)
       save = saver_module.Saver({"v0": v0_2}, sharded=True, allow_empty=True)
       self.evaluate(variables.global_variables_initializer())
 
   def testVariables(self):
     save_path = os.path.join(self.get_temp_dir(), "variables")
     with session.Session("", graph=ops_lib.Graph()) as sess:
-      one = variables.VariableV1(1.0)
-      twos = variables.VariableV1([2.0, 2.0, 2.0])
+      one = variable_v1.VariableV1(1.0)
+      twos = variable_v1.VariableV1([2.0, 2.0, 2.0])
       v2 = saver_test_utils.CheckpointedOp(name="v2")
       init = variables.global_variables_initializer()
       save = saver_module.Saver()
@@ -622,8 +621,8 @@ class SaverTest(test.TestCase):
       save.save(sess, save_path)
 
     with session.Session("", graph=ops_lib.Graph()) as sess:
-      one = variables.VariableV1(0.0)
-      twos = variables.VariableV1([0.0, 0.0, 0.0])
+      one = variable_v1.VariableV1(0.0)
+      twos = variable_v1.VariableV1([0.0, 0.0, 0.0])
       v2 = saver_test_utils.CheckpointedOp(name="v2")
       # Saver with no arg, defaults to 'all variables'.
       save = saver_module.Saver()
@@ -635,14 +634,14 @@ class SaverTest(test.TestCase):
 
   def testVarListShouldBeEmptyInDeferredBuild(self):
     with ops_lib.Graph().as_default():
-      v = variables.VariableV1(1.0)
+      v = variable_v1.VariableV1(1.0)
       with self.assertRaisesRegex(ValueError, "defer_build"):
         saver_module.Saver([v], defer_build=True)
 
   def testBuildShouldBeCalledBeforeSaveInCaseOfDeferBuild(self):
     save_path = os.path.join(self.get_temp_dir(), "error_deferred_build")
     with ops_lib.Graph().as_default(), session.Session() as sess:
-      variables.VariableV1(1.0)
+      variable_v1.VariableV1(1.0)
       saver = saver_module.Saver(defer_build=True)
       with self.assertRaisesRegex(RuntimeError, "build"):
         saver.save(sess, save_path)
@@ -650,18 +649,18 @@ class SaverTest(test.TestCase):
   def testDeferredBuild(self):
     save_path = os.path.join(self.get_temp_dir(), "deferred_build")
     with session.Session("", graph=ops_lib.Graph()) as sess:
-      one = variables.VariableV1(1.0)
+      one = variable_v1.VariableV1(1.0)
       save = saver_module.Saver(defer_build=True)
       # if build is not deferred, saver cannot save the `twos`.
-      twos = variables.VariableV1([2.0, 2.0, 2.0])
+      twos = variable_v1.VariableV1([2.0, 2.0, 2.0])
       init = variables.global_variables_initializer()
       save.build()
       init.run()
       save.save(sess, save_path)
 
     with session.Session("", graph=ops_lib.Graph()) as sess:
-      one = variables.VariableV1(0.0)
-      twos = variables.VariableV1([0.0, 0.0, 0.0])
+      one = variable_v1.VariableV1(0.0)
+      twos = variable_v1.VariableV1([0.0, 0.0, 0.0])
       # Saver with no arg, defaults to 'all variables'.
       save = saver_module.Saver()
       save.restore(sess, save_path)
@@ -672,7 +671,7 @@ class SaverTest(test.TestCase):
   def testReshape(self):
     save_path = os.path.join(self.get_temp_dir(), "variables_reshape")
     with session.Session("", graph=ops_lib.Graph()) as sess:
-      var = variables.VariableV1([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+      var = variable_v1.VariableV1([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
       init = variables.global_variables_initializer()
       save = saver_module.Saver()
       init.run()
@@ -680,7 +679,7 @@ class SaverTest(test.TestCase):
 
     # Error when restoring with default reshape=False
     with session.Session("", graph=ops_lib.Graph()) as sess:
-      var = variables.VariableV1([[0.0, 0.0], [0.0, 0.0], [0.0, 0.0]])
+      var = variable_v1.VariableV1([[0.0, 0.0], [0.0, 0.0], [0.0, 0.0]])
       save = saver_module.Saver()
       with self.assertRaisesRegex(
           errors_impl.InvalidArgumentError,
@@ -689,7 +688,7 @@ class SaverTest(test.TestCase):
 
     # Restored to new shape with reshape=True
     with session.Session("", graph=ops_lib.Graph()) as sess:
-      var = variables.VariableV1([[0.0, 0.0], [0.0, 0.0], [0.0, 0.0]])
+      var = variable_v1.VariableV1([[0.0, 0.0], [0.0, 0.0], [0.0, 0.0]])
       save = saver_module.Saver(reshape=True)
       save.restore(sess, save_path)
       self.assertAllClose([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]],
@@ -740,8 +739,8 @@ class SaverTest(test.TestCase):
     for save_path in paths:
       # Build a graph with 2 parameter nodes, and Save and
       # Restore nodes for them.
-      v0 = variables.VariableV1(10.0, name="v0")
-      v1 = variables.VariableV1(20.0, name="v1")
+      v0 = variable_v1.VariableV1(10.0, name="v0")
+      v1 = variable_v1.VariableV1(20.0, name="v1")
       save = saver_module.Saver({"v0": v0, "v1": v1}, restore_sequentially=True)
       init_all_op = variables.global_variables_initializer()
 
@@ -779,8 +778,8 @@ class SaverTest(test.TestCase):
 
     # Build a graph with 2 parameter nodes, and Save and
     # Restore nodes for them.
-    v0 = variables.VariableV1(10.0, name="v0")
-    v1 = variables.VariableV1(20.0, name="v1")
+    v0 = variable_v1.VariableV1(10.0, name="v0")
+    v1 = variable_v1.VariableV1(20.0, name="v1")
     save = saver_module.Saver({"v0": v0, "v1": v1}, restore_sequentially=True)
     init_all_op = variables.global_variables_initializer()
 
@@ -885,7 +884,10 @@ class SaverTest(test.TestCase):
           "v2": v2.saveable
       },
                                 restore_sequentially=True)
-      save.save(sess, save_path)
+      ckpt_prefix = save.save(sess, save_path)
+      filesize = saver_module._get_checkpoint_size(ckpt_prefix)
+      count_after_one_save = metrics.GetCheckpointSize(
+          api_label=api_label, filesize=filesize)
 
       self.assertEqual(_get_write_histogram_proto().num, num_writes_start + 1)
       time_after_one_save = metrics.GetTrainingTimeSaved(api_label=api_label)
@@ -912,6 +914,9 @@ class SaverTest(test.TestCase):
       self.assertGreater(
           metrics.GetTrainingTimeSaved(api_label=api_label),
           time_after_one_save)
+      self.assertEqual(
+          metrics.GetCheckpointSize(api_label=api_label, filesize=filesize),
+          count_after_one_save + 1)
 
 
 class SaveRestoreShardedTest(test.TestCase):
@@ -931,10 +936,10 @@ class SaveRestoreShardedTest(test.TestCase):
         target="",
         config=config_pb2.ConfigProto(device_count={"CPU": 2})) as sess:
       with sess.graph.device("/cpu:0"):
-        v0 = variables.VariableV1(10, name="v0")
+        v0 = variable_v1.VariableV1(10, name="v0")
         t0 = saver_test_utils.CheckpointedOp(name="t0")
       with sess.graph.device("/cpu:1"):
-        v1 = variables.VariableV1(20, name="v1")
+        v1 = variable_v1.VariableV1(20, name="v1")
         t1 = saver_test_utils.CheckpointedOp(name="t1")
       save = saver_module.Saver(
           {
@@ -962,7 +967,7 @@ class SaveRestoreShardedTest(test.TestCase):
           target="",
           config=config_pb2.ConfigProto(device_count={"CPU": 2})) as sess:
         with sess.graph.device("/cpu:0"):
-          v0 = variables.VariableV1(111, name="v0")
+          v0 = variable_v1.VariableV1(111, name="v0")
           t0 = saver_test_utils.CheckpointedOp(name="t0")
         save = saver_module.Saver(
             {
@@ -986,7 +991,7 @@ class SaveRestoreShardedTest(test.TestCase):
           target="",
           config=config_pb2.ConfigProto(device_count={"CPU": 2})) as sess:
         with sess.graph.device("/cpu:0"):
-          v1 = variables.VariableV1(222)
+          v1 = variable_v1.VariableV1(222)
           t1 = saver_test_utils.CheckpointedOp(name="t1")
         save = saver_module.Saver(
             {
@@ -1010,10 +1015,10 @@ class SaveRestoreShardedTest(test.TestCase):
         target="",
         config=config_pb2.ConfigProto(device_count={"CPU": 2})) as sess:
       with sess.graph.device("/cpu:0"):
-        v0 = variables.VariableV1(111, name="v0")
+        v0 = variable_v1.VariableV1(111, name="v0")
         t0 = saver_test_utils.CheckpointedOp(name="t0")
       with sess.graph.device("/cpu:1"):
-        v1 = variables.VariableV1(222, name="v1")
+        v1 = variable_v1.VariableV1(222, name="v1")
         t1 = saver_test_utils.CheckpointedOp(name="t1")
       save = saver_module.Saver(
           {
@@ -1057,7 +1062,7 @@ class SaveRestoreShardedTest(test.TestCase):
   def testSaverDef(self):
     # train.Saver is V1 only API.
     with ops_lib.Graph().as_default(), self.cached_session():
-      v0 = variables.VariableV1(123, name="v0")
+      v0 = variable_v1.VariableV1(123, name="v0")
       save = saver_module.Saver({"v0": v0}, sharded=True)
       sd = save.as_saver_def()
       self.assertTrue(sd.sharded)
@@ -1090,7 +1095,7 @@ class SaveRestoreShardedTest(test.TestCase):
           if use_resource:
             vs = [resource_variable_ops.ResourceVariable(rnd, name=var_name)]
           else:
-            vs = [variables.VariableV1(rnd, name=var_name)]
+            vs = [variable_v1.VariableV1(rnd, name=var_name)]
 
         self.evaluate(variables.global_variables_initializer())
         if call_saver_with_dict:
@@ -1115,7 +1120,7 @@ class SaveRestoreShardedTest(test.TestCase):
           ]
         else:
           new_vs = [
-              variables.VariableV1(
+              variable_v1.VariableV1(
                   array_ops.zeros(
                       shape=var_full_shape),  # != original contents.
                   name=var_name)
@@ -1322,7 +1327,7 @@ class MaxToKeepTest(test.TestCase):
     with context.eager_mode():
       save_dir = self._get_test_dir("max_to_keep_eager")
 
-      v = variable_scope.variable(10.0, name="v")
+      v = variable_v1.VariableV1(10.0, name="v")
       save = saver_module.Saver({"v": v}, max_to_keep=2)
       self.evaluate(variables.global_variables_initializer())
       if not context.executing_eagerly():
@@ -1394,7 +1399,7 @@ class MaxToKeepTest(test.TestCase):
 
     # train.Saver is V1 only API.
     with ops_lib.Graph().as_default(), self.cached_session() as sess:
-      v = variables.VariableV1(10.0, name="v")
+      v = variable_v1.VariableV1(10.0, name="v")
       save = saver_module.Saver({"v": v}, max_to_keep=2)
       self.evaluate(variables.global_variables_initializer())
       self.assertEqual([], save.last_checkpoints)
@@ -1573,9 +1578,9 @@ class MaxToKeepTest(test.TestCase):
         target="",
         config=config_pb2.ConfigProto(device_count={"CPU": 2})) as sess:
       with sess.graph.device("/cpu:0"):
-        v0 = variables.VariableV1(111, name="v0")
+        v0 = variable_v1.VariableV1(111, name="v0")
       with sess.graph.device("/cpu:1"):
-        v1 = variables.VariableV1(222, name="v1")
+        v1 = variable_v1.VariableV1(222, name="v1")
       save = saver_module.Saver(
           {
               "v0": v0,
@@ -1632,7 +1637,7 @@ class MaxToKeepTest(test.TestCase):
     save_dir2 = self._get_test_dir("max_to_keep_0")
 
     with self.cached_session() as sess:
-      v = variables.VariableV1(10.0, name="v")
+      v = variable_v1.VariableV1(10.0, name="v")
       self.evaluate(variables.global_variables_initializer())
 
       # Test max_to_keep being None.
@@ -1659,7 +1664,7 @@ class MaxToKeepTest(test.TestCase):
     save_dir = self._get_test_dir("no_meta_graph")
 
     with self.cached_session() as sess:
-      v = variables.VariableV1(10.0, name="v")
+      v = variable_v1.VariableV1(10.0, name="v")
       save = saver_module.Saver({"v": v})
       self.evaluate(variables.global_variables_initializer())
 
@@ -1688,7 +1693,7 @@ class RecoverLastCheckpointsTest(test.TestCase):
     with context.eager_mode():
       save_dir = self._get_test_dir("recover_last_checkpoints")
 
-      v = variable_scope.variable(10.0, name="v")
+      v = variable_v1.VariableV1(10.0, name="v")
       save = saver_module.Saver({"v": v}, max_to_keep=10)
       self.evaluate(variables.global_variables_initializer())
       self.assertEqual([], save.last_checkpoints)
@@ -1743,7 +1748,7 @@ class KeepCheckpointEveryNHoursTest(test.TestCase):
     save_dir = self._get_test_dir("keep_checkpoint_every_n_hours")
 
     with self.cached_session() as sess:
-      v = variable_scope.variable([10.0], name="v")
+      v = variable_v1.VariableV1([10.0], name="v")
       # Run the initializer NOW to avoid the 0.5s overhead of the first Run()
       # call, which throws the test timing off in fastbuild mode.
       self.evaluate(variables.global_variables_initializer())
@@ -1809,7 +1814,7 @@ class SaveRestoreWithVariableNameMap(test.TestCase):
       # Save the initialized values in the file at "save_path"
       # Use a variable name map to set the saved tensor names
       val = save.save(sess, save_path)
-      self.assertTrue(isinstance(val, six.string_types))
+      self.assertIsInstance(val, str)
       self.assertEqual(save_path, val)
 
       # Verify that the original names are not in the Saved file
@@ -1880,13 +1885,13 @@ class MetaGraphTest(test.TestCase):
     filename = os.path.join(test_dir, "metafile")
     with self.cached_session():
       # Creates a graph.
-      v0 = variables.VariableV1(1.0, name="v0")
-      control_flow_ops.cond(
+      v0 = variable_v1.VariableV1(1.0, name="v0")
+      cond.cond(
           math_ops.less(v0, 10), lambda: math_ops.add(v0, 1),
           lambda: math_ops.subtract(v0, 1))
-      control_flow_ops.while_loop(lambda i: math_ops.less(i, 10),
-                                  lambda i: math_ops.add(i, 1), [v0])
-      var = variables.VariableV1(constant_op.constant(0, dtype=dtypes.int64))
+      while_loop.while_loop(lambda i: math_ops.less(i, 10),
+                            lambda i: math_ops.add(i, 1), [v0])
+      var = variable_v1.VariableV1(constant_op.constant(0, dtype=dtypes.int64))
       count_up_to = var.count_up_to(3)
       input_queue = data_flow_ops.FIFOQueue(
           30, dtypes.float32, shared_name="collection_queue")
@@ -1935,7 +1940,7 @@ class MetaGraphTest(test.TestCase):
   def testAddCollectionDefFails(self):
     with self.cached_session():
       # Creates a graph.
-      v0 = variables.VariableV1(10.0, name="v0")
+      v0 = variable_v1.VariableV1(10.0, name="v0")
       # Creates a saver.
       save = saver_module.Saver({"v0": v0})
       # Generates MetaGraphDef.
@@ -1959,8 +1964,9 @@ class MetaGraphTest(test.TestCase):
     saver1_ckpt = os.path.join(test_dir, "saver1.ckpt")
     with self.session(graph=ops_lib.Graph()) as sess:
       # Creates a graph.
-      v0 = variables.VariableV1([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]], name="v0")
-      v1 = variables.VariableV1(11.0, name="v1")
+      v0 = variable_v1.VariableV1([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]],
+                                  name="v0")
+      v1 = variable_v1.VariableV1(11.0, name="v1")
       # Creates 2 savers.
       saver0 = saver_module.Saver({"v0": v0}, name="saver0")
       saver1 = saver_module.Saver({"v1": v1}, name="saver1")
@@ -2041,8 +2047,9 @@ class MetaGraphTest(test.TestCase):
     saver1_ckpt = os.path.join(test_dir, "saver1.ckpt")
     with self.session(graph=ops_lib.Graph()) as sess:
       # Creates a graph.
-      v0 = variables.VariableV1([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]], name="v0")
-      v1 = variables.VariableV1(11.0, name="v1")
+      v0 = variable_v1.VariableV1([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]],
+                                  name="v0")
+      v1 = variable_v1.VariableV1(11.0, name="v1")
 
       # Creates 2 savers.
       saver0 = saver_module.Saver({"v0": v0}, name="saver0")
@@ -2094,7 +2101,7 @@ class MetaGraphTest(test.TestCase):
     # train.Saver is V1 only API.
     with ops_lib.Graph().as_default(), self.session():
       # Creates a graph.
-      variables.VariableV1(10.0, name="v0")
+      variable_v1.VariableV1(10.0, name="v0")
       # Exports the graph as binary format.
       saver_module.export_meta_graph(filename, as_text=False)
     with ops_lib.Graph().as_default(), self.session():
@@ -2127,8 +2134,8 @@ class MetaGraphTest(test.TestCase):
     test_dir = self._get_test_dir("slice_saver")
     filename = os.path.join(test_dir, "metafile")
     with self.cached_session():
-      v1 = variables.VariableV1([20.0], name="v1")
-      v2 = variables.VariableV1([20.0], name="v2")
+      v1 = variable_v1.VariableV1([20.0], name="v1")
+      v2 = variable_v1.VariableV1([20.0], name="v2")
       v2._set_save_slice_info(
           variables.Variable.SaveSliceInfo("v1", [1], [0], [1]))
 
@@ -2155,28 +2162,28 @@ class MetaGraphTest(test.TestCase):
     # Hidden 1
     images = constant_op.constant(1.2, dtypes.float32, shape=[100, 28])
     with ops_lib.name_scope("hidden1"):
-      weights = variables.VariableV1(
-          random_ops.truncated_normal(
-              [28, 128], stddev=1.0 / math.sqrt(float(28))),
+      weights = variable_v1.VariableV1(
+          random_ops.truncated_normal([28, 128],
+                                      stddev=1.0 / math.sqrt(float(28))),
           name="weights")
-      # The use of control_flow_ops.cond here is purely for adding test coverage
+      # The use of cond.cond here is purely for adding test coverage
       # the save and restore of control flow context (which doesn't make any
       # sense here from a machine learning perspective).  The typical biases is
       # a simple Variable without the conditions.
-      biases = variables.VariableV1(
-          control_flow_ops.cond(
+      biases = variable_v1.VariableV1(
+          cond.cond(
               math_ops.less(random.random(), 0.5),
               lambda: array_ops.ones([128]), lambda: array_ops.zeros([128])),
           name="biases")
       hidden1 = nn_ops.relu(math_ops.matmul(images, weights) + biases)
     # Hidden 2
     with ops_lib.name_scope("hidden2"):
-      weights = variables.VariableV1(
-          random_ops.truncated_normal(
-              [128, 32], stddev=1.0 / math.sqrt(float(128))),
+      weights = variable_v1.VariableV1(
+          random_ops.truncated_normal([128, 32],
+                                      stddev=1.0 / math.sqrt(float(128))),
           name="weights")
 
-      # The use of control_flow_ops.while_loop here is purely for adding test
+      # The use of while_loop.while_loop here is purely for adding test
       # coverage the save and restore of control flow context (which doesn't
       # make any sense here from a machine learning perspective).  The typical
       # biases is a simple Variable without the conditions.
@@ -2187,18 +2194,18 @@ class MetaGraphTest(test.TestCase):
         biases += constant_op.constant(0.1, shape=[32])
         return it + 1, biases
 
-      _, biases = control_flow_ops.while_loop(
-          loop_cond, loop_body,
-          [constant_op.constant(0),
-           variables.VariableV1(array_ops.zeros([32]))])
+      _, biases = while_loop.while_loop(loop_cond, loop_body, [
+          constant_op.constant(0),
+          variable_v1.VariableV1(array_ops.zeros([32]))
+      ])
       hidden2 = nn_ops.relu(math_ops.matmul(hidden1, weights) + biases)
     # Linear
     with ops_lib.name_scope("softmax_linear"):
-      weights = variables.VariableV1(
-          random_ops.truncated_normal(
-              [32, 10], stddev=1.0 / math.sqrt(float(32))),
+      weights = variable_v1.VariableV1(
+          random_ops.truncated_normal([32, 10],
+                                      stddev=1.0 / math.sqrt(float(32))),
           name="weights")
-      biases = variables.VariableV1(array_ops.zeros([10]), name="biases")
+      biases = variable_v1.VariableV1(array_ops.zeros([10]), name="biases")
       logits = math_ops.matmul(hidden2, weights) + biases
       ops_lib.add_to_collection("logits", logits)
     init_all_op = variables.global_variables_initializer()
@@ -2232,7 +2239,7 @@ class MetaGraphTest(test.TestCase):
       indices = array_ops.expand_dims(math_ops.range(0, batch_size), 1)
       concated = array_ops.concat([indices, labels], 1)
       onehot_labels = sparse_ops.sparse_to_dense(
-          concated, array_ops.stack([batch_size, 10]), 1.0, 0.0)
+          concated, array_ops_stack.stack([batch_size, 10]), 1.0, 0.0)
       logits = ops_lib.get_collection("logits")[0]
       cross_entropy = nn_ops.softmax_cross_entropy_with_logits(
           labels=onehot_labels, logits=logits, name="xentropy")
@@ -2287,7 +2294,7 @@ class MetaGraphTest(test.TestCase):
 
     # Create while loop using `outer_body_fn`.
     with ops_lib.Graph().as_default():
-      var = variables.VariableV1(0.0)
+      var = variable_v1.VariableV1(0.0)
       var_name = var.name
       output = graph_fn(var)
       output_name = output.name
@@ -2314,6 +2321,9 @@ class MetaGraphTest(test.TestCase):
         self.evaluate(init_op)
         expected_grad_value = self.evaluate(grad)
 
+    # To avoid graph name collisions between original and loaded code.
+    context._reset_context()   # pylint: disable=protected-access
+
     # Restore the MetaGraphDef into a new Graph.
     with ops_lib.Graph().as_default():
       with session.Session() as sess:
@@ -2336,17 +2346,17 @@ class MetaGraphTest(test.TestCase):
     # Build a while loop with `outer_body_fn`, export it, and verify that it can
     # be imported and the gradient can be built and run correctly.
     # pylint: disable=g-long-lambda
-    return self._testGradientSerDes(
-        lambda x: control_flow_ops.while_loop(
-            lambda i, y: i < 5, outer_body_fn, [0, x])[1])
+    return self._testGradientSerDes(lambda x: while_loop.while_loop(
+        lambda i, y: i < 5, outer_body_fn, [0, x])[1])
     # pylint: enable=g-long-lambda
 
   def testNestedWhileLoopsSerDes(self):
     # Test two simple nested while loops.
     def body(i, x):
-      _, r = control_flow_ops.while_loop(lambda j, y: j < 3,
-                                         lambda j, y: (j + 1, y + x),
-                                         [0, 0.0])
+      _, r = while_loop.while_loop(
+          lambda j, y: j < 3,
+          lambda j, y: (j + 1, y + x),
+          [0, 0.0])
       return i + 1, x + r
     self._testWhileLoopAndGradientSerDes(body)
 
@@ -2354,9 +2364,9 @@ class MetaGraphTest(test.TestCase):
     # Test while loop in a cond in a while loop.
     # pylint: disable=g-long-lambda
     def body(i, x):
-      cond_result = control_flow_ops.cond(
+      cond_result = cond.cond(
           i > 0,
-          lambda: control_flow_ops.while_loop(
+          lambda: while_loop.while_loop(
               lambda j, y: j < 3,
               lambda j, y: (j + 1, y + x),
               [0, 0.0])[1],
@@ -2368,22 +2378,22 @@ class MetaGraphTest(test.TestCase):
   def testNestedCondsSerDes(self):
     # Test conds in a cond.
     # pylint: disable=g-long-lambda
-    self._testGradientSerDes(lambda x: control_flow_ops.cond(
+    self._testGradientSerDes(lambda x: cond.cond(
         x > 0,
-        lambda: control_flow_ops.cond(x > 3,
-                                      lambda: array_ops.identity(x),
-                                      lambda: math_ops.multiply(x, 2.0)),
-        lambda: control_flow_ops.cond(x < -3,
-                                      lambda: constant_op.constant(1.0),
-                                      lambda: math_ops.multiply(x, -1.0))))
+        lambda: cond.cond(x > 3,
+                          lambda: array_ops.identity(x),
+                          lambda: math_ops.multiply(x, 2.0)),
+        lambda: cond.cond(x < -3,
+                          lambda: constant_op.constant(1.0),
+                          lambda: math_ops.multiply(x, -1.0))))
     # pylint: enable=g-long-lambda
 
   @test_util.run_v1_only("This exercises Tensor.op which is meaningless in V2.")
   def testStrippedOpListDef(self):
     with self.cached_session():
       # Creates a graph.
-      v0 = variables.VariableV1(0.0)
-      var = variables.VariableV1(10.0)
+      v0 = variable_v1.VariableV1(0.0)
+      var = variable_v1.VariableV1(10.0)
       math_ops.add(v0, var)
 
       @function.Defun(dtypes.float32)
@@ -2423,8 +2433,8 @@ class MetaGraphTest(test.TestCase):
     # (complex64) in the "Complex" op must be removed.
     # train.Saver and train.export_meta_graph are V1 only APIs.
     with ops_lib.Graph().as_default(), self.cached_session():
-      real_num = variables.VariableV1(1.0, dtype=dtypes.float32, name="real")
-      imag_num = variables.VariableV1(2.0, dtype=dtypes.float32, name="imag")
+      real_num = variable_v1.VariableV1(1.0, dtype=dtypes.float32, name="real")
+      imag_num = variable_v1.VariableV1(2.0, dtype=dtypes.float32, name="imag")
       math_ops.complex(real_num, imag_num, name="complex")
 
       save = saver_module.Saver({"real_num": real_num, "imag_num": imag_num})
@@ -2440,8 +2450,8 @@ class MetaGraphTest(test.TestCase):
     # (complex64) in the "Complex" op must *not* be removed, even if they map
     # to their defaults.
     with ops_lib.Graph().as_default(), self.session():
-      real_num = variables.VariableV1(1.0, dtype=dtypes.float32, name="real")
-      imag_num = variables.VariableV1(2.0, dtype=dtypes.float32, name="imag")
+      real_num = variable_v1.VariableV1(1.0, dtype=dtypes.float32, name="real")
+      imag_num = variable_v1.VariableV1(2.0, dtype=dtypes.float32, name="imag")
       math_ops.complex(real_num, imag_num, name="complex")
 
       save = saver_module.Saver({"real_num": real_num, "imag_num": imag_num})
@@ -2462,9 +2472,9 @@ class MetaGraphTest(test.TestCase):
       image = array_ops.placeholder(dtypes.float32, [None, 784], name="image")
       label = array_ops.placeholder(dtypes.float32, [None, 10], name="label")
       with session.Session() as sess:
-        weights = variables.VariableV1(
+        weights = variable_v1.VariableV1(
             random_ops.random_uniform([784, 10]), name="weights")
-        bias = variables.VariableV1(array_ops.zeros([10]), name="bias")
+        bias = variable_v1.VariableV1(array_ops.zeros([10]), name="bias")
         logit = nn_ops.relu(
             math_ops.matmul(image, weights) + bias, name="logits")
         nn_ops.softmax(logit, name="prediction")
@@ -2508,7 +2518,7 @@ class MetaGraphTest(test.TestCase):
       self.assertIsNone(new_saver_1)
 
       # Create a variable in graph_2 under scope "my_scope".
-      variables.VariableV1(array_ops.zeros([10]), name="my_scope/my_var")
+      variable_v1.VariableV1(array_ops.zeros([10]), name="my_scope/my_var")
       self.evaluate(variables.global_variables_initializer())
       # Restore the checkpoint into a different scope "subgraph_2".
       new_saver_2 = saver_module.import_meta_graph(
@@ -2535,9 +2545,9 @@ class MetaGraphTest(test.TestCase):
       image = array_ops.placeholder(dtypes.float32, [None, 784], name="image")
       label = array_ops.placeholder(dtypes.float32, [None, 10], name="label")
       with session.Session() as sess:
-        weights = variables.VariableV1(
+        weights = variable_v1.VariableV1(
             random_ops.random_uniform([784, 10]), name="weights")
-        bias = variables.VariableV1(array_ops.zeros([10]), name="bias")
+        bias = variable_v1.VariableV1(array_ops.zeros([10]), name="bias")
         logit = nn_ops.relu(
             math_ops.matmul(image, weights) + bias, name="logits")
         nn_ops.softmax(logit, name="prediction")
@@ -2567,9 +2577,9 @@ class MetaGraphTest(test.TestCase):
       with ops_lib.device("/job:ps/replica:0/task:0/device:GPU:0"):
         image = array_ops.placeholder(dtypes.float32, [None, 784], name="image")
         label = array_ops.placeholder(dtypes.float32, [None, 10], name="label")
-        weights = variables.VariableV1(
+        weights = variable_v1.VariableV1(
             random_ops.random_uniform([784, 10]), name="weights")
-        bias = variables.VariableV1(array_ops.zeros([10]), name="bias")
+        bias = variable_v1.VariableV1(array_ops.zeros([10]), name="bias")
         logit = nn_ops.relu(math_ops.matmul(image, weights) + bias)
         nn_ops.softmax(logit, name="prediction")
         cost = nn_ops.softmax_cross_entropy_with_logits(labels=label,
@@ -2600,9 +2610,9 @@ class MetaGraphTest(test.TestCase):
       with ops_lib.device("/job:ps/replica:0/task:0/device:GPU:0"):
         image = array_ops.placeholder(dtypes.float32, [None, 784], name="image")
         label = array_ops.placeholder(dtypes.float32, [None, 10], name="label")
-        weights = variables.VariableV1(
+        weights = variable_v1.VariableV1(
             random_ops.random_uniform([784, 10]), name="weights")
-        bias = variables.VariableV1(array_ops.zeros([10]), name="bias")
+        bias = variable_v1.VariableV1(array_ops.zeros([10]), name="bias")
         logit = nn_ops.relu(math_ops.matmul(image, weights) + bias)
         nn_ops.softmax(logit, name="prediction")
         cost = nn_ops.softmax_cross_entropy_with_logits(labels=label,
@@ -2653,10 +2663,12 @@ class CheckpointReaderTest(test.TestCase):
 
   def testDebugString(self):
     # Builds a graph.
-    v0 = variables.VariableV1(
-        [[1, 2, 3], [4, 5, 6]], dtype=dtypes.float32, name="v0")
-    v1 = variables.VariableV1(
-        [[[1], [2]], [[3], [4]], [[5], [6]]], dtype=dtypes.float32, name="v1")
+    v0 = variable_v1.VariableV1([[1, 2, 3], [4, 5, 6]],
+                                dtype=dtypes.float32,
+                                name="v0")
+    v1 = variable_v1.VariableV1([[[1], [2]], [[3], [4]], [[5], [6]]],
+                                dtype=dtypes.float32,
+                                name="v1")
     init_all_op = variables.global_variables_initializer()
     save = saver_module.Saver(
         {
@@ -2677,8 +2689,8 @@ class CheckpointReaderTest(test.TestCase):
       self.assertTrue(reader.has_tensor("v1"))
       debug_string = reader.debug_string()
       # Verifies that debug string contains the right strings.
-      self.assertTrue(compat.as_bytes("v0 (DT_FLOAT) [2,3]") in debug_string)
-      self.assertTrue(compat.as_bytes("v1 (DT_FLOAT) [3,2,1]") in debug_string)
+      self.assertIn(compat.as_bytes("v0 (DT_FLOAT) [2,3]"), debug_string)
+      self.assertIn(compat.as_bytes("v1 (DT_FLOAT) [3,2,1]"), debug_string)
       # Verifies get_variable_to_shape_map() returns the correct information.
       var_map = reader.get_variable_to_shape_map()
       self.assertEqual([2, 3], var_map["v0"])
@@ -2692,6 +2704,67 @@ class CheckpointReaderTest(test.TestCase):
       with self.assertRaisesRegex(errors.NotFoundError,
                                   "v3 not found in checkpoint"):
         reader.get_tensor("v3")
+
+  def testConcurrentAccess(self):
+    import threading
+
+    v0 = variable_v1.VariableV1(
+        [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], dtype=dtypes.float32, name="v0"
+    )
+    v1 = variable_v1.VariableV1(
+        [[[1.0], [2.0]], [[3.0], [4.0]], [[5.0], [6.0]]],
+        dtype=dtypes.float32,
+        name="v1",
+    )
+
+    init_all_op = variables.global_variables_initializer()
+    save = saver_module.Saver(
+        {"v0": v0, "v1": v1}, write_version=self._WRITE_VERSION
+    )
+
+    save_path = os.path.join(
+        self.get_temp_dir(), "ckpt_for_concurrent_" + str(self._WRITE_VERSION)
+    )
+
+    with self.cached_session() as sess:
+      self.evaluate(init_all_op)
+      save.save(sess, save_path)
+
+    reader = py_checkpoint_reader.NewCheckpointReader(save_path)
+
+    num_threads = 8
+    iterations_per_thread = 50
+    exceptions = []
+
+    def worker():
+      try:
+        for _ in range(iterations_per_thread):
+          self.assertTrue(reader.has_tensor("v0"))
+          self.assertTrue(reader.has_tensor("v1"))
+          self.assertFalse(reader.has_tensor("v_nonexistent"))
+
+          v0_tensor = reader.get_tensor("v0")
+          v1_tensor = reader.get_tensor("v1")
+
+          self.assertAllEqual([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], v0_tensor)
+          self.assertAllEqual(
+              [[[1.0], [2.0]], [[3.0], [4.0]], [[5.0], [6.0]]], v1_tensor
+          )
+
+          debug_str = reader.debug_string()
+          self.assertIn(compat.as_bytes("v0"), debug_str)
+      except Exception as e:
+        exceptions.append(e)
+
+    threads = [threading.Thread(target=worker) for _ in range(num_threads)]
+
+    for t in threads:
+      t.start()
+
+    for t in threads:
+      t.join()
+
+    self.assertEmpty(exceptions)
 
   def testNonexistentPath(self):
     with self.assertRaisesRegex(errors.NotFoundError,
@@ -2712,8 +2785,9 @@ class WriteGraphTest(test.TestCase):
 
   def testWriteGraph(self):
     test_dir = self._get_test_dir("write_graph_dir")
-    variables.VariableV1(
-        [[1, 2, 3], [4, 5, 6]], dtype=dtypes.float32, name="v0")
+    variable_v1.VariableV1([[1, 2, 3], [4, 5, 6]],
+                           dtype=dtypes.float32,
+                           name="v0")
     path = graph_io.write_graph(ops_lib.get_default_graph(),
                                 os.path.join(test_dir, "l1"), "graph.pbtxt")
     truth = os.path.join(test_dir, "l1", "graph.pbtxt")
@@ -2722,8 +2796,9 @@ class WriteGraphTest(test.TestCase):
 
   def testRecursiveCreate(self):
     test_dir = self._get_test_dir("deep_dir")
-    variables.VariableV1(
-        [[1, 2, 3], [4, 5, 6]], dtype=dtypes.float32, name="v0")
+    variable_v1.VariableV1([[1, 2, 3], [4, 5, 6]],
+                           dtype=dtypes.float32,
+                           name="v0")
     path = graph_io.write_graph(ops_lib.get_default_graph().as_graph_def(),
                                 os.path.join(test_dir, "l1", "l2", "l3"),
                                 "graph.pbtxt")
@@ -2747,16 +2822,16 @@ class ScopedGraphTest(test.TestCase):
       images = constant_op.constant(
           1.2, dtypes.float32, shape=[100, 28], name="images")
       with ops_lib.name_scope("hidden1"):
-        weights1 = variables.VariableV1(
-            random_ops.truncated_normal(
-                [28, 128], stddev=1.0 / math.sqrt(float(28))),
+        weights1 = variable_v1.VariableV1(
+            random_ops.truncated_normal([28, 128],
+                                        stddev=1.0 / math.sqrt(float(28))),
             name="weights")
-        # The use of control_flow_ops.cond here is purely for adding test
+        # The use of cond.cond here is purely for adding test
         # coverage the save and restore of control flow context (which doesn't
         # make any sense here from a machine learning perspective).  The typical
         # biases is a simple Variable without the conditions.
-        biases1 = variables.VariableV1(
-            control_flow_ops.cond(
+        biases1 = variable_v1.VariableV1(
+            cond.cond(
                 math_ops.less(random.random(), 0.5),
                 lambda: array_ops.ones([128]), lambda: array_ops.zeros([128])),
             name="biases")
@@ -2764,12 +2839,12 @@ class ScopedGraphTest(test.TestCase):
 
       # Hidden 2
       with ops_lib.name_scope("hidden2"):
-        weights2 = variables.VariableV1(
-            random_ops.truncated_normal(
-                [128, 32], stddev=1.0 / math.sqrt(float(128))),
+        weights2 = variable_v1.VariableV1(
+            random_ops.truncated_normal([128, 32],
+                                        stddev=1.0 / math.sqrt(float(128))),
             name="weights")
 
-        # The use of control_flow_ops.while_loop here is purely for adding test
+        # The use of while_loop.while_loop here is purely for adding test
         # coverage the save and restore of control flow context (which doesn't
         # make any sense here from a machine learning perspective).  The typical
         # biases is a simple Variable without the conditions.
@@ -2780,17 +2855,18 @@ class ScopedGraphTest(test.TestCase):
           biases2 += constant_op.constant(0.1, shape=[32])
           return it + 1, biases2
 
-        _, biases2 = control_flow_ops.while_loop(loop_cond, loop_body, [
-            constant_op.constant(0), variables.VariableV1(array_ops.zeros([32]))
+        _, biases2 = while_loop.while_loop(loop_cond, loop_body, [
+            constant_op.constant(0),
+            variable_v1.VariableV1(array_ops.zeros([32]))
         ])
         hidden2 = nn_ops.relu(math_ops.matmul(hidden1, weights2) + biases2)
       # Linear
       with ops_lib.name_scope("softmax_linear"):
-        weights3 = variables.VariableV1(
-            random_ops.truncated_normal(
-                [32, 10], stddev=1.0 / math.sqrt(float(32))),
+        weights3 = variable_v1.VariableV1(
+            random_ops.truncated_normal([32, 10],
+                                        stddev=1.0 / math.sqrt(float(32))),
             name="weights")
-        biases3 = variables.VariableV1(array_ops.zeros([10]), name="biases")
+        biases3 = variable_v1.VariableV1(array_ops.zeros([10]), name="biases")
         logits = math_ops.matmul(hidden2, weights3) + biases3
         ops_lib.add_to_collection("logits", logits)
 
@@ -2836,12 +2912,12 @@ class ScopedGraphTest(test.TestCase):
     with graph.as_default():
       # Hidden 2
       with ops_lib.name_scope("hidden2"):
-        weights = variables.VariableV1(
-            random_ops.truncated_normal(
-                [128, 32], stddev=1.0 / math.sqrt(float(128))),
+        weights = variable_v1.VariableV1(
+            random_ops.truncated_normal([128, 32],
+                                        stddev=1.0 / math.sqrt(float(128))),
             name="weights")
 
-        # The use of control_flow_ops.while_loop here is purely for adding test
+        # The use of while_loop.while_loop here is purely for adding test
         # coverage the save and restore of control flow context (which doesn't
         # make any sense here from a machine learning perspective).  The typical
         # biases is a simple Variable without the conditions.
@@ -2852,17 +2928,18 @@ class ScopedGraphTest(test.TestCase):
           biases += constant_op.constant(0.1, shape=[32])
           return it + 1, biases
 
-        _, biases = control_flow_ops.while_loop(loop_cond, loop_body, [
-            constant_op.constant(0), variables.VariableV1(array_ops.zeros([32]))
+        _, biases = while_loop.while_loop(loop_cond, loop_body, [
+            constant_op.constant(0),
+            variable_v1.VariableV1(array_ops.zeros([32]))
         ])
         hidden2 = nn_ops.relu(math_ops.matmul(hidden1, weights) + biases)
       # Linear
       with ops_lib.name_scope("softmax_linear"):
-        weights = variables.VariableV1(
-            random_ops.truncated_normal(
-                [32, 10], stddev=1.0 / math.sqrt(float(32))),
+        weights = variable_v1.VariableV1(
+            random_ops.truncated_normal([32, 10],
+                                        stddev=1.0 / math.sqrt(float(32))),
             name="weights")
-        biases = variables.VariableV1(array_ops.zeros([10]), name="biases")
+        biases = variable_v1.VariableV1(array_ops.zeros([10]), name="biases")
         logits = math_ops.matmul(hidden2, weights) + biases
         ops_lib.add_to_collection("logits", logits)
 
@@ -2899,9 +2976,9 @@ class ScopedGraphTest(test.TestCase):
       with ops_lib.name_scope("hidden1"):
         images = constant_op.constant(
             1.0, dtypes.float32, shape=[3, 2], name="images")
-        weights1 = variables.VariableV1(
-            [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], name="weights")
-        biases1 = variables.VariableV1([0.1] * 3, name="biases")
+        weights1 = variable_v1.VariableV1([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]],
+                                          name="weights")
+        biases1 = variable_v1.VariableV1([0.1] * 3, name="biases")
         nn_ops.relu(math_ops.matmul(images, weights1) + biases1, name="relu")
 
     # Run the graph and save scoped checkpoint.
@@ -2956,9 +3033,9 @@ class ScopedGraphTest(test.TestCase):
       with ops_lib.name_scope("hidden1"):
         images = constant_op.constant(
             1.0, dtypes.float32, shape=[3, 2], name="images")
-        weights1 = variables.VariableV1(
-            [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], name="weights")
-        biases1 = variables.VariableV1([0.1] * 3, name="biases")
+        weights1 = variable_v1.VariableV1([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]],
+                                          name="weights")
+        biases1 = variable_v1.VariableV1([0.1] * 3, name="biases")
         nn_ops.relu(math_ops.matmul(images, weights1) + biases1, name="relu")
 
       # Run the graph and save scoped checkpoint.
@@ -2992,12 +3069,12 @@ class ScopedGraphTest(test.TestCase):
     graph = ops_lib.Graph()
     with graph.as_default():
       with ops_lib.name_scope("hidden1"):
-        variable1 = variables.VariableV1([1.0], name="variable1")
+        variable1 = variable_v1.VariableV1([1.0], name="variable1")
         saver1 = saver_module.Saver(var_list=[variable1])
         graph.add_to_collection(ops_lib.GraphKeys.SAVERS, saver1)
 
       with ops_lib.name_scope("hidden2"):
-        variable2 = variables.VariableV1([2.0], name="variable2")
+        variable2 = variable_v1.VariableV1([2.0], name="variable2")
       saver2 = saver_module.Saver(var_list=[variable2], name="hidden2/")
       graph.add_to_collection(ops_lib.GraphKeys.SAVERS, saver2)
 
@@ -3191,7 +3268,7 @@ class TrackableCompatibilityTests(test.TestCase):
     checkpoint_prefix = os.path.join(checkpoint_directory, "ckpt")
 
     with ops_lib.Graph().as_default() as g:
-      a = variables.VariableV1(1., name="a")
+      a = variable_v1.VariableV1(1., name="a")
       a_saver = saver_module.Saver([a])
 
       with self.session(graph=g) as sess:
@@ -3199,7 +3276,7 @@ class TrackableCompatibilityTests(test.TestCase):
         save_path = a_saver.save(sess=sess, save_path=checkpoint_prefix)
 
     with ops_lib.Graph().as_default() as g:
-      a = variables.VariableV1([1.], name="a")
+      a = variable_v1.VariableV1([1.], name="a")
       a_saver = saver_module.Saver([a])
       with self.session(graph=g) as sess:
         with self.assertRaisesRegex(

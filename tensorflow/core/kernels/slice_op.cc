@@ -23,25 +23,25 @@ limitations under the License.
 
 #include "tensorflow/core/kernels/slice_op.h"
 
-#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
+#include "absl/base/prefetch.h"
+#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/register_types.h"
 #include "tensorflow/core/framework/tensor.h"
 #include "tensorflow/core/kernels/ops_util.h"
 #include "tensorflow/core/lib/core/status.h"
 #include "tensorflow/core/lib/gtl/array_slice.h"
-#include "tensorflow/core/platform/prefetch.h"
 
 namespace tensorflow {
 
 namespace {
 
 void IntTensorToInt64Vec(const Tensor& tensor,
-                         gtl::InlinedVector<int64_t, 4>* out) {
+                         absl::InlinedVector<int64_t, 4>* out) {
   out->resize(tensor.NumElements());
   int64_t* out_ptr = out->data();
   if (tensor.dtype() == DT_INT32) {
-    const int32* tensor_ptr = tensor.flat<int32>().data();
+    const int32_t* tensor_ptr = tensor.flat<int32_t>().data();
     for (int64_t i = 0; i < tensor.NumElements(); ++i) {
       out_ptr[i] = tensor_ptr[i];
     }
@@ -63,8 +63,8 @@ typedef Eigen::GpuDevice GPUDevice;
 void SharedSliceValidation(OpKernelContext* context, const Tensor& input,
                            TensorShape* output_shape, bool* is_identity,
                            bool* slice_dim0,
-                           gtl::InlinedVector<int64_t, 4>* begin,
-                           gtl::InlinedVector<int64_t, 4>* size) {
+                           absl::InlinedVector<int64_t, 4>* begin,
+                           absl::InlinedVector<int64_t, 4>* size) {
   const Tensor& begin_tensor = context->input(1);
   const Tensor& size_tensor = context->input(2);
 
@@ -74,10 +74,10 @@ void SharedSliceValidation(OpKernelContext* context, const Tensor& input,
           TensorShapeUtils::IsVector(size_tensor.shape()) &&
           begin_tensor.NumElements() == input.dims() &&
           size_tensor.NumElements() == input.dims(),
-      errors::InvalidArgument(
+      absl::InvalidArgumentError(absl::StrCat(
           "Expected begin and size arguments to be 1-D tensors of size ",
           input.dims(), ", but got shapes ", begin_tensor.shape().DebugString(),
-          " and ", size_tensor.shape().DebugString(), " instead."));
+          " and ", size_tensor.shape().DebugString(), " instead.")));
 
   const int input_dims = input.dims();
   IntTensorToInt64Vec(begin_tensor, begin);
@@ -102,14 +102,20 @@ void SharedSliceValidation(OpKernelContext* context, const Tensor& input,
                                   ") when ", "input.dim_size(", i, ") == 0"));
     } else {
       OP_REQUIRES(context, 0 <= b && b <= input.dim_size(i),
-                  errors::InvalidArgument("Expected begin[", i, "] in [0, ",
-                                          input.dim_size(i), "], but got ", b));
-      OP_REQUIRES(
-          context, 0 <= s && b + s <= input.dim_size(i),
-          errors::InvalidArgument("Expected size[", i, "] in [0, ",
-                                  input.dim_size(i) - b, "], but ", "got ", s));
+                  absl::InvalidArgumentError(
+                      absl::StrCat("Expected begin[", i, "] in [0, ",
+                                   input.dim_size(i), "], but got ", b)));
+      // `b` has been validated to lie in [0, dim_size(i)] just above, so
+      // `dim_size(i) - b` cannot underflow. Comparing against it instead of
+      // computing `b + s` avoids a signed overflow: for a large `dim_size(i)`,
+      // `b + s` can wrap negative and pass the upper-bound check, letting the
+      // wrapped limit reach a fatal `Tensor::Slice` invariant downstream.
+      OP_REQUIRES(context, 0 <= s && s <= input.dim_size(i) - b,
+                  absl::InvalidArgumentError(absl::StrCat(
+                      "Expected size[", i, "] in [0, ", input.dim_size(i) - b,
+                      "], but ", "got ", s)));
     }
-    output_shape->AddDim(s);
+    OP_REQUIRES_OK(context, output_shape->AddDimWithStatus(s));
     const bool take_all = (b == 0) && (s == input.dim_size(i));
     (*is_identity) &= take_all;
     (*slice_dim0) &= (i == 0) || take_all;
@@ -121,8 +127,8 @@ void SharedSliceValidation(OpKernelContext* context, const Tensor& input,
 template <typename T>
 static void SharedSliceCommonCases(OpKernelContext* context,
                                    const Tensor& input,
-                                   gtl::InlinedVector<int64, 4>* begin,
-                                   gtl::InlinedVector<int64, 4>* size,
+                                   absl::InlinedVector<int64_t, 4>* begin,
+                                   absl::InlinedVector<int64_t, 4>* size,
                                    Tensor** result, bool* done) {
   bool is_identity = true;
   bool slice_dim0 = true;
@@ -157,8 +163,8 @@ class SliceOp : public OpKernel {
   explicit SliceOp(OpKernelConstruction* context) : OpKernel(context) {}
 
   void Compute(OpKernelContext* context) override {
-    gtl::InlinedVector<int64_t, 4> begin;
-    gtl::InlinedVector<int64_t, 4> size;
+    absl::InlinedVector<int64_t, 4> begin;
+    absl::InlinedVector<int64_t, 4> size;
     const Tensor& input = context->input(0);
     Tensor* result = nullptr;
     bool done = false;
@@ -168,7 +174,7 @@ class SliceOp : public OpKernel {
     const int input_dims = input.dims();
 
     if (result->NumElements() > 0) {
-      if (std::is_same<Device, CPUDevice>::value && input_dims == 2 &&
+      if (std::is_same_v<Device, CPUDevice> && input_dims == 2 &&
           DataTypeCanUseMemcpy(DataTypeToEnum<T>::v())) {
         auto input_t = input.tensor<T, 2>();
         auto output_t = result->tensor<T, 2>();
@@ -183,9 +189,8 @@ class SliceOp : public OpKernel {
         for (int i = 0; i < row_size; ++i) {
           const int64_t row = row_begin + i;
           if (i + 1 < size[0]) {
-            port::prefetch<port::PREFETCH_HINT_T0>(&output_t(i + 1, 0));
-            port::prefetch<port::PREFETCH_HINT_T0>(
-                &input_t(row + 1, col_begin));
+            absl::PrefetchToLocalCache(&output_t(i + 1, 0));
+            absl::PrefetchToLocalCache(&input_t(row + 1, col_begin));
           }
           memcpy(&output_t(i, 0), &input_t(row, col_begin),
                  col_size * sizeof(T));
@@ -211,14 +216,14 @@ class SliceOp : public OpKernel {
 
       OP_REQUIRES(
           context, false,
-          errors::Unimplemented("SliceOp : Unhandled input dimensions"));
+          absl::UnimplementedError("SliceOp : Unhandled input dimensions"));
     }
   }
 
  private:
   template <int NDIM>
-  void HandleCase(OpKernelContext* context, gtl::ArraySlice<int64_t> begin,
-                  gtl::ArraySlice<int64_t> size, const Tensor& input,
+  void HandleCase(OpKernelContext* context, absl::Span<const int64_t> begin,
+                  absl::Span<const int64_t> size, const Tensor& input,
                   Tensor* result) {
     Eigen::DSizes<Eigen::DenseIndex, NDIM> indices;
     Eigen::DSizes<Eigen::DenseIndex, NDIM> sizes;
@@ -273,6 +278,8 @@ TF_CALL_ALL_TYPES(DECLARE_FOR_N);
 
 TF_CALL_POD_STRING_TYPES(REGISTER_SLICE);
 TF_CALL_QUANTIZED_TYPES(REGISTER_SLICE);
+TF_CALL_float8_e5m2(REGISTER_SLICE);
+TF_CALL_float8_e4m3fn(REGISTER_SLICE);
 #undef REGISTER_SLICE
 
 #if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
@@ -297,7 +304,6 @@ namespace functor {
   DECLARE_GPU_SPEC(T, 7); \
   DECLARE_GPU_SPEC(T, 8);
 
-TF_CALL_bfloat16(DECLARE_FOR_N);
 TF_CALL_int8(DECLARE_FOR_N);
 TF_CALL_int32(DECLARE_FOR_N);
 TF_CALL_int64(DECLARE_FOR_N);
@@ -315,25 +321,24 @@ TF_CALL_GPU_ALL_TYPES(DECLARE_FOR_N);
                               .HostMemory("size"),       \
                           SliceOp<GPUDevice, type>)
 
-TF_CALL_bfloat16(REGISTER_GPU);
 TF_CALL_int8(REGISTER_GPU);
 TF_CALL_int64(REGISTER_GPU);
 TF_CALL_GPU_ALL_TYPES(REGISTER_GPU);
 
-// A special GPU kernel for int32.
+#undef REGISTER_GPU
+
+#endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM
+
+// A special DEVICE_DEFAULT kernel for int32.
 // TODO(b/25387198): Also enable int32 in device memory. This kernel
 // registration requires all int32 inputs and outputs to be in host memory.
 REGISTER_KERNEL_BUILDER(Name("Slice")
-                            .Device(DEVICE_GPU)
-                            .TypeConstraint<int32>("T")
+                            .Device(DEVICE_DEFAULT)
+                            .TypeConstraint<int32_t>("T")
                             .HostMemory("input")
                             .HostMemory("begin")
                             .HostMemory("size")
                             .HostMemory("output"),
-                        SliceOp<CPUDevice, int32>);
-
-#undef REGISTER_GPU
-
-#endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM
+                        SliceOp<CPUDevice, int32_t>);
 
 }  // namespace tensorflow

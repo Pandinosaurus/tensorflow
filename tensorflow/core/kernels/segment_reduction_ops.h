@@ -16,7 +16,8 @@ limitations under the License.
 #ifndef TENSORFLOW_CORE_KERNELS_SEGMENT_REDUCTION_OPS_H_
 #define TENSORFLOW_CORE_KERNELS_SEGMENT_REDUCTION_OPS_H_
 
-#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
+#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
+#include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/tensor.h"
 #include "tensorflow/core/framework/tensor_shape.h"
 #include "tensorflow/core/framework/tensor_types.h"
@@ -55,6 +56,11 @@ struct Prod {
 struct Min {
   template <typename T>
   __host__ __device__ T operator()(const T& a, const T& b) const {
+    if constexpr (!Eigen::NumTraits<T>::IsInteger) {
+      if (Eigen::numext::isnan(a) || Eigen::numext::isnan(b)) {
+        return Eigen::numext::isnan(a) ? a : b;
+      }
+    }
     return min(a, b);
   }
 };
@@ -62,6 +68,11 @@ struct Min {
 struct Max {
   template <typename T>
   __host__ __device__ T operator()(const T& a, const T& b) const {
+    if constexpr (!Eigen::NumTraits<T>::IsInteger) {
+      if (Eigen::numext::isnan(a) || Eigen::numext::isnan(b)) {
+        return Eigen::numext::isnan(a) ? a : b;
+      }
+    }
     return max(a, b);
   }
 };
@@ -137,11 +148,12 @@ struct Highest {
 
 template <typename T, typename Index, typename SegmentId>
 struct SparseSegmentReductionFunctor {
-  Status operator()(OpKernelContext* context, bool is_mean, bool is_sqrtn,
-                    T default_value, typename TTypes<T, 2>::ConstTensor input,
-                    typename TTypes<Index>::ConstVec indices,
-                    typename TTypes<SegmentId>::ConstVec segment_ids,
-                    typename TTypes<T, 2>::Tensor output);
+  absl::Status operator()(OpKernelContext* context, bool is_mean, bool is_sqrtn,
+                          T default_value,
+                          typename TTypes<T, 2>::ConstTensor input,
+                          typename TTypes<Index>::ConstVec indices,
+                          typename TTypes<SegmentId>::ConstVec segment_ids,
+                          typename TTypes<T, 2>::Tensor output);
 };
 
 template <class Device, typename T, typename Index, typename SegmentId>
@@ -151,7 +163,18 @@ struct SparseSegmentGradFunctor {
                   typename TTypes<T>::ConstMatrix input_flat,
                   typename TTypes<Index>::ConstVec indices_vec,
                   typename TTypes<SegmentId>::ConstVec segment_vec,
-                  typename TTypes<T>::Matrix output_flat);
+                  Tensor* output);
+};
+
+template <class Device, typename T, typename Index, typename SegmentId>
+struct SparseSegmentGradV2Functor {
+  void operator()(OpKernelContext* context,
+                  SparseSegmentReductionOperation operation,
+                  typename TTypes<T>::ConstMatrix input_flat,
+                  typename TTypes<Index>::ConstVec indices_vec,
+                  typename TTypes<SegmentId>::ConstVec segment_vec,
+                  const TensorShape& dense_output_shape,
+                  typename AsyncOpKernel::DoneCallback done);
 };
 
 }  // namespace functor

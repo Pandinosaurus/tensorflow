@@ -1,15 +1,33 @@
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
 # Description:
 #   Contains the Keras OptimizerV2 API (internal TensorFlow version).
 
-load("//tensorflow:tensorflow.bzl", "cuda_py_test")
+load("@xla//third_party/rules_python/python:defs.bzl", "py_library")
 
 package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
     # TODO(scottzhu): Remove non-keras deps from TF.
     default_visibility = [
         "//tensorflow/python:__pkg__",
         "//tensorflow/python/distribute:__pkg__",
         "//tensorflow/python/keras:__subpackages__",
-        "//tensorflow/python/training/tracking:__pkg__",
+        "//tensorflow/python/tpu/tests:__pkg__",
+        "//tensorflow/python/trackable:__pkg__",
+        "//tensorflow/python/training:__pkg__",
     ],
     licenses = ["notice"],
 )
@@ -35,27 +53,32 @@ py_library(
         "utils.py",
     ],
     srcs_version = "PY3",
+    strict_deps = False,
     deps = [
         ":learning_rate_schedule",
-        "//tensorflow/python:control_flow_ops",
-        "//tensorflow/python:framework",
-        "//tensorflow/python:math_ops",
-        "//tensorflow/python:resource_variable_ops",
-        "//tensorflow/python:state_ops",
-        "//tensorflow/python:variable_scope",
-        "//tensorflow/python:variables",
         "//tensorflow/python/distribute:central_storage_strategy",
         "//tensorflow/python/distribute:distribute_lib",
         "//tensorflow/python/distribute:parameter_server_strategy",
         "//tensorflow/python/distribute:parameter_server_strategy_v2",
         "//tensorflow/python/distribute:reduce_util",
         "//tensorflow/python/distribute:values",
+        "//tensorflow/python/framework:dtypes",
+        "//tensorflow/python/framework:indexed_slices",
+        "//tensorflow/python/framework:ops",
+        "//tensorflow/python/framework:tensor",
+        "//tensorflow/python/framework:tensor_conversion",
         "//tensorflow/python/keras:backend",
         "//tensorflow/python/keras:backend_config",
         "//tensorflow/python/keras/engine:base_layer_utils",
         "//tensorflow/python/keras/initializers",
         "//tensorflow/python/keras/utils:layer_utils",
         "//tensorflow/python/keras/utils:tf_utils",
+        "//tensorflow/python/ops:control_flow_ops",
+        "//tensorflow/python/ops:math_ops",
+        "//tensorflow/python/ops:resource_variable_ops",
+        "//tensorflow/python/ops:state_ops",
+        "//tensorflow/python/ops:variable_scope",
+        "//tensorflow/python/ops:variables",
     ],
 )
 
@@ -65,13 +88,17 @@ py_library(
         "learning_rate_schedule.py",
     ],
     srcs_version = "PY3",
+    strict_deps = False,
     deps = [
-        "//tensorflow/python:array_ops",
-        "//tensorflow/python:control_flow_ops",
-        "//tensorflow/python:framework",
-        "//tensorflow/python:math_ops",
-        "//tensorflow/python:random_ops",
+        "//tensorflow/python/framework:constant_op",
+        "//tensorflow/python/framework:ops",
+        "//tensorflow/python/framework:tensor_conversion",
         "//tensorflow/python/keras/utils:generic_utils",
+        "//tensorflow/python/ops:array_ops",
+        "//tensorflow/python/ops:cond",
+        "//tensorflow/python/ops:control_flow_case",
+        "//tensorflow/python/ops:math_ops",
+        "//tensorflow/python/ops:random_ops",
     ],
 )
 
@@ -79,241 +106,14 @@ py_library(
     name = "legacy_learning_rate_decay",
     srcs = ["legacy_learning_rate_decay.py"],
     srcs_version = "PY3",
+    strict_deps = False,
     deps = [
         ":learning_rate_schedule",
-        "//tensorflow/python:dtypes",
-        "//tensorflow/python:framework_ops",
-        "//tensorflow/python:math_ops",
         "//tensorflow/python/eager:context",
+        "//tensorflow/python/framework:dtypes",
+        "//tensorflow/python/framework:ops",
+        "//tensorflow/python/framework:tensor_conversion",
+        "//tensorflow/python/ops:math_ops",
         "//tensorflow/python/util:tf_export",
-    ],
-)
-
-cuda_py_test(
-    name = "adagrad_test",
-    size = "medium",
-    srcs = ["adagrad_test.py"],
-    shard_count = 4,
-    deps = [
-        ":optimizer_v2",
-        "//tensorflow/python:client_testlib",
-        "//tensorflow/python:embedding_ops",
-        "//tensorflow/python:framework",
-        "//tensorflow/python:math_ops",
-        "//tensorflow/python:platform_test",
-        "//tensorflow/python:resource_variable_ops",
-        "//tensorflow/python:resources",
-        "//tensorflow/python:variables",
-        "//tensorflow/python/eager:context",
-        "//tensorflow/python/keras:combinations",
-    ],
-)
-
-cuda_py_test(
-    name = "adam_test",
-    size = "medium",
-    srcs = ["adam_test.py"],
-    shard_count = 4,
-    tags = [
-        "no_rocm",
-        "no_windows",  # TODO(b/171384138)
-    ],
-    deps = [
-        ":optimizer_v2",
-        "//tensorflow/python:client_testlib",
-        "//tensorflow/python:embedding_ops",
-        "//tensorflow/python:framework",
-        "//tensorflow/python:math_ops",
-        "//tensorflow/python:platform_test",
-        "//tensorflow/python:resource_variable_ops",
-        "//tensorflow/python:resources",
-        "//tensorflow/python:variables",
-        "//tensorflow/python/eager:context",
-        "//tensorflow/python/keras:combinations",
-    ],
-)
-
-cuda_py_test(
-    name = "adamax_test",
-    size = "medium",
-    srcs = ["adamax_test.py"],
-    shard_count = 4,
-    # TODO(b/168527439): invalid resource variable reference on GPU for TFRT.
-    tags = ["no_rocm"],
-    deps = [
-        ":optimizer_v2",
-        "//tensorflow/python:client_testlib",
-        "//tensorflow/python:embedding_ops",
-        "//tensorflow/python:framework",
-        "//tensorflow/python:math_ops",
-        "//tensorflow/python:platform_test",
-        "//tensorflow/python:resource_variable_ops",
-        "//tensorflow/python:resources",
-        "//tensorflow/python:variables",
-        "//tensorflow/python/eager:context",
-        "//tensorflow/python/keras:combinations",
-    ],
-)
-
-cuda_py_test(
-    name = "adadelta_test",
-    size = "medium",
-    srcs = ["adadelta_test.py"],
-    shard_count = 4,
-    # TODO(b/168527439): invalid resource variable reference on GPU for TFRT.
-    deps = [
-        ":optimizer_v2",
-        "//tensorflow/python:client_testlib",
-        "//tensorflow/python:embedding_ops",
-        "//tensorflow/python:framework",
-        "//tensorflow/python:math_ops",
-        "//tensorflow/python:platform_test",
-        "//tensorflow/python:resource_variable_ops",
-        "//tensorflow/python:resources",
-        "//tensorflow/python:variables",
-        "//tensorflow/python/eager:context",
-        "//tensorflow/python/keras:combinations",
-    ],
-)
-
-cuda_py_test(
-    name = "ftrl_test",
-    size = "medium",
-    srcs = ["ftrl_test.py"],
-    shard_count = 4,
-    deps = [
-        ":optimizer_v2",
-        "//tensorflow/python:client_testlib",
-        "//tensorflow/python:embedding_ops",
-        "//tensorflow/python:framework",
-        "//tensorflow/python:math_ops",
-        "//tensorflow/python:platform_test",
-        "//tensorflow/python:resource_variable_ops",
-        "//tensorflow/python:resources",
-        "//tensorflow/python:variables",
-        "//tensorflow/python/eager:context",
-    ],
-)
-
-cuda_py_test(
-    name = "gradient_descent_test",
-    size = "medium",
-    srcs = ["gradient_descent_test.py"],
-    shard_count = 4,
-    deps = [
-        ":optimizer_v2",
-        "//tensorflow/python:client_testlib",
-        "//tensorflow/python:embedding_ops",
-        "//tensorflow/python:framework",
-        "//tensorflow/python:math_ops",
-        "//tensorflow/python:platform_test",
-        "//tensorflow/python:resource_variable_ops",
-        "//tensorflow/python:resources",
-        "//tensorflow/python:variables",
-        "//tensorflow/python/eager:context",
-        "//tensorflow/python/keras:combinations",
-    ],
-)
-
-cuda_py_test(
-    name = "nadam_test",
-    size = "medium",
-    srcs = ["nadam_test.py"],
-    shard_count = 4,
-    deps = [
-        ":optimizer_v2",
-        "//tensorflow/python:client_testlib",
-        "//tensorflow/python:embedding_ops",
-        "//tensorflow/python:framework",
-        "//tensorflow/python:math_ops",
-        "//tensorflow/python:platform_test",
-        "//tensorflow/python:resource_variable_ops",
-        "//tensorflow/python:resources",
-        "//tensorflow/python:variables",
-        "//tensorflow/python/eager:context",
-    ],
-)
-
-cuda_py_test(
-    name = "optimizer_v2_test",
-    size = "medium",
-    srcs = ["optimizer_v2_test.py"],
-    shard_count = 8,
-    tags = [
-        "no_windows",
-    ],
-    deps = [
-        ":optimizer_v2",
-        "//tensorflow/python:array_ops",
-        "//tensorflow/python:client_testlib",
-        "//tensorflow/python:clip_ops",
-        "//tensorflow/python:framework",
-        "//tensorflow/python:framework_test_lib",
-        "//tensorflow/python:gradients",
-        "//tensorflow/python:resource_variable_ops",
-        "//tensorflow/python:state_ops",
-        "//tensorflow/python:variables",
-        "//tensorflow/python/eager:def_function",
-        "//tensorflow/python/keras",
-        "//tensorflow/python/keras:combinations",
-        "@absl_py//absl/testing:parameterized",
-    ],
-)
-
-cuda_py_test(
-    name = "learning_rate_schedule_test",
-    size = "medium",
-    srcs = ["learning_rate_schedule_test.py"],
-    shard_count = 4,
-    deps = [
-        ":optimizer_v2",
-        "//tensorflow/python:client_testlib",
-        "//tensorflow/python/keras",
-        "//tensorflow/python/keras:combinations",
-        "//third_party/py/numpy",
-        "@absl_py//absl/testing:parameterized",
-    ],
-)
-
-cuda_py_test(
-    name = "legacy_learning_rate_decay_test",
-    size = "medium",
-    srcs = ["legacy_learning_rate_decay_test.py"],
-    deps = [
-        ":legacy_learning_rate_decay",
-        "//tensorflow/python:framework_test_lib",
-        "//tensorflow/python:platform_test",
-        "//tensorflow/python:resource_variable_ops",
-        "//tensorflow/python:training_lib",
-        "//tensorflow/python:variables",
-        "//tensorflow/python/eager:context",
-        "//tensorflow/python/keras",
-        "//tensorflow/python/keras:combinations",
-    ],
-)
-
-cuda_py_test(
-    name = "rmsprop_test",
-    size = "medium",
-    srcs = ["rmsprop_test.py"],
-    shard_count = 2,
-    xla_tags = [
-        "no_cuda_asan",  # times out
-    ],
-    # TODO(b/168527439): invalid resource variable reference on GPU for TFRT.
-    deps = [
-        ":optimizer_v2",
-        "//tensorflow/python:array_ops",
-        "//tensorflow/python:client_testlib",
-        "//tensorflow/python:clip_ops",
-        "//tensorflow/python:framework",
-        "//tensorflow/python:framework_test_lib",
-        "//tensorflow/python:gradients",
-        "//tensorflow/python:resource_variable_ops",
-        "//tensorflow/python:state_ops",
-        "//tensorflow/python:variables",
-        "//tensorflow/python/eager:def_function",
-        "//tensorflow/python/keras:combinations",
-        "@absl_py//absl/testing:parameterized",
     ],
 )

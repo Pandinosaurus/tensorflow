@@ -1,3 +1,18 @@
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
 # Experimental Implementation of SavedModel C APIs for TensorFlow. See RFC
 # https://github.com/tensorflow/community/pull/207
 # External clients should not worry about this directory; all contents are implementation details.
@@ -9,8 +24,6 @@
 # Note(bmzhao): The *.cc files in this directory form the direct implementation of the
 # C API functions exposed in tf/c/experimental/saved_model/public/.
 
-load("//tensorflow/core/platform:rules_cc.bzl", "cc_library")
-
 # Note(bmzhao): All *type.h files in this directory are the internal definitions of
 # the opaque C types. These headers should only be visible to internal tensorflow
 # implementors.
@@ -19,12 +32,10 @@ load(
     "tf_cc_test",
     "tf_copts",
 )
+load("//tensorflow/core/platform:rules_cc.bzl", "cc_library")
 
 package(
-    default_visibility = [
-        "//tensorflow/cc/experimental/libtf:__pkg__",
-        "//tensorflow/cc/experimental/libtf:__subpackages__",
-    ],
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
     licenses = ["notice"],
 )
 
@@ -139,11 +150,7 @@ cc_library(
         "//tensorflow/c/experimental/saved_model/public:saved_model_api.h",
     ],
     copts = tf_copts(),
-    visibility = [
-        "//tensorflow/c/experimental/saved_model/public:__pkg__",
-        "//tensorflow/cc/experimental/libtf:__pkg__",
-        "//tensorflow/cc/experimental/libtf:__subpackages__",
-    ],
+    visibility = ["//tensorflow/c/experimental/saved_model/public:__pkg__"],
     deps = [
         ":concrete_function",
         ":concrete_function_list",
@@ -160,6 +167,8 @@ cc_library(
         "//tensorflow/c/experimental/saved_model/core:tf_saved_model_api",
         "//tensorflow/core:lib",
         "//tensorflow/core/common_runtime/eager:context",
+        "@com_google_absl//absl/base",
+        "@com_google_absl//absl/status",
         "@com_google_absl//absl/types:optional",
     ],
 )
@@ -169,10 +178,7 @@ cc_library(
     hdrs = [
         "saved_model_api_type.h",
     ],
-    visibility = [
-        "//tensorflow/cc/experimental/libtf:__pkg__",
-        "//tensorflow/cc/experimental/libtf:__subpackages__",
-    ],
+    visibility = ["//visibility:private"],
     deps = [
         "//tensorflow/c:conversion_macros",
         "//tensorflow/c/experimental/saved_model/core:saved_model_api",
@@ -352,7 +358,7 @@ cc_library(
 
 tf_cc_test(
     name = "saved_model_api_test",
-    size = "small",
+    size = "medium",
     srcs = [
         "saved_model_api_test.cc",
     ],
@@ -372,7 +378,9 @@ tf_cc_test(
         "//tensorflow/c/eager:c_api",
         "//tensorflow/c/eager:c_api_experimental",
         "//tensorflow/c/eager:c_api_test_util",
+        "//tensorflow/c/experimental/saved_model/core:concrete_function",
         "//tensorflow/c/experimental/saved_model/core:tf_saved_model_api",
+        "//tensorflow/c/experimental/saved_model/core/revived_types:variable",
         "//tensorflow/c/experimental/saved_model/public:concrete_function",
         "//tensorflow/c/experimental/saved_model/public:saved_model_api",
         "//tensorflow/c/experimental/saved_model/public:signature_def_function",
@@ -380,8 +388,14 @@ tf_cc_test(
         "//tensorflow/c/experimental/saved_model/public:signature_def_param",
         "//tensorflow/c/experimental/saved_model/public:signature_def_param_list",
         "//tensorflow/c/experimental/saved_model/public:tensor_spec",
+        "//tensorflow/cc/saved_model:bundle_v2",
         "//tensorflow/core:lib",
+        "//tensorflow/core:protos_all_cc",
         "//tensorflow/core:test",
         "//tensorflow/core:test_main",
+        "@com_google_absl//absl/base",
+        "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings:string_view",
     ],
 )

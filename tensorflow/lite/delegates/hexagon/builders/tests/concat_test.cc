@@ -14,8 +14,12 @@ limitations under the License.
 ==============================================================================*/
 #include <random>
 
+#include <gmock/gmock.h>
 #include <gtest/gtest.h>
+#include "tensorflow/lite/c/c_api_types.h"
 #include "tensorflow/lite/delegates/hexagon/builders/tests/hexagon_delegate_op_model.h"
+#include "tensorflow/lite/kernels/test_util.h"
+#include "tensorflow/lite/schema/schema_generated.h"
 
 namespace tflite {
 using testing::ElementsAreArray;
@@ -98,10 +102,24 @@ void FourInputsQuantizedSameRangeImpl() {
   EXPECT_THAT(m0.GetDequantizedOutput<integer_type>(),
               ElementsAreArray(ArrayFloatNear(
                   {
-                      1.0f, 3.0f, 1.1f, 3.1f, 1.2f, 3.2f, 1.3f, 3.3f,  //
-                      4.0f, 7.0f, 4.1f, 7.1f, 4.2f, 7.2f, 4.3f, 7.3f,  //
+                      1.0f,
+                      3.0f,
+                      1.1f,
+                      3.1f,
+                      1.2f,
+                      3.2f,
+                      1.3f,
+                      3.3f,  //
+                      4.0f,
+                      7.0f,
+                      4.1f,
+                      7.1f,
+                      4.2f,
+                      7.2f,
+                      4.3f,
+                      7.3f,  //
                   },
-                  /*max_abs_error=*/0.2)));
+                  /*max_abs_err=*/0.2)));
 }
 
 TEST(QuantizedConcatenationOpModel, FourInputsQuantizedSameRange_UInt8) {
@@ -163,10 +181,24 @@ TEST(QuantizedConcatenationOpModel, FourInputsQuantizedMixedRange) {
   EXPECT_THAT(m0.GetDequantizedOutput<uint8_t>(),
               ElementsAreArray(ArrayFloatNear(
                   {
-                      1.0f, 3.0f, 1.1f, 3.1f, 1.2f, 3.2f, 1.3f, 3.3f,  //
-                      4.0f, 7.0f, 4.1f, 7.1f, 4.2f, 7.2f, 4.3f, 7.3f,  //
+                      1.0f,
+                      3.0f,
+                      1.1f,
+                      3.1f,
+                      1.2f,
+                      3.2f,
+                      1.3f,
+                      3.3f,  //
+                      4.0f,
+                      7.0f,
+                      4.1f,
+                      7.1f,
+                      4.2f,
+                      7.2f,
+                      4.3f,
+                      7.3f,  //
                   },
-                  /*max_abs_error=*/0.2)));
+                  /*max_abs_err=*/0.2)));
 }
 
 TEST(QuantizedConcatenationOpModel, FourInputsAxis2_UInt8) {
@@ -185,10 +217,24 @@ TEST(QuantizedConcatenationOpModel, FourInputsAxis2_UInt8) {
   EXPECT_THAT(m0.GetDequantizedOutput<uint8_t>(),
               ElementsAreArray(ArrayFloatNear(
                   {
-                      1.0f, -1.0f, 1.0f, 1.0f, 1.0f, -1.0f, 1.0f, 1.0f,   //
-                      -1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f, 1.0f, 1.0f,  //
+                      1.0f,
+                      -1.0f,
+                      1.0f,
+                      1.0f,
+                      1.0f,
+                      -1.0f,
+                      1.0f,
+                      1.0f,  //
+                      -1.0f,
+                      -1.0f,
+                      1.0f,
+                      1.0f,
+                      -1.0f,
+                      1.0f,
+                      1.0f,
+                      1.0f,  //
                   },
-                  /*max_abs_error=*/0.2)));
+                  /*max_abs_err=*/0.2)));
 }
 
 // If the input min/max (across all tensors) is same as the output min/max,
@@ -228,13 +274,13 @@ TEST(QuantizedConcatenationOpModel, FourInputsQuantizedMixedRange_LargeData) {
   m0.SetInput<uint8_t>(3, data4);
 
   // Reference output.
-  m0.Invoke();
+  ASSERT_EQ(m0.Invoke(), kTfLiteOk);
   std::vector<float> reference_output = m0.GetDequantizedOutput<uint8_t>();
 
   m0.ApplyDelegateAndInvoke();
   EXPECT_THAT(m0.GetDequantizedOutput<uint8_t>(),
               ElementsAreArray(ArrayFloatNear(reference_output,
-                                              /*max_abs_error=*/0.1)));
+                                              /*max_abs_err=*/0.1)));
 }
 
 }  // namespace tflite

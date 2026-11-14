@@ -14,11 +14,9 @@
 # ==============================================================================
 """Tests for tflite_convert.py."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import os
+import shlex
+import subprocess
 
 from absl.testing import parameterized
 import numpy as np
@@ -43,7 +41,7 @@ from tensorflow.python.platform import resource_loader
 from tensorflow.python.platform import test
 from tensorflow.python.saved_model import saved_model
 from tensorflow.python.saved_model.save import save
-from tensorflow.python.training.tracking import tracking
+from tensorflow.python.trackable import autotrackable
 from tensorflow.python.training.training_util import write_graph
 
 
@@ -58,11 +56,11 @@ class TestModels(test_util.TensorFlowTestCase):
            expected_ops_in_converted_model=None,
            expected_output_shapes=None):
     output_file = os.path.join(self.get_temp_dir(), 'model.tflite')
-    tflite_bin = resource_loader.get_path_to_datafile('tflite_convert')
-    cmdline = '{0} --output_file={1} {2}'.format(tflite_bin, output_file,
-                                                 flags_str)
+    tflite_bin = resource_loader.get_path_to_datafile('tflite_convert.par')
+    cmdline = [tflite_bin, '--output_file={}'.format(output_file)]
+    cmdline.extend(shlex.split(flags_str))
 
-    exitcode = os.system(cmdline)
+    exitcode = subprocess.call(cmdline)
     if exitcode == 0:
       with gfile.Open(output_file, 'rb') as model_file:
         content = model_file.read()
@@ -342,30 +340,6 @@ class TfLiteConvertV1Test(TestModels):
     self._run(flags_str, should_succeed=True)
     os.remove(keras_file)
 
-  def testConversionSummary(self):
-    keras_file = self._getKerasModelFile()
-    log_dir = self.get_temp_dir()
-
-    flags_str = ('--keras_model_file={} --experimental_new_converter  '
-                 '--conversion_summary_dir={}'.format(keras_file, log_dir))
-    self._run(flags_str, should_succeed=True)
-    os.remove(keras_file)
-
-    num_items_conversion_summary = len(os.listdir(log_dir))
-    self.assertTrue(num_items_conversion_summary)
-
-  def testConversionSummaryWithOldConverter(self):
-    keras_file = self._getKerasModelFile()
-    log_dir = self.get_temp_dir()
-
-    flags_str = ('--keras_model_file={} --experimental_new_converter=false '
-                 '--conversion_summary_dir={}'.format(keras_file, log_dir))
-    self._run(flags_str, should_succeed=True)
-    os.remove(keras_file)
-
-    num_items_conversion_summary = len(os.listdir(log_dir))
-    self.assertEqual(num_items_conversion_summary, 0)
-
   def _initObjectDetectionArgs(self):
     # Initializes the arguments required for the object detection model.
     # Looks for the model file which is saved in a different location internally
@@ -463,7 +437,7 @@ class TfLiteConvertV2Test(TestModels):
   @test_util.run_v2_only
   def testSavedModel(self):
     input_data = constant_op.constant(1., shape=[1])
-    root = tracking.AutoTrackable()
+    root = autotrackable.AutoTrackable()
     root.f = def_function.function(lambda x: 2. * x)
     to_save = root.f.get_concrete_function(input_data)
 

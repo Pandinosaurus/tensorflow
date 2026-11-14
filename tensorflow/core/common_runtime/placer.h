@@ -18,7 +18,9 @@ limitations under the License.
 
 #include <string>
 
+#include "absl/status/status.h"
 #include "tensorflow/core/common_runtime/device_set.h"
+#include "tensorflow/core/common_runtime/optimization_registry.h"
 #include "tensorflow/core/framework/function.h"
 #include "tensorflow/core/graph/graph.h"
 #include "tensorflow/core/lib/core/status.h"
@@ -68,13 +70,13 @@ class Placer {
   //
   // The "graph", "devices", and "default_local_device" pointer arguments are
   // borrowed by this Placer, and must outlive it.
-  Placer(Graph* graph, const string& function_name,
+  Placer(Graph* graph, const std::string& function_name,
          const FunctionLibraryDefinition* flib_def, const DeviceSet* devices,
          const Device* default_local_device, bool allow_soft_placement,
          bool log_device_placement);
-  Placer(Graph* graph, const string& function_name,
+  Placer(Graph* graph, const std::string& function_name,
          const FunctionLibraryDefinition* flib_def, const DeviceSet* devices);
-  Placer(Graph* graph, const string& function_name,
+  Placer(Graph* graph, const std::string& function_name,
          const FunctionLibraryDefinition* flib_def, const DeviceSet* devices,
          const Device* default_local_device);
 
@@ -85,23 +87,25 @@ class Placer {
   //
   // This method is not thread-safe.
   // Run() may be invoked at most once.
-  Status Run();
+  absl::Status Run();
+  absl::Status Run(const GraphOptimizationPassOptions& options);
 
  private:
   // Returns true if the device type of 'candidate_device_name' is
   // found in 'devices'.
-  bool CanAssignToDevice(const string& candidate_device_name,
+  bool CanAssignToDevice(const std::string& candidate_device_name,
                          const std::vector<Device*>& devices) const;
 
   Graph* const graph_;  // Not owned.
-  const string function_name_;
+  const std::string function_name_;
   const FunctionLibraryDefinition* const flib_def_;  // Not owned.
   const DeviceSet* const devices_;                   // Not owned.
   const Device* default_local_device_;               // Not owned.
   const bool allow_soft_placement_;
   const bool log_device_placement_;
 
-  TF_DISALLOW_COPY_AND_ASSIGN(Placer);
+  Placer(const Placer&) = delete;
+  void operator=(const Placer&) = delete;
 };
 
 }  // namespace tensorflow

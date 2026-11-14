@@ -17,15 +17,22 @@ limitations under the License.
 
 #define EIGEN_USE_THREADS
 
+#if !defined(PLUGGABLE_DEVICE_SUPPORTED_MACOS) && defined(__APPLE__) && \
+    !defined(ANDROID) && !defined(__ANDROID__) &&                       \
+    (!defined(TARGET_OS_IOS) || !TARGET_OS_IOS)
+#define PLUGGABLE_DEVICE_SUPPORTED_MACOS 1
+#endif
+
 #include <limits>
 #include <vector>
 // TODO(b/31496047): Fix non-standard include order.
 #include <numeric>  // clang-format off
 
-#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
+#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
 #include "tensorflow/core/framework/bounds_check.h"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/register_types.h"
+#include "tensorflow/core/framework/resource_handle.h"
 #include "tensorflow/core/framework/resource_mgr.h"
 #include "tensorflow/core/framework/tensor.h"
 #include "tensorflow/core/framework/tensor_shape.h"
@@ -41,7 +48,7 @@ limitations under the License.
 #include "tensorflow/core/platform/logging.h"
 #include "tensorflow/core/platform/thread_annotations.h"
 #include "tensorflow/core/platform/types.h"
-#include "tensorflow/core/util/ptr_util.h"
+#include "tensorflow/core/util/overflow.h"
 
 typedef Eigen::ThreadPoolDevice CPUDevice;
 #if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
@@ -52,7 +59,8 @@ typedef Eigen::GpuDevice GPUDevice;
 
 namespace tensorflow {
 
-Status GetHandle(OpKernelContext* ctx, string* container, string* ta_handle) {
+absl::Status GetHandle(OpKernelContext* ctx, std::string* container,
+                       std::string* ta_handle) {
   {
     Tensor tensor;
     // Assuming that handle is the input at index 0.
@@ -62,39 +70,42 @@ Status GetHandle(OpKernelContext* ctx, string* container, string* ta_handle) {
       tensor = ctx->input(0);
     }
     if (tensor.NumElements() != 2) {
-      return errors::InvalidArgument(
+      return absl::InvalidArgumentError(absl::StrCat(
           "Tensor array handle must be 2-element vector, but had shape: ",
-          tensor.shape().DebugString());
+          tensor.shape().DebugString()));
     }
     auto h = tensor.flat<tstring>();
     *container = h(0);
     *ta_handle = h(1);
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-Status GetTensorArray(OpKernelContext* ctx, TensorArray** tensor_array) {
-  string container;
-  string ta_handle;
+absl::Status GetTensorArray(OpKernelContext* ctx, TensorArray** tensor_array) {
+  std::string container;
+  std::string ta_handle;
   if (ctx->input_dtype(0) != DT_RESOURCE) {
     TF_RETURN_IF_ERROR(GetHandle(ctx, &container, &ta_handle));
     ResourceMgr* rm = ctx->resource_manager();
-    if (rm == nullptr) return errors::Internal("No resource manager.");
-    TF_RETURN_IF_ERROR(
-        ctx->step_container()->Lookup(rm, container + ta_handle, tensor_array));
-    return Status::OK();
+    if (rm == nullptr) return absl::InternalError("No resource manager.");
+    ScopedStepContainer* sc = ctx->step_container();
+    if (sc == nullptr) return absl::InternalError("No step container.");
+    TF_RETURN_IF_ERROR(sc->Lookup(rm, container + ta_handle, tensor_array));
+    return absl::OkStatus();
   } else {
-    return LookupResource(ctx, HandleFromInput(ctx, 0), tensor_array);
+    ResourceHandle handle;
+    TF_RETURN_IF_ERROR(HandleFromInput(ctx, 0, &handle));
+    return LookupResource(ctx, handle, tensor_array);
   }
 }
 
-Status SetupFlowControlInputs(OpKernelContext* ctx, bool set_output) {
+absl::Status SetupFlowControlInputs(OpKernelContext* ctx, bool set_output) {
   const Tensor* flow_control;
   TF_RETURN_IF_ERROR(ctx->input("flow_in", &flow_control));
   if (set_output) {
     TF_RETURN_IF_ERROR(ctx->set_output("flow_out", *flow_control));
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 // CREATION *******************************************************************
@@ -116,7 +127,8 @@ class TensorArrayCreationOp : public OpKernel {
                             &tensor_array_output_handle, alloc_attr));
     // Store the handle in a per-step container of the RM.
     ResourceMgr* rm = ctx->resource_manager();
-    OP_REQUIRES(ctx, rm != nullptr, errors::Internal("No resource manager."));
+    OP_REQUIRES(ctx, rm != nullptr,
+                absl::InternalError("No resource manager."));
 
     TensorArray* output_tensor_array;
     OP_REQUIRES_OK(ctx, CreateTensorArray(ctx, rm, &tensor_array_output_handle,
@@ -146,9 +158,9 @@ class TensorArrayCreationOp : public OpKernel {
   }
 
  protected:
-  virtual Status CreateTensorArray(OpKernelContext* ctx, ResourceMgr* rm,
-                                   Tensor* tensor_array_output_handle,
-                                   TensorArray** output_tensor_array) = 0;
+  virtual absl::Status CreateTensorArray(OpKernelContext* ctx, ResourceMgr* rm,
+                                         Tensor* tensor_array_output_handle,
+                                         TensorArray** output_tensor_array) = 0;
 
  private:
   const DeviceType device_type_;
@@ -179,30 +191,30 @@ class TensorArrayOp : public TensorArrayCreationOp {
     if (tensor_array_name_.empty()) tensor_array_name_ = name();
   }
 
-  Status CreateTensorArray(OpKernelContext* ctx, ResourceMgr* rm,
-                           Tensor* tensor_array_output_handle,
-                           TensorArray** output_tensor_array) override {
+  absl::Status CreateTensorArray(OpKernelContext* ctx, ResourceMgr* rm,
+                                 Tensor* tensor_array_output_handle,
+                                 TensorArray** output_tensor_array) override {
     const Tensor* tensor_size;
     TF_RETURN_IF_ERROR(ctx->input("size", &tensor_size));
 
     if (!TensorShapeUtils::IsScalar(tensor_size->shape())) {
-      return errors::InvalidArgument(
-          "TensorArray size must be scalar, but had shape: ",
-          tensor_size->shape().DebugString());
+      return absl::InvalidArgumentError(
+          absl::StrCat("TensorArray size must be scalar, but had shape: ",
+                       tensor_size->shape().DebugString()));
     }
-    const int32_t size = tensor_size->scalar<int32>()();
+    const int32_t size = tensor_size->scalar<int32_t>()();
     if (size < 0) {
-      return errors::InvalidArgument("Size should be >= 0.");
+      return absl::InvalidArgumentError("Size should be >= 0.");
     }
 
     auto handle = tensor_array_output_handle->flat<tstring>();
-    string unique_tensor_array_name =
-        strings::StrCat(tensor_array_name_, "_",
-                        TensorArray::tensor_array_counter.fetch_add(1));
+    std::string unique_tensor_array_name =
+        absl::StrCat(tensor_array_name_, "_",
+                     TensorArray::tensor_array_counter.fetch_add(1));
     handle(0) = "_tensor_arrays";
     handle(1) = unique_tensor_array_name;
 
-    auto key = strings::StrCat(handle(0), unique_tensor_array_name);
+    auto key = absl::StrCat(handle(0), unique_tensor_array_name);
 
     TensorArray* tensor_array = new TensorArray(
         key, dtype_, *tensor_array_output_handle, size, element_shape_,
@@ -214,7 +226,7 @@ class TensorArrayOp : public TensorArrayCreationOp {
 
     *output_tensor_array = tensor_array;
 
-    return Status::OK();
+    return absl::OkStatus();
   }
 
  private:
@@ -223,9 +235,10 @@ class TensorArrayOp : public TensorArrayCreationOp {
   bool identical_element_shapes_;
   bool dynamic_size_;
   bool clear_after_read_;
-  string tensor_array_name_;  // The name used to create the TensorArray.
+  std::string tensor_array_name_;  // The name used to create the TensorArray.
 
-  TF_DISALLOW_COPY_AND_ASSIGN(TensorArrayOp);
+  TensorArrayOp(const TensorArrayOp&) = delete;
+  void operator=(const TensorArrayOp&) = delete;
 };
 
 REGISTER_KERNEL_BUILDER(Name("TensorArray").Device(DEVICE_CPU), TensorArrayOp);
@@ -257,12 +270,39 @@ REGISTER_KERNEL_BUILDER(Name("TensorArrayV3").Device(DEVICE_CPU),
                           TensorArrayOp);
 
 TF_CALL_int64(REGISTER_GPU);
-TF_CALL_bfloat16(REGISTER_GPU);
 TF_CALL_GPU_NUMBER_TYPES(REGISTER_GPU);
 TF_CALL_COMPLEX_TYPES(REGISTER_GPU);
 #undef REGISTER_GPU
 
 #endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM
+
+#if defined(PLUGGABLE_DEVICE_SUPPORTED_MACOS)
+#define REGISTER_DEVICE_DEFAULT(type)                        \
+  REGISTER_KERNEL_BUILDER(Name("TensorArray")                \
+                              .Device(DEVICE_DEFAULT)        \
+                              .TypeConstraint<type>("dtype") \
+                              .HostMemory("size")            \
+                              .HostMemory("handle"),         \
+                          TensorArrayOp);                    \
+  REGISTER_KERNEL_BUILDER(Name("TensorArrayV2")              \
+                              .Device(DEVICE_DEFAULT)        \
+                              .TypeConstraint<type>("dtype") \
+                              .HostMemory("size")            \
+                              .HostMemory("handle"),         \
+                          TensorArrayOp);                    \
+  REGISTER_KERNEL_BUILDER(Name("TensorArrayV3")              \
+                              .Device(DEVICE_DEFAULT)        \
+                              .TypeConstraint<type>("dtype") \
+                              .HostMemory("size")            \
+                              .HostMemory("handle"),         \
+                          TensorArrayOp);
+
+TF_CALL_int64(REGISTER_DEVICE_DEFAULT);
+TF_CALL_bfloat16(REGISTER_DEVICE_DEFAULT);
+TF_CALL_GPU_NUMBER_TYPES(REGISTER_DEVICE_DEFAULT);
+TF_CALL_COMPLEX_TYPES(REGISTER_DEVICE_DEFAULT);
+#undef REGISTER_DEVICE_DEFAULT
+#endif
 
 // GRADIENT *******************************************************************
 // Note that this op may have an optional third input. If present, it represents
@@ -276,37 +316,37 @@ class TensorArrayGradOp : public TensorArrayCreationOp {
     OP_REQUIRES_OK(context, context->GetAttr("source", &source_));
   }
 
-  Status CreateTensorArray(OpKernelContext* ctx, ResourceMgr* rm,
-                           Tensor* tensor_array_output_handle,
-                           TensorArray** output_tensor_array) override {
-    string container;
-    string tensor_array_name;
+  absl::Status CreateTensorArray(OpKernelContext* ctx, ResourceMgr* rm,
+                                 Tensor* tensor_array_output_handle,
+                                 TensorArray** output_tensor_array) override {
+    std::string container;
+    std::string tensor_array_name;
     if (ctx->input_dtype(0) != DT_RESOURCE) {
       TF_RETURN_IF_ERROR(GetHandle(ctx, &container, &tensor_array_name));
       if (container != "_tensor_arrays") {
-        return errors::InvalidArgument(
+        return absl::InvalidArgumentError(absl::StrCat(
             "Input container should be '_tensor_arrays',  but received '",
-            container, "'");
+            container, "'"));
       }
     } else {
       container = "_tensor_arrays";
       const auto& resource = ctx->input(0).flat<ResourceHandle>()(0);
-      if (StringPiece(resource.name()).substr(0, container.size()) !=
+      if (absl::string_view(resource.name()).substr(0, container.size()) !=
           container) {
-        return errors::InvalidArgument("Wrong input container. ",
-                                       resource.name());
+        return absl::InvalidArgumentError(
+            absl::StrCat("Wrong input container. ", resource.name()));
       }
-      tensor_array_name =
-          string(StringPiece(resource.name()).substr(container.size()));
+      tensor_array_name = std::string(
+          absl::string_view(resource.name()).substr(container.size()));
     }
 
     auto output_handle = tensor_array_output_handle->flat<tstring>();
     output_handle(0) = "_tensor_array_grads";
-    output_handle(1) = strings::StrCat(tensor_array_name, "@", source_);
+    output_handle(1) = absl::StrCat(tensor_array_name, "@", source_);
 
     TensorArray* tensor_array;
     TF_RETURN_IF_ERROR(ctx->step_container()->Lookup(
-        rm, strings::StrCat(container, tensor_array_name), &tensor_array));
+        rm, absl::StrCat(container, tensor_array_name), &tensor_array));
     core::ScopedUnref unref(tensor_array);
 
     // Once gradients are being calculated, the forward TensorArray
@@ -319,14 +359,14 @@ class TensorArrayGradOp : public TensorArrayCreationOp {
     TF_RETURN_IF_ERROR(tensor_array->MarkedSize(&marked_size));
 
     if (array_size < 0) {
-      return errors::InvalidArgument("ArraySize should be >= 0.");
+      return absl::InvalidArgumentError("ArraySize should be >= 0.");
     }
     if (!tensor_array->GradientsAllowed()) {
-      return errors::InvalidArgument(
+      return absl::InvalidArgumentError(absl::StrCat(
           "Unable to create a gradients TensorArray for ", tensor_array_name,
           ".  Perhaps you used the multiple_writes_aggregate flag on a "
           "previous write?  Gradient calculation is impossible when multiple "
-          "writes are performed to the same index.");
+          "writes are performed to the same index."));
     }
     TensorShape shape_to_prepend;
     auto element_shape = PartialTensorShape();
@@ -342,16 +382,16 @@ class TensorArrayGradOp : public TensorArrayCreationOp {
           dims.push_back(dim.size);
         }
         TF_RETURN_IF_ERROR(TensorShapeUtils::MakeShape(
-            gtl::ArraySlice<int64_t>(dims), &element_shape));
+            absl::Span<const int64_t>(dims), &element_shape));
       }
     } else {
       element_shape = tensor_array->ElemShape();
     }
 
-    const auto key = strings::StrCat(output_handle(0), output_handle(1));
+    const auto key = absl::StrCat(output_handle(0), output_handle(1));
     auto creator = [key, tensor_array, array_size, marked_size, element_shape,
-                    shape_to_prepend,
-                    tensor_array_output_handle](TensorArray** ret) -> Status {
+                    shape_to_prepend, tensor_array_output_handle](
+                       TensorArray** ret) -> absl::Status {
       *ret = new TensorArray(
           key, tensor_array->ElemType(), *tensor_array_output_handle,
           array_size, element_shape, tensor_array->HasIdenticalElementShapes(),
@@ -361,7 +401,7 @@ class TensorArrayGradOp : public TensorArrayCreationOp {
       return (*ret)->CopyShapesFrom(tensor_array, &shape_to_prepend);
     };
 
-    Status s = ctx->step_container()->LookupOrCreate<TensorArray>(
+    absl::Status s = ctx->step_container()->LookupOrCreate<TensorArray>(
         rm, key, output_tensor_array, creator);
     (*output_tensor_array)->Unref();
 
@@ -372,9 +412,10 @@ class TensorArrayGradOp : public TensorArrayCreationOp {
   // The gradient source for creating the given
   // gradient TensorArray.  This should be unique to each gradients
   // call.  Typical values look like "gradients", "gradients_1", ...
-  string source_;
+  std::string source_;
 
-  TF_DISALLOW_COPY_AND_ASSIGN(TensorArrayGradOp);
+  TensorArrayGradOp(const TensorArrayGradOp&) = delete;
+  void operator=(const TensorArrayGradOp&) = delete;
 };
 
 REGISTER_KERNEL_BUILDER(Name("TensorArrayGrad").Device(DEVICE_CPU),
@@ -406,6 +447,29 @@ REGISTER_KERNEL_BUILDER(Name("TensorArrayGradWithShape")
                             .HostMemory("shape_to_prepend")
                             .HostMemory("grad_handle"),
                         TensorArrayGradOp);
+#if defined(PLUGGABLE_DEVICE_SUPPORTED_MACOS)
+REGISTER_KERNEL_BUILDER(Name("TensorArrayGrad")
+                            .Device(DEVICE_DEFAULT)
+                            .HostMemory("handle")
+                            .HostMemory("grad_handle"),
+                        TensorArrayGradOp);
+REGISTER_KERNEL_BUILDER(Name("TensorArrayGradV2")
+                            .Device(DEVICE_DEFAULT)
+                            .HostMemory("handle")
+                            .HostMemory("grad_handle"),
+                        TensorArrayGradOp);
+REGISTER_KERNEL_BUILDER(Name("TensorArrayGradV3")
+                            .Device(DEVICE_DEFAULT)
+                            .HostMemory("handle")
+                            .HostMemory("grad_handle"),
+                        TensorArrayGradOp);
+REGISTER_KERNEL_BUILDER(Name("TensorArrayGradWithShape")
+                            .Device(DEVICE_DEFAULT)
+                            .HostMemory("handle")
+                            .HostMemory("shape_to_prepend")
+                            .HostMemory("grad_handle"),
+                        TensorArrayGradOp);
+#endif
 
 // WRITE **********************************************************************
 
@@ -424,21 +488,21 @@ class TensorArrayWriteOp : public OpKernel {
     OP_REQUIRES_OK(ctx, ctx->input("value", &tensor_value));
 
     OP_REQUIRES(ctx, TensorShapeUtils::IsScalar(tensor_index->shape()),
-                errors::InvalidArgument(
+                absl::InvalidArgumentError(absl::StrCat(
                     "TensorArray index must be scalar, but had shape: ",
-                    tensor_index->shape().DebugString()));
+                    tensor_index->shape().DebugString())));
 
     TensorArray* tensor_array = nullptr;
     OP_REQUIRES_OK(ctx, GetTensorArray(ctx, &tensor_array));
     core::ScopedUnref unref(tensor_array);
-    const int32_t index = tensor_index->scalar<int32>()();
+    const int32_t index = tensor_index->scalar<int32_t>()();
     OP_REQUIRES(
         ctx, tensor_value->dtype() == tensor_array->ElemType(),
-        errors::InvalidArgument("TensorArray dtype is ",
-                                DataTypeString(tensor_array->ElemType()),
-                                " but Op is trying to write dtype ",
-                                DataTypeString(tensor_value->dtype()), "."));
-    Status s =
+        absl::InvalidArgumentError(absl::StrCat(
+            "TensorArray dtype is ", DataTypeString(tensor_array->ElemType()),
+            " but Op is trying to write dtype ",
+            DataTypeString(tensor_value->dtype()), ".")));
+    absl::Status s =
         tensor_array->WriteOrAggregate<Device, T>(ctx, index, tensor_value);
     OP_REQUIRES_OK(ctx, s);
   }
@@ -481,7 +545,6 @@ TF_CALL_ALL_TYPES(REGISTER_WRITE);
                               .HostMemory("index"),             \
                           TensorArrayWriteOp<GPUDevice, type>);
 
-TF_CALL_bfloat16(REGISTER_GPU);
 TF_CALL_GPU_NUMBER_TYPES(REGISTER_GPU);
 TF_CALL_COMPLEX_TYPES(REGISTER_GPU);
 #undef REGISTER_GPU
@@ -505,22 +568,22 @@ class TensorArrayReadOp : public OpKernel {
     OP_REQUIRES_OK(ctx, ctx->input("index", &tensor_index));
 
     OP_REQUIRES(ctx, TensorShapeUtils::IsScalar(tensor_index->shape()),
-                errors::InvalidArgument(
+                absl::InvalidArgumentError(absl::StrCat(
                     "TensorArray index must be scalar, but had shape: ",
-                    tensor_index->shape().DebugString()));
+                    tensor_index->shape().DebugString())));
 
     TensorArray* tensor_array = nullptr;
     OP_REQUIRES_OK(ctx, GetTensorArray(ctx, &tensor_array));
     core::ScopedUnref unref(tensor_array);
 
-    const int32_t index = tensor_index->scalar<int32>()();
+    const int32_t index = tensor_index->scalar<int32_t>()();
     OP_REQUIRES(
         ctx, dtype_ == tensor_array->ElemType(),
-        errors::InvalidArgument(
+        absl::InvalidArgumentError(absl::StrCat(
             "TensorArray dtype is ", DataTypeString(tensor_array->ElemType()),
-            " but Op requested dtype ", DataTypeString(dtype_), "."));
+            " but Op requested dtype ", DataTypeString(dtype_), ".")));
     Tensor value;
-    Status s = tensor_array->Read<Device, T>(ctx, index, &value);
+    absl::Status s = tensor_array->Read<Device, T>(ctx, index, &value);
     OP_REQUIRES_OK(ctx, s);
     ctx->set_output(0, value);
   }
@@ -570,7 +633,6 @@ TF_CALL_ALL_TYPES(REGISTER_READ)
                           TensorArrayReadOp<GPUDevice, type>);
 
 TF_CALL_int64(REGISTER_GPU);
-TF_CALL_bfloat16(REGISTER_GPU);
 TF_CALL_GPU_NUMBER_TYPES(REGISTER_GPU);
 TF_CALL_COMPLEX_TYPES(REGISTER_GPU);
 #undef REGISTER_GPU
@@ -602,9 +664,9 @@ class TensorArrayPackOrGatherOp : public OpKernel {
     core::ScopedUnref unref(tensor_array);
     OP_REQUIRES(
         ctx, dtype_ == tensor_array->ElemType(),
-        errors::InvalidArgument(
+        absl::InvalidArgumentError(absl::StrCat(
             "TensorArray dtype is ", DataTypeString(tensor_array->ElemType()),
-            " but Op requested dtype ", DataTypeString(dtype_), "."));
+            " but Op requested dtype ", DataTypeString(dtype_), ".")));
 
     // Ensure new element shape is compatible with the one stored in the
     // TensorArray.
@@ -612,7 +674,7 @@ class TensorArrayPackOrGatherOp : public OpKernel {
 
     int32_t num_indices;
     std::vector<Tensor> values;
-    std::vector<int32> indices;
+    std::vector<int32_t> indices;
     if (LEGACY_PACK) {
       OP_REQUIRES_OK(ctx, tensor_array->PackOrConcatSize(&num_indices));
       indices.resize(num_indices);
@@ -621,10 +683,10 @@ class TensorArrayPackOrGatherOp : public OpKernel {
       const Tensor* tensor_indices;
       OP_REQUIRES_OK(ctx, ctx->input("indices", &tensor_indices));
       OP_REQUIRES(ctx, TensorShapeUtils::IsVector(tensor_indices->shape()),
-                  errors::InvalidArgument(
+                  absl::InvalidArgumentError(absl::StrCat(
                       "Expected indices to be a vector, but received shape: ",
-                      tensor_indices->shape().DebugString()));
-      const auto indices_t = tensor_indices->vec<int32>();
+                      tensor_indices->shape().DebugString())));
+      const auto indices_t = tensor_indices->vec<int32_t>();
       num_indices = tensor_indices->NumElements();
       indices.resize(num_indices);
       std::copy(indices_t.data(), indices_t.data() + num_indices,
@@ -635,12 +697,12 @@ class TensorArrayPackOrGatherOp : public OpKernel {
     // shape [0] + element_shape_
     if (num_indices == 0) {
       OP_REQUIRES(ctx, element_shape_.IsFullyDefined(),
-                  errors::Unimplemented(
+                  absl::UnimplementedError(absl::StrCat(
                       "TensorArray has size zero, but element shape ",
                       element_shape_.DebugString(),
                       " is not fully defined. "
                       "Currently only static shapes are supported when packing "
-                      "zero-size TensorArrays."));
+                      "zero-size TensorArrays.")));
       TensorShape empty_shape;
       element_shape_.AsTensorShape(&empty_shape);
       empty_shape.InsertDim(0, 0);
@@ -650,17 +712,17 @@ class TensorArrayPackOrGatherOp : public OpKernel {
     }
 
     // Read all the Tensors into a vector to keep track of their memory.
-    Status s = tensor_array->ReadMany<Device, T>(ctx, indices, &values);
+    absl::Status s = tensor_array->ReadMany<Device, T>(ctx, indices, &values);
     OP_REQUIRES_OK(ctx, s);
 
     const Tensor* value_0_t = &values[0];
 
-    OP_REQUIRES(
-        ctx, element_shape_.IsCompatibleWith(value_0_t->shape()),
-        errors::InvalidArgument("TensorArray was passed element_shape ",
-                                element_shape_.DebugString(),
-                                " which does not match the Tensor at index 0: ",
-                                value_0_t->shape().DebugString()));
+    OP_REQUIRES(ctx, element_shape_.IsCompatibleWith(value_0_t->shape()),
+                absl::InvalidArgumentError(absl::StrCat(
+                    "TensorArray was passed element_shape ",
+                    element_shape_.DebugString(),
+                    " which does not match the Tensor at index 0: ",
+                    value_0_t->shape().DebugString())));
 
     TensorShape output_shape(value_0_t->shape());
     output_shape.InsertDim(0, num_indices);
@@ -679,23 +741,23 @@ class TensorArrayPackOrGatherOp : public OpKernel {
         output_tensor->shaped<T, 2>({1, output_shape.num_elements()});
 
     // Insert the first value
-    input_tensors_flat.push_back(MakeUnique<ConstMatrix>(
+    input_tensors_flat.push_back(std::make_unique<ConstMatrix>(
         value_0_t->shaped<T, 2>({1, value_0_t->NumElements()})));
 
     for (int i = 1; i < num_indices; ++i) {
       const Tensor* value_t = &values[i];
       OP_REQUIRES(
           ctx, value_0_t->shape() == value_t->shape(),
-          errors::InvalidArgument(
+          absl::InvalidArgumentError(absl::StrCat(
               "TensorArray has inconsistent shapes.  Index 0 has shape: ",
               value_0_t->shape().DebugString(), " but index ", i,
-              " has shape: ", value_t->shape().DebugString()));
-      input_tensors_flat.push_back(MakeUnique<ConstMatrix>(
+              " has shape: ", value_t->shape().DebugString())));
+      input_tensors_flat.push_back(std::make_unique<ConstMatrix>(
           value_t->shaped<T, 2>({1, value_t->NumElements()})));
     }
 
 #if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
-    if (std::is_same<Device, GPUDevice>::value) {
+    if (std::is_same_v<Device, GPUDevice>) {
       ConcatGPU<T>(ctx, input_tensors_flat, output_tensor, &output_flat);
       return;
     }
@@ -769,7 +831,6 @@ REGISTER_GATHER_AND_PACK(qint32);
           .HostMemory("handle"),                                            \
       TensorArrayPackOrGatherOp<GPUDevice, type, false /* LEGACY_PACK */>);
 
-TF_CALL_bfloat16(REGISTER_GPU);
 TF_CALL_GPU_NUMBER_TYPES(REGISTER_GPU);
 TF_CALL_COMPLEX_TYPES(REGISTER_GPU);
 #undef REGISTER_GPU
@@ -780,24 +841,24 @@ TF_CALL_COMPLEX_TYPES(REGISTER_GPU);
 REGISTER_KERNEL_BUILDER(
     Name("TensorArrayGather")
         .Device(DEVICE_GPU)
-        .TypeConstraint<int32>("dtype")
+        .TypeConstraint<int32_t>("dtype")
         .HostMemory("indices")
         .HostMemory("handle"),
-    TensorArrayPackOrGatherOp<CPUDevice, int32, false /* LEGACY_PACK */>);
+    TensorArrayPackOrGatherOp<CPUDevice, int32_t, false /* LEGACY_PACK */>);
 REGISTER_KERNEL_BUILDER(
     Name("TensorArrayGatherV2")
         .Device(DEVICE_GPU)
-        .TypeConstraint<int32>("dtype")
+        .TypeConstraint<int32_t>("dtype")
         .HostMemory("indices")
         .HostMemory("handle"),
-    TensorArrayPackOrGatherOp<CPUDevice, int32, false /* LEGACY_PACK */>);
+    TensorArrayPackOrGatherOp<CPUDevice, int32_t, false /* LEGACY_PACK */>);
 REGISTER_KERNEL_BUILDER(
     Name("TensorArrayGatherV3")
         .Device(DEVICE_GPU)
-        .TypeConstraint<int32>("dtype")
+        .TypeConstraint<int32_t>("dtype")
         .HostMemory("indices")
         .HostMemory("handle"),
-    TensorArrayPackOrGatherOp<CPUDevice, int32, false /* LEGACY_PACK */>);
+    TensorArrayPackOrGatherOp<CPUDevice, int32_t, false /* LEGACY_PACK */>);
 
 #endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 
@@ -826,9 +887,9 @@ class TensorArrayConcatOp : public OpKernel {
     core::ScopedUnref unref(tensor_array);
     OP_REQUIRES(
         ctx, dtype_ == tensor_array->ElemType(),
-        errors::InvalidArgument(
+        absl::InvalidArgumentError(absl::StrCat(
             "TensorArray dtype is ", DataTypeString(tensor_array->ElemType()),
-            " but Op requested dtype ", DataTypeString(dtype_), "."));
+            " but Op requested dtype ", DataTypeString(dtype_), ".")));
 
     int32_t array_size;
     OP_REQUIRES_OK(ctx, tensor_array->PackOrConcatSize(&array_size));
@@ -838,12 +899,12 @@ class TensorArrayConcatOp : public OpKernel {
     if (array_size == 0) {
       OP_REQUIRES(
           ctx, element_shape_except0_.IsFullyDefined(),
-          errors::Unimplemented(
+          absl::UnimplementedError(absl::StrCat(
               "TensorArray has size zero, but element_shape_except0 ",
               element_shape_except0_.DebugString(),
               " is not fully defined. "
               "Currently only static shapes are supported when concatenating "
-              "zero-size TensorArrays."));
+              "zero-size TensorArrays.")));
       TensorShape empty_shape;
       element_shape_except0_.AsTensorShape(&empty_shape);
       empty_shape.InsertDim(0, 0);
@@ -855,9 +916,9 @@ class TensorArrayConcatOp : public OpKernel {
 
     // Read all the Tensors into a vector to keep track of their memory.
     std::vector<Tensor> values;
-    std::vector<int32> indices(array_size);
+    std::vector<int32_t> indices(array_size);
     std::iota(indices.begin(), indices.end(), 0);
-    Status s = tensor_array->ReadMany<Device, T>(ctx, indices, &values);
+    absl::Status s = tensor_array->ReadMany<Device, T>(ctx, indices, &values);
     OP_REQUIRES_OK(ctx, s);
 
     Tensor* lengths_tensor = nullptr;
@@ -874,9 +935,9 @@ class TensorArrayConcatOp : public OpKernel {
 
       OP_REQUIRES(
           ctx, TensorShapeUtils::IsVectorOrHigher(value_shape_t),
-          errors::InvalidArgument(
+          absl::InvalidArgumentError(absl::StrCat(
               "Concat saw a scalar shape at index ", i,
-              " but requires at least vectors.  Did you mean to call pack?"));
+              " but requires at least vectors.  Did you mean to call pack?")));
 
       lengths_tensor_t(i) = value_shape_t.dim_size(0);
 
@@ -887,19 +948,20 @@ class TensorArrayConcatOp : public OpKernel {
         output_shape_except0 = value_shape_t_except0;
         OP_REQUIRES(
             ctx, element_shape_except0_.IsCompatibleWith(output_shape_except0),
-            errors::InvalidArgument(
-                "TensorArray was passed element_shape_except0 ",
-                element_shape_except0_.DebugString(),
-                " but index 0 has (excepting dimension 0) shape: ",
-                value_shape_t_except0.DebugString(), " which does not match."));
+            absl::InvalidArgumentError(
+                absl::StrCat("TensorArray was passed element_shape_except0 ",
+                             element_shape_except0_.DebugString(),
+                             " but index 0 has (excepting dimension 0) shape: ",
+                             value_shape_t_except0.DebugString(),
+                             " which does not match.")));
       } else {
         OP_REQUIRES(ctx, output_shape_except0 == value_shape_t_except0,
-                    errors::InvalidArgument(
+                    absl::InvalidArgumentError(absl::StrCat(
                         "TensorArray has inconsistent shapes.  Index 0 has "
                         "(excepting dimension 0) shape: ",
                         output_shape_except0.DebugString(), " but index ", i,
                         " has (excepting dimension 0) shape: ",
-                        value_shape_t_except0.DebugString()));
+                        value_shape_t_except0.DebugString())));
         // Store the previous maximum length as the offset for this tensor.
         output_shape.set_dim(
             0, output_shape.dim_size(0) + value_shape_t.dim_size(0));
@@ -913,7 +975,7 @@ class TensorArrayConcatOp : public OpKernel {
     for (size_t i = 0; i < values.size(); ++i) {
       const Tensor* value_t = &values[i];
       if (value_t->NumElements() > 0) {
-        input_tensors_flat.push_back(MakeUnique<ConstMatrix>(
+        input_tensors_flat.push_back(std::make_unique<ConstMatrix>(
             value_t->shaped<T, 2>({1, value_t->NumElements()})));
       }
     }
@@ -922,7 +984,7 @@ class TensorArrayConcatOp : public OpKernel {
       auto output_flat =
           output_tensor->shaped<T, 2>({1, output_shape.num_elements()});
 #if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
-      if (std::is_same<Device, GPUDevice>::value) {
+      if (std::is_same_v<Device, GPUDevice>) {
         ConcatGPU<T>(ctx, input_tensors_flat, output_tensor, &output_flat);
         return;
       }
@@ -985,7 +1047,6 @@ REGISTER_CONCAT(qint32);
                               .HostMemory("handle"),             \
                           TensorArrayConcatOp<GPUDevice, type>)
 
-TF_CALL_bfloat16(REGISTER_GPU);
 TF_CALL_GPU_NUMBER_TYPES(REGISTER_GPU);
 TF_CALL_COMPLEX_TYPES(REGISTER_GPU);
 #undef REGISTER_GPU
@@ -995,24 +1056,45 @@ TF_CALL_COMPLEX_TYPES(REGISTER_GPU);
 // registration requires all int32 inputs and outputs to be in host memory.
 REGISTER_KERNEL_BUILDER(Name("TensorArrayConcat")
                             .Device(DEVICE_GPU)
+                            .TypeConstraint<int32_t>("dtype")
+                            .HostMemory("lengths")
+                            .HostMemory("handle"),
+                        TensorArrayConcatOp<CPUDevice, int32_t>);
+REGISTER_KERNEL_BUILDER(Name("TensorArrayConcatV2")
+                            .Device(DEVICE_GPU)
+                            .TypeConstraint<int32_t>("dtype")
+                            .HostMemory("lengths")
+                            .HostMemory("handle"),
+                        TensorArrayConcatOp<CPUDevice, int32_t>);
+REGISTER_KERNEL_BUILDER(Name("TensorArrayConcatV3")
+                            .Device(DEVICE_GPU)
+                            .TypeConstraint<int32_t>("dtype")
+                            .HostMemory("lengths")
+                            .HostMemory("handle"),
+                        TensorArrayConcatOp<CPUDevice, int32_t>);
+
+#endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM
+
+#if defined(PLUGGABLE_DEVICE_SUPPORTED_MACOS)
+REGISTER_KERNEL_BUILDER(Name("TensorArrayConcat")
+                            .Device(DEVICE_DEFAULT)
                             .TypeConstraint<int32>("dtype")
                             .HostMemory("lengths")
                             .HostMemory("handle"),
                         TensorArrayConcatOp<CPUDevice, int32>);
 REGISTER_KERNEL_BUILDER(Name("TensorArrayConcatV2")
-                            .Device(DEVICE_GPU)
+                            .Device(DEVICE_DEFAULT)
                             .TypeConstraint<int32>("dtype")
                             .HostMemory("lengths")
                             .HostMemory("handle"),
                         TensorArrayConcatOp<CPUDevice, int32>);
 REGISTER_KERNEL_BUILDER(Name("TensorArrayConcatV3")
-                            .Device(DEVICE_GPU)
+                            .Device(DEVICE_DEFAULT)
                             .TypeConstraint<int32>("dtype")
                             .HostMemory("lengths")
                             .HostMemory("handle"),
                         TensorArrayConcatOp<CPUDevice, int32>);
-
-#endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM
+#endif
 
 // UNPACK and SCATTER *********************************************************
 
@@ -1034,25 +1116,26 @@ class TensorArrayUnpackOrScatterOp : public OpKernel {
 
     OP_REQUIRES(ctx,
                 FastBoundsCheck(element_shape.dim_size(0),
-                                std::numeric_limits<int32>::max()),
-                errors::InvalidArgument("tensor dim0 too large to unpack"));
+                                std::numeric_limits<int32_t>::max()),
+                absl::InvalidArgumentError("tensor dim0 too large to unpack"));
 
     OP_REQUIRES(
         ctx, tensor_value->dtype() == tensor_array->ElemType(),
-        errors::InvalidArgument("TensorArray dtype is ",
-                                DataTypeString(tensor_array->ElemType()),
-                                " but Op is trying to write dtype ",
-                                DataTypeString(tensor_value->dtype()), "."));
+        absl::InvalidArgumentError(absl::StrCat(
+            "TensorArray dtype is ", DataTypeString(tensor_array->ElemType()),
+            " but Op is trying to write dtype ",
+            DataTypeString(tensor_value->dtype()), ".")));
     OP_REQUIRES(ctx, element_shape.dims() > 0,
-                errors::InvalidArgument("Input value for unpack must be at "
-                                        "least a vector but received shape: ",
-                                        element_shape.DebugString()));
+                absl::InvalidArgumentError(
+                    absl::StrCat("Input value for unpack must be at "
+                                 "least a vector but received shape: ",
+                                 element_shape.DebugString())));
     int32_t array_size;
     OP_REQUIRES_OK(ctx, tensor_array->Size(&array_size));
 
     int32_t max_index;
     int32_t num_values;
-    std::vector<int32> write_indices;
+    std::vector<int32_t> write_indices;
     if (LEGACY_UNPACK) {
       num_values = element_shape.dim_size(0);
       max_index = num_values - 1;
@@ -1062,16 +1145,16 @@ class TensorArrayUnpackOrScatterOp : public OpKernel {
       const Tensor* tensor_indices;
       OP_REQUIRES_OK(ctx, ctx->input("indices", &tensor_indices));
       OP_REQUIRES(ctx, TensorShapeUtils::IsVector(tensor_indices->shape()),
-                  errors::InvalidArgument(
+                  absl::InvalidArgumentError(absl::StrCat(
                       "Expected indices to be a vector, but received shape: ",
-                      tensor_indices->shape().DebugString()));
+                      tensor_indices->shape().DebugString())));
       OP_REQUIRES(ctx,
                   tensor_indices->NumElements() == element_shape.dim_size(0),
-                  errors::InvalidArgument(
+                  absl::InvalidArgumentError(absl::StrCat(
                       "Expected len(indices) == values.shape[0], but saw: ",
                       tensor_indices->NumElements(), " vs. ",
-                      element_shape.dim_size(0)));
-      const auto indices_t = tensor_indices->vec<int32>();
+                      element_shape.dim_size(0))));
+      const auto indices_t = tensor_indices->vec<int32_t>();
       num_values = tensor_indices->NumElements();
       max_index = (num_values == 0)
                       ? -1
@@ -1087,20 +1170,20 @@ class TensorArrayUnpackOrScatterOp : public OpKernel {
 
     // If dynamic size, we may have to resize the TensorArray to fit.
     if (dynamic_size && array_size < max_index + 1) {
-      array_size = static_cast<int32>(max_index + 1);
+      array_size = static_cast<int32_t>(max_index + 1);
     }
 
     if (LEGACY_UNPACK) {
       OP_REQUIRES(
           ctx, element_shape.dim_size(0) == array_size,
-          errors::InvalidArgument(
+          absl::InvalidArgumentError(absl::StrCat(
               "Input value must have first dimension equal to the array size (",
-              element_shape.dim_size(0), " vs. ", array_size, ")"));
+              element_shape.dim_size(0), " vs. ", array_size, ")")));
     } else {
-      OP_REQUIRES(
-          ctx, max_index < array_size,
-          errors::InvalidArgument("Max scatter index must be < array size (",
-                                  max_index, " vs. ", array_size, ")"));
+      OP_REQUIRES(ctx, max_index < array_size,
+                  absl::InvalidArgumentError(
+                      absl::StrCat("Max scatter index must be < array size (",
+                                   max_index, " vs. ", array_size, ")")));
     }
     element_shape.RemoveDim(0);
 
@@ -1136,8 +1219,8 @@ class TensorArrayUnpackOrScatterOp : public OpKernel {
       OP_REQUIRES_OK(ctx, tensor_array->SetMarkedSize(array_size));
     }
 
-    Status s = tensor_array->WriteOrAggregateMany<Device, T>(ctx, write_indices,
-                                                             &write_values);
+    absl::Status s = tensor_array->WriteOrAggregateMany<Device, T>(
+        ctx, write_indices, &write_values);
     OP_REQUIRES_OK(ctx, s);
   }
 };
@@ -1229,37 +1312,47 @@ class TensorArraySplitOp : public OpKernel {
     OP_REQUIRES_OK(ctx, ctx->input("lengths", &tensor_lengths));
 
     OP_REQUIRES(ctx, TensorShapeUtils::IsVector(tensor_lengths->shape()),
-                errors::InvalidArgument(
+                absl::InvalidArgumentError(absl::StrCat(
                     "Expected lengths to be a vector, received shape: ",
-                    tensor_lengths->shape().DebugString()));
+                    tensor_lengths->shape().DebugString())));
     OP_REQUIRES(ctx,
                 FastBoundsCheck(tensor_lengths->NumElements(),
-                                std::numeric_limits<int32>::max()),
-                errors::InvalidArgument(
+                                std::numeric_limits<int32_t>::max()),
+                absl::InvalidArgumentError(
                     "Expected lengths to have < max int32 entries"));
 
-    int32_t num_tensors = static_cast<int32>(tensor_lengths->NumElements());
+    int32_t num_tensors = static_cast<int32_t>(tensor_lengths->NumElements());
     auto tensor_lengths_t = tensor_lengths->vec<int64_t>();
     std::vector<int64_t> cumulative_lengths;
     cumulative_lengths.reserve(num_tensors);
     int64_t total_length = 0;
     for (int i = 0; i < num_tensors; ++i) {
-      total_length += tensor_lengths_t(i);
+      const int64_t length = tensor_lengths_t(i);
+      OP_REQUIRES(ctx, length >= 0,
+                  absl::InvalidArgumentError(absl::StrCat(
+                      "Expected lengths to be non-negative, but found ", length,
+                      " at index ", i)));
+      const int64_t next_total_length =
+          AddWithoutOverflow(total_length, length);
+      OP_REQUIRES(
+          ctx, next_total_length >= 0,
+          absl::InvalidArgumentError("TensorArraySplit lengths overflowed"));
+      total_length = next_total_length;
       cumulative_lengths.push_back(total_length);
     }
 
     OP_REQUIRES(
         ctx, TensorShapeUtils::IsVectorOrHigher(tensor_value->shape()),
-        errors::InvalidArgument(
+        absl::InvalidArgumentError(absl::StrCat(
             "Expected value to be at least a vector, but received shape: ",
-            tensor_value->shape().DebugString()));
+            tensor_value->shape().DebugString())));
 
-    OP_REQUIRES(
-        ctx, total_length == tensor_value->shape().dim_size(0),
-        errors::InvalidArgument("Expected sum of lengths to be equal to "
-                                "values.shape[0], but sum of lengths is ",
-                                total_length, " and value's shape is: ",
-                                tensor_value->shape().DebugString()));
+    OP_REQUIRES(ctx, total_length == tensor_value->shape().dim_size(0),
+                absl::InvalidArgumentError(
+                    absl::StrCat("Expected sum of lengths to be equal to "
+                                 "values.shape[0], but sum of lengths is ",
+                                 total_length, " and value's shape is: ",
+                                 tensor_value->shape().DebugString())));
     int64_t elements_per_row =
         (total_length == 0) ? 0 : (tensor_value->NumElements() / total_length);
 
@@ -1279,17 +1372,17 @@ class TensorArraySplitOp : public OpKernel {
 
     OP_REQUIRES(
         ctx, array_size == num_tensors,
-        errors::InvalidArgument(
+        absl::InvalidArgumentError(absl::StrCat(
             "TensorArray's size is not equal to the size of lengths (",
             array_size, " vs. ", num_tensors, "), and the TensorArray is not ",
-            "marked as dynamically resizeable"));
+            "marked as dynamically resizeable")));
 
     OP_REQUIRES(
         ctx, tensor_value->dtype() == tensor_array->ElemType(),
-        errors::InvalidArgument("TensorArray dtype is ",
-                                DataTypeString(tensor_array->ElemType()),
-                                " but Op is trying to write dtype ",
-                                DataTypeString(tensor_value->dtype()), "."));
+        absl::InvalidArgumentError(absl::StrCat(
+            "TensorArray dtype is ", DataTypeString(tensor_array->ElemType()),
+            " but Op is trying to write dtype ",
+            DataTypeString(tensor_value->dtype()), ".")));
 
     auto tensor_value_t =
         tensor_value->shaped<T, 3>({1, total_length, elements_per_row});
@@ -1326,11 +1419,11 @@ class TensorArraySplitOp : public OpKernel {
     // Record the concat size of the TensorArray.
     OP_REQUIRES_OK(ctx, tensor_array->SetMarkedSize(array_size));
 
-    std::vector<int32> indices(array_size);
+    std::vector<int32_t> indices(array_size);
     std::iota(indices.begin(), indices.end(), 0);
 
-    Status s = tensor_array->WriteOrAggregateMany<Device, T>(ctx, indices,
-                                                             &write_values);
+    absl::Status s = tensor_array->WriteOrAggregateMany<Device, T>(
+        ctx, indices, &write_values);
     OP_REQUIRES_OK(ctx, s);
   }
 };
@@ -1391,7 +1484,7 @@ class TensorArraySizeOp : public OpKernel {
     core::ScopedUnref unref(tensor_array);
     Tensor* output = nullptr;
     OP_REQUIRES_OK(ctx, ctx->allocate_output(0, TensorShape({}), &output));
-    OP_REQUIRES_OK(ctx, tensor_array->Size(&(output->scalar<int32>()())));
+    OP_REQUIRES_OK(ctx, tensor_array->Size(&(output->scalar<int32_t>()())));
   }
 };
 

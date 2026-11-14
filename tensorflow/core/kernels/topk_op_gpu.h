@@ -23,12 +23,13 @@ limitations under the License.
 #include <string>
 #include <vector>
 
-#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
+#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/register_types.h"
 #include "tensorflow/core/framework/tensor.h"
 #include "tensorflow/core/framework/tensor_shape.h"
 #include "tensorflow/core/kernels/gpu_prim.h"
+#include "tensorflow/core/kernels/gpu_prim_helpers.h"
 #include "tensorflow/core/kernels/topk_op.h"
 #include "tensorflow/core/lib/gtl/top_n.h"
 #include "tensorflow/core/platform/logging.h"
@@ -237,12 +238,12 @@ __device__ void heapTopK(const T* __restrict__ input, int length, int k,
   // Now iterate over the remaining items.
   // If an item is smaller than the min element, it is not amongst the top k.
   // Otherwise, replace the min element with it and push upwards.
-  for (int index = heap_end_index; index < length; index += step_size) {
+  for (int64_t index = heap_end_index; index < length; index += step_size) {
     // We prefer elements with lower indices. This is given here.
     // Later elements automatically have higher indices, so can be discarded.
     if (input[index] > heap.root().value) {
       // This element should replace the min.
-      heap.replace_root({index, input[index]}, k);
+      heap.replace_root({static_cast<int>(index), input[index]}, k);
     }
   }
 
@@ -439,10 +440,10 @@ struct ColumnIndexCreator {
 };
 
 template <typename T>
-Status LaunchSortKernel(OpKernelContext* ctx, const T* input, int num_rows,
-                        int num_cols, int k,
-                        typename TTypes<T, 2>::Tensor values,
-                        TTypes<int, 2>::Tensor indices) {
+absl::Status LaunchSortKernel(OpKernelContext* ctx, const T* input,
+                              int num_rows, int num_cols, int k,
+                              typename TTypes<T, 2>::Tensor values,
+                              TTypes<int, 2>::Tensor indices) {
   const GPUDevice& d = ctx->eigen_device<GPUDevice>();
   const auto& cu_stream = GetGpuStream(ctx);
   size_t temp_storage_bytes = -1;
@@ -452,7 +453,7 @@ Status LaunchSortKernel(OpKernelContext* ctx, const T* input, int num_rows,
   Tensor input_indices;
   TF_RETURN_IF_ERROR(ctx->allocate_temp(
       DT_INT32, TensorShape({num_rows, num_cols}), &input_indices));
-  auto input_indices_t = To32Bit(input_indices.flat<int32>());
+  auto input_indices_t = To32Bit(input_indices.flat<int32_t>());
   input_indices_t.device(d) =
       input_indices_t.generate(ColumnIndexCreator(num_cols));
 
@@ -476,80 +477,96 @@ Status LaunchSortKernel(OpKernelContext* ctx, const T* input, int num_rows,
     TF_RETURN_IF_ERROR(ctx->allocate_temp(DataTypeToEnum<T>::value,
                                           TensorShape({num_rows, num_cols}),
                                           &temp_values));
-    sorted_indices_ptr = temp_indices.flat<int32>().data();
+    sorted_indices_ptr = temp_indices.flat<int32_t>().data();
     sorted_values_ptr = temp_values.flat<T>().data();
   }
 
-  auto err = gpuprim::DeviceSegmentedRadixSort::SortPairsDescending(
-      /* d_temp_storage */ nullptr,
-      /* temp_storage_bytes */ temp_storage_bytes,
-      /* d_keys_in */ input,
-      /* d_keys_out */ sorted_values_ptr,
-      /* d_values_in */ input_indices_t.data(),
-      /* d_values_out */ sorted_indices_ptr,
-      /* num_items */ num_cols * num_rows,
-      /* num_segments */ num_rows,
-      /* d_begin_offsets */ segment_offsets_t,
-      /* d_end_offsets */ segment_offsets_t + 1,
-      /* begin_bit */ 0,
-      /* end_bit */ sizeof(T) * 8,
-      /* stream */ cu_stream);
-  if (err != cudaSuccess) {
-    return errors::Internal(
-        "TopKOp: Could not launch "
-        "gpuprim::DeviceSegmentedRadixSort::SortPairsDescending to calculate "
-        "temp_storage_bytes, status: ",
-        cudaGetErrorString(err));
+  bool ran_nonsegmented_version = false;
+  if (num_rows == 1) {
+    // Note: DeviceSegmentedRadixSort is very slow when num_segments=1 because
+    // it only uses 1 SM per segment. Calling the un-segmented version is much
+    // faster in this case.
+    TF_RETURN_IF_ERROR(
+        GpuRadixSortDescending(ctx, num_cols, /*keys_in=*/input,
+                               /*keys_out=*/sorted_values_ptr,
+                               /*indices_in=*/input_indices_t.data(),
+                               /*indices_out=*/sorted_indices_ptr,
+                               /*num_bits=*/sizeof(T) * 8));
+    ran_nonsegmented_version = true;
   }
-  Tensor temp_storage;
-  TF_RETURN_IF_ERROR(ctx->allocate_temp(
-      DT_INT8, TensorShape({static_cast<int64>(temp_storage_bytes)}),
-      &temp_storage));
-  err = gpuprim::DeviceSegmentedRadixSort::SortPairsDescending(
-      /* d_temp_storage */ temp_storage.flat<int8>().data(),
-      /* temp_storage_bytes */ temp_storage_bytes,
-      /* d_keys_in */ input,
-      /* d_keys_out */ sorted_values_ptr,
-      /* d_values_in */ input_indices_t.data(),
-      /* d_values_out */ sorted_indices_ptr,
-      /* num_items */ num_cols * num_rows,
-      /* num_segments */ num_rows,
-      /* d_begin_offsets */ segment_offsets_t,
-      /* d_end_offsets */ segment_offsets_t + 1,
-      /* begin_bit */ 0,
-      /* end_bit */ sizeof(T) * 8,
-      /* stream */ cu_stream);
-  if (err != cudaSuccess) {
-    return errors::Internal(
-        "TopKOp: Could not launch "
-        "gpuprim::DeviceSegmentedRadixSort::SortPairsDescending to sort input, "
-        "temp_storage_bytes: ",
-        temp_storage_bytes, ", status: ", cudaGetErrorString(err));
+  if (!ran_nonsegmented_version) {
+    auto err = gpuprim::DeviceSegmentedRadixSort::SortPairsDescending(
+        /* d_temp_storage */ nullptr,
+        /* temp_storage_bytes */ temp_storage_bytes,
+        /* d_keys_in */ input,
+        /* d_keys_out */ sorted_values_ptr,
+        /* d_values_in */ input_indices_t.data(),
+        /* d_values_out */ sorted_indices_ptr,
+        /* num_items */ num_cols * num_rows,
+        /* num_segments */ num_rows,
+        /* d_begin_offsets */ segment_offsets_t,
+        /* d_end_offsets */ segment_offsets_t + 1,
+        /* begin_bit */ 0,
+        /* end_bit */ sizeof(T) * 8,
+        /* stream */ cu_stream);
+    if (err != cudaSuccess) {
+      return errors::Internal(
+          "TopKOp: Could not launch "
+          "gpuprim::DeviceSegmentedRadixSort::SortPairsDescending to calculate "
+          "temp_storage_bytes, status: ",
+          cudaGetErrorString(err));
+    }
+    Tensor temp_storage;
+    TF_RETURN_IF_ERROR(ctx->allocate_temp(
+        DT_INT8, TensorShape({static_cast<int64_t>(temp_storage_bytes)}),
+        &temp_storage));
+    err = gpuprim::DeviceSegmentedRadixSort::SortPairsDescending(
+        /* d_temp_storage */ temp_storage.flat<int8_t>().data(),
+        /* temp_storage_bytes */ temp_storage_bytes,
+        /* d_keys_in */ input,
+        /* d_keys_out */ sorted_values_ptr,
+        /* d_values_in */ input_indices_t.data(),
+        /* d_values_out */ sorted_indices_ptr,
+        /* num_items */ num_cols * num_rows,
+        /* num_segments */ num_rows,
+        /* d_begin_offsets */ segment_offsets_t,
+        /* d_end_offsets */ segment_offsets_t + 1,
+        /* begin_bit */ 0,
+        /* end_bit */ sizeof(T) * 8,
+        /* stream */ cu_stream);
+    if (err != cudaSuccess) {
+      return errors::Internal(
+          "TopKOp: Could not launch "
+          "gpuprim::DeviceSegmentedRadixSort::SortPairsDescending to sort "
+          "input, "
+          "temp_storage_bytes: ",
+          temp_storage_bytes, ", status: ", cudaGetErrorString(err));
+    }
   }
   if (k < num_cols) {
     // Need to copy subsets of sorted_indices and sorted_outputs to
     // indices and outputs.
     const Eigen::DSizes<Eigen::DenseIndex, 2> slice_indices{0, 0};
     const Eigen::DSizes<Eigen::DenseIndex, 2> slice_sizes{num_rows, k};
-    To32Bit(indices).device(d) =
-        To32Bit(temp_indices.matrix<int32>()).slice(slice_indices, slice_sizes);
+    To32Bit(indices).device(d) = To32Bit(temp_indices.matrix<int32_t>())
+                                     .slice(slice_indices, slice_sizes);
     To32Bit(values).device(d) =
         To32Bit(temp_values.matrix<T>()).slice(slice_indices, slice_sizes);
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-}  // end namespace impl
+}  // namespace impl
 
 namespace functor {
 
-template <typename T>
-struct TopKFunctor<GPUDevice, T> {
-  static EIGEN_ALWAYS_INLINE Status
-  Compute(OpKernelContext* context, bool sorted, int k,
-          const typename TTypes<T, 2>::ConstTensor& input, const int64 num_rows,
-          const int64 num_cols, typename TTypes<T, 2>::Tensor values,
-          typename TTypes<int, 2>::Tensor indices) {
+template <typename T, typename Tidx>
+struct TopKFunctor<GPUDevice, T, Tidx> {
+  static EIGEN_ALWAYS_INLINE absl::Status Compute(
+      OpKernelContext* context, bool sorted, int k,
+      const typename TTypes<T, 2>::ConstTensor& input, const int64_t num_rows,
+      const int64_t num_cols, typename TTypes<T, 2>::Tensor values,
+      typename TTypes<Tidx, 2>::Tensor indices) {
     // For small k, use the heap implementation.  For larger k, use
     // the in-place gpuprim sort.  For k == num_cols, always use the
     // in-place gpuprim sort.  The thresholds for n and k were determined
@@ -566,13 +583,13 @@ struct TopKFunctor<GPUDevice, T> {
         return errors::Internal(
             "Could not launch TopKKernel: ", cudaGetErrorString(err), ".");
       } else {
-        return Status::OK();
+        return absl::OkStatus();
       }
     }
   }
 };
 
-}  // end namespace functor
+}  // namespace functor
 }  // namespace tensorflow
 
 #endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM

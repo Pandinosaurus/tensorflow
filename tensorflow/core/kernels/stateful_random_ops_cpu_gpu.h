@@ -16,7 +16,6 @@ limitations under the License.
 #ifndef TENSORFLOW_CORE_KERNELS_STATEFUL_RANDOM_OPS_CPU_GPU_H_
 #define TENSORFLOW_CORE_KERNELS_STATEFUL_RANDOM_OPS_CPU_GPU_H_
 
-#include "tensorflow/core/framework/resource_var.h"
 #include "tensorflow/core/kernels/random_ops_util.h"
 #include "tensorflow/core/kernels/stateful_random_ops.h"
 
@@ -24,19 +23,19 @@ namespace tensorflow {
 
 PHILOX_DEVICE_INLINE PhiloxRandom
 GetPhiloxRandomFromMem(StateElementType const* ptr) {
-  auto ptr_ = reinterpret_cast<uint64 const*>(ptr);
+  auto ptr_ = reinterpret_cast<const uint64_t*>(ptr);
   return GetPhiloxRandomFromCounterKeyMem(ptr_, ptr_ + 2);
 }
 
 PHILOX_DEVICE_INLINE void WritePhiloxRandomToMem(PhiloxRandom const& philox,
                                                  StateElementType* ptr) {
-  auto ptr_ = reinterpret_cast<uint64*>(ptr);
+  auto ptr_ = reinterpret_cast<uint64_t*>(ptr);
   WriteCounterToMem(philox.counter(), ptr_);
   WriteKeyToMem(philox.key(), ptr_ + 2);
 }
 
 PHILOX_DEVICE_INLINE PhiloxRandom SkipPhiloxRandom(PhiloxRandom const& philox,
-                                                   uint64 output_size) {
+                                                   uint64_t output_size) {
   auto new_philox = philox;
   // Multiplier 256 is the same as in FillPhiloxRandomTask; do not change it
   // just here.
@@ -46,18 +45,18 @@ PHILOX_DEVICE_INLINE PhiloxRandom SkipPhiloxRandom(PhiloxRandom const& philox,
 }
 
 PHILOX_DEVICE_INLINE void UpdateMemWithPhiloxRandom(PhiloxRandom const& philox,
-                                                    uint64 output_size,
+                                                    uint64_t output_size,
                                                     StateElementType* ptr) {
   auto new_philox = SkipPhiloxRandom(philox, output_size);
   WritePhiloxRandomToMem(new_philox, ptr);
 }
 
 PHILOX_DEVICE_INLINE void UpdateCounterMemWithPhiloxRandom(
-    PhiloxRandom::ResultType const& counter, uint64 output_size,
+    PhiloxRandom::ResultType const& counter, uint64_t output_size,
     StateElementType* ptr) {
   auto philox = PhiloxRandom(counter, PhiloxRandom::Key() /*dummy*/);
   auto new_philox = SkipPhiloxRandom(philox, output_size);
-  WriteCounterToMem(new_philox.counter(), reinterpret_cast<uint64*>(ptr));
+  WriteCounterToMem(new_philox.counter(), reinterpret_cast<uint64_t*>(ptr));
 }
 
 namespace functor {
@@ -76,10 +75,12 @@ struct RngSkip_Philox;
 
 using CPUDevice = Eigen::ThreadPoolDevice;
 
+class ScopedUnlockUnrefVar;
+
 struct UpdateVariableAndFill_Philox_Arg {
   int64_t output_size;
   int64_t alg_tag_skip;
-  ScopedUnlockUnrefVar* not_used;
+  ScopedUnlockUnrefVar* state_var_guard;
   Tensor* state_tensor;
 };
 
@@ -101,7 +102,7 @@ struct UpdateVariableAndFill_Philox<GPUDevice, Distribution> {
 template <>
 struct RngSkip_Philox<GPUDevice> {
   void operator()(const GPUDevice& device, const StateElementType* in_data,
-                  uint64 delta, StateElementType* out_data);
+                  uint64_t delta, StateElementType* out_data);
 };
 
 }  // end namespace functor

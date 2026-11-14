@@ -45,16 +45,18 @@ class DummyDevice : public DeviceBase {
 };
 
 // Helper for comparing output and expected output
-void ExpectSummaryMatches(const Summary& actual, const string& expected_str) {
+void ExpectSummaryMatches(const Summary& actual,
+                          const std::string& expected_str) {
   Summary expected;
   ASSERT_TRUE(protobuf::TextFormat::ParseFromString(expected_str, &expected));
   EXPECT_EQ(expected.DebugString(), actual.DebugString());
 }
 
-void TestScalarSummaryOp(Tensor* tags, Tensor* values, string expected_output,
+void TestScalarSummaryOp(Tensor* tags, Tensor* values,
+                         std::string expected_output,
                          error::Code expected_code) {
   // Initialize node used to fetch OpKernel
-  Status status;
+  absl::Status status;
   NodeDef def;
   def.set_op("ScalarSummary");
 
@@ -64,8 +66,8 @@ void TestScalarSummaryOp(Tensor* tags, Tensor* values, string expected_output,
   SetAttrValue(values->dtype(), &valuesTypeAttr);
   (*def.mutable_attr())["T"] = valuesTypeAttr;
 
-  def.add_input(strings::StrCat("input1: ", DataTypeString(tags->dtype())));
-  def.add_input(strings::StrCat("input2: ", DataTypeString(values->dtype())));
+  def.add_input(absl::StrCat("input1: ", DataTypeString(tags->dtype())));
+  def.add_input(absl::StrCat("input2: ", DataTypeString(values->dtype())));
 
   std::unique_ptr<OpKernel> kernel =
       CreateOpKernel(DeviceType(DEVICE_CPU), nullptr, nullptr, def, 1, &status);
@@ -76,10 +78,10 @@ void TestScalarSummaryOp(Tensor* tags, Tensor* values, string expected_output,
   params.op_kernel = kernel.get();
   AllocatorAttributes alloc_attrs;
   params.output_attr_array = &alloc_attrs;
-  gtl::InlinedVector<TensorValue, 4> inputs;
+  absl::InlinedVector<TensorValue, 4UL> inputs;
   inputs.emplace_back(tags);
   inputs.emplace_back(values);
-  params.inputs = &inputs;
+  params.inputs = inputs;
   OpKernelContext ctx(&params, 1);
   kernel->Compute(&ctx);
   ASSERT_EQ(expected_code, ctx.status().code());

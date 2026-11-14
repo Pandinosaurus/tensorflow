@@ -14,6 +14,9 @@ limitations under the License.
 ==============================================================================*/
 #include "tensorflow/core/common_runtime/eager/eager_op_rewrite_registry.h"
 
+#include <memory>
+#include <utility>
+
 namespace tensorflow {
 
 EagerOpRewriteRegistry* EagerOpRewriteRegistry::Global() {
@@ -27,11 +30,11 @@ void EagerOpRewriteRegistry::Register(Phase phase, int32_t ordinal,
   auto it_rewrites = rewrites_[phase].cbegin();
   for (; it_rewrites != rewrites_[phase].cend(); ++it_rewrites) {
     if (it_rewrites->second == ordinal) {
-      TF_CHECK_OK(errors::AlreadyExists(
+      TF_CHECK_OK(absl::AlreadyExistsError(absl::StrCat(
           "Attempting to register Eager Rewriter ", pass->GetDebugInfo().name,
           " for phase ", phase, " using ordinal ", ordinal,
           " already occupied by Rewriter ",
-          it_rewrites->first->GetDebugInfo().name));
+          it_rewrites->first->GetDebugInfo().name)));
     }
     if (it_rewrites->second > ordinal) {
       break;
@@ -41,7 +44,7 @@ void EagerOpRewriteRegistry::Register(Phase phase, int32_t ordinal,
                            std::make_pair(std::move(pass), ordinal));
 }
 
-Status EagerOpRewriteRegistry::RunRewrite(
+absl::Status EagerOpRewriteRegistry::RunRewrite(
     Phase phase, EagerOperation* orig_op,
     std::unique_ptr<EagerOperation>* out_op) {
   EagerOperation* pre_op = orig_op;
@@ -53,7 +56,7 @@ Status EagerOpRewriteRegistry::RunRewrite(
     }
   }
 
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 }  // namespace tensorflow

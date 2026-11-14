@@ -13,25 +13,33 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "mlir/IR/Dialect.h"  // from @llvm-project
 #include "mlir/IR/MLIRContext.h"  // from @llvm-project
 #include "mlir/IR/PatternMatch.h"  // from @llvm-project
-#include "mlir/InitAllDialects.h"  // from @llvm-project
-#include "mlir/InitAllPasses.h"  // from @llvm-project
 #include "mlir/Reducer/ReductionPatternInterface.h"  // from @llvm-project
+#include "mlir/Support/LogicalResult.h"  // from @llvm-project
 #include "mlir/Tools/mlir-reduce/MlirReduceMain.h"  // from @llvm-project
-#include "tensorflow/compiler/mlir/hlo/include/mlir-hlo/Dialect/mhlo/IR/register.h"
-#include "tensorflow/compiler/mlir/hlo/include/mlir-hlo/Dialect/mhlo/transforms/register_passes.h"
 #include "tensorflow/compiler/mlir/init_mlir.h"
-#include "tensorflow/compiler/mlir/lite/ir/tfl_ops.h"
+#include "tensorflow/compiler/mlir/register_common_dialects.h"
 #include "tensorflow/compiler/mlir/tensorflow/dialect_registration.h"
-#include "tensorflow/compiler/mlir/tensorflow/transforms/passes.h"
-#include "tensorflow/compiler/mlir/tools/kernel_gen/ir/tf_framework_ops.h"
-#include "tensorflow/compiler/mlir/xla/transforms/passes.h"
+#include "tensorflow/compiler/mlir/tensorflow/ir/tf_ops.h"
 
 namespace {
 
-#include "tensorflow/compiler/mlir/tensorflow/transforms/reducer/tf_reduce_patterns.inc"
+struct CollapseAndErase : public mlir::OpRewritePattern<mlir::TF::IdentityOp> {
+  using OpRewritePattern::OpRewritePattern;
+  mlir::LogicalResult matchAndRewrite(
+      mlir::TF::IdentityOp op, mlir::PatternRewriter& rewriter) const override {
+    auto arg = op.getInput().getDefiningOp<mlir::TF::IdentityOp>();
+    if (!arg) return mlir::failure();
+
+    rewriter.replaceOpWithNewOp<mlir::TF::IdentityOp>(op, op.getType(),
+                                                      arg.getInput());
+    if (arg.use_empty()) {
+      rewriter.eraseOp(arg);
+    }
+    return mlir::success();
+  }
+};
 
 struct TFReductionPatternInterface
     : public mlir::DialectReductionPatternInterface {
@@ -41,7 +49,7 @@ struct TFReductionPatternInterface
 
   void populateReductionPatterns(
       mlir::RewritePatternSet &patterns) const final {
-    populateWithGenerated(patterns);
+    patterns.add<CollapseAndErase>(patterns.getContext());
   }
 };
 
@@ -50,25 +58,13 @@ struct TFReductionPatternInterface
 int main(int argc, char *argv[]) {
   tensorflow::InitMlir y(&argc, &argv);
 
-  mlir::registerAllPasses();
-  mlir::registerTensorFlowPasses();
-  mlir::TFDevice::registerTensorFlowDevicePasses();
-  mlir::mhlo::registerAllMhloPasses();
-  mlir::lmhlo::registerAllLmhloPasses();
-  // These are in compiler/mlir/xla and not part of the above MHLO passes.
-  mlir::mhlo::registerXlaPasses();
-  mlir::mhlo::registerLegalizeTFPass();
-  mlir::mhlo::registerLegalizeTFControlFlowPass();
-  mlir::mhlo::registerLegalizeTfTypesPassPass();
-
   mlir::DialectRegistry registry;
-  mlir::registerAllDialects(registry);
-  mlir::RegisterAllTensorFlowDialects(registry);
-  registry.addDialectInterface<mlir::TF::TensorFlowDialect,
-                               TFReductionPatternInterface>();
-  mlir::mhlo::registerAllMhloDialects(registry);
-  registry.insert<mlir::TFL::TensorFlowLiteDialect>();
-  registry.insert<mlir::kernel_gen::tf_framework::TFFrameworkDialect>();
+  mlir::RegisterCommonToolingDialects(registry);
+
+  registry.addExtension(
+      +[](mlir::MLIRContext *ctx, mlir::TF::TensorFlowDialect *dialect) {
+        dialect->addInterfaces<TFReductionPatternInterface>();
+      });
 
   mlir::MLIRContext context(registry);
 

@@ -15,7 +15,12 @@ limitations under the License.
 
 #include "tensorflow/core/grappler/optimizers/generic_layout_optimizer.h"
 
+#include <cstdint>
+#include <limits>
+#include <vector>
+
 #include "absl/memory/memory.h"
+#include "absl/strings/str_join.h"
 #include "absl/strings/string_view.h"
 #include "tensorflow/cc/ops/array_ops.h"
 #include "tensorflow/cc/ops/const_op.h"
@@ -32,6 +37,7 @@ limitations under the License.
 #include "tensorflow/core/grappler/utils/graph_view.h"
 #include "tensorflow/core/grappler/utils/grappler_test.h"
 #include "tensorflow/core/lib/core/status_test_util.h"
+#include "tensorflow/core/platform/tensor_float_32_utils.h"
 #include "tensorflow/core/platform/test.h"
 
 namespace tensorflow {
@@ -39,6 +45,7 @@ namespace grappler {
 
 using ::tensorflow::Scope;
 using ::tensorflow::ops::Conv2D;
+using ::tensorflow::ops::Conv3D;
 using ::tensorflow::ops::Identity;
 using ::tensorflow::ops::RandomUniform;
 
@@ -68,6 +75,10 @@ constexpr int kDepthOut = 16;
   { 0, 3, 1, 2 }
 #define PERMUTATION_DST_TO_SRC \
   { 0, 2, 3, 1 }
+#define DIMS_5D(n, d, h, w, c) \
+  { n, d, h, w, c }
+#define SRC_DATA_FORMAT_5D "NDHWC"
+#define DST_DATA_FORMAT_5D "NCDHW"
 #else
 #define DIMS(n, h, w, c) \
   { n, c, h, w }
@@ -79,11 +90,15 @@ constexpr int kDepthOut = 16;
   { 0, 2, 3, 1 }
 #define PERMUTATION_DST_TO_SRC \
   { 0, 3, 1, 2 }
+#define DIMS_5D(n, d, h, w, c) \
+  { n, c, d, h, w }
+#define SRC_DATA_FORMAT_5D "NCDHW"
+#define DST_DATA_FORMAT_5D "NDHWC"
 #endif  // (GOOGLE_CUDA || TENSORFLOW_USE_ROCM)
 
 template <typename T = float>
 Output SimpleConv2D(tensorflow::Scope* s, int input_size, int filter_size,
-                    const string& padding, const string& device) {
+                    const std::string& padding, const std::string& device) {
   int batch_size = 8;
   int input_height = input_size;
   int input_width = input_size;
@@ -111,7 +126,7 @@ Output SimpleConv2D(tensorflow::Scope* s, int input_size, int filter_size,
 }
 
 Output SimpleConv2DBackpropInput(tensorflow::Scope* s, int input_size,
-                                 int filter_size, const string& padding,
+                                 int filter_size, const std::string& padding,
                                  bool dilated, const int input_sizes_length) {
   int batch_size = 128;
   int input_height = input_size;
@@ -159,6 +174,37 @@ Output SimpleConv2DBackpropInput(tensorflow::Scope* s, int input_size,
   return conv_backprop_input;
 }
 
+template <typename T = float>
+Output SimpleConv3D(tensorflow::Scope* s, int input_size, int filter_size,
+                    const std::string& padding, const std::string& device) {
+  int batch_size = 8;
+  int input_height = input_size;
+  int input_width = input_size;
+  int input_depth = 4;
+  int input_channel = 3;
+  int filter_count = 6;
+  int stride = 1;
+  TensorShape input_shape(DIMS_5D(batch_size, input_depth, input_height,
+                                  input_width, input_channel));
+  Tensor input_data(DataTypeToEnum<T>::value, input_shape);
+  test::FillIota<T>(&input_data, static_cast<T>(1));
+  Output input =
+      ops::Const(s->WithOpName("Input"), Input::Initializer(input_data));
+
+  TensorShape filter_shape(
+      {filter_size, filter_size, filter_size, input_channel, filter_count});
+  Tensor filter_data(DataTypeToEnum<T>::value, filter_shape);
+  test::FillIota<T>(&filter_data, static_cast<T>(1));
+  Output filter =
+      ops::Const(s->WithOpName("Filter"), Input::Initializer(filter_data));
+
+  Output conv =
+      ops::Conv3D(s->WithOpName("Conv3D").WithDevice(device), input, filter,
+                  DIMS_5D(1, stride, stride, stride, 1), padding,
+                  ops::Conv3D::Attrs().DataFormat(SRC_DATA_FORMAT_5D));
+  return conv;
+}
+
 class GenericLayoutOptimizerTest : public GrapplerTest {
  protected:
   void SetUp() override {
@@ -166,7 +212,7 @@ class GenericLayoutOptimizerTest : public GrapplerTest {
 
     if (gpu_available) {
       virtual_cluster_ =
-          absl::make_unique<SingleMachine>(/*timeout_s=*/10, 1, 1);
+          std::make_unique<SingleMachine>(/*timeout_s=*/10, 1, 1);
     } else {
       DeviceProperties cpu_device;
       cpu_device.set_type("CPU");
@@ -193,7 +239,11 @@ class GenericLayoutOptimizerTest : public GrapplerTest {
     TF_ASSERT_OK(virtual_cluster_->Provision());
   }
 
-  void TearDown() override { TF_ASSERT_OK(virtual_cluster_->Shutdown()); }
+  void TearDown() override {
+    TF_ASSERT_OK(virtual_cluster_->Shutdown());
+    // Turn TensorFloat-32 back on since some tests disable it
+    tsl::enable_tensor_float_32_execution(true);
+  }
 
   std::unique_ptr<Cluster> virtual_cluster_;
 };
@@ -239,37 +289,19 @@ TEST_F(GenericLayoutOptimizerTest, OptimizeSimpleConv2DGraph) {
   GraphDef output;
   TF_ASSERT_OK(optimizer.Optimize(virtual_cluster_.get(), item, &output));
 
-  Status status;
+  absl::Status status;
   utils::GraphView graph_view(&output, &status);
   TF_ASSERT_OK(status);
-  // The expected optimized graph contains 2 extra sets of Transpose nodes and
-  // has the Conv2D's data_format set to "NCHW" on GPU, while "NHWC" on CPU.
-  auto* input_transpose_node = graph_view.GetNode(
-      absl::StrCat("Conv2D-0-Transpose", SRC_DATA_FORMAT, "To", DST_DATA_FORMAT,
-                   "-LayoutOptimizer"));
-
-  ASSERT_NE(input_transpose_node, nullptr);
-  ASSERT_EQ(input_transpose_node->NumRegularFanins(), 2);
-  VerifyRegularFaninMatch(input_transpose_node, 0, "Input", 0);
 
   auto* conv2d_node = graph_view.GetNode("Conv2D");
   ASSERT_NE(conv2d_node, nullptr);
   ASSERT_EQ(conv2d_node->NumRegularFanins(), 2);
-  VerifyRegularFaninMatch(conv2d_node, 0, input_transpose_node->GetName(), 0);
   VerifyRegularFaninMatch(conv2d_node, 1, "Filter", 0);
-  VerifyDataFormatAttributeMatch(conv2d_node, DST_DATA_FORMAT);
-
-  auto* output_transpose_node = graph_view.GetNode(
-      absl::StrCat("Conv2D-0-0-Transpose", DST_DATA_FORMAT, "To",
-                   SRC_DATA_FORMAT, "-LayoutOptimizer"));
-  ASSERT_NE(output_transpose_node, nullptr);
-  ASSERT_EQ(output_transpose_node->NumRegularFanins(), 2);
-  VerifyRegularFaninMatch(output_transpose_node, 0, conv2d_node->GetName(), 0);
+  VerifyDataFormatAttributeMatch(conv2d_node, SRC_DATA_FORMAT);
 
   auto* output_node = graph_view.GetNode("Output");
   ASSERT_NE(output_node, nullptr);
   ASSERT_EQ(output_node->NumRegularFanins(), 1);
-  VerifyRegularFaninMatch(output_node, 0, output_transpose_node->GetName(), 0);
 }
 
 TEST_F(GenericLayoutOptimizerTest, PreserveFetch) {
@@ -284,7 +316,7 @@ TEST_F(GenericLayoutOptimizerTest, PreserveFetch) {
   GraphDef output;
   TF_ASSERT_OK(optimizer.Optimize(virtual_cluster_.get(), item, &output));
 
-  Status status;
+  absl::Status status;
   utils::GraphView graph_view(&output, &status);
   TF_ASSERT_OK(status);
   auto* conv_node = graph_view.GetNode("Conv2D");
@@ -303,18 +335,19 @@ TEST_F(GenericLayoutOptimizerTest, EmptyDevice) {
   GraphDef output;
   TF_ASSERT_OK(optimizer.Optimize(virtual_cluster_.get(), item, &output));
 
-  Status status;
+  absl::Status status;
   utils::GraphView graph_view(&output, &status);
   TF_ASSERT_OK(status);
   auto* conv_node = graph_view.GetNode("Conv2D");
   ASSERT_NE(conv_node, nullptr);
-  VerifyDataFormatAttributeMatch(conv_node, DST_DATA_FORMAT);
+  VerifyDataFormatAttributeMatch(conv_node, SRC_DATA_FORMAT);
 }
 
 TEST_F(GenericLayoutOptimizerTest, GPUDevice) {
 #if !(GOOGLE_CUDA || TENSORFLOW_USE_ROCM)
   GTEST_SKIP() << "Neither CUDA nor ROCm is enabled";
 #endif  // !(GOOGLE_CUDA || TENSORFLOW_USE_ROCM)
+  tsl::enable_tensor_float_32_execution(false);  // NOLINT
   tensorflow::Scope s = tensorflow::Scope::NewRootScope();
   auto conv =
       SimpleConv2D(&s, 4, 2, "VALID", "/job:w/replica:0/task:0/device:GPU:0");
@@ -326,7 +359,7 @@ TEST_F(GenericLayoutOptimizerTest, GPUDevice) {
   GraphDef output;
   TF_ASSERT_OK(optimizer.Optimize(virtual_cluster_.get(), item, &output));
 
-  Status status;
+  absl::Status status;
   utils::GraphView graph_view(&output, &status);
   TF_ASSERT_OK(status);
   auto* conv_node = graph_view.GetNode("Conv2D");
@@ -345,7 +378,7 @@ TEST_F(GenericLayoutOptimizerTest, CPUDevice) {
   GraphDef output;
   TF_ASSERT_OK(optimizer.Optimize(virtual_cluster_.get(), item, &output));
 
-  Status status;
+  absl::Status status;
   utils::GraphView graph_view(&output, &status);
   TF_ASSERT_OK(status);
   auto* conv_node = graph_view.GetNode("Conv2D");
@@ -359,7 +392,7 @@ TEST_F(GenericLayoutOptimizerTest, CPUDevice) {
 
 TEST_F(GenericLayoutOptimizerTest, NoOptimizeIntegerConvolution) {
   tensorflow::Scope s = tensorflow::Scope::NewRootScope();
-  auto conv = SimpleConv2D<int32>(&s, 4, 2, "VALID", "");
+  auto conv = SimpleConv2D<int32_t>(&s, 4, 2, "VALID", "");
   Output fetch = ops::Identity(s.WithOpName("Fetch"), {conv});
   GrapplerItem item;
   TF_ASSERT_OK(s.ToGraphDef(&item.graph));
@@ -368,7 +401,7 @@ TEST_F(GenericLayoutOptimizerTest, NoOptimizeIntegerConvolution) {
   GraphDef output;
   TF_ASSERT_OK(optimizer.Optimize(virtual_cluster_.get(), item, &output));
 
-  Status status;
+  absl::Status status;
   utils::GraphView graph_view(&output, &status);
   TF_ASSERT_OK(status);
   auto* conv_node = graph_view.GetNode("Conv2D");
@@ -390,7 +423,7 @@ TEST_F(GenericLayoutOptimizerTest, Connectivity) {
   // middle are layout agnostic). If the graph is already in topological order,
   // the problem is easier, where layout optimizer only needs to check
   // single-hop connectivity.
-  Status status;
+  absl::Status status;
   utils::GraphView graph_view_original(&item.graph, &status);
   const int i1_index = graph_view_original.GetNode("i1")->node_index();
   const int i2_index = graph_view_original.GetNode("i2")->node_index();
@@ -424,29 +457,18 @@ TEST_F(GenericLayoutOptimizerTest, Conv2DBackpropInputNonConstInputSizes) {
     GraphDef output;
     TF_ASSERT_OK(optimizer.Optimize(virtual_cluster_.get(), item, &output));
 
-    Status status;
+    absl::Status status;
     utils::GraphView graph_view(&output, &status);
     TF_ASSERT_OK(status);
     auto* conv2d_backprop_node = graph_view.GetNode("Conv2DBackpropInput");
     ASSERT_NE(conv2d_backprop_node, nullptr);
     ASSERT_EQ(conv2d_backprop_node->NumRegularFanins(), 3);
-    VerifyRegularFaninMatch(
-        conv2d_backprop_node, 0,
-        absl::StrCat("Conv2DBackpropInput-0-DataFormatVecPermute",
-                     SRC_DATA_FORMAT, "To", DST_DATA_FORMAT,
-                     "-LayoutOptimizer"),
-        0);
-    auto* input_sizes_node = graph_view.GetNode(absl::StrCat(
-        "Conv2DBackpropInput-0-DataFormatVecPermute", SRC_DATA_FORMAT, "To",
-        DST_DATA_FORMAT, "-LayoutOptimizer"));
-    ASSERT_NE(input_sizes_node, nullptr);
-    EXPECT_EQ(input_sizes_node->GetOp(), "DataFormatVecPermute");
-    ASSERT_EQ(input_sizes_node->NumRegularFanins(), 1);
-    VerifyRegularFaninMatch(input_sizes_node, 0, "InputSizesIdentity", 0);
+    VerifyRegularFaninMatch(conv2d_backprop_node, 0, "InputSizesIdentity", 0);
   }
 }
 
 TEST_F(GenericLayoutOptimizerTest, Conv2DDataFormatVecPermuteCollapse) {
+  tsl::enable_tensor_float_32_execution(false);
   Scope scope =
       Scope::NewRootScope().WithDevice(absl::StrCat("/device:", DEVICE, ":0"));
   auto conv = SimpleConv2D(&scope, 4, 2, "VALID",
@@ -470,7 +492,7 @@ TEST_F(GenericLayoutOptimizerTest, Conv2DDataFormatVecPermuteCollapse) {
   //
   // Graph after collapsion:
   // input -> T -> conv2d -> shape -> fill -> T' -> output
-  Status status;
+  absl::Status status;
   utils::GraphView graph_view(&output, &status);
   TF_ASSERT_OK(status);
   auto* conv2d_node = graph_view.GetNode("Conv2D");
@@ -547,7 +569,7 @@ TEST_F(GenericLayoutOptimizerTest, DoNotPruneNonAddedCancellableTransposes) {
   GraphDef output;
   TF_ASSERT_OK(optimizer.Optimize(virtual_cluster_.get(), item, &output));
 
-  Status status;
+  absl::Status status;
   utils::GraphView graph_view(&output, &status);
   TF_ASSERT_OK(status);
 
@@ -613,9 +635,9 @@ TEST_F(GenericLayoutOptimizerTest, CancelTransposeAroundPad) {
       RewriterConfig::AGGRESSIVE,
       RewriterConfig::NCHW_TO_NHWC /* CPU settings*/);
 
-  const Tensor kPermuteNhwcToNchw = test::AsTensor<int32>({0, 3, 1, 2});
-  const Tensor kPermuteNchwToNhwc = test::AsTensor<int32>({0, 2, 3, 1});
-  const Tensor kPad = test::AsTensor<int32>({1, 2, 3, 4, 5, 6, 7, 8}, {4, 2});
+  const Tensor kPermuteNhwcToNchw = test::AsTensor<int32_t>({0, 3, 1, 2});
+  const Tensor kPermuteNchwToNhwc = test::AsTensor<int32_t>({0, 2, 3, 1});
+  const Tensor kPad = test::AsTensor<int32_t>({1, 2, 3, 4, 5, 6, 7, 8}, {4, 2});
 
   GrapplerItem item;
   item.graph = test::function::GDef({
@@ -641,7 +663,7 @@ TEST_F(GenericLayoutOptimizerTest, CancelTransposeAroundPad) {
   TF_EXPECT_OK(optimizer.Optimize(virtual_cluster_.get(), item, &output));
 
   const Tensor kPermutedPaddings =
-      test::AsTensor<int32>({1, 2, 5, 6, 7, 8, 3, 4}, {4, 2});
+      test::AsTensor<int32_t>({1, 2, 5, 6, 7, 8, 3, 4}, {4, 2});
 
   GraphDef expected = test::function::GDef({
       NDef("x", "Placeholder", {}, {{"dtype", DT_FLOAT}}),
@@ -675,6 +697,117 @@ TEST_F(GenericLayoutOptimizerTest, CancelTransposeAroundPad) {
   test::ExpectTensorEqual<float>(tensors_expected[1], tensors[1]);
 }
 
+TEST_F(GenericLayoutOptimizerTest,
+       CancelTransposeAroundPadAcceptsValidSelfInversePermutation) {
+  using test::function::NDef;
+
+  GenericLayoutOptimizer optimizer(
+      RewriterConfig::AGGRESSIVE,
+      RewriterConfig::NCHW_TO_NHWC /* CPU settings*/);
+
+  // {0, 2, 1, 3} is its own inverse, so the pair around Pad still cancels.
+  const Tensor kPermute = test::AsTensor<int32_t>({0, 2, 1, 3});
+  const Tensor kPad = test::AsTensor<int32_t>({1, 2, 3, 4, 5, 6, 7, 8}, {4, 2});
+
+  GrapplerItem item;
+  item.graph = test::function::GDef({
+      NDef("x", "Placeholder", {}, {{"dtype", DT_FLOAT}}),
+
+      NDef("paddings", "Const", {}, {{"dtype", DT_INT32}, {"value", kPad}}),
+      NDef("perm_before", "Const", {},
+           {{"dtype", DT_INT32}, {"value", kPermute}}),
+      NDef("perm_after", "Const", {},
+           {{"dtype", DT_INT32}, {"value", kPermute}}),
+
+      NDef("transpose_0", "Transpose", {"x", "perm_before"},
+           {{"T", DT_FLOAT}, {"Tperm", DT_INT32}}),
+      NDef("pad", "Pad", {"transpose_0", "paddings"},
+           {{"T", DT_FLOAT}, {"Tpaddings", DT_INT32}}),
+      NDef("transpose_1", "Transpose", {"pad", "perm_after"},
+           {{"T", DT_FLOAT}, {"Tperm", DT_INT32}}),
+  });
+
+  GraphDef output;
+  TF_EXPECT_OK(optimizer.Optimize(virtual_cluster_.get(), item, &output));
+
+  int num_transposes = 0;
+  for (const NodeDef& node : output.node()) {
+    if (node.op() == "Transpose") ++num_transposes;
+  }
+  EXPECT_EQ(num_transposes, 0);
+
+  Tensor x = GenerateRandomTensor<DT_FLOAT>({2, 3, 5, 7});
+  item.fetch = {"transpose_1"};
+  item.feed.emplace_back("x", x);
+  auto tensors_expected = EvaluateFetchNodes(item);
+  GrapplerItem optimized = item.WithGraph(std::move(output));
+  auto tensors = EvaluateFetchNodes(optimized);
+  ASSERT_EQ(tensors.size(), 1);
+  ASSERT_EQ(tensors_expected.size(), 1);
+  test::ExpectTensorEqual<float>(tensors_expected[0], tensors[0]);
+}
+
+TEST_F(GenericLayoutOptimizerTest,
+       CancelTransposeAroundPadRejectsOutOfRangePermutation) {
+  using test::function::NDef;
+
+  GenericLayoutOptimizer optimizer(
+      RewriterConfig::AGGRESSIVE,
+      RewriterConfig::NCHW_TO_NHWC /* CPU settings*/);
+
+  const Tensor kPermuteNchwToNhwc = test::AsTensor<int32_t>({0, 2, 3, 1});
+  const Tensor kPad = test::AsTensor<int32_t>({1, 2, 3, 4, 5, 6, 7, 8}, {4, 2});
+
+  // Each permutation has four elements, like kPermuteNchwToNhwc, but holds an
+  // index outside [0, 4), so the two Transpose nodes are not cancellable.
+  const std::vector<std::vector<int32_t>> kOutOfRangePermutations = {
+      {0, 4, 1, 2},
+      {-1, 3, 1, 2},
+      {0, 3, 1, std::numeric_limits<int32_t>::max()},
+  };
+
+  for (const auto& permutation : kOutOfRangePermutations) {
+    SCOPED_TRACE(absl::StrJoin(permutation, ","));
+    const Tensor kPermuteBefore = test::AsTensor<int32_t>(permutation);
+
+    GrapplerItem item;
+    item.graph = test::function::GDef({
+        NDef("x", "Placeholder", {}, {{"dtype", DT_FLOAT}}),
+
+        NDef("paddings", "Const", {}, {{"dtype", DT_INT32}, {"value", kPad}}),
+        NDef("perm_before", "Const", {},
+             {{"dtype", DT_INT32}, {"value", kPermuteBefore}}),
+        NDef("perm_nchw_to_nhwc", "Const", {},
+             {{"dtype", DT_INT32}, {"value", kPermuteNchwToNhwc}}),
+
+        NDef("transpose_0", "Transpose", {"x", "perm_before"},
+             {{"T", DT_FLOAT}, {"Tperm", DT_INT32}}),
+        NDef("pad", "Pad", {"transpose_0", "paddings"},
+             {{"T", DT_FLOAT}, {"Tpaddings", DT_INT32}}),
+        NDef("transpose_1", "Transpose", {"pad", "perm_nchw_to_nhwc"},
+             {{"T", DT_FLOAT}, {"Tperm", DT_INT32}}),
+    });
+
+    GraphDef output;
+    TF_EXPECT_OK(optimizer.Optimize(virtual_cluster_.get(), item, &output));
+
+    // Both Transpose nodes are kept and the paddings are not permuted.
+    int num_checked = 0;
+    for (const NodeDef& node : output.node()) {
+      if (node.name() == "transpose_0" || node.name() == "transpose_1") {
+        EXPECT_EQ(node.op(), "Transpose");
+        ++num_checked;
+      } else if (node.name() == "paddings") {
+        Tensor paddings;
+        ASSERT_TRUE(paddings.FromProto(node.attr().at("value").tensor()));
+        EXPECT_EQ(paddings.tensor_data(), kPad.tensor_data());
+        ++num_checked;
+      }
+    }
+    EXPECT_EQ(num_checked, 3);
+  }
+}
+
 TEST_F(GenericLayoutOptimizerTest, PreserveInputShapes) {
   using test::function::NDef;
 
@@ -688,17 +821,74 @@ TEST_F(GenericLayoutOptimizerTest, PreserveInputShapes) {
   item.graph = test::function::GDef({NDef(
       "x", "_Arg", {},
       {{"T", DT_FLOAT}, {"index", 0}, {"_output_shapes", output_shapes}})});
+  item.feed.emplace_back("x", Tensor(DT_FLOAT));
 
   GraphDef output;
   TF_ASSERT_OK(optimizer.Optimize(virtual_cluster_.get(), item, &output));
 
-  Status status;
+  absl::Status status;
   utils::GraphView graph_view(&output, &status);
   TF_ASSERT_OK(status);
 
   auto* arg = graph_view.GetNode("x");
   ASSERT_NE(arg, nullptr);
   EXPECT_TRUE(arg->HasAttr("_output_shapes"));
+  EXPECT_EQ(arg->GetAttr("_output_shapes")->DebugString(),
+            output_shapes.DebugString());
+}
+
+TEST_F(GenericLayoutOptimizerTest, OptimizeSimpleConv3DGraph_CPU) {
+  // A simple graph contains 1 Conv3D node, 2 input and 1 output nodes.
+  // Data format is NCDHW on CPU.
+  Scope scope = Scope::NewRootScope();
+
+  auto conv3d = SimpleConv3D(&scope, 32, 1, "VALID", "/CPU:0");
+  auto identity = Identity(scope.WithOpName("Output"), conv3d);
+  GrapplerItem item;
+  TF_ASSERT_OK(scope.ToGraphDef(&item.graph));
+
+  GenericLayoutOptimizer optimizer(REWRITER_CONFIG);
+  GraphDef output;
+  TF_ASSERT_OK(optimizer.Optimize(virtual_cluster_.get(), item, &output));
+
+  absl::Status status;
+  utils::GraphView graph_view(&output, &status);
+  TF_ASSERT_OK(status);
+
+  auto* conv3d_node = graph_view.GetNode("Conv3D");
+  ASSERT_NE(conv3d_node, nullptr);
+  ASSERT_EQ(conv3d_node->NumRegularFanins(), 2);
+  VerifyRegularFaninMatch(conv3d_node, 1, "Filter", 0);
+
+  auto* output_node = graph_view.GetNode("Output");
+  ASSERT_NE(output_node, nullptr);
+  ASSERT_EQ(output_node->NumRegularFanins(), 1);
+
+#if (GOOGLE_CUDA || TENSORFLOW_USE_ROCM)
+  VerifyDataFormatAttributeMatch(conv3d_node, SRC_DATA_FORMAT_5D);
+#else
+  // The expected optimized graph contains 2 extra sets of Transpose nodes and
+  // has the Conv3D's data_format set "NDHWC" on CPU.
+  auto* input_transpose_node = graph_view.GetNode(
+      absl::StrCat("Conv3D-0-Transpose", SRC_DATA_FORMAT_5D, "To",
+                   DST_DATA_FORMAT_5D, "-LayoutOptimizer"));
+
+  ASSERT_NE(input_transpose_node, nullptr);
+  ASSERT_EQ(input_transpose_node->NumRegularFanins(), 2);
+  VerifyRegularFaninMatch(input_transpose_node, 0, "Input", 0);
+
+  VerifyRegularFaninMatch(conv3d_node, 0, input_transpose_node->GetName(), 0);
+  VerifyDataFormatAttributeMatch(conv3d_node, DST_DATA_FORMAT_5D);
+
+  auto* output_transpose_node = graph_view.GetNode(
+      absl::StrCat("Conv3D-0-0-Transpose", DST_DATA_FORMAT_5D, "To",
+                   SRC_DATA_FORMAT_5D, "-LayoutOptimizer"));
+  ASSERT_NE(output_transpose_node, nullptr);
+  ASSERT_EQ(output_transpose_node->NumRegularFanins(), 2);
+  VerifyRegularFaninMatch(output_transpose_node, 0, conv3d_node->GetName(), 0);
+
+  VerifyRegularFaninMatch(output_node, 0, output_transpose_node->GetName(), 0);
+#endif
 }
 
 // TODO(yanzha): Add more complex Graph for test.

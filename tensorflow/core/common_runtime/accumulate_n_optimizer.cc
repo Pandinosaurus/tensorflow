@@ -46,31 +46,31 @@ Tensor make_zeros(const DataType& dtype, const TensorShapeProto& shape) {
 // third-party libraries aren't currently supported.
 class AccumulateNV2RemovePass : public GraphOptimizationPass {
  public:
-  Status Run(const GraphOptimizationPassOptions& options) override {
+  absl::Status Run(const GraphOptimizationPassOptions& options) override {
     // TODO(freiss.oss@gmail.com): Substantial shared code with
     // ParallelConcatRemovePass::Run(). Consider refactoring if someone makes
     // a third similar rewrite.
     if (options.graph == nullptr) {
       // TODO(apassos) returning OK feels weird here as we can't do anything
       // without a graph, but some tests require this.
-      return Status::OK();
+      return absl::OkStatus();
     }
 
     Graph* g = options.graph->get();
     if (g == nullptr) {
-      return errors::Internal(
+      return absl::InternalError(
           "AccumulateNV2 removal should happen before partitioning and a "
           "graph should be available.");
     }
 
     // Build up a todo list of ops to replace, *then* modify the graph
-    gtl::InlinedVector<Node*, 2> matches;
+    absl::InlinedVector<Node*, 2UL> matches;
     for (Node* n : g->op_nodes()) {
       if (n->type_string() == "AccumulateNV2") {
         matches.push_back(n);
       }
     }
-    if (matches.empty()) return Status::OK();
+    if (matches.empty()) return absl::OkStatus();
 
     std::vector<ControlFlowInfo> control_flow_info;
     TF_RETURN_IF_ERROR(BuildControlFlowInfo(g, &control_flow_info));
@@ -98,29 +98,30 @@ class AccumulateNV2RemovePass : public GraphOptimizationPass {
         TF_RETURN_IF_ERROR(RewriteIntoTempVariable(n, g));
       }
     }
-    return Status::OK();
+    return absl::OkStatus();
   }
 
-  Status RewriteIntoTempVariable(Node* n, Graph* g) {
+  absl::Status RewriteIntoTempVariable(Node* n, Graph* g) {
     VLOG(3) << "Rewrite AccumulateNV2 into TemporaryVariable and Assign: "
             << SummarizeNode(*n);
 
     AttrSlice n_attrs = n->attrs();
-    auto base_make_node = [n, &n_attrs](const string& op, const string& name) {
+    auto base_make_node = [n, &n_attrs](const std::string& op,
+                                        const std::string& name) {
       NodeDebugInfo debug_info(*n);
       NodeBuilder node_builder(name, op, OpRegistry::Global(), &debug_info);
 
       // The pieces of AccumulateNV2 should all be on the same node.
       node_builder.Device(n->requested_device());
-      const string& colo = GetNodeAttrString(n_attrs, kColocationAttrName);
+      const std::string& colo = GetNodeAttrString(n_attrs, kColocationAttrName);
       if (!colo.empty()) {
         node_builder.Attr(kColocationAttrName, colo);
       }
       return node_builder;
     };
-    auto make_node = [n, g, &base_make_node](string op) {
-      return base_make_node(
-          op, g->NewName(strings::StrCat(n->name(), "/Internal")));
+    auto make_node = [n, g, &base_make_node](std::string op) {
+      return base_make_node(op,
+                            g->NewName(absl::StrCat(n->name(), "/Internal")));
     };
 
     DataType dtype;
@@ -144,8 +145,8 @@ class AccumulateNV2RemovePass : public GraphOptimizationPass {
     std::vector<Node*> add_values_to_accumulator;  // AssignAdd ops
     Node* clean_up_accumulator = nullptr;          // DestroyTemporaryVariable
 
-    const string accumulator_name =
-        strings::StrCat(n->name(), "/Internal/Accumulator");
+    const std::string accumulator_name =
+        absl::StrCat(n->name(), "/Internal/Accumulator");
     TensorShapeProto variable_shape;
     variable_shape.add_dim()->set_size(0);
     TF_RETURN_IF_ERROR(make_node("TemporaryVariable")
@@ -226,10 +227,10 @@ class AccumulateNV2RemovePass : public GraphOptimizationPass {
     // using its incoming/outgoing edge sets.
     g->RemoveNode(n);
 
-    return Status::OK();
+    return absl::OkStatus();
   }
 
-  Status RewriteIntoAddN(Node* n, Graph* g) {
+  absl::Status RewriteIntoAddN(Node* n, Graph* g) {
     VLOG(3) << "Rewrite AccumulateNV2 into AddN: " << SummarizeNode(*n);
 
     AttrSlice n_attrs = n->attrs();
@@ -261,7 +262,7 @@ class AccumulateNV2RemovePass : public GraphOptimizationPass {
             .Attr("T", dtype)
             .Input(data_inputs)
             .ControlInputs(control_inputs);
-    const string& colo = GetNodeAttrString(n_attrs, kColocationAttrName);
+    const std::string& colo = GetNodeAttrString(n_attrs, kColocationAttrName);
     if (!colo.empty()) {
       builder.Attr(kColocationAttrName, colo);
     }
@@ -281,7 +282,7 @@ class AccumulateNV2RemovePass : public GraphOptimizationPass {
     // using its incoming/outgoing edge sets.
     g->RemoveNode(n);
 
-    return Status::OK();
+    return absl::OkStatus();
   }
 };
 REGISTER_OPTIMIZATION(OptimizationPassRegistry::PRE_PLACEMENT, 10,

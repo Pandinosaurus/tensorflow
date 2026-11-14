@@ -14,14 +14,42 @@ limitations under the License.
 ==============================================================================*/
 #include "tensorflow/core/tfrt/utils/tfrt_graph_execution_state.h"
 
+#include <cstdint>
+#include <cstdlib>
+#include <memory>
+#include <string>
+#include <vector>
+
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
+#include "absl/container/flat_hash_map.h"
+#include "tensorflow/cc/framework/ops.h"
+#include "tensorflow/cc/framework/scope.h"
 #include "tensorflow/cc/ops/array_ops.h"
 #include "tensorflow/cc/ops/const_op.h"
-#include "tensorflow/cc/ops/standard_ops.h"
+#include "tensorflow/cc/ops/control_flow_ops.h"
+#include "tensorflow/cc/ops/functional_ops.h"
+#include "tensorflow/cc/ops/math_ops.h"
+#include "tensorflow/cc/ops/state_ops.h"
 #include "tensorflow/cc/ops/while_loop.h"
+#include "tensorflow/compiler/mlir/tensorflow/translate/mlir_roundtrip_flags.h"
+#include "tensorflow/compiler/mlir/tensorflow/utils/attribute_utils.h"
+#include "xla/tsl/lib/core/status_test_util.h"
+#include "xla/tsl/platform/statusor.h"
+#include "tensorflow/core/framework/device_factory.h"
+#include "tensorflow/core/framework/function.h"
+#include "tensorflow/core/framework/graph.pb.h"
+#include "tensorflow/core/framework/tensor.h"
+#include "tensorflow/core/framework/tensor_testutil.h"
+#include "tensorflow/core/framework/types.h"
+#include "tensorflow/core/framework/types.pb.h"
+#include "tensorflow/core/framework/versions.pb.h"
 #include "tensorflow/core/grappler/utils/grappler_test.h"
-#include "tensorflow/core/lib/core/status_test_util.h"
+#include "tensorflow/core/lib/monitoring/cell_reader.h"
+#include "tensorflow/core/platform/status.h"
+#include "tensorflow/core/protobuf/rewriter_config.pb.h"
+#include "tensorflow/core/tfrt/fallback/fallback_state.h"
+#include "tensorflow/core/tfrt/graph_executor/config.h"
 
 namespace tensorflow {
 namespace tfrt_stub {
@@ -71,14 +99,15 @@ TEST_F(PruneGraphDefTest, ConstFeedWithInput) {
   CompareGraphs(expected, graphdef);
 }
 
-Status LessThanTenCond(const Scope& scope, const std::vector<Output>& inputs,
-                       Output* output) {
+absl::Status LessThanTenCond(const Scope& scope,
+                             const std::vector<Output>& inputs,
+                             Output* output) {
   *output = ops::Less(scope, inputs[0], 10);
   return scope.status();
 }
 
-Status AddOneBody(const Scope& scope, const std::vector<Output>& inputs,
-                  std::vector<Output>* outputs) {
+absl::Status AddOneBody(const Scope& scope, const std::vector<Output>& inputs,
+                        std::vector<Output>* outputs) {
   outputs->push_back(ops::AddN(scope, {inputs[0], 1}));
   return scope.status();
 }
@@ -273,8 +302,7 @@ TEST_F(PruneGraphDefTest, EliminateRefVariablesFromV1ControlFlowFailed) {
 
   const auto status = EliminateRefVariablesFromV1ControlFlow(graphdef);
   EXPECT_FALSE(status.ok());
-  EXPECT_THAT(status.error_message(),
-              HasSubstr("requires its input to be refs"));
+  EXPECT_THAT(status.ToString(), HasSubstr("requires its input to be refs"));
 }
 
 TEST_F(PruneGraphDefTest, KeepLoopStructureComplete) {
@@ -302,6 +330,568 @@ TEST_F(PruneGraphDefTest, KeepLoopStructureComplete) {
   TF_ASSERT_OK(PruneGraphDef(graphdef, callable_options));
   EXPECT_THAT(graphdef,
               IgnoringRepeatedFieldOrdering(EqualsProto(original_graphdef)));
+}
+
+class OptimizeGraphTest : public grappler::GrapplerTest {};
+
+TEST_F(OptimizeGraphTest, OptimizeFunctions) {
+  GraphDef graphdef;
+  tensorflow::FunctionDefLibrary fdef_lib;
+  {
+    auto scope = tensorflow::Scope::NewRootScope().WithDevice(
+        "/job:localhost/replica:0/task:0/device:CPU:0");
+
+    const Tensor kThree = test::AsScalar<float>(3.0);
+    auto fdef = tensorflow::FunctionDefHelper::Create(
+        "Pow3", {"x: float"}, {"y: float"}, {},
+        {{{"three"}, "Const", {}, {{"dtype", DT_FLOAT}, {"value", kThree}}},
+         {{"pow3"}, "Pow", {"x", "three:output:0"}, {{"T", DT_FLOAT}}}},
+        {{"y", "pow3:z:0"}});
+
+    tensorflow::FunctionDefLibrary fdef_lib;
+    *fdef_lib.add_function() = fdef;
+    TF_ASSERT_OK(scope.graph()->AddFunctionLibrary(fdef_lib));
+
+    Output a = ops::Const(scope.WithOpName("a"), 2.0, {1, 1});
+
+    std::vector<tensorflow::Output> inputs = {a};
+    std::vector<tensorflow::DataType> output_dtypes = {
+        fdef.signature().output_arg(0).type()};
+    tensorflow::NameAttrList func_attr;
+    func_attr.set_name(fdef.signature().name());
+    auto pcall = ops::PartitionedCall(scope, inputs, output_dtypes, func_attr);
+    Output b = pcall.output.front();
+
+    Output c = ops::Identity(scope.WithOpName("c"), b);
+
+    TF_ASSERT_OK(scope.ToGraphDef(&graphdef));
+  }
+
+  TF_ASSERT_OK_AND_ASSIGN(
+      auto fallback_state,
+      tensorflow::tfrt_stub::FallbackState::Create({}, fdef_lib));
+
+  TfrtGraphExecutionState::Options options;
+  options.run_placer_grappler_on_functions = true;
+  TF_ASSERT_OK_AND_ASSIGN(
+      auto graph_execution_state,
+      TfrtGraphExecutionState::Create(options, graphdef, *fallback_state));
+
+  tensorflow::GraphImportConfig graph_import_config;
+  graph_import_config.prune_unused_nodes = true;
+  graph_import_config.enable_shape_inference = false;
+  tensorflow::ArrayInfo array_info;
+  array_info.imported_dtype = DT_FLOAT;
+  array_info.shape.set_unknown_rank(true);
+  graph_import_config.inputs["a"] = array_info;
+  graph_import_config.outputs = {"c"};
+
+  TF_ASSERT_OK_AND_ASSIGN(
+      auto optimized_graph,
+      graph_execution_state->CreateOptimizedGraph(graph_import_config));
+  GraphDef optimized_graph_def;
+  optimized_graph.graph->ToGraphDef(&optimized_graph_def);
+
+  GraphDef expected;
+  {
+    auto scope = tensorflow::Scope::NewRootScope().WithDevice(
+        "/job:localhost/replica:0/task:0/device:CPU:0");
+
+    const Tensor kThree = test::AsScalar<float>(3.0);
+    // After optimization, "x^3" will be transformed to "(x^2)*x".
+    auto fdef = tensorflow::FunctionDefHelper::Create(
+        "Pow3", {"x: float"}, {"y_retval: float"}, {},
+        {{{"ArithmeticOptimizer/ConvertPow__inner_pow3"},
+          "Square",
+          {"x"},
+          {{"dtype", DT_FLOAT}},
+          /*dep=*/{},
+          "/job:localhost/replica:0/task:0/device:CPU:0"},
+         {{"pow3"},
+          "Mul",
+          {"ArithmeticOptimizer/ConvertPow__inner_pow3:y:0", "x"},
+          {{"T", DT_FLOAT}},
+          /*dep=*/{},
+          "/job:localhost/replica:0/task:0/device:CPU:0"}},
+        {{"y_retval", "pow3:z:0"}});
+
+    tensorflow::FunctionDefLibrary fdef_lib;
+    *fdef_lib.add_function() = fdef;
+    TF_ASSERT_OK(scope.graph()->AddFunctionLibrary(fdef_lib));
+
+    Output a = ops::Const(scope.WithOpName("a"), 2.0, {1, 1});
+
+    std::vector<tensorflow::Output> inputs = {a};
+    std::vector<tensorflow::DataType> output_dtypes = {
+        fdef.signature().output_arg(0).type()};
+    tensorflow::NameAttrList func_attr;
+    func_attr.set_name(fdef.signature().name());
+    auto pcall = ops::PartitionedCall(scope, inputs, output_dtypes, func_attr);
+    Output b = pcall.output.front();
+
+    Output c = ops::Identity(scope.WithOpName("c"), b);
+
+    TF_ASSERT_OK(scope.ToGraphDef(&expected));
+  }
+
+  CompareGraphs(expected, optimized_graph_def);
+  CompareFunctions(expected.library().function(0),
+                   optimized_graph_def.library().function(0));
+}
+
+TEST_F(OptimizeGraphTest, MinConsumerBump) {
+  setenv("TF_ENABLE_PROTO_MEMORY_OPTIMIZATIONS", "true", 1);
+  GraphDef graphdef;
+  tensorflow::FunctionDefLibrary fdef_lib;
+  {
+    auto scope = tensorflow::Scope::NewRootScope().WithDevice(
+        "/job:localhost/replica:0/task:0/device:CPU:0");
+
+    const Tensor kThree = test::AsScalar<float>(3.0);
+    auto fdef = tensorflow::FunctionDefHelper::Create(
+        "Pow3", {"x: float"}, {"y: float"}, {},
+        {{{"three"}, "Const", {}, {{"dtype", DT_FLOAT}, {"value", kThree}}},
+         {{"pow3"}, "Pow", {"x", "three:output:0"}, {{"T", DT_FLOAT}}}},
+        {{"y", "pow3:z:0"}});
+
+    tensorflow::FunctionDefLibrary fdef_lib;
+    *fdef_lib.add_function() = fdef;
+    TF_ASSERT_OK(scope.graph()->AddFunctionLibrary(fdef_lib));
+
+    Output a = ops::Const(scope.WithOpName("a"), 2.0, {1, 1});
+
+    std::vector<tensorflow::Output> inputs = {a};
+    std::vector<tensorflow::DataType> output_dtypes = {
+        fdef.signature().output_arg(0).type()};
+    tensorflow::NameAttrList func_attr;
+    func_attr.set_name(fdef.signature().name());
+    auto pcall = ops::PartitionedCall(scope, inputs, output_dtypes, func_attr);
+    Output b = pcall.output.front();
+
+    Output c = ops::Identity(scope.WithOpName("c"), b);
+
+    TF_ASSERT_OK(scope.ToGraphDef(&graphdef));
+  }
+
+  // Ensure initial min_consumer is < 12 for testing.
+  graphdef.mutable_versions()->set_min_consumer(0);
+
+  TF_ASSERT_OK_AND_ASSIGN(
+      auto fallback_state,
+      tensorflow::tfrt_stub::FallbackState::Create({}, fdef_lib));
+
+  TfrtGraphExecutionState::Options options;
+  // This triggers the early return in OptimizeGraph if
+  // ProtoMemoryOptimizationsEnabled() is true.
+  options.run_placer_grappler_on_functions = false;
+  TF_ASSERT_OK_AND_ASSIGN(
+      auto graph_execution_state,
+      TfrtGraphExecutionState::Create(options, graphdef, *fallback_state));
+
+  tensorflow::GraphImportConfig graph_import_config;
+  graph_import_config.prune_unused_nodes = true;
+  graph_import_config.enable_shape_inference = false;
+  tensorflow::ArrayInfo array_info;
+  array_info.imported_dtype = DT_FLOAT;
+  array_info.shape.set_unknown_rank(true);
+  graph_import_config.inputs["a"] = array_info;
+  graph_import_config.outputs = {"c"};
+
+  TF_ASSERT_OK_AND_ASSIGN(
+      auto optimized_graph,
+      graph_execution_state->CreateOptimizedGraph(graph_import_config));
+
+  // If we bypassed AddFunctionLibrary, this might still be 0 if Grappler didn't
+  // bump it. We want to verify if it is bumped to 12. CURRENT BEHAVIOR: It is
+  // NOT bumped because we bypass AddFunctionLibrary via move assignment.
+  EXPECT_LT(optimized_graph.graph->versions().min_consumer(), 12);
+  unsetenv("TF_ENABLE_PROTO_MEMORY_OPTIMIZATIONS");
+}
+
+TEST_F(OptimizeGraphTest, OptimizeFunctionsUsedByFunctionNodes) {
+  GraphDef graphdef;
+  tensorflow::FunctionDefLibrary fdef_lib;
+  {
+    auto scope = tensorflow::Scope::NewRootScope().WithDevice(
+        "/job:localhost/replica:0/task:0/device:CPU:0");
+
+    const Tensor kThree = test::AsScalar<float>(3.0);
+    auto pow3_fdef = tensorflow::FunctionDefHelper::Create(
+        "Pow3", {"x: float"}, {"y: float"}, {},
+        {{{"three"}, "Const", {}, {{"dtype", DT_FLOAT}, {"value", kThree}}},
+         {{"pow3"}, "Pow", {"x", "three:output:0"}, {{"T", DT_FLOAT}}}},
+        {{"y", "pow3:z:0"}});
+
+    const Tensor kOne = test::AsScalar<float>(1.0);
+    auto base2pow3_fdef = tensorflow::FunctionDefHelper::Create(
+        "Add1Pow3", {"x: float"}, {"y: float"}, {},
+        {{{"one"}, "Const", {}, {{"dtype", DT_FLOAT}, {"value", kOne}}},
+         {{"add"}, "Add", {"x", "one:output:0"}, {{"T", DT_FLOAT}}},
+         {{"pcall"},
+          "PartitionedCall",
+          {"add:z:0"},
+          {{"Tin", DataTypeSlice({DT_FLOAT})},
+           {"Tout", DataTypeSlice({DT_FLOAT})},
+           {"f", tensorflow::FunctionDefHelper::FunctionRef(
+                     "Pow3", {{"T", DT_FLOAT}})}}}},
+        {{"y", "pcall:output:0"}});
+
+    tensorflow::FunctionDefLibrary fdef_lib;
+    *fdef_lib.add_function() = pow3_fdef;
+    *fdef_lib.add_function() = base2pow3_fdef;
+    TF_ASSERT_OK(scope.graph()->AddFunctionLibrary(fdef_lib));
+
+    Output a = ops::Const(scope.WithOpName("a"), 1.0, {1, 1});
+
+    std::vector<tensorflow::Output> inputs = {a};
+    std::vector<tensorflow::DataType> output_dtypes = {
+        base2pow3_fdef.signature().output_arg(0).type()};
+    tensorflow::NameAttrList func_attr;
+    func_attr.set_name(base2pow3_fdef.signature().name());
+    auto pcall = ops::PartitionedCall(scope, inputs, output_dtypes, func_attr);
+    Output b = pcall.output.front();
+
+    Output c = ops::Identity(scope.WithOpName("c"), b);
+
+    TF_ASSERT_OK(scope.ToGraphDef(&graphdef));
+  }
+
+  TF_ASSERT_OK_AND_ASSIGN(
+      auto fallback_state,
+      tensorflow::tfrt_stub::FallbackState::Create({}, fdef_lib));
+
+  TfrtGraphExecutionState::Options options;
+  options.run_placer_grappler_on_functions = true;
+  TF_ASSERT_OK_AND_ASSIGN(
+      auto graph_execution_state,
+      TfrtGraphExecutionState::Create(options, graphdef, *fallback_state));
+
+  tensorflow::GraphImportConfig graph_import_config;
+  graph_import_config.prune_unused_nodes = true;
+  graph_import_config.enable_shape_inference = false;
+  tensorflow::ArrayInfo array_info;
+  array_info.imported_dtype = DT_FLOAT;
+  array_info.shape.set_unknown_rank(true);
+  graph_import_config.inputs["a"] = array_info;
+  graph_import_config.outputs = {"c"};
+
+  TF_ASSERT_OK_AND_ASSIGN(
+      auto optimized_graph,
+      graph_execution_state->CreateOptimizedGraph(graph_import_config));
+  GraphDef optimized_graph_def;
+  optimized_graph.graph->ToGraphDef(&optimized_graph_def);
+
+  GraphDef expected;
+  {
+    auto scope = tensorflow::Scope::NewRootScope().WithDevice(
+        "/job:localhost/replica:0/task:0/device:CPU:0");
+
+    const Tensor kThree = test::AsScalar<float>(3.0);
+    // After optimization, "x^3" will be transformed to "(x^2)*x".
+    auto pow3_fdef = tensorflow::FunctionDefHelper::Create(
+        "Pow3", {"x: float"}, {"y_retval: float"}, {},
+        {{{"ArithmeticOptimizer/ConvertPow__inner_pow3"},
+          "Square",
+          {"x"},
+          {{"dtype", DT_FLOAT}},
+          /*dep=*/{},
+          "/job:localhost/replica:0/task:0/device:CPU:0"},
+         {{"pow3"},
+          "Mul",
+          {"ArithmeticOptimizer/ConvertPow__inner_pow3:y:0", "x"},
+          {{"T", DT_FLOAT}},
+          /*dep=*/{},
+          "/job:localhost/replica:0/task:0/device:CPU:0"}},
+        {{"y_retval", "pow3:z:0"}});
+
+    const Tensor kOne = test::AsScalar<float>(1.0);
+    auto base2pow3_fdef = tensorflow::FunctionDefHelper::Create(
+        "Add1Pow3", {"x: float"}, {"y: float"}, {},
+        {{{"one"}, "Const", {}, {{"dtype", DT_FLOAT}, {"value", kOne}}},
+         {{"add"}, "Add", {"x", "one:output:0"}, {{"T", DT_FLOAT}}},
+         {{"pcall"},
+          "PartitionedCall",
+          {"add:z:0"},
+          {{"Tin", DataTypeSlice({DT_FLOAT})},
+           {"Tout", DataTypeSlice({DT_FLOAT})},
+           {"f", tensorflow::FunctionDefHelper::FunctionRef(
+                     "Pow3", {{"T", DT_FLOAT}})}}}},
+        {{"y", "pcall:output:0"}});
+
+    tensorflow::FunctionDefLibrary fdef_lib;
+    *fdef_lib.add_function() = pow3_fdef;
+    *fdef_lib.add_function() = base2pow3_fdef;
+    TF_ASSERT_OK(scope.graph()->AddFunctionLibrary(fdef_lib));
+
+    Output a = ops::Const(scope.WithOpName("a"), 1.0, {1, 1});
+
+    std::vector<tensorflow::Output> inputs = {a};
+    std::vector<tensorflow::DataType> output_dtypes = {
+        base2pow3_fdef.signature().output_arg(0).type()};
+    tensorflow::NameAttrList func_attr;
+    func_attr.set_name(base2pow3_fdef.signature().name());
+    auto pcall = ops::PartitionedCall(scope, inputs, output_dtypes, func_attr);
+    Output b = pcall.output.front();
+
+    Output c = ops::Identity(scope.WithOpName("c"), b);
+
+    TF_ASSERT_OK(scope.ToGraphDef(&expected));
+  }
+
+  // Since `Pow3` is called by `Add1Pow3`, it is optimized.
+  CompareFunctions(expected.library().function(1),
+                   optimized_graph_def.library().function(1));
+  ASSERT_EQ("Pow3",
+            optimized_graph_def.library().function(1).signature().name());
+}
+
+TEST_F(OptimizeGraphTest, DontOptimizeUnsafeFunction) {
+  GraphDef graphdef;
+  tensorflow::FunctionDefLibrary fdef_lib;
+  {
+    auto scope = tensorflow::Scope::NewRootScope().WithDevice(
+        "/job:localhost/replica:0/task:0/device:CPU:0");
+
+    const Tensor kThree = test::AsScalar<float>(3.0);
+    auto fdef = tensorflow::FunctionDefHelper::Create(
+        "Pow3", {"x: float"}, {"y: float"}, {},
+        {{{"three"}, "Const", {}, {{"dtype", DT_FLOAT}, {"value", kThree}}},
+         {{"pow3"}, "Pow", {"x", "three:output:0"}, {{"T", DT_FLOAT}}}},
+        {{"y", "pow3:z:0"}});
+
+    tensorflow::FunctionDefLibrary fdef_lib;
+    *fdef_lib.add_function() = fdef;
+    TF_ASSERT_OK(scope.graph()->AddFunctionLibrary(fdef_lib));
+
+    Output a = ops::Const(scope.WithOpName("a"), 2.0, {1, 1});
+
+    Output cond = ops::Const(scope.WithOpName("cond"), true, {1, 1});
+    std::vector<tensorflow::Output> inputs = {a};
+    std::vector<tensorflow::DataType> output_dtypes = {
+        fdef.signature().output_arg(0).type()};
+    tensorflow::NameAttrList func_attr;
+    func_attr.set_name(fdef.signature().name());
+    auto if_op =
+        ops::If(scope, cond, inputs, output_dtypes, func_attr, func_attr);
+    Output b = if_op.output.front();
+
+    Output c = ops::Identity(scope.WithOpName("c"), b);
+
+    TF_ASSERT_OK(scope.ToGraphDef(&graphdef));
+  }
+
+  TF_ASSERT_OK_AND_ASSIGN(
+      auto fallback_state,
+      tensorflow::tfrt_stub::FallbackState::Create({}, fdef_lib));
+
+  TfrtGraphExecutionState::Options options;
+  options.run_placer_grappler_on_functions = true;
+  TF_ASSERT_OK_AND_ASSIGN(
+      auto graph_execution_state,
+      TfrtGraphExecutionState::Create(options, graphdef, *fallback_state));
+
+  tensorflow::GraphImportConfig graph_import_config;
+  graph_import_config.prune_unused_nodes = true;
+  graph_import_config.enable_shape_inference = false;
+  tensorflow::ArrayInfo array_info;
+  array_info.imported_dtype = DT_FLOAT;
+  array_info.shape.set_unknown_rank(true);
+  graph_import_config.inputs["a"] = array_info;
+  graph_import_config.outputs = {"c"};
+
+  TF_ASSERT_OK_AND_ASSIGN(
+      auto optimized_graph,
+      graph_execution_state->CreateOptimizedGraph(graph_import_config));
+  GraphDef optimized_graph_def;
+  optimized_graph.graph->ToGraphDef(&optimized_graph_def);
+
+  // The optimized graph remains the same as the original one, because the
+  // function used by `If` op is not optimized.
+  CompareGraphs(graphdef, optimized_graph_def);
+  CompareFunctions(graphdef.library().function(0),
+                   optimized_graph_def.library().function(0));
+}
+
+TEST_F(OptimizeGraphTest, FunctionBecomeUnsafeIfAnyOpIsUnsafe) {
+  GraphDef graphdef;
+  tensorflow::FunctionDefLibrary fdef_lib;
+  {
+    auto scope = tensorflow::Scope::NewRootScope().WithDevice(
+        "/job:localhost/replica:0/task:0/device:CPU:0");
+
+    const Tensor kThree = test::AsScalar<float>(3.0);
+    auto fdef = tensorflow::FunctionDefHelper::Create(
+        "Pow3", {"x: float"}, {"y: float"}, {},
+        {{{"three"}, "Const", {}, {{"dtype", DT_FLOAT}, {"value", kThree}}},
+         {{"pow3"}, "Pow", {"x", "three:output:0"}, {{"T", DT_FLOAT}}}},
+        {{"y", "pow3:z:0"}});
+
+    tensorflow::FunctionDefLibrary fdef_lib;
+    *fdef_lib.add_function() = fdef;
+    TF_ASSERT_OK(scope.graph()->AddFunctionLibrary(fdef_lib));
+
+    Output a = ops::Const(scope.WithOpName("a"), 2.0, {1, 1});
+
+    Output cond = ops::Const(scope.WithOpName("cond"), true, {1, 1});
+    std::vector<tensorflow::Output> inputs = {a};
+    std::vector<tensorflow::DataType> output_dtypes = {
+        fdef.signature().output_arg(0).type()};
+    tensorflow::NameAttrList func_attr;
+    func_attr.set_name(fdef.signature().name());
+    auto if_op =
+        ops::If(scope, cond, inputs, output_dtypes, func_attr, func_attr);
+    Output b = if_op.output.front();
+
+    inputs = {b};
+    auto pcall = ops::PartitionedCall(scope, inputs, output_dtypes, func_attr);
+    Output c = pcall.output.front();
+
+    Output d = ops::Identity(scope.WithOpName("d"), c);
+
+    TF_ASSERT_OK(scope.ToGraphDef(&graphdef));
+  }
+
+  TF_ASSERT_OK_AND_ASSIGN(
+      auto fallback_state,
+      tensorflow::tfrt_stub::FallbackState::Create({}, fdef_lib));
+
+  TfrtGraphExecutionState::Options options;
+  options.run_placer_grappler_on_functions = true;
+  TF_ASSERT_OK_AND_ASSIGN(
+      auto graph_execution_state,
+      TfrtGraphExecutionState::Create(options, graphdef, *fallback_state));
+
+  tensorflow::GraphImportConfig graph_import_config;
+  graph_import_config.prune_unused_nodes = true;
+  graph_import_config.enable_shape_inference = false;
+  tensorflow::ArrayInfo array_info;
+  array_info.imported_dtype = DT_FLOAT;
+  array_info.shape.set_unknown_rank(true);
+  graph_import_config.inputs["a"] = array_info;
+  graph_import_config.outputs = {"d"};
+
+  TF_ASSERT_OK_AND_ASSIGN(
+      auto optimized_graph,
+      graph_execution_state->CreateOptimizedGraph(graph_import_config));
+  GraphDef optimized_graph_def;
+  optimized_graph.graph->ToGraphDef(&optimized_graph_def);
+
+  // Both `If` and `PartitionedCall` ops use the function, so the function
+  // remains unoptimized.
+  CompareFunctions(graphdef.library().function(0),
+                   optimized_graph_def.library().function(0));
+}
+
+TEST_F(OptimizeGraphTest, MLIRBridgeCanBeDisabled) {
+  monitoring::testing::CellReader<int64_t> check_mlir_bridge_disabled_reader(
+      "/tensorflow/core/tf_mlir_bridge_first_phase_v2_count");
+  GraphDef graphdef;
+  tensorflow::FunctionDefLibrary fdef_lib;
+  {
+    auto scope = tensorflow::Scope::NewRootScope().WithDevice(
+        "/job:localhost/replica:0/task:0/device:CPU:0");
+
+    const Tensor kThree = test::AsScalar<float>(3.0);
+    auto fdef = tensorflow::FunctionDefHelper::Create(
+        "Pow3", {"x: float"}, {"y: float"}, {},
+        {{{"three"}, "Const", {}, {{"dtype", DT_FLOAT}, {"value", kThree}}},
+         {{"pow3"}, "Pow", {"x", "three:output:0"}, {{"T", DT_FLOAT}}}},
+        {{"y", "pow3:z:0"}});
+
+    tensorflow::FunctionDefLibrary fdef_lib;
+    *fdef_lib.add_function() = fdef;
+    TF_ASSERT_OK(scope.graph()->AddFunctionLibrary(fdef_lib));
+
+    Output a = ops::Const(scope.WithOpName("a"), 2.0, {1, 1});
+
+    std::vector<tensorflow::Output> inputs = {a};
+    std::vector<tensorflow::DataType> output_dtypes = {
+        fdef.signature().output_arg(0).type()};
+    tensorflow::NameAttrList func_attr;
+    func_attr.set_name(fdef.signature().name());
+    auto pcall = ops::PartitionedCall(scope, inputs, output_dtypes, func_attr);
+    Output b = pcall.output.front();
+
+    Output c = ops::Identity(scope.WithOpName("c"), b);
+
+    TF_ASSERT_OK(scope.ToGraphDef(&graphdef));
+  }
+
+  TF_ASSERT_OK_AND_ASSIGN(
+      auto fallback_state,
+      tensorflow::tfrt_stub::FallbackState::Create({}, fdef_lib));
+
+  TfrtGraphExecutionState::Options options;
+  options.run_placer_grappler_on_functions = true;
+
+  tensorflow::tfrt_stub::RuntimeConfig runtime_config;
+  tensorflow::tf2xla::v1::MlirBridgeConfig mlir_bridge_config;
+  mlir_bridge_config.set_enable_tf2xla_mlir_bridge(false);
+  TF_ASSERT_OK(runtime_config.Add(mlir_bridge_config));
+
+  TF_ASSERT_OK_AND_ASSIGN(
+      auto graph_execution_state,
+      TfrtGraphExecutionState::Create(options, graphdef, *fallback_state,
+                                      &runtime_config));
+
+  EXPECT_EQ(
+      check_mlir_bridge_disabled_reader.Delta(
+          mlir::TF::kMlirPh1BridgeCounterReplicated,
+          mlir::TF::kMlirPh1BridgeCounterV1, mlir::TF::kMlirPh1BridgeCounterTpu,
+          "fallback_enabled", "disabled_by_user"),
+      1);
+}
+
+class ExtendGraphTest : public grappler::GrapplerTest {};
+
+TEST_F(ExtendGraphTest, ExtendGraph) {
+  GraphDef graphdef;
+  {
+    auto scope = tensorflow::Scope::NewRootScope().WithDevice("/device:CPU:0");
+
+    Output a = ops::Const(scope.WithOpName("a"), 0.0f, {10, 10});
+
+    TF_ASSERT_OK(scope.ToGraphDef(&graphdef));
+  }
+
+  SessionOptions session_options;
+  // Disable optimizations for static graph to allow calls to Session::Extend.
+  session_options.config.mutable_experimental()
+      ->set_disable_optimize_for_static_graph(true);
+  TF_ASSERT_OK_AND_ASSIGN(
+      auto fallback_state,
+      tensorflow::tfrt_stub::FallbackState::Create(session_options, {}));
+
+  TfrtGraphExecutionState::Options options;
+  options.run_placer_grappler_on_functions = false;
+  TF_ASSERT_OK_AND_ASSIGN(
+      auto graph_execution_state,
+      TfrtGraphExecutionState::Create(options, graphdef, *fallback_state));
+
+  GraphDef extension;
+  {
+    auto scope = tensorflow::Scope::NewRootScope().WithDevice("/device:CPU:0");
+
+    Output b = ops::Const(scope.WithOpName("b"), 0.0f, {10, 10});
+
+    TF_ASSERT_OK(scope.ToGraphDef(&extension));
+  }
+
+  TF_ASSERT_OK(graph_execution_state->Extend(extension));
+
+  GraphDef expected;
+  {
+    auto scope = tensorflow::Scope::NewRootScope().WithDevice("/device:CPU:0");
+
+    Output a = ops::Const(scope.WithOpName("a"), 0.0f, {10, 10});
+
+    Output b = ops::Const(scope.WithOpName("b"), 0.0f, {10, 10});
+
+    TF_ASSERT_OK(scope.ToGraphDef(&expected));
+  }
+
+  ASSERT_NE(graph_execution_state->original_graph_def(), nullptr);
+  CompareGraphs(expected, *graph_execution_state->original_graph_def());
 }
 
 }  // namespace

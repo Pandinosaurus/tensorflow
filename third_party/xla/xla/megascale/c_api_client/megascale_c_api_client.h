@@ -1,0 +1,147 @@
+/* Copyright 2026 The OpenXLA Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+==============================================================================*/
+
+#ifndef XLA_MEGASCALE_C_API_CLIENT_MEGASCALE_C_API_CLIENT_H_
+#define XLA_MEGASCALE_C_API_CLIENT_MEGASCALE_C_API_CLIENT_H_
+
+#include <cstdint>
+#include <memory>
+#include <optional>
+#include <string>
+#include <tuple>
+#include <vector>
+
+#include "absl/functional/any_invocable.h"
+#include "absl/log/log.h"
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
+#include "absl/strings/string_view.h"
+#include "absl/time/time.h"
+#include "xla/backends/cpu/collectives/cpu_collectives.h"
+#include "xla/megascale/addresses.pb.h"
+#include "xla/megascale/c_api_client/c_api_megascale_error_aggregator.h"
+#include "xla/megascale/c_api_client/megascale_types.h"
+#include "xla/megascale/dcn_topology.pb.h"
+#include "xla/megascale/megascale_runtime_error_overlay.pb.h"
+#include "xla/pjrt/pjrt_compiler.h"
+#include "xla/pjrt/pjrt_executable.h"
+#include "xla/tsl/platform/logging.h"
+
+namespace pjrt {
+class PjRtCApiMultiSliceConfig;
+}  // namespace pjrt
+
+namespace xla {
+namespace megascale {
+namespace c_api_client {
+
+struct ProcessesInfo {
+  // Mapping of dense process ids to their network addresses.
+  std::vector<std::string> addresses;
+  // Dense slice index of each process.
+  std::optional<std::vector<int32_t>> slice_indexes = std::nullopt;
+  // Dense per-slice index of each process.
+  std::optional<std::vector<int32_t>> per_slice_indexes = std::nullopt;
+  // The number of devices per process.
+  int32_t num_devices_per_process = 0;
+};
+
+// Returns AoT config for megascale multi slice compilation.
+// REQUIRES: num_slices > 1.
+absl::StatusOr<xla::MultiSliceConfigRef> CreateAoTMegascaleConfig(
+    const xla::PjRtTopologyDescription& topology_description, int num_slices);
+
+absl::StatusOr<std::shared_ptr<CApiMegascaleErrorAggregator>>
+CreateMegascaleErrorAggregator(absl::string_view app_type);
+
+absl::StatusOr<xla::MultiSliceConfigRef> CreateMultiSliceMegascaleConfig(
+    const xla::PjRtTopologyDescription& topology_description, int num_slices,
+    int32_t local_slice_id, int32_t local_host_id,
+    const xla::megascale::runtime::EndpointAddresses& endpoint_addresses,
+    const xla::megascale::runtime::DCNTopology& dcn_topology,
+    std::shared_ptr<CApiPjRtClientContext> megascale_client_ctx);
+
+absl::StatusOr<std::shared_ptr<CApiPjRtClientContext>>
+MegaScaleClientContextFromClient(xla::PjRtClient* client);
+
+absl::StatusOr<std::shared_ptr<CApiPjRtClientContext>>
+CreateDefaultMegaScaleClientContext();
+
+absl::StatusOr<std::unique_ptr<xla::cpu::CpuCollectives>>
+CreateMegascaleCollectives(
+    const CApiPjRtClientContext& megascale_client_ctx,
+    ProcessesInfo&& processes_info,
+    std::optional<xla::megascale::runtime::DCNTopology>&& dcn_topology);
+
+absl::Status RegisterMegascaleErrorHandler(
+    absl::string_view handler_name,
+    absl::AnyInvocable<
+        void(const runtime::external::MegaScaleRuntimeError& error)>
+        handler);
+
+absl::Status UnregisterMegascaleErrorHandler(absl::string_view handler_name);
+
+absl::StatusOr<std::vector<runtime::HostNetworkAddress>>
+GetInterfaceAddressesHelper(absl::string_view megascale_port_name,
+                            int32_t megascale_port,
+                            const std::vector<std::string>& interface_prefixes,
+                            bool use_all_interfaces,
+                            bool limit_to_process_numa_local_interfaces);
+
+absl::StatusOr<std::tuple<runtime::external::MegaScaleRuntimeError, bool>>
+GetOrCreateRuntimeError(
+    runtime::external::MegaScaleRuntimeError::ErrorType error_type,
+    absl::Time start_time, const absl::Status& status, int32_t launch_id,
+    std::optional<
+        runtime::external::MegaScaleRuntimeError::UnrecoverableErrorType>
+        unrecoverable_error_type = std::nullopt);
+
+// Discovers slices using the Megascale client context and returns a
+// multi-slice configuration wrapped in PjRtCApiMultiSliceConfig.
+absl::StatusOr<std::unique_ptr<const xla::MultiSliceConfig>> DiscoverSlices(
+    std::shared_ptr<CApiPjRtClientContext> megascale_client_ctx);
+
+// Convenience wrapper discovering slices directly from a PjRtClient.
+absl::StatusOr<std::unique_ptr<const xla::MultiSliceConfig>>
+DiscoverSlicesFromClient(xla::PjRtClient* client);
+
+// Returns the incarnation ID for the given MultiSliceConfig.
+absl::StatusOr<int64_t> GetIncarnationId(
+    const pjrt::PjRtCApiMultiSliceConfig& config);
+absl::StatusOr<int64_t> GetIncarnationId(const xla::MultiSliceConfig& config);
+
+// Returns the local host ID for the given MultiSliceConfig.
+absl::StatusOr<int32_t> GetLocalHostId(
+    const pjrt::PjRtCApiMultiSliceConfig& config);
+absl::StatusOr<int32_t> GetLocalHostId(const xla::MultiSliceConfig& config);
+
+// Returns the number of hosts for the given MultiSliceConfig.
+absl::StatusOr<int32_t> GetNumHosts(
+    const pjrt::PjRtCApiMultiSliceConfig& config);
+absl::StatusOr<int32_t> GetNumHosts(const xla::MultiSliceConfig& config);
+
+// Executes a global barrier across slices for the given MultiSliceConfig.
+absl::Status GlobalBarrier(const pjrt::PjRtCApiMultiSliceConfig& config,
+                           absl::string_view barrier_id,
+                           absl::Duration timeout);
+absl::Status GlobalBarrier(const xla::MultiSliceConfig& config,
+                           absl::string_view barrier_id,
+                           absl::Duration timeout);
+
+}  // namespace c_api_client
+}  // namespace megascale
+}  // namespace xla
+
+#endif  // XLA_MEGASCALE_C_API_CLIENT_MEGASCALE_C_API_CLIENT_H_

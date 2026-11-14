@@ -13,23 +13,44 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include <algorithm>
 #include <atomic>
+#include <cfenv>
+#include <chrono>
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <list>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include "absl/log/check.h"
+#include "absl/log/log.h"
+#include "absl/log/vlog_is_on.h"
+#include "absl/strings/str_cat.h"
 #define EIGEN_USE_THREADS
 
-#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
+#include <optional>
+
+#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
 #include "tensorflow/core/lib/core/threadpool_interface.h"
+#include "tensorflow/core/lib/monitoring/sampler.h"
 #include "tensorflow/core/lib/strings/strcat.h"
 #include "tensorflow/core/platform/context.h"
 #include "tensorflow/core/platform/denormal.h"
+#include "tensorflow/core/platform/env.h"
 #include "tensorflow/core/platform/mutex.h"
 #include "tensorflow/core/platform/setround.h"
-#include "tensorflow/core/platform/tracing.h"
 #include "tensorflow/core/profiler/lib/connected_traceme.h"
 #include "tensorflow/core/profiler/lib/traceme.h"
 #include "tensorflow/core/profiler/lib/traceme_encode.h"
 #include "tensorflow/core/tfrt/run_handler_thread_pool/run_handler.h"
 #include "tensorflow/core/tfrt/run_handler_thread_pool/run_handler_util.h"
-#include "tensorflow/core/util/ptr_util.h"
+#include "tensorflow/core/tfrt/runtime/work_queue_interface.h"
+#include "tsl/platform/tracing.h"
+#include "tfrt/host_context/async_dispatch.h"  // from @tf_runtime
 
 namespace tfrt {
 namespace tf {
@@ -37,6 +58,12 @@ namespace {
 
 typedef typename internal::RunHandlerEnvironment::Task Task;
 typedef Eigen::RunQueue<Task, 1024> Queue;
+
+auto* wait_for_handler_latency = tensorflow::monitoring::Sampler<1>::New(
+    {"/tensorflow/core/tfrt/run_handler_thread_pool/"
+     "wait_for_handler_latency",
+     "Latency of waiting for a free handler in microseconds.", "priority"},
+    tensorflow::monitoring::Buckets::Exponential(100, 2, 20));
 
 }  // namespace
 
@@ -62,10 +89,10 @@ RunHandlerEnvironment::EnvThread* RunHandlerEnvironment::CreateThread(
 
 RunHandlerEnvironment::Task RunHandlerEnvironment::CreateTask(TaskFunction f) {
   uint64_t id = 0;
-  if (tensorflow::tracing::EventCollector::IsEnabled()) {
-    id = tensorflow::tracing::GetUniqueArg();
-    tensorflow::tracing::RecordEvent(
-        tensorflow::tracing::EventCategory::kScheduleClosure, id);
+  if (tsl::tracing::EventCollector::IsEnabled()) {
+    id = tsl::tracing::GetUniqueArg();
+    tsl::tracing::RecordEvent(tsl::tracing::EventCategory::kScheduleClosure,
+                              id);
   }
   return Task{
       std::unique_ptr<TaskImpl>(new TaskImpl{
@@ -78,8 +105,8 @@ RunHandlerEnvironment::Task RunHandlerEnvironment::CreateTask(TaskFunction f) {
 
 void RunHandlerEnvironment::ExecuteTask(const Task& t) {
   tensorflow::WithContext wc(t.f->context);
-  tensorflow::tracing::ScopedRegion region(
-      tensorflow::tracing::EventCategory::kRunClosure, t.f->trace_id);
+  tsl::tracing::ScopedRegion region(tsl::tracing::EventCategory::kRunClosure,
+                                    t.f->trace_id);
   t.f->f();
 }
 
@@ -149,12 +176,12 @@ ThreadWorkSource::~ThreadWorkSource() {
 Task ThreadWorkSource::EnqueueTask(Task t, bool is_blocking,
                                    bool enable_wake_up) {
   uint64_t id = t.f->trace_id;
-  tensorflow::profiler::TraceMe activity(
+  tsl::profiler::TraceMe activity(
       [id, is_blocking] {
-        return tensorflow::profiler::TraceMeEncode(
+        return tsl::profiler::TraceMeEncode(
             "Enqueue", {{"id", id}, {"is_blocking", is_blocking}});
       },
-      tensorflow::profiler::TraceMeLevel::kInfo);
+      tsl::profiler::TraceMeLevel::kInfo);
   tensorflow::mutex* mu = nullptr;
   Queue* task_queue = nullptr;
   thread_local int64_t closure_counter = 0;
@@ -322,12 +349,11 @@ unsigned ThreadWorkSource::NonBlockingWorkShardingFactor() {
 }
 
 std::string ThreadWorkSource::ToString() {
-  return tensorflow::strings::StrCat(
-      "traceme_id = ", GetTracemeId(),
-      ", inter queue size = ", TaskQueueSize(true),
-      ", inter inflight = ", GetInflightTaskCount(true),
-      ", intra queue size = ", TaskQueueSize(false),
-      ", intra inflight = ", GetInflightTaskCount(false));
+  return absl::StrCat("traceme_id = ", GetTracemeId(),
+                      ", inter queue size = ", TaskQueueSize(true),
+                      ", inter inflight = ", GetInflightTaskCount(true),
+                      ", intra queue size = ", TaskQueueSize(false),
+                      ", intra inflight = ", GetInflightTaskCount(false));
 }
 
 RunHandlerThreadPool::RunHandlerThreadPool(
@@ -357,10 +383,10 @@ RunHandlerThreadPool::RunHandlerThreadPool(
   thread_data_.resize(num_threads_);
   for (int i = 0; i < num_threads_; ++i) {
     thread_data_[i].new_thread_work_sources =
-        absl::make_unique<Eigen::MaxSizeVector<ThreadWorkSource*>>(
+        std::make_unique<Eigen::MaxSizeVector<ThreadWorkSource*>>(
             options.max_concurrent_handler);
     thread_data_[i].current_thread_work_sources =
-        absl::make_unique<Eigen::MaxSizeVector<ThreadWorkSource*>>(
+        std::make_unique<Eigen::MaxSizeVector<ThreadWorkSource*>>(
             options.max_concurrent_handler);
   }
   VLOG(1) << "Creating RunHandlerThreadPool " << name << " with  "
@@ -569,16 +595,6 @@ void RunHandlerThreadPool::WorkerLoop(int thread_id,
                    &task_from_blocking_queue, &tws);
     }
     if (t.f) {
-      tensorflow::profiler::TraceMeConsumer activity(
-          // From TraceMeProducer in SavedModelImpl::Run
-          [tws, task_from_blocking_queue, thread_id] {
-            return tensorflow::profiler::TraceMeEncode(
-                task_from_blocking_queue ? "inter" : "intra",
-                {{"id", tws->GetTracemeId()}, {"thread_id", thread_id}});
-          },
-          // GetTracemeId returns the request ID for inference.
-          tensorflow::profiler::ContextType::kTfrtExecutor, tws->GetTracemeId(),
-          tensorflow::profiler::TraceMeLevel::kInfo);
       VLOG(2) << "Running " << (task_from_blocking_queue ? "inter" : "intra")
               << " work from " << tws->GetTracemeId();
       tws->IncrementInflightTaskCount(task_from_blocking_queue);
@@ -586,12 +602,12 @@ void RunHandlerThreadPool::WorkerLoop(int thread_id,
       tws->DecrementInflightTaskCount(task_from_blocking_queue);
       tws->DecrementPendingTaskCount();
     } else {
-      tensorflow::profiler::TraceMe activity(
+      tsl::profiler::TraceMe activity(
           [thread_id] {
-            return tensorflow::profiler::TraceMeEncode(
-                "Sleeping", {{"thread_id", thread_id}});
+            return tsl::profiler::TraceMeEncode("Sleeping",
+                                                {{"thread_id", thread_id}});
           },
-          tensorflow::profiler::TraceMeLevel::kInfo);
+          tsl::profiler::TraceMeLevel::kInfo);
       if (VLOG_IS_ON(4)) {
         for (int i = 0; i < thread_work_sources->size(); ++i) {
           VLOG(4) << "source id " << i << " "
@@ -664,7 +680,7 @@ class RunHandler::Impl {
  public:
   explicit Impl(RunHandlerPool::Impl* pool_impl);
 
-  ~Impl() {}
+  ~Impl() = default;
 
   // Stores now time (in microseconds) since unix epoch when the handler is
   // requested via RunHandlerPool::Get().
@@ -695,7 +711,8 @@ class RunHandler::Impl {
     }
 
     void Schedule(std::function<void()> fn) override {
-      run_handler_->ScheduleIntraOpClosure(tfrt::TaskFunction(std::move(fn)));
+      run_handler_->ScheduleIntraOpClosure(tensorflow::tfrt_stub::WrapWork(
+          run_handler_->tws()->GetTracemeId(), "intra", std::move(fn)));
     }
 
     int NumThreads() const override;
@@ -778,24 +795,23 @@ class RunHandlerPool::Impl {
   std::unique_ptr<RunHandler> Get(int64_t step_id, int64_t timeout_in_ms,
                                   const RunHandlerOptions& options)
       TF_LOCKS_EXCLUDED(mu_) {
-    thread_local std::unique_ptr<
-        Eigen::MaxSizeVector<internal::ThreadWorkSource*>>
-        thread_work_sources =
-            std::unique_ptr<Eigen::MaxSizeVector<internal::ThreadWorkSource*>>(
-                new Eigen::MaxSizeVector<internal::ThreadWorkSource*>(
-                    max_handlers_));
+    thread_local auto thread_work_sources =
+        std::make_unique<Eigen::MaxSizeVector<internal::ThreadWorkSource*>>(
+
+            max_handlers_);
     uint64_t version;
     int num_active_requests;
     RunHandler::Impl* handler_impl;
     {
       tensorflow::mutex_lock l(mu_);
+      uint64_t start_wait_us = tensorflow::Env::Default()->NowMicros();
       if (!has_free_handler()) {
-        tensorflow::profiler::TraceMe activity(
+        tsl::profiler::TraceMe activity(
             [step_id] {
-              return tensorflow::profiler::TraceMeEncode(
-                  "WaitingForHandler", {{"step_id", step_id}});
+              return tsl::profiler::TraceMeEncode("WaitingForHandler",
+                                                  {{"step_id", step_id}});
             },
-            tensorflow::profiler::TraceMeLevel::kInfo);
+            tsl::profiler::TraceMeLevel::kInfo);
         if (timeout_in_ms == 0) {
           mu_.Await(tensorflow::Condition(this, &Impl::has_free_handler));
         } else if (!mu_.AwaitWithDeadline(
@@ -804,7 +820,10 @@ class RunHandlerPool::Impl {
                            timeout_in_ms * 1000 * 1000)) {
           return nullptr;
         }
+        wait_for_handler_latency->GetCell(absl::StrCat(options.priority))
+            ->Add(tensorflow::Env::Default()->NowMicros() - start_wait_us);
       }
+
       // Remove the last entry from free_handlers_ and add to the end of
       // sorted_active_handlers_.
       handler_impl = free_handlers_.back();
@@ -830,7 +849,7 @@ class RunHandlerPool::Impl {
       version = ++version_;
     }
     RecomputePoolStats(num_active_requests, version, *thread_work_sources);
-    return tensorflow::WrapUnique<RunHandler>(new RunHandler(handler_impl));
+    return std::unique_ptr<RunHandler>(new RunHandler(handler_impl));
   }
 
   void ReleaseHandler(RunHandler::Impl* handler) TF_LOCKS_EXCLUDED(mu_) {
@@ -864,7 +883,7 @@ class RunHandlerPool::Impl {
     // requests will trigger recomputation.
     if (wait_if_no_active_request_ && sorted_active_handlers_.empty()) {
       thread_local auto thread_work_sources =
-          absl::make_unique<Eigen::MaxSizeVector<internal::ThreadWorkSource*>>(
+          std::make_unique<Eigen::MaxSizeVector<internal::ThreadWorkSource*>>(
               max_handlers_);
       thread_work_sources->resize(0);
       auto version = ++version_;
@@ -984,9 +1003,9 @@ void RunHandlerPool::Impl::LogInfo() {
         ids_str += " ";
       }
 
-      times_str += tensorflow::strings::StrCat(
-          (now - (*it)->start_time_us()) / 1000.0, " ms.");
-      ids_str += tensorflow::strings::StrCat((*it)->tws()->GetTracemeId());
+      absl::StrAppend(&times_str, (now - (*it)->start_time_us()) / 1000.0,
+                      " ms.");
+      absl::StrAppend(&ids_str, (*it)->tws()->GetTracemeId());
       ++it;
     }
     VLOG(1) << "Elapsed times are: " << times_str;
@@ -1029,7 +1048,7 @@ int RunHandler::Impl::RunHandlerEigenThreadPool::CurrentThreadId() const {
 
 RunHandlerPool::RunHandlerPool(Options options) : impl_(new Impl(options)) {}
 
-RunHandlerPool::~RunHandlerPool() {}
+RunHandlerPool::~RunHandlerPool() = default;
 
 std::unique_ptr<RunHandler> RunHandlerPool::Get(
     int64_t step_id, int64_t timeout_in_ms, const RunHandlerOptions& options) {
@@ -1050,8 +1069,14 @@ void RunHandler::ScheduleInterOpClosure(TaskFunction fn) {
 }
 
 void RunHandler::ScheduleIntraOpClosure(TaskFunction fn) {
-  impl_->ScheduleInterOpClosure(std::move(fn));
+  impl_->ScheduleIntraOpClosure(std::move(fn));
 }
+
+int RunHandler::NumThreads() const {
+  return impl_->pool_impl()->run_handler_thread_pool()->NumThreads();
+}
+
+int64_t RunHandler::step_id() const { return impl_->step_id(); }
 
 tensorflow::thread::ThreadPoolInterface*
 RunHandler::AsIntraThreadPoolInterface() const {
@@ -1059,6 +1084,34 @@ RunHandler::AsIntraThreadPoolInterface() const {
 }
 
 RunHandler::~RunHandler() { impl_->pool_impl()->ReleaseHandler(impl_); }
+
+int RunHandlerWorkQueue::GetParallelismLevel() const {
+  return run_handler_->NumThreads();
+}
+
+void RunHandlerWorkQueue::AddTask(TaskFunction work) {
+  run_handler_->ScheduleInterOpClosure(tensorflow::tfrt_stub::WrapWork(
+      run_handler_->step_id(), "inter", std::move(work)));
+}
+
+std::optional<TaskFunction> RunHandlerWorkQueue::AddBlockingTask(
+    TaskFunction work, bool allow_queuing) {
+  LOG_EVERY_N_SEC(ERROR, 10)
+      << "RunHandlerWorkQueue::AddBlockingTask() is not supposed to be called.";
+  return work;
+}
+
+void RunHandlerWorkQueue::Await(ArrayRef<RCReference<AsyncValue>> values) {
+  tfrt::Await(values);
+}
+
+bool RunHandlerWorkQueue::IsInWorkerThread() const {
+  // Simply return true here as this method is not used in savedmodel workflow
+  // and soon deprecated.
+  //
+  // TODO(b/198671794): Remove this method once it is removed from base.
+  return true;
+}
 
 }  // namespace tf
 }  // namespace tfrt

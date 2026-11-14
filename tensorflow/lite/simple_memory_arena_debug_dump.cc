@@ -13,8 +13,10 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 #include <algorithm>
+#include <cstdint>
 #include <cstdio>
 #include <functional>
+#include <limits>
 #include <queue>
 #include <string>
 #include <vector>
@@ -58,7 +60,7 @@ void PrintIntVector(const std::vector<int>& v) {
 }
 
 struct PerLayerInfo {
-  PerLayerInfo() {}
+  PerLayerInfo() = default;
   PerLayerInfo(int id, size_t bytes, const std::vector<int>& tensors)
       : node_id(id), total_bytes(bytes), live_tensors(tensors) {}
   int node_id;

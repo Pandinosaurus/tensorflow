@@ -17,12 +17,16 @@ limitations under the License.
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
+#include <memory>
 #include <vector>
 
-#include "tensorflow/lite/c/builtin_op_data.h"
-#include "tensorflow/lite/c/common.h"
+#include "absl/types/span.h"
+#include "tensorflow/lite/core/c/builtin_op_data.h"
+#include "tensorflow/lite/core/c/common.h"
 #include "tensorflow/lite/kernels/cpu_backend_context.h"
 #include "tensorflow/lite/kernels/internal/optimized/optimized_ops.h"
+#include "tensorflow/lite/kernels/internal/runtime_shape.h"
 #include "tensorflow/lite/kernels/internal/tensor_ctypes.h"
 #include "tensorflow/lite/kernels/internal/types.h"
 #include "tensorflow/lite/kernels/kernel_util.h"
@@ -46,17 +50,14 @@ static constexpr size_t kMaxIm2colBufferSizeMobile = 1024 * 1024 * 1024;  // 1GB
 struct OpData {
   Padding3DValues padding;
   int im2col_tensor_id = kTensorNotAllocated;
-  int transposed_filter_tensor_id = kTensorNotAllocated;
 
   bool need_im2col = false;
-  bool need_transposed_filter = false;
 
   // Disable im2col if the temporary im2col tensor requires too much memory
   // (i.e. >= kMaxIm2colBufferSizeMobile).
   bool im2col_oversized = false;
 
   int32_t im2col_index;
-  int32_t transposed_filter_index;
 };
 
 void* Init(TfLiteContext* context, const char* buffer, size_t length) {
@@ -83,16 +84,12 @@ TfLiteStatus AllocateTemporaryTensorsIfRequired(
 
   opdata->need_im2col = (kernel_type == kGenericOptimized) &&
                         (need_dilated_im2col || need_non_dilated_im2col);
-  // TODO(b/183455632): Add transposing logic in converter so constant folding
-  // might work on constant filter tensor.
-  opdata->need_transposed_filter = (kernel_type == kGenericOptimized);
 
   // On mobile platforms, the generic optimized kernel will not be used if the
   // temporary im2col tensor requires too much memory.
   if (IsMobilePlatform() && opdata->need_im2col &&
       im2col_bytes >= kMaxIm2colBufferSizeMobile) {
     opdata->need_im2col = false;
-    opdata->need_transposed_filter = false;
     opdata->im2col_oversized = true;
   }
 
@@ -102,15 +99,6 @@ TfLiteStatus AllocateTemporaryTensorsIfRequired(
           context, context->AddTensors(context, 1, &opdata->im2col_tensor_id));
     }
     opdata->im2col_index = temporaries_count++;
-  }
-
-  if (opdata->need_transposed_filter) {
-    if (opdata->transposed_filter_tensor_id == kTensorNotAllocated) {
-      TF_LITE_ENSURE_OK(
-          context, context->AddTensors(context, 1,
-                                       &opdata->transposed_filter_tensor_id));
-    }
-    opdata->transposed_filter_index = temporaries_count++;
   }
 
   TfLiteIntArrayFree(node->temporaries);
@@ -139,6 +127,16 @@ TfLiteStatus Prepare(KernelType kernel_type, TfLiteContext* context,
 
   // Check input channels matching filter.
   TF_LITE_ENSURE_EQ(context, input->dims->data[4], filter->dims->data[3]);
+  TF_LITE_ENSURE(context, input->dims->data[0] >= 0);
+  TF_LITE_ENSURE(context, input->dims->data[1] > 0);
+  TF_LITE_ENSURE(context, input->dims->data[2] > 0);
+  TF_LITE_ENSURE(context, input->dims->data[3] > 0);
+  TF_LITE_ENSURE(context, input->dims->data[4] > 0);
+  TF_LITE_ENSURE(context, filter->dims->data[0] > 0);
+  TF_LITE_ENSURE(context, filter->dims->data[1] > 0);
+  TF_LITE_ENSURE(context, filter->dims->data[2] > 0);
+  TF_LITE_ENSURE(context, filter->dims->data[3] > 0);
+  TF_LITE_ENSURE(context, filter->dims->data[4] > 0);
 
   // Check types.
   TfLiteType input_type = input->type;
@@ -152,6 +150,16 @@ TfLiteStatus Prepare(KernelType kernel_type, TfLiteContext* context,
     TF_LITE_ENSURE_TYPES_EQ(context, bias->type, input_type);
     TF_LITE_ENSURE_EQ(context, NumElements(bias), SizeOfDimension(filter, 4));
   }
+
+  // Validate stride values.
+  TF_LITE_ENSURE(context, params->stride_depth > 0);
+  TF_LITE_ENSURE(context, params->stride_height > 0);
+  TF_LITE_ENSURE(context, params->stride_width > 0);
+
+  // Validate dilation values.
+  TF_LITE_ENSURE(context, params->dilation_depth_factor > 0);
+  TF_LITE_ENSURE(context, params->dilation_height_factor > 0);
+  TF_LITE_ENSURE(context, params->dilation_width_factor > 0);
 
   // Filter has shape of [filter_depth, filter_height, filter_width,
   // in_channels, out_channels].
@@ -167,70 +175,100 @@ TfLiteStatus Prepare(KernelType kernel_type, TfLiteContext* context,
 
   // Matching GetWindowedOutputSize in TensorFlow.
   int out_width, out_height, out_depth;
-  opdata->padding = ComputePadding3DValues(
+  TF_LITE_ENSURE_STATUS(ComputePadding3DValuesChecked(
       params->stride_height, params->stride_width, params->stride_depth,
       params->dilation_height_factor, params->dilation_width_factor,
       params->dilation_depth_factor, height, width, depth, filter_height,
       filter_width, filter_depth, params->padding, &out_height, &out_width,
-      &out_depth);
+      &out_depth, &opdata->padding));
 
-  TfLiteIntArray* output_size = TfLiteIntArrayCreate(5);
+  int input_spatial_elements = 0;
+  TF_LITE_ENSURE_MSG(context,
+                     CheckedNumElements({depth, height, width, input_channel},
+                                        input_spatial_elements) == kTfLiteOk,
+                     "%s", "Conv3D input spatial dimensions overflow.");
+  int total_input_elements = 0;
+  TF_LITE_ENSURE_MSG(
+      context, CheckedNumElements(input, total_input_elements) == kTfLiteOk,
+      "%s", "Conv3D input dimensions overflow.");
+
+  int output_spatial_elements = 0;
+  TF_LITE_ENSURE_MSG(
+      context,
+      CheckedNumElements({out_depth, out_height, out_width, channels_out},
+                         output_spatial_elements) == kTfLiteOk,
+      "%s", "Conv3D output spatial dimensions overflow.");
+  int total_output_elements = 0;
+  TF_LITE_ENSURE_MSG(context,
+                     CheckedNumElements({batches, out_depth, out_height,
+                                         out_width, channels_out},
+                                        total_output_elements) == kTfLiteOk,
+                     "%s", "Conv3D output dimensions overflow.");
+
+  std::unique_ptr<TfLiteIntArray, void (*)(TfLiteIntArray*)> output_size(
+      TfLiteIntArrayCreate(5), TfLiteIntArrayFree);
   output_size->data[0] = batches;
   output_size->data[1] = out_depth;
   output_size->data[2] = out_height;
   output_size->data[3] = out_width;
   output_size->data[4] = channels_out;
-  TF_LITE_ENSURE_OK(context,
-                    context->ResizeTensor(context, output, output_size));
+  TF_LITE_ENSURE_OK(
+      context, context->ResizeTensor(context, output, output_size.release()));
 
   // Allocate temporary tensors.
   size_t input_type_size;
   TF_LITE_ENSURE_STATUS(GetSizeOfType(context, input->type, &input_type_size));
-  const size_t im2col_bytes = batches * out_depth * out_height * out_width *
-                              input_channel * filter_depth * filter_height *
-                              filter_width * input_type_size;
+  size_t im2col_elements = 0;
+  TF_LITE_ENSURE_OK(
+      context,
+      CheckedShapeProduct(
+          context,
+          {batches, out_depth, out_height, out_width, input_channel,
+           filter_depth, filter_height, filter_width},
+          "Conv3D im2col tensor has too many elements.", im2col_elements));
+  size_t im2col_bytes = 0;
+  TF_LITE_ENSURE_MSG(context,
+                     MultiplyAndCheckOverflow(im2col_elements, input_type_size,
+                                              &im2col_bytes) == kTfLiteOk,
+                     "%s", "Conv3D im2col tensor is too large.");
   TF_LITE_ENSURE_OK(context, AllocateTemporaryTensorsIfRequired(
                                  kernel_type, context, node, opdata, params,
                                  filter, im2col_bytes));
 
   if (opdata->need_im2col) {
-    TfLiteIntArray* im2col_size = TfLiteIntArrayCreate(5);
-    im2col_size->data[0] = output_size->data[0];
-    im2col_size->data[1] = output_size->data[1];
-    im2col_size->data[2] = output_size->data[2];
-    im2col_size->data[3] = output_size->data[3];
-    im2col_size->data[4] =
-        input_channel * filter_depth * filter_height * filter_width;
+    if (im2col_elements > std::numeric_limits<int32_t>::max()) {
+      TF_LITE_KERNEL_LOG(
+          context,
+          "Conv3D im2col elements (%zu) exceed the 32-bit integer limit.",
+          im2col_elements);
+      return kTfLiteError;
+    }
+    std::unique_ptr<TfLiteIntArray, void (*)(TfLiteIntArray*)> im2col_size(
+        TfLiteIntArrayCreate(5), TfLiteIntArrayFree);
+    im2col_size->data[0] = batches;
+    im2col_size->data[1] = out_depth;
+    im2col_size->data[2] = out_height;
+    im2col_size->data[3] = out_width;
+    const RuntimeShape filter_shape = GetTensorShape(filter);
+    int im2col_depth = 0;
+    TF_LITE_ENSURE_MSG(
+        context, filter_shape.CheckedSizeToDimension(/*end=*/4, im2col_depth),
+        "%s", "Conv3D im2col tensor has too many channels.");
+    im2col_size->data[4] = im2col_depth;
 
     TfLiteTensor* im2col;
     node->temporaries->data[opdata->im2col_index] = opdata->im2col_tensor_id;
-    TF_LITE_ENSURE_OK(context, GetTemporarySafe(context, node,
-                                                opdata->im2col_index, &im2col));
+    TfLiteStatus status =
+        GetTemporarySafe(context, node, opdata->im2col_index, &im2col);
+    if (status != kTfLiteOk) {
+      return status;
+    }
     im2col->type = input->type;
     im2col->allocation_type = kTfLiteArenaRw;
-    TF_LITE_ENSURE_OK(context,
-                      context->ResizeTensor(context, im2col, im2col_size));
+    status = context->ResizeTensor(context, im2col, im2col_size.release());
+    TF_LITE_ENSURE_OK(context, status);
   }
 
-  if (opdata->need_transposed_filter) {
-    TfLiteIntArray* transposed_filter_size = TfLiteIntArrayCreate(5);
-    transposed_filter_size->data[0] = filter->dims->data[4];
-    transposed_filter_size->data[1] = filter->dims->data[0];
-    transposed_filter_size->data[2] = filter->dims->data[1];
-    transposed_filter_size->data[3] = filter->dims->data[2];
-    transposed_filter_size->data[4] = filter->dims->data[3];
-
-    TfLiteTensor* transposed_filter;
-    node->temporaries->data[opdata->transposed_filter_index] =
-        opdata->transposed_filter_tensor_id;
-    TF_LITE_ENSURE_OK(context, GetTemporarySafe(context, node,
-                                                opdata->transposed_filter_index,
-                                                &transposed_filter));
-    transposed_filter->type = filter->type;
-    transposed_filter->allocation_type = kTfLiteArenaRw;
-    TF_LITE_ENSURE_OK(context, context->ResizeTensor(context, transposed_filter,
-                                                     transposed_filter_size));
-  }
   return kTfLiteOk;
 }
 
@@ -239,11 +277,11 @@ TfLiteStatus Prepare(TfLiteContext* context, TfLiteNode* node) {
   return Prepare(kernel_type, context, node);
 }
 
-void EvalFloat(KernelType kernel_type, TfLiteContext* context, TfLiteNode* node,
-               TfLiteConv3DParams* params, OpData* opdata,
-               const TfLiteTensor* input, const TfLiteTensor* filter,
-               const TfLiteTensor* bias, TfLiteTensor* im2col,
-               TfLiteTensor* tranposed_filter, TfLiteTensor* output) {
+TfLiteStatus EvalFloat(KernelType kernel_type, TfLiteContext* context,
+                       TfLiteNode* node, TfLiteConv3DParams* params,
+                       OpData* opdata, const TfLiteTensor* input,
+                       const TfLiteTensor* filter, const TfLiteTensor* bias,
+                       TfLiteTensor* im2col, TfLiteTensor* output) {
   float output_activation_min, output_activation_max;
   CalculateActivationRange(params->activation, &output_activation_min,
                            &output_activation_max);
@@ -265,19 +303,17 @@ void EvalFloat(KernelType kernel_type, TfLiteContext* context, TfLiteNode* node,
                             GetTensorData<float>(filter), GetTensorShape(bias),
                             GetTensorData<float>(bias), GetTensorShape(output),
                             GetTensorData<float>(output));
-      break;
+      return kTfLiteOk;
     }
     case kGenericOptimized: {
-      optimized_ops::Conv3D(
+      return optimized_ops::Conv3D(
           runtime_params, GetTensorShape(input), GetTensorData<float>(input),
           GetTensorShape(filter), GetTensorData<float>(filter),
           GetTensorShape(bias), GetTensorData<float>(bias),
           GetTensorShape(output), GetTensorData<float>(output),
           GetTensorShape(im2col), GetTensorData<float>(im2col),
-          GetTensorShape(tranposed_filter),
-          GetTensorData<float>(tranposed_filter),
           CpuBackendContext::GetFromContext(context));
-    } break;
+    }
   }
 }
 
@@ -288,6 +324,9 @@ TfLiteStatus Eval(KernelType kernel_type, TfLiteContext* context,
 
   TfLiteTensor* output;
   TF_LITE_ENSURE_OK(context, GetOutputSafe(context, node, 0, &output));
+  if (NumElements(output) == 0) {
+    return kTfLiteOk;
+  }
   const TfLiteTensor* input;
   TF_LITE_ENSURE_OK(context, GetInputSafe(context, node, 0, &input));
   const TfLiteTensor* filter;
@@ -297,11 +336,6 @@ TfLiteStatus Eval(KernelType kernel_type, TfLiteContext* context,
   TfLiteTensor* im2col = opdata->need_im2col
                              ? &context->tensors[opdata->im2col_tensor_id]
                              : nullptr;
-  TfLiteTensor* transposed_filter =
-      opdata->need_transposed_filter
-          ? &context->tensors[opdata->transposed_filter_tensor_id]
-          : nullptr;
-
   // Fallback to reference execution path when im2col is needed but disabled.
   if (opdata->im2col_oversized) {
     kernel_type = kReference;
@@ -309,9 +343,8 @@ TfLiteStatus Eval(KernelType kernel_type, TfLiteContext* context,
 
   switch (input->type) {
     case kTfLiteFloat32:
-      EvalFloat(kernel_type, context, node, params, opdata, input, filter, bias,
-                im2col, transposed_filter, output);
-      break;
+      return EvalFloat(kernel_type, context, node, params, opdata, input,
+                       filter, bias, im2col, output);
     default:
       TF_LITE_KERNEL_LOG(context, "Type %s currently not supported.",
                          TfLiteTypeGetName(input->type));

@@ -31,7 +31,7 @@ limitations under the License.
 
 namespace tensorflow {
 namespace {
-Status MakeNodeDef(DataType dtype, NodeDef* node_def) {
+absl::Status MakeNodeDef(DataType dtype, NodeDef* node_def) {
   return NodeDefBuilder("fingerprint", "Fingerprint")
       .Input(FakeInput(dtype))
       .Input(FakeInput(DT_STRING))
@@ -40,11 +40,11 @@ Status MakeNodeDef(DataType dtype, NodeDef* node_def) {
 
 class FingerprintOpTest : public OpsTestBase {
  protected:
-  Status MakeFingerprintOp(Tensor* tensor) {
+  absl::Status MakeFingerprintOp(Tensor* tensor) {
     return MakeFingerprintOp(tensor, "farmhash64");
   }
 
-  Status MakeFingerprintOp(Tensor* data, const string& method) {
+  absl::Status MakeFingerprintOp(Tensor* data, const std::string& method) {
     TF_RETURN_IF_ERROR(MakeNodeDef(data->dtype(), node_def()));
     TF_RETURN_IF_ERROR(InitOp());
 
@@ -54,7 +54,7 @@ class FingerprintOpTest : public OpsTestBase {
     method_ = Tensor(DT_STRING, TensorShape{});
     method_.scalar<tstring>()() = method;
     inputs_.push_back(TensorValue(&method_));
-    return Status::OK();
+    return absl::OkStatus();
   }
 
   Tensor batch_dims_;
@@ -73,9 +73,9 @@ TEST_F(FingerprintOpTest, Empty) {
 // This test detects changes in fingerprint method.
 TEST_F(FingerprintOpTest, GoldenValue) {
   Tensor tensor(DT_UINT8, {1, 3, 4, 5, 6, 7});
-  auto buffer = tensor.flat<uint8>();
+  auto buffer = tensor.flat<uint8_t>();
   std::iota(buffer.data(), buffer.data() + buffer.size(),
-            static_cast<uint8>(47));
+            static_cast<uint8_t>(47));
 
   TF_ASSERT_OK(MakeFingerprintOp(&tensor));
   TF_ASSERT_OK(RunOpKernel());
@@ -121,7 +121,7 @@ TEST_F(FingerprintOpTest, Collision) {
     const int64_t size = shape.num_elements() * DataTypeSize(dtype);
 
     Tensor tensor(dtype, shape);
-    auto buffer = tensor.bit_casted_shaped<uint8, 1>({size});
+    auto buffer = tensor.bit_casted_shaped<uint8_t, 1>({size});
     buffer.setRandom();
 
     TF_ASSERT_OK(MakeFingerprintOp(&tensor));
@@ -147,8 +147,8 @@ TEST_F(FingerprintOpTest, CollisionString) {
   auto& input = tensor.vec<tstring>()(0);
   input.resize(size);
 
-  TTypes<uint8>::UnalignedFlat buffer(reinterpret_cast<uint8*>(&input[0]),
-                                      input.size());
+  TTypes<uint8_t>::UnalignedFlat buffer(reinterpret_cast<uint8_t*>(&input[0]),
+                                        input.size());
   buffer.setRandom();
 
   TF_ASSERT_OK(MakeFingerprintOp(&tensor));
@@ -195,9 +195,9 @@ TEST_F(FingerprintOpTest, SupportedMethods) {
   Tensor tensor(DT_STRING, TensorShape{1});
   TF_ASSERT_OK(MakeFingerprintOp(&tensor, "unsupported_method"));
 
-  const Status status = RunOpKernel();
+  const absl::Status status = RunOpKernel();
   EXPECT_FALSE(status.ok());
-  EXPECT_NE(status.error_message().find("unsupported_method"), string::npos);
+  EXPECT_NE(status.message().find("unsupported_method"), std::string::npos);
 }
 
 TEST_F(FingerprintOpTest, SupportedTypes) {

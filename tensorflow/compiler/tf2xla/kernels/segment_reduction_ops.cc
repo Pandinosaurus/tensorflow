@@ -13,21 +13,35 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include <algorithm>
+#include <cstdint>
+#include <limits>
+#include <vector>
+
 #include "tensorflow/compiler/tf2xla/lib/scatter.h"
 #include "tensorflow/compiler/tf2xla/type_util.h"
-#include "tensorflow/compiler/tf2xla/xla_helpers.h"
 #include "tensorflow/compiler/tf2xla/xla_op_kernel.h"
 #include "tensorflow/compiler/tf2xla/xla_op_registry.h"
-#include "tensorflow/compiler/xla/client/lib/constants.h"
-#include "tensorflow/compiler/xla/client/value_inference.h"
-#include "tensorflow/compiler/xla/client/xla_builder.h"
+#include "xla/hlo/builder/lib/constants.h"
+#include "xla/hlo/builder/lib/math.h"
+#include "xla/hlo/builder/value_inference.h"
+#include "xla/hlo/builder/xla_builder.h"
+#include "xla/primitive_util.h"
+#include "xla/shape.h"
+#include "xla/xla_data.pb.h"
+#include "tensorflow/core/framework/op_kernel.h"
+#include "tensorflow/core/framework/op_requires.h"
+#include "tensorflow/core/framework/tensor_shape.h"
+#include "tensorflow/core/framework/types.pb.h"
+#include "tensorflow/core/platform/errors.h"
 
 namespace tensorflow {
 namespace {
 
-class UnsortedSegmentReduce : public XlaOpKernel {
+class SegmentReduce : public XlaOpKernel {
  public:
-  explicit UnsortedSegmentReduce(OpKernelConstruction* ctx) : XlaOpKernel(ctx) {
+  explicit SegmentReduce(OpKernelConstruction* ctx, bool indices_are_sorted)
+      : XlaOpKernel(ctx), indices_are_sorted_(indices_are_sorted) {
     DataType dtype;
     OP_REQUIRES_OK(ctx, ctx->GetAttr("T", &dtype));
     OP_REQUIRES_OK(ctx, DataTypeToPrimitiveType(dtype, &type_));
@@ -39,6 +53,9 @@ class UnsortedSegmentReduce : public XlaOpKernel {
   // A function to combine two scalars with the same index (e.g., sum).
   virtual xla::XlaOp Combine(xla::XlaOp a, xla::XlaOp b) = 0;
 
+  // Whether to pre-filter/replace NaNs in updates logic.
+  virtual bool FilterNaNs() const { return false; }
+
   void Compile(XlaOpKernelContext* ctx) override {
     // output = unsorted_segment_sum(data, indices, num_segments)
     // Compute a tensor such that:
@@ -46,7 +63,9 @@ class UnsortedSegmentReduce : public XlaOpKernel {
     //    output[i] == 0 if i does not appear in indices
     //
     // Contrast with segment_sum(), which assumes indices are sorted and that
-    // max(indices)+1 is the desired size of the output.
+    // max(indices)+1 is the desired size of the output. Note that
+    // segment_sum_v2 also takes num_segments as an input and can be supported
+    // similarly.
     //
     // The returned output tensor has the same type as data, and the same shape
     // as data with the first indices.rank dimensions are replaced
@@ -61,10 +80,73 @@ class UnsortedSegmentReduce : public XlaOpKernel {
     OP_REQUIRES_OK(ctx,
                    ctx->ConstantInputAsIntScalar(
                        2, &num_segments, xla::ValueInferenceMode::kUpperBound));
+    // Reject a negative num_segments like the TensorFlow kernels, before it
+    // reaches TensorShape, which CHECK-fails on negative sizes.
+    OP_REQUIRES(ctx, num_segments >= 0,
+                errors::InvalidArgument("Input num_segments == ", num_segments,
+                                        " must not be negative."));
     OP_REQUIRES(ctx, data_shape.dims() >= indices_shape.dims(),
                 errors::InvalidArgument(type_string(),
                                         " requires that indices' rank be"
                                         " less than or equal to data's rank."));
+
+    // InputShape() reports a bounded-dynamic dimension as its upper bound, so
+    // two prefix dimensions that are equal at run time can still disagree
+    // here. Reconcile the operands first: their run-time sizes are equal, so
+    // both fit within the smaller of the two bounds. Slice the larger side
+    // down to that bound and re-apply its run-time size. Only a dimension
+    // that is actually dynamic is sliced, so a genuine static mismatch still
+    // fails the check below. This has to reach the operands rather than just
+    // the check, because xla::Scatter compares the same bounds again during
+    // shape inference and tolerates only unbounded dynamic sizes. Where
+    // cwise_ops.cc pads the smaller side up when both sides are dynamic,
+    // slicing is safe here: segment reduction does not broadcast, so there is
+    // no size-1 dimension to preserve. The run-time size is clamped to the
+    // reduced bound, which XLA requires of a dynamic dimension; an input that
+    // trips the clamp had unequal prefix dimensions at run time and was
+    // already invalid for this op.
+    OP_REQUIRES_VALUE(xla::Shape data_xla_shape, ctx, ctx->InputXlaShape(0));
+    OP_REQUIRES_VALUE(xla::Shape indices_xla_shape, ctx, ctx->InputXlaShape(1));
+    OP_REQUIRES(
+        ctx,
+        data_xla_shape.dimensions().size() == data_shape.dims() &&
+            indices_xla_shape.dimensions().size() == indices_shape.dims(),
+        errors::Internal(type_string(), " got mismatched ranks for data (",
+                         data_xla_shape.dimensions().size(), " vs. ",
+                         data_shape.dims(), ") or indices (",
+                         indices_xla_shape.dimensions().size(), " vs. ",
+                         indices_shape.dims(), ")"));
+    for (int d = 0; d < indices_shape.dims(); ++d) {
+      const int64_t data_bound = data_shape.dim_size(d);
+      const int64_t indices_bound = indices_shape.dim_size(d);
+      if (data_bound > indices_bound &&
+          data_xla_shape.is_dynamic_dimension(d)) {
+        // Dimension sizes are S32, so clamp the bound before narrowing it.
+        const int32_t size_bound = static_cast<int32_t>(std::min<int64_t>(
+            indices_bound, std::numeric_limits<int32_t>::max()));
+        xla::XlaOp size =
+            xla::Min(xla::GetDimensionSize(data, d),
+                     xla::ConstantR0<int32_t>(ctx->builder(), size_bound));
+        data = xla::SliceInDim(data, /*start_index=*/0,
+                               /*limit_index=*/indices_bound, /*stride=*/1,
+                               /*dimno=*/d);
+        data = xla::SetDimensionSize(data, size, d);
+        data_shape.set_dim(d, indices_bound);
+      } else if (indices_bound > data_bound &&
+                 indices_xla_shape.is_dynamic_dimension(d)) {
+        const int32_t size_bound = static_cast<int32_t>(
+            std::min<int64_t>(data_bound, std::numeric_limits<int32_t>::max()));
+        xla::XlaOp size =
+            xla::Min(xla::GetDimensionSize(indices, d),
+                     xla::ConstantR0<int32_t>(ctx->builder(), size_bound));
+        indices = xla::SliceInDim(indices, /*start_index=*/0,
+                                  /*limit_index=*/data_bound, /*stride=*/1,
+                                  /*dimno=*/d);
+        indices = xla::SetDimensionSize(indices, size, d);
+        indices_shape.set_dim(d, data_bound);
+      }
+    }
+
     // Validate that indices.shape is a prefix of data.shape.
     for (int d = 0; d < indices_shape.dims(); ++d) {
       OP_REQUIRES(
@@ -97,7 +179,22 @@ class UnsortedSegmentReduce : public XlaOpKernel {
     OP_REQUIRES_OK(
         ctx, ctx->ResolveInputDynamismIntoPred(2, &num_segments_is_dynamic));
 
-    buffer_dims.insert(buffer_dims.begin(), ctx->Input(2));
+    xla::XlaOp num_segments_size = ctx->Input(2);
+    if (num_segments_is_dynamic) {
+      // SetDimensionSize takes an S32 size. The check above only sees the
+      // bound of a num_segments known only at run time, so clamp a negative
+      // one at 0 rather than set it as the dimension size. Clamp in the
+      // original width, so that an int64 size doesn't wrap when narrowed.
+      num_segments_size =
+          xla::Clamp(xla::ScalarLike(num_segments_size, 0), num_segments_size,
+                     xla::ScalarLike(num_segments_size,
+                                     std::numeric_limits<int32_t>::max()));
+      if (ctx->input_xla_type(2) != xla::S32) {
+        num_segments_size =
+            xla::ConvertElementType(num_segments_size, xla::S32);
+      }
+    }
+    buffer_dims.insert(buffer_dims.begin(), num_segments_size);
     buffer_dims_are_dynamic.insert(buffer_dims_are_dynamic.begin(),
                                    num_segments_is_dynamic);
     // Build the segment shape part.
@@ -114,23 +211,38 @@ class UnsortedSegmentReduce : public XlaOpKernel {
       }
     }
 
+    // With no segments, every segment id is dropped and the result is empty.
+    // XlaScatter rejects a scatter into a dimension of size zero, so return
+    // the empty buffer as is.
+    if (num_segments == 0) {
+      ctx->SetOutput(0, buffer);
+      return;
+    }
+
+    if (FilterNaNs() && xla::primitive_util::IsFloatingPointType(type_)) {
+      data = xla::Select(xla::IsNan(data), InitialValue(builder), data);
+    }
+
     auto combiner = [this](xla::XlaOp a, xla::XlaOp b,
                            xla::XlaBuilder* builder) { return Combine(a, b); };
 
     auto result = XlaScatter(buffer, /*updates=*/data, indices,
-                             /*indices_are_vectors=*/false, combiner, builder);
+                             /*indices_are_vectors=*/false, indices_are_sorted_,
+                             combiner, builder);
     OP_REQUIRES_OK(ctx, result.status());
-    ctx->SetOutput(0, result.ValueOrDie());
+    ctx->SetOutput(0, result.value());
   }
 
  protected:
   xla::PrimitiveType type_;
+  bool indices_are_sorted_;
 };
 
-class UnsortedSegmentSum : public UnsortedSegmentReduce {
+template <bool indices_are_sorted>
+class SegmentSum : public SegmentReduce {
  public:
-  explicit UnsortedSegmentSum(OpKernelConstruction* ctx)
-      : UnsortedSegmentReduce(ctx) {}
+  explicit SegmentSum(OpKernelConstruction* ctx)
+      : SegmentReduce(ctx, indices_are_sorted) {}
 
   xla::XlaOp InitialValue(xla::XlaBuilder* builder) override {
     return xla::Zero(builder, type_);
@@ -138,14 +250,17 @@ class UnsortedSegmentSum : public UnsortedSegmentReduce {
   xla::XlaOp Combine(xla::XlaOp a, xla::XlaOp b) override { return a + b; };
 };
 
+REGISTER_XLA_OP(Name("SegmentSumV2").CompileTimeConstantInput("num_segments"),
+                SegmentSum</*indices_are_sorted=*/true>);
 REGISTER_XLA_OP(
     Name("UnsortedSegmentSum").CompileTimeConstantInput("num_segments"),
-    UnsortedSegmentSum);
+    SegmentSum</*indices_are_sorted=*/false>);
 
-class UnsortedSegmentProd : public UnsortedSegmentReduce {
+template <bool indices_are_sorted>
+class SegmentProd : public SegmentReduce {
  public:
-  explicit UnsortedSegmentProd(OpKernelConstruction* ctx)
-      : UnsortedSegmentReduce(ctx) {}
+  explicit SegmentProd(OpKernelConstruction* ctx)
+      : SegmentReduce(ctx, indices_are_sorted) {}
 
   xla::XlaOp InitialValue(xla::XlaBuilder* builder) override {
     return xla::One(builder, type_);
@@ -155,12 +270,17 @@ class UnsortedSegmentProd : public UnsortedSegmentReduce {
 
 REGISTER_XLA_OP(
     Name("UnsortedSegmentProd").CompileTimeConstantInput("num_segments"),
-    UnsortedSegmentProd);
+    SegmentProd</*indices_are_sorted=*/false>);
+REGISTER_XLA_OP(Name("SegmentProdV2").CompileTimeConstantInput("num_segments"),
+                SegmentProd</*indices_are_sorted=*/true>);
 
-class UnsortedSegmentMin : public UnsortedSegmentReduce {
+template <bool indices_are_sorted>
+class SegmentMin : public SegmentReduce {
  public:
-  explicit UnsortedSegmentMin(OpKernelConstruction* ctx)
-      : UnsortedSegmentReduce(ctx) {}
+  explicit SegmentMin(OpKernelConstruction* ctx)
+      : SegmentReduce(ctx, indices_are_sorted) {}
+
+  bool FilterNaNs() const override { return true; }
 
   xla::XlaOp InitialValue(xla::XlaBuilder* builder) override {
     return xla::MaxFiniteValue(builder, type_);
@@ -172,12 +292,17 @@ class UnsortedSegmentMin : public UnsortedSegmentReduce {
 
 REGISTER_XLA_OP(
     Name("UnsortedSegmentMin").CompileTimeConstantInput("num_segments"),
-    UnsortedSegmentMin);
+    SegmentMin</*indices_are_sorted=*/false>);
+REGISTER_XLA_OP(Name("SegmentMinV2").CompileTimeConstantInput("num_segments"),
+                SegmentMin</*indices_are_sorted=*/true>);
 
-class UnsortedSegmentMax : public UnsortedSegmentReduce {
+template <bool indices_are_sorted>
+class SegmentMax : public SegmentReduce {
  public:
-  explicit UnsortedSegmentMax(OpKernelConstruction* ctx)
-      : UnsortedSegmentReduce(ctx) {}
+  explicit SegmentMax(OpKernelConstruction* ctx)
+      : SegmentReduce(ctx, indices_are_sorted) {}
+
+  bool FilterNaNs() const override { return true; }
 
   xla::XlaOp InitialValue(xla::XlaBuilder* builder) override {
     return xla::MinFiniteValue(builder, type_);
@@ -189,7 +314,9 @@ class UnsortedSegmentMax : public UnsortedSegmentReduce {
 
 REGISTER_XLA_OP(
     Name("UnsortedSegmentMax").CompileTimeConstantInput("num_segments"),
-    UnsortedSegmentMax);
+    SegmentMax</*indices_are_sorted=*/false>);
+REGISTER_XLA_OP(Name("SegmentMaxV2").CompileTimeConstantInput("num_segments"),
+                SegmentMax</*indices_are_sorted=*/true>);
 
 }  // namespace
 }  // namespace tensorflow

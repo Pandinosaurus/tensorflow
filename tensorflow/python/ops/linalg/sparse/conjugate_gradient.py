@@ -14,18 +14,14 @@
 # ==============================================================================
 """Preconditioned Conjugate Gradient."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import collections
 
 from tensorflow.python.framework import constant_op
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import ops
 from tensorflow.python.ops import array_ops
-from tensorflow.python.ops import control_flow_ops
 from tensorflow.python.ops import math_ops
+from tensorflow.python.ops import while_loop
 from tensorflow.python.ops.linalg import linalg_impl as linalg
 from tensorflow.python.util import dispatch
 from tensorflow.python.util.tf_export import tf_export
@@ -77,6 +73,11 @@ def conjugate_gradient(operator,
   """
   if not (operator.is_self_adjoint and operator.is_positive_definite):
     raise ValueError('Expected a self-adjoint, positive definite operator.')
+
+  rhs = ops.convert_to_tensor(rhs, name='rhs')
+  if rhs.shape.rank is not None:
+    if rhs.shape.rank < 1:
+      raise ValueError('rhs must have at least rank 1')
 
   cg_state = collections.namedtuple('CGState', ['i', 'x', 'r', 'p', 'gamma'])
 
@@ -133,8 +134,7 @@ def conjugate_gradient(operator,
     gamma0 = dot(r0, p0)
     i = constant_op.constant(0, dtype=dtypes.int32)
     state = cg_state(i=i, x=x, r=r0, p=p0, gamma=gamma0)
-    _, state = control_flow_ops.while_loop(
-        stopping_criterion, cg_step, [i, state])
+    _, state = while_loop.while_loop(stopping_criterion, cg_step, [i, state])
     return cg_state(
         state.i,
         x=state.x,

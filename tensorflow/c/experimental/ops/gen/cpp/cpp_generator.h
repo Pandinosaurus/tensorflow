@@ -16,8 +16,11 @@ limitations under the License.
 #define TENSORFLOW_C_EXPERIMENTAL_OPS_GEN_CPP_CPP_GENERATOR_H_
 
 #include "tensorflow/c/experimental/ops/gen/common/controller.h"
+#include "tensorflow/c/experimental/ops/gen/common/path_config.h"
+#include "tensorflow/c/experimental/ops/gen/common/source_code.h"
 #include "tensorflow/c/experimental/ops/gen/cpp/renderers/cpp_config.h"
 #include "tensorflow/c/experimental/ops/gen/cpp/renderers/renderer_context.h"
+#include "tensorflow/core/platform/types.h"
 
 namespace tensorflow {
 namespace generator {
@@ -27,8 +30,8 @@ class CppGenerator {
   explicit CppGenerator(cpp::CppConfig cpp_config, PathConfig path_config);
   SourceCode HeaderFileContents() const;
   SourceCode SourceFileContents() const;
-  string HeaderFileName() const;
-  string SourceFileName() const;
+  std::string HeaderFileName() const;
+  std::string SourceFileName() const;
   void WriteHeaderFile() const;
   void WriteSourceFile() const;
 

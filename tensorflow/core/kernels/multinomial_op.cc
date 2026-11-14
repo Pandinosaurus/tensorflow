@@ -23,7 +23,7 @@ limitations under the License.
 #include <cmath>
 #include <memory>
 
-#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
+#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/register_types.h"
 #include "tensorflow/core/framework/tensor.h"
@@ -54,16 +54,16 @@ struct MultinomialFunctor {
 };
 
 #if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
-extern template struct MultinomialFunctor<GPUDevice, Eigen::half, int32>;
-extern template struct MultinomialFunctor<GPUDevice, float, int32>;
-extern template struct MultinomialFunctor<GPUDevice, double, int32>;
-extern template struct MultinomialFunctor<GPUDevice, int32, int32>;
-extern template struct MultinomialFunctor<GPUDevice, int64_t, int32>;
+extern template struct MultinomialFunctor<GPUDevice, Eigen::half, int32_t>;
+extern template struct MultinomialFunctor<GPUDevice, float, int32_t>;
+extern template struct MultinomialFunctor<GPUDevice, double, int32_t>;
+extern template struct MultinomialFunctor<GPUDevice, int32_t, int32_t>;
+extern template struct MultinomialFunctor<GPUDevice, int64_t, int32_t>;
 
 extern template struct MultinomialFunctor<GPUDevice, Eigen::half, int64_t>;
 extern template struct MultinomialFunctor<GPUDevice, float, int64_t>;
 extern template struct MultinomialFunctor<GPUDevice, double, int64_t>;
-extern template struct MultinomialFunctor<GPUDevice, int32, int64_t>;
+extern template struct MultinomialFunctor<GPUDevice, int32_t, int64_t>;
 extern template struct MultinomialFunctor<GPUDevice, int64_t, int64_t>;
 #endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 
@@ -153,30 +153,32 @@ class MultinomialOp : public OpKernel {
   void DoCompute(OpKernelContext* ctx, const Tensor& logits_t,
                  const Tensor& num_samples_t, GuardedPhiloxRandom* generator) {
     OP_REQUIRES(ctx, TensorShapeUtils::IsMatrix(logits_t.shape()),
-                errors::InvalidArgument("logits should be a matrix, got shape ",
-                                        logits_t.shape().DebugString()));
-    OP_REQUIRES(
-        ctx, TensorShapeUtils::IsScalar(num_samples_t.shape()),
-        errors::InvalidArgument("num_samples should be a scalar, got shape ",
-                                num_samples_t.shape().DebugString()));
+                absl::InvalidArgumentError(
+                    absl::StrCat("logits should be a matrix, got shape ",
+                                 logits_t.shape().DebugString())));
+    OP_REQUIRES(ctx, TensorShapeUtils::IsScalar(num_samples_t.shape()),
+                absl::InvalidArgumentError(
+                    absl::StrCat("num_samples should be a scalar, got shape ",
+                                 num_samples_t.shape().DebugString())));
 
     const int num_samples = num_samples_t.scalar<int>()();
     OP_REQUIRES(ctx, num_samples >= 0,
-                errors::InvalidArgument(
-                    "num_samples should be nonnegative, got ", num_samples));
+                absl::InvalidArgumentError(absl::StrCat(
+                    "num_samples should be non-negative, got ", num_samples)));
 
-    for (int i = 0; i < 2; i++) {
-      const int64_t dim = logits_t.dim_size(i);
-      OP_REQUIRES(ctx, static_cast<int>(dim) == dim,
-                  errors::InvalidArgument(
-                      "logits.shape = ", logits_t.shape().DebugString(),
-                      " too large for int"));
-    }
     const int batch_size = static_cast<int>(logits_t.dim_size(0));
     const int num_classes = static_cast<int>(logits_t.dim_size(1));
+
+    OP_REQUIRES(ctx, batch_size == logits_t.dim_size(0),
+                absl::InvalidArgumentError("batch_size cannot exceed max int"));
+
+    OP_REQUIRES(
+        ctx, num_classes == logits_t.dim_size(1),
+        absl::InvalidArgumentError("num_classes cannot exceed max int"));
+
     OP_REQUIRES(ctx, num_classes > 0,
-                errors::InvalidArgument("num_classes should be positive, got ",
-                                        num_classes));
+                absl::InvalidArgumentError(absl::StrCat(
+                    "num_classes should be positive, got ", num_classes)));
 
     Tensor* samples_t;
     OP_REQUIRES_OK(
@@ -186,7 +188,7 @@ class MultinomialOp : public OpKernel {
     // Execute kernel only for nonempty output; otherwise Eigen crashes on GPU.
     if (samples_t->NumElements() > 0) {
       Tensor noises, scores, scratch;  // Scratch space only used for GPU.
-      if (std::is_same<Device, GPUDevice>::value) {
+      if (std::is_same_v<Device, GPUDevice>) {
         OP_REQUIRES_OK(
             ctx,
             ctx->allocate_temp(
@@ -205,7 +207,7 @@ class MultinomialOp : public OpKernel {
 
       int num_samples_ceil_4 = (num_samples + 3) / 4 * 4;
       // CPU generates doubles = 2 samples per number.
-      if (std::is_same<Device, CPUDevice>::value) num_samples_ceil_4 *= 2;
+      if (std::is_same_v<Device, CPUDevice>) num_samples_ceil_4 *= 2;
       auto rng =
           generator->ReserveRandomOutputs(batch_size * num_samples_ceil_4, 256);
       functor::MultinomialFunctor<Device, T, OutputType>()(
@@ -249,6 +251,7 @@ class StatefulMultinomialOp : public MultinomialOp<Device, T, OutputType> {
                           StatefulMultinomialOp<CPUDevice, TYPE, int64>);
 
 TF_CALL_half(REGISTER);
+TF_CALL_bfloat16(REGISTER);
 TF_CALL_float(REGISTER);
 TF_CALL_double(REGISTER);
 #undef REGISTER
@@ -286,9 +289,10 @@ class StatelessMultinomialOp : public MultinomialOp<Device, T, OutputType> {
     const Tensor& num_samples_t = ctx->input(1);
 
     const Tensor& seed_t = ctx->input(2);
-    OP_REQUIRES(ctx, seed_t.dims() == 1 && seed_t.dim_size(0) == 2,
-                errors::InvalidArgument("seed must have shape [2], not ",
-                                        seed_t.shape().DebugString()));
+    OP_REQUIRES(
+        ctx, seed_t.dims() == 1 && seed_t.dim_size(0) == 2,
+        absl::InvalidArgumentError(absl::StrCat(
+            "seed must have shape [2], not ", seed_t.shape().DebugString())));
 
     random::PhiloxRandom::Key key;
     random::PhiloxRandom::ResultType counter;
@@ -317,6 +321,7 @@ class StatelessMultinomialOp : public MultinomialOp<Device, T, OutputType> {
                           StatelessMultinomialOp<CPUDevice, TYPE, int64>);
 
 TF_CALL_half(REGISTER);
+TF_CALL_bfloat16(REGISTER);
 TF_CALL_float(REGISTER);
 TF_CALL_double(REGISTER);
 #undef REGISTER

@@ -17,7 +17,7 @@ limitations under the License.
 
 #define EIGEN_USE_GPU
 
-#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
+#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/register_types.h"
 #include "tensorflow/core/framework/tensor.h"
@@ -34,30 +34,6 @@ namespace tensorflow {
 
 namespace {
 
-template <typename U, typename T>
-__device__ __host__ EIGEN_STRONG_INLINE
-    typename std::enable_if<!std::is_same<T, U>::value, U>::type
-    strict_cast(T t);
-
-template <typename U, typename T>
-__device__ __host__ EIGEN_STRONG_INLINE
-    typename std::enable_if<std::is_same<T, U>::value, U>::type
-    strict_cast(T t) {
-  return t;
-}
-
-template <>
-__device__ __host__ EIGEN_STRONG_INLINE float strict_cast<float, Eigen::half>(
-    Eigen::half t) {
-  return functor::HalfToFloat()(t);
-}
-
-template <>
-__device__ __host__ EIGEN_STRONG_INLINE Eigen::half
-strict_cast<Eigen::half, float>(float t) {
-  return functor::FloatToHalf()(t);
-}
-
 template <typename T>
 struct softmax_traits {
   using accumulator_type = T;
@@ -68,13 +44,32 @@ struct softmax_traits<Eigen::half> {
   using accumulator_type = float;
 };
 
+template <>
+struct softmax_traits<Eigen::bfloat16> {
+  using accumulator_type = float;
+};
+
+template <typename T>
+__global__ void SoftmaxSingleClassKernel(const T* __restrict__ logits,
+                                         T* __restrict__ output,
+                                         const int64_t num_elements,
+                                         const bool in_log_space) {
+  using acc_type = typename softmax_traits<T>::accumulator_type;
+  for (int64_t idx : GpuGridRangeX<int64_t>(num_elements)) {
+    acc_type val = static_cast<acc_type>(logits[idx]);
+    acc_type zero = val - val;
+    output[idx] = static_cast<T>(in_log_space ? zero : exp(zero));
+  }
+}
+
 template <typename T, typename U, int kUnroll>
 __global__ void GenerateNormalizedProb(const T* logits, const U* sum_probs,
                                        const T* max_logits, T* output,
-                                       const int num_rows, const int num_cols,
+                                       const int64_t num_rows,
+                                       const int64_t num_cols,
                                        const bool in_log_space) {
-  int tid = blockIdx.x * blockDim.x + threadIdx.x;
-  int row, col;
+  int64_t tid = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  int64_t row, col;
 
   // TODO(jamesqin): change to half2 load when inputs are Eigen::half.
   U input[kUnroll];
@@ -84,13 +79,13 @@ __global__ void GenerateNormalizedProb(const T* logits, const U* sum_probs,
     row = tid / num_cols;
     col = tid % num_cols;
     if (row < num_rows && col < num_cols) {
-      input[i] = strict_cast<U>(logits[tid]);
-      max_val[i] = strict_cast<U>(ldg(max_logits + row));
+      input[i] = static_cast<U>(logits[tid]);
+      max_val[i] = static_cast<U>(ldg(max_logits + row));
     }
-    tid += gridDim.x * blockDim.x;
+    tid += static_cast<int64_t>(gridDim.x) * blockDim.x;
   }
 
-  tid = blockIdx.x * blockDim.x + threadIdx.x;
+  tid = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   for (int i = 0; i < kUnroll; i++) {
     row = tid / num_cols;
     col = tid % num_cols;
@@ -100,21 +95,21 @@ __global__ void GenerateNormalizedProb(const T* logits, const U* sum_probs,
       } else {
         result[i] = exp(input[i] - max_val[i]) / ldg(sum_probs + row);
       }
-      output[tid] = strict_cast<T>(result[i]);
+      output[tid] = static_cast<T>(result[i]);
     }
-    tid += gridDim.x * blockDim.x;
+    tid += static_cast<int64_t>(gridDim.x) * blockDim.x;
   }
 }
 
 template <>
 __global__ void GenerateNormalizedProb<Eigen::half, float, 8>(
     const Eigen::half* logits, const float* sum_probs,
-    const Eigen::half* max_logits, Eigen::half* output, const int num_rows,
-    const int num_cols, const bool in_log_space) {
+    const Eigen::half* max_logits, Eigen::half* output, const int64_t num_rows,
+    const int64_t num_cols, const bool in_log_space) {
   const int kUnroll = 8;
-  int tid = blockIdx.x * blockDim.x + threadIdx.x;
-  int idx[kUnroll];
-  int row[kUnroll];
+  int64_t tid = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  int64_t idx[kUnroll];
+  int64_t row[kUnroll];
 
   float input[kUnroll];
   float max_val[kUnroll];
@@ -130,14 +125,14 @@ __global__ void GenerateNormalizedProb<Eigen::half, float, 8>(
     for (int i = 0; i < kUnroll; i++) {
       idx[i] = tid * kUnroll + i;
       row[i] = idx[i] / num_cols;
-      input[i] = strict_cast<float>(logits_h[i]);
-      max_val[i] = strict_cast<float>(ldg(max_logits + row[i]));
+      input[i] = static_cast<float>(logits_h[i]);
+      max_val[i] = static_cast<float>(ldg(max_logits + row[i]));
       if (in_log_space) {
         result[i] = input[i] - max_val[i] - log(ldg(sum_probs + row[i]));
       } else {
         result[i] = exp(input[i] - max_val[i]) / ldg(sum_probs + row[i]);
       }
-      output_h[i] = strict_cast<Eigen::half>(result[i]);
+      output_h[i] = static_cast<Eigen::half>(result[i]);
     }
 
     *reinterpret_cast<ulonglong2*>(output + tid * kUnroll) = output_d;
@@ -146,14 +141,14 @@ __global__ void GenerateNormalizedProb<Eigen::half, float, 8>(
       if (tid * kUnroll + i < num_rows * num_cols) {
         idx[i] = tid * kUnroll + i;
         row[i] = idx[i] / num_cols;
-        input[i] = strict_cast<float>(logits[idx[i]]);
-        max_val[i] = strict_cast<float>(ldg(max_logits + row[i]));
+        input[i] = static_cast<float>(logits[idx[i]]);
+        max_val[i] = static_cast<float>(ldg(max_logits + row[i]));
         if (in_log_space) {
           result[i] = input[i] - max_val[i] - log(ldg(sum_probs + row[i]));
         } else {
           result[i] = exp(input[i] - max_val[i]) / ldg(sum_probs + row[i]);
         }
-        output[idx[i]] = strict_cast<Eigen::half>(result[i]);
+        output[idx[i]] = static_cast<Eigen::half>(result[i]);
       }
     }
   }
@@ -163,24 +158,24 @@ template <typename T, typename U>
 struct SubtractAndExpFunctor {
   __host__ __device__ SubtractAndExpFunctor(const T* __restrict__ logits,
                                             const T* __restrict__ max_logits,
-                                            const int num_cols)
+                                            const int64_t num_cols)
       : logits_(logits), max_logits_(max_logits), num_cols_(num_cols) {}
 
-  __host__ __device__ U operator()(const int gid) const {
+  __host__ __device__ U operator()(const int64_t gid) const {
     // TODO(jamesqin): change to half2 load when inputs are Eigen::half.
     const U diff =
-        strict_cast<U>(logits_[gid] - ldg(max_logits_ + gid / num_cols_));
+        static_cast<U>(logits_[gid] - ldg(max_logits_ + gid / num_cols_));
     return exp(diff);
   }
 
   const T* logits_;
   const T* max_logits_;
-  const int num_cols_;
+  const int64_t num_cols_;
 };
 
 template <typename T, typename Op, typename InputIter>
 void DoRowReduction(OpKernelContext* context, T* output, InputIter input,
-                    int rows, int cols) {
+                    int64_t rows, int64_t cols) {
   typedef const Eigen::array<TTypes<float>::Tensor::Index, 1>& ReductionAxes;
   Constants<GPUDevice> constants;
 
@@ -201,17 +196,31 @@ class SoftmaxOpGPU : public OpKernel {
   void Compute(OpKernelContext* context) override {
     const Tensor& logits_in_ = context->input(0);
     OP_REQUIRES(context, TensorShapeUtils::IsVectorOrHigher(logits_in_.shape()),
-                errors::InvalidArgument("logits must have >= 1 dimension, got ",
-                                        logits_in_.shape().DebugString()));
+                absl::InvalidArgumentError(
+                    absl::StrCat("logits must have >= 1 dimension, got ",
+                                 logits_in_.shape().DebugString())));
     auto logits_in = logits_in_.flat_inner_dims<T>();
-    const int rows = logits_in.dimension(0);
-    const int cols = logits_in.dimension(1);
+    const int64_t rows = logits_in.dimension(0);
+    const int64_t cols = logits_in.dimension(1);
     Tensor* softmax_out = nullptr;
     OP_REQUIRES_OK(context, context->forward_input_or_allocate_output(
                                 {0}, 0, logits_in_.shape(), &softmax_out));
 
     const auto& cu_stream = GetGpuStream(context);
     if (logits_in_.NumElements() > 0) {
+      if (cols == 1) {
+        const auto& d = context->eigen_gpu_device();
+        GpuLaunchConfig config = GetGpuLaunchConfig(rows, d);
+        OP_REQUIRES_OK(
+            context,
+            GpuLaunchKernel(
+                SoftmaxSingleClassKernel<T>, config.block_count,
+                config.thread_per_block, 0, cu_stream,
+                reinterpret_cast<const T*>(logits_in_.flat<T>().data()),
+                const_cast<T*>(softmax_out->flat<T>().data()), rows, log_));
+        return;
+      }
+
       Tensor max_logits;
       Tensor sum_probs;
       OP_REQUIRES_OK(context,
@@ -227,12 +236,10 @@ class SoftmaxOpGPU : public OpKernel {
           context, const_cast<T*>(max_logits.flat<T>().data()),
           reinterpret_cast<const T*>(logits_in_.flat<T>().data()), rows, cols);
 
-
-      gpuprim::CountingInputIterator<int> counting_iterator(0);
-      using InputIterType =
-          gpuprim::TransformInputIterator<acc_type,
-                                          SubtractAndExpFunctor<T, acc_type>,
-                                          gpuprim::CountingInputIterator<int>>;
+      gpuprim::CountingInputIterator<int64_t> counting_iterator(0);
+      using InputIterType = gpuprim::TransformInputIterator<
+          acc_type, SubtractAndExpFunctor<T, acc_type>,
+          gpuprim::CountingInputIterator<int64_t>>;
 
       InputIterType input_itr(
           counting_iterator,
@@ -251,8 +258,8 @@ class SoftmaxOpGPU : public OpKernel {
       const int numThreadsPerBlock = 128;
       if (DataTypeToEnum<T>::value == DT_HALF && aligned) {
         const int kUnroll = 8;
-        const int numBlocks =
-            Eigen::divup(rows * cols, numThreadsPerBlock * kUnroll);
+        const int numBlocks = Eigen::divup(
+            rows * cols, static_cast<int64_t>(numThreadsPerBlock * kUnroll));
         TF_CHECK_OK(GpuLaunchKernel(
             GenerateNormalizedProb<T, acc_type, kUnroll>, numBlocks,
             numThreadsPerBlock, 0, cu_stream,
@@ -263,8 +270,8 @@ class SoftmaxOpGPU : public OpKernel {
             const_cast<T*>(softmax_out->flat<T>().data()), rows, cols, log_));
       } else {
         const int kUnroll = 4;
-        const int numBlocks =
-            Eigen::divup(rows * cols, numThreadsPerBlock * kUnroll);
+        const int numBlocks = Eigen::divup(
+            rows * cols, static_cast<int64_t>(numThreadsPerBlock * kUnroll));
         TF_CHECK_OK(GpuLaunchKernel(
             GenerateNormalizedProb<T, acc_type, kUnroll>, numBlocks,
             numThreadsPerBlock, 0, cu_stream,

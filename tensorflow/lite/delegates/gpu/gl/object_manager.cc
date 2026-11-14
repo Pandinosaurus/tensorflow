@@ -15,7 +15,11 @@ limitations under the License.
 
 #include "tensorflow/lite/delegates/gpu/gl/object_manager.h"
 
-#include "absl/memory/memory.h"
+#include <cstdint>
+#include <memory>
+#include <utility>
+#include <vector>
+
 #include "absl/types/span.h"
 #include "tensorflow/lite/delegates/gpu/common/convert.h"
 #include "tensorflow/lite/delegates/gpu/common/status.h"
@@ -51,7 +55,7 @@ absl::Status ObjectManager::RegisterBuffer(uint32_t id, GlBuffer buffer) {
   if (id >= buffers_.size()) {
     buffers_.resize(id + 1);
   }
-  buffers_[id] = absl::make_unique<GlBuffer>(std::move(buffer));
+  buffers_[id] = std::make_unique<GlBuffer>(std::move(buffer));
   return absl::OkStatus();
 }
 
@@ -69,7 +73,7 @@ absl::Status ObjectManager::RegisterTexture(uint32_t id, GlTexture texture) {
   if (id >= textures_.size()) {
     textures_.resize(id + 1);
   }
-  textures_[id] = absl::make_unique<GlTexture>(std::move(texture));
+  textures_[id] = std::make_unique<GlTexture>(std::move(texture));
   return absl::OkStatus();
 }
 

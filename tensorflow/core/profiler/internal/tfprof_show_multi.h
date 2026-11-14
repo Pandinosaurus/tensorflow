@@ -1,4 +1,4 @@
-/* Copyright 2016 The TensorFlow Authors All Rights Reserved.
+/* Copyright 2016 The TensorFlow Authors. All Rights Reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,11 +19,10 @@ limitations under the License.
 #define TENSORFLOW_CORE_PROFILER_INTERNAL_TFPROF_SHOW_MULTI_H_
 
 #include <algorithm>
+#include <memory>
 #include <string>
 #include <vector>
 
-#include "tensorflow/c/checkpoint_reader.h"
-#include "tensorflow/core/framework/graph.pb.h"
 #include "tensorflow/core/lib/core/errors.h"
 #include "tensorflow/core/profiler/internal/tfprof_constants.h"
 #include "tensorflow/core/profiler/internal/tfprof_node.h"
@@ -40,17 +39,18 @@ namespace tfprof {
 
 class TFMultiShow {
  public:
-  explicit TFMultiShow() {}
-  virtual ~TFMultiShow() {}
+  explicit TFMultiShow() = default;
+  virtual ~TFMultiShow() = default;
   virtual void AddNode(TFGraphNode* node) = 0;
   virtual void Build() = 0;
-  const MultiGraphNodeProto& Show(const string& prefix, const Options& opts);
+  const MultiGraphNodeProto& Show(const std::string& prefix,
+                                  const Options& opts);
 
  protected:
   virtual const ShowMultiNode* ShowInternal(const Options& opts,
                                             Timeline* timeline) = 0;
 
-  bool LookUpCheckPoint(const string& name,
+  bool LookUpCheckPoint(const std::string& name,
                         std::unique_ptr<TFProfTensor>* tensor);
 
   // Overridden by subclass if extra requirements need to be met.
@@ -63,14 +63,14 @@ class TFMultiShow {
                   int depth) const;
 
   bool ShouldTrim(const ShowMultiNode* node,
-                  const std::vector<string>& regexes) const;
+                  const std::vector<std::string>& regexes) const;
 
   bool ReAccount(ShowMultiNode* node, const Options& opts);
 
-  string FormatLegend(const Options& opts) const;
-  string FormatInputShapes(const MultiGraphNodeProto& proto) const;
-  std::vector<string> FormatTimes(const ShowMultiNode* node,
-                                  const Options& opts) const;
+  std::string FormatLegend(const Options& opts) const;
+  std::string FormatInputShapes(const MultiGraphNodeProto& proto) const;
+  std::vector<std::string> FormatTimes(const ShowMultiNode* node,
+                                       const Options& opts) const;
 
   template <typename T>
   std::vector<T*> SortNodes(const std::vector<T*>& nodes, const Options& opts) {

@@ -15,10 +15,14 @@ limitations under the License.
 
 #include "tensorflow/core/kernels/range_sampler.h"
 
+#include <algorithm>
 #include <cmath>
-#include <unordered_set>
+#include <cstdint>
+#include <limits>
 #include <vector>
 
+#include "absl/container/flat_hash_set.h"
+#include "absl/log/check.h"
 #include "tensorflow/core/lib/core/errors.h"
 #include "tensorflow/core/lib/gtl/map_util.h"
 #include "tensorflow/core/lib/io/inputbuffer.h"
@@ -33,24 +37,21 @@ namespace tensorflow {
 using gtl::ArraySlice;
 using gtl::MutableArraySlice;
 
-RangeSampler::~RangeSampler() {}
+RangeSampler::~RangeSampler() = default;
 
 void RangeSampler::SampleBatch(random::SimplePhilox* rnd, bool unique,
-                               gtl::MutableArraySlice<int64_t> batch) const {
-  SampleBatchGetExpectedCount(
-      rnd, unique, batch, gtl::MutableArraySlice<float>(),
-      gtl::ArraySlice<int64_t>(), gtl::MutableArraySlice<float>());
+                               absl::Span<int64_t> batch) const {
+  SampleBatchGetExpectedCount(rnd, unique, batch, absl::Span<float>(),
+                              absl::Span<const int64_t>(), absl::Span<float>());
 }
 
 void RangeSampler::SampleBatchGetExpectedCount(
-    random::SimplePhilox* rnd, bool unique,
-    gtl::MutableArraySlice<int64_t> batch,
-    gtl::MutableArraySlice<float> batch_expected_count,
-    gtl::ArraySlice<int64_t> extras,
-    gtl::MutableArraySlice<float> extras_expected_count) const {
+    random::SimplePhilox* rnd, bool unique, absl::Span<int64_t> batch,
+    absl::Span<float> batch_expected_count, absl::Span<const int64_t> extras,
+    absl::Span<float> extras_expected_count) const {
   SampleBatchGetExpectedCountAvoid(rnd, unique, batch, batch_expected_count,
                                    extras, extras_expected_count,
-                                   gtl::ArraySlice<int64_t>());
+                                   absl::Span<const int64_t>());
 }
 
 namespace {
@@ -77,22 +78,23 @@ static float ExpectedCountHelper(float p, int batch_size, int num_tries) {
 }  // namespace
 
 void RangeSampler::SampleBatchGetExpectedCountAvoid(
-    random::SimplePhilox* rnd, bool unique, MutableArraySlice<int64_t> batch,
-    MutableArraySlice<float> batch_expected_count, ArraySlice<int64_t> extras,
-    MutableArraySlice<float> extras_expected_count,
-    ArraySlice<int64_t> avoided_values) const {
+    random::SimplePhilox* rnd, bool unique, absl::Span<int64_t> batch,
+    absl::Span<float> batch_expected_count, absl::Span<const int64_t> extras,
+    absl::Span<float> extras_expected_count,
+    absl::Span<const int64_t> avoided_values) const {
   const int batch_size = batch.size();
   int num_tries;
 
   if (unique) {
     CHECK_LE(static_cast<int64_t>(batch_size + avoided_values.size()), range_);
-    std::unordered_set<int64_t> used(batch_size);
+    absl::flat_hash_set<int64_t> used;
+    used.reserve(batch_size + avoided_values.size());
     used.insert(avoided_values.begin(), avoided_values.end());
     int num_picked = 0;
     num_tries = 0;
     while (num_picked < batch_size) {
       num_tries++;
-      CHECK_LT(num_tries, kint32max);
+      CHECK_LT(num_tries, std::numeric_limits<int32_t>::max());
       int64_t value = Sample(rnd);
       if (gtl::InsertIfNotPresent(&used, value)) {
         batch[num_picked++] = value;
@@ -124,10 +126,10 @@ void RangeSampler::SampleBatchGetExpectedCountAvoid(
 AllSampler::AllSampler(int64_t range) : RangeSampler(range) {}
 
 void AllSampler::SampleBatchGetExpectedCountAvoid(
-    random::SimplePhilox* rnd, bool unique, MutableArraySlice<int64_t> batch,
-    MutableArraySlice<float> batch_expected_count, ArraySlice<int64_t> extras,
-    MutableArraySlice<float> extras_expected_count,
-    ArraySlice<int64_t> avoided_values) const {
+    random::SimplePhilox* rnd, bool unique, absl::Span<int64_t> batch,
+    absl::Span<float> batch_expected_count, absl::Span<const int64_t> extras,
+    absl::Span<float> extras_expected_count,
+    absl::Span<const int64_t> avoided_values) const {
   const int batch_size = batch.size();
   CHECK_EQ(range_, batch_size);
   for (int i = 0; i < batch_size; i++) {
@@ -180,7 +182,7 @@ float LogUniformSampler::Probability(int64_t value) const {
 
 ThreadUnsafeUnigramSampler::ThreadUnsafeUnigramSampler(int64_t range)
     : RangeSampler(range), picker_(range) {
-  CHECK_LT(range, kint32max);
+  CHECK_LT(range, std::numeric_limits<int32_t>::max());
 }
 
 int64_t ThreadUnsafeUnigramSampler::Sample(random::SimplePhilox* rnd) const {
@@ -191,9 +193,10 @@ float ThreadUnsafeUnigramSampler::Probability(int64_t value) const {
   return static_cast<float>(picker_.get_weight(value)) / picker_.total_weight();
 }
 
-void ThreadUnsafeUnigramSampler::Update(ArraySlice<int64_t> values) {
-  int num_updates = std::min(static_cast<int>(values.size()),
-                             kint32max - picker_.total_weight());
+void ThreadUnsafeUnigramSampler::Update(absl::Span<const int64_t> values) {
+  int num_updates =
+      std::min(static_cast<int>(values.size()),
+               std::numeric_limits<int32_t>::max() - picker_.total_weight());
   for (int i = 0; i < num_updates; i++) {
     const int64_t value = values[i];
     picker_.set_weight(value, picker_.get_weight(value) + 1);
@@ -203,7 +206,7 @@ void ThreadUnsafeUnigramSampler::Update(ArraySlice<int64_t> values) {
 // Thread-safe unigram sampler
 UnigramSampler::UnigramSampler(int64_t range)
     : RangeSampler(range), unsafe_sampler_(range) {
-  CHECK_LT(range, kint32max);
+  CHECK_LT(range, std::numeric_limits<int32_t>::max());
 }
 
 int64_t UnigramSampler::Sample(random::SimplePhilox* rnd) const {
@@ -218,51 +221,52 @@ float UnigramSampler::Probability(int64_t value) const {
 
 // Overriding at a high level results in far fewer lock acquisitions.
 void UnigramSampler::SampleBatchGetExpectedCountAvoid(
-    random::SimplePhilox* rnd, bool unique, MutableArraySlice<int64_t> batch,
-    MutableArraySlice<float> batch_expected_count, ArraySlice<int64_t> extras,
-    MutableArraySlice<float> extras_expected_count,
-    ArraySlice<int64_t> avoided_values) const {
+    random::SimplePhilox* rnd, bool unique, absl::Span<int64_t> batch,
+    absl::Span<float> batch_expected_count, absl::Span<const int64_t> extras,
+    absl::Span<float> extras_expected_count,
+    absl::Span<const int64_t> avoided_values) const {
   tf_shared_lock lock(mu_);
   unsafe_sampler_.SampleBatchGetExpectedCountAvoid(
       rnd, unique, batch, batch_expected_count, extras, extras_expected_count,
       avoided_values);
 }
 
-void UnigramSampler::Update(ArraySlice<int64_t> values) {
+void UnigramSampler::Update(absl::Span<const int64_t> values) {
   mutex_lock lock(mu_);
   unsafe_sampler_.Update(values);
 }
 
-FixedUnigramSampler::FixedUnigramSampler(Env* env, int64_t range,
-                                         const string& vocab_file,
-                                         float distortion,
+FixedUnigramSampler::FixedUnigramSampler(int64_t range, float distortion,
                                          int32_t num_reserved_ids,
                                          int32_t num_shards, int32_t shard)
     : RangeSampler(range),
       total_weight_(0.0),
       num_shards_(num_shards),
-      shard_(shard) {
+      shard_(shard),
+      distortion_(distortion) {
   FillReservedIds(num_reserved_ids);
-  // TODO(vanhoucke): make this non-crashing.
-  TF_CHECK_OK(LoadFromFile(env, vocab_file, distortion));
-  CHECK_EQ(range, weights_.size());
-  dist_sampler_.reset(new random::DistributionSampler(weights_));
 }
 
-FixedUnigramSampler::FixedUnigramSampler(int64_t range,
-                                         const std::vector<float>& unigrams,
-                                         float distortion,
-                                         int32_t num_reserved_ids,
-                                         int32_t num_shards, int32_t shard)
-    : RangeSampler(range),
-      total_weight_(0.0),
-      num_shards_(num_shards),
-      shard_(shard) {
-  FillReservedIds(num_reserved_ids);
-  LoadFromUnigrams(unigrams, distortion);
-  // TODO(vanhoucke): make this non-crashing.
-  CHECK_EQ(range, weights_.size());
+absl::Status FixedUnigramSampler::SetDistributionSampler(
+    Env* env, const std::string& vocab_file) {
+  TF_RETURN_IF_ERROR(LoadFromFile(env, vocab_file, distortion_));
+  if (!TF_PREDICT_TRUE(FixedUnigramSampler::range() == weights_.size()))
+    return (absl::InvalidArgumentError(
+        absl::StrCat("range is ", FixedUnigramSampler::range(),
+                     " must be equal to weights size  ", weights_.size())));
   dist_sampler_.reset(new random::DistributionSampler(weights_));
+  return absl::OkStatus();
+}
+
+absl::Status FixedUnigramSampler::SetDistributionSampler(
+    const std::vector<float>& unigrams) {
+  LoadFromUnigrams(unigrams, distortion_);
+  if (!TF_PREDICT_TRUE(FixedUnigramSampler::range() == weights_.size()))
+    return (absl::InvalidArgumentError(
+        absl::StrCat("range is ", FixedUnigramSampler::range(),
+                     " must be equal to weights size  ", weights_.size())));
+  dist_sampler_.reset(new random::DistributionSampler(weights_));
+  return absl::OkStatus();
 }
 
 float FixedUnigramSampler::Probability(int64_t value) const {
@@ -282,25 +286,26 @@ void FixedUnigramSampler::FillReservedIds(int32_t num_reserved_ids) {
   }
 }
 
-Status FixedUnigramSampler::LoadFromFile(Env* env, const string& vocab_file,
-                                         float distortion) {
+absl::Status FixedUnigramSampler::LoadFromFile(Env* env,
+                                               const std::string& vocab_file,
+                                               float distortion) {
   std::unique_ptr<RandomAccessFile> file;
   TF_RETURN_IF_ERROR(env->NewRandomAccessFile(vocab_file, &file));
 
   io::InputBuffer in(file.get(), 262144 /*bytes*/);
-  string line;
+  std::string line;
   int32_t word_id = weights_.size();
   while (in.ReadLine(&line).ok()) {
     // The vocabulary file should be in csv like format, with the last
     // field the weight associated with the word.
-    std::vector<string> cols = str_util::Split(line, ',');
+    std::vector<std::string> cols = str_util::Split(line, ',');
     if (cols.empty()) continue;
     // Skip entries that do not belong to this shard.
     if (word_id % num_shards_ == shard_) {
       float w = 0.0;
-      if (!strings::safe_strtof(cols.at(cols.size() - 1), &w)) {
-        return errors::InvalidArgument("Wrong vocabulary format at line: ",
-                                       line);
+      if (!absl::SimpleAtof(cols.at(cols.size() - 1), &w)) {
+        return absl::InvalidArgumentError(
+            absl::StrCat("Wrong vocabulary format at line: ", line));
       }
       w = std::pow(w, distortion);
       total_weight_ += w;
@@ -308,7 +313,7 @@ Status FixedUnigramSampler::LoadFromFile(Env* env, const string& vocab_file,
     }
     ++word_id;
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 void FixedUnigramSampler::LoadFromUnigrams(const std::vector<float>& unigrams,

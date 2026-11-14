@@ -15,6 +15,7 @@ limitations under the License.
 
 #include "tensorflow/core/grappler/optimizers/data/slack.h"
 
+#include "absl/status/status.h"
 #include "tensorflow/core/framework/attr_value_util.h"
 #include "tensorflow/core/grappler/grappler_item.h"
 #include "tensorflow/core/grappler/optimizers/data/function_utils.h"
@@ -31,7 +32,7 @@ namespace {
 void SetupGrapplerItem(GrapplerItem *item) {
   MutableGraphView graph(&item->graph);
 
-  std::vector<std::pair<string, AttrValue>> common_attrs(2);
+  std::vector<std::pair<std::string, AttrValue>> common_attrs(2);
   AttrValue shapes_attr;
   SetAttrValue(std::vector<TensorShape>({{}}), &shapes_attr);
   common_attrs[0] = std::make_pair("output_shapes", shapes_attr);
@@ -43,7 +44,7 @@ void SetupGrapplerItem(GrapplerItem *item) {
   NodeDef *stop_node = graph_utils::AddScalarConstNode<int64_t>(10, &graph);
   NodeDef *step_node = graph_utils::AddScalarConstNode<int64_t>(1, &graph);
 
-  std::vector<string> range_inputs(3);
+  std::vector<std::string> range_inputs(3);
   range_inputs[0] = start_node->name();
   range_inputs[1] = stop_node->name();
   range_inputs[2] = step_node->name();
@@ -59,7 +60,7 @@ void SetupGrapplerItem(GrapplerItem *item) {
 }
 
 struct ParameterizedSlackTest
-    : ::testing::TestWithParam<std::tuple<string, int>> {};
+    : ::testing::TestWithParam<std::tuple<std::string, int>> {};
 
 TEST_P(ParameterizedSlackTest, BasicTest) {
   GrapplerItem item;
@@ -88,10 +89,10 @@ TEST(SlackTest, TestFailWithoutInit) {
   GrapplerItem item;
   Slack optimizer;
   GraphDef output;
-  Status result = optimizer.Optimize(nullptr, item, &output);
+  absl::Status result = optimizer.Optimize(nullptr, item, &output);
 
   EXPECT_FALSE(result.ok());
-  EXPECT_TRUE(errors::IsInvalidArgument(result));
+  EXPECT_TRUE(absl::IsInvalidArgument(result));
 }
 
 TEST(SlackTest, TestFailWithInvalidSlackEveryParam) {
@@ -104,10 +105,10 @@ TEST(SlackTest, TestFailWithInvalidSlackEveryParam) {
   TF_ASSERT_OK(optimizer.Init(&config));
 
   GraphDef output;
-  Status result = optimizer.Optimize(nullptr, item, &output);
+  absl::Status result = optimizer.Optimize(nullptr, item, &output);
 
   EXPECT_FALSE(result.ok());
-  EXPECT_TRUE(errors::IsInvalidArgument(result));
+  EXPECT_TRUE(absl::IsInvalidArgument(result));
 }
 
 TEST(SlackTest, TestFunctionNotOptimized) {
@@ -132,23 +133,23 @@ TEST(SlackTest, TestFunctionNotOptimized) {
                               {std::make_pair("output_shapes", shapes_attr),
                                std::make_pair("Toutput_types", types_attr)},
                               fdef);
-  NodeDef *prefetch_node = function_utils::AddNode(
+  NodeDef* prefetch_node = function_utils::AddNode(
       "PrefetchDataset", "PrefetchDataset",
-      {strings::StrCat(tensor_dataset_node->name(), ":handle:0"), "args_0"},
+      {absl::StrCat(tensor_dataset_node->name(), ":handle:0"), "args_0"},
       {std::make_pair("output_shapes", shapes_attr),
        std::make_pair("output_types", types_attr)},
       fdef);
 
   AttrValue variant_type_attr;
   SetAttrValue(DT_VARIANT, &variant_type_attr);
-  NodeDef *identity_node = function_utils::AddNode(
-      "Identity", "Identity",
-      {strings::StrCat(prefetch_node->name(), ":handle:0"),
-       strings::StrCat("^", tensor_dataset_node->name())},
-      {std::make_pair("T", variant_type_attr)}, fdef);
+  NodeDef* identity_node =
+      function_utils::AddNode("Identity", "Identity",
+                              {absl::StrCat(prefetch_node->name(), ":handle:0"),
+                               absl::StrCat("^", tensor_dataset_node->name())},
+                              {std::make_pair("T", variant_type_attr)}, fdef);
 
   (*fdef->mutable_ret())["identity"] =
-      strings::StrCat(identity_node->name(), ":output:0");
+      absl::StrCat(identity_node->name(), ":output:0");
   (*fdef->mutable_control_ret())[tensor_dataset_node->name()] =
       tensor_dataset_node->name();
   fdef->mutable_signature()->add_control_output(tensor_dataset_node->name());

@@ -64,7 +64,7 @@ limitations under the License.
 #include "absl/types/optional.h"
 #include "absl/types/span.h"
 #include "tensorflow/cc/framework/ops.h"
-#include "tensorflow/compiler/xla/test.h"
+#include "xla/hlo/testlib/test.h"
 #include "tensorflow/core/graph/graph.h"
 
 namespace tensorflow {
@@ -84,35 +84,35 @@ class NodeMatcherProperties {
  public:
   using NodeSeqMatcher = std::vector<::testing::Matcher<const Node*>>;
   using InputSeqMatcher = std::vector<::testing::Matcher<OutEdge>>;
-  using AttrKeyValuePair = std::pair<string, absl::optional<AttrValue>>;
+  using AttrKeyValuePair = std::pair<std::string, std::optional<AttrValue>>;
 
-  const absl::optional<string>& name() const { return name_; }
-  const absl::optional<string>& op() const { return op_; }
-  const absl::optional<string>& assigned_device() const {
+  const std::optional<std::string>& name() const { return name_; }
+  const std::optional<std::string>& op() const { return op_; }
+  const std::optional<std::string>& assigned_device() const {
     return assigned_device_;
   }
-  const absl::optional<Tensor>& constant_value() const {
+  const std::optional<Tensor>& constant_value() const {
     return constant_value_;
   }
-  const absl::optional<InputSeqMatcher>& inputs() const {
+  const std::optional<InputSeqMatcher>& inputs() const {
     return input_matchers_;
   }
-  const absl::optional<NodeSeqMatcher>& control_deps() const {
+  const std::optional<NodeSeqMatcher>& control_deps() const {
     return control_deps_;
   }
-  const absl::optional<AttrKeyValuePair>& attr() const { return attr_; }
+  const std::optional<AttrKeyValuePair>& attr() const { return attr_; }
 
-  void set_name(string name) {
+  void set_name(std::string name) {
     DCHECK(IsEmpty());
     name_ = std::move(name);
   }
 
-  void set_op(string op) {
+  void set_op(std::string op) {
     DCHECK(IsEmpty());
     op_ = std::move(op);
   }
 
-  void set_assigned_device(string assigned_device) {
+  void set_assigned_device(std::string assigned_device) {
     DCHECK(IsEmpty());
     assigned_device_ = std::move(assigned_device);
   }
@@ -144,13 +144,13 @@ class NodeMatcherProperties {
   }
 
  private:
-  absl::optional<string> name_;
-  absl::optional<string> op_;
-  absl::optional<string> assigned_device_;
-  absl::optional<Tensor> constant_value_;
-  absl::optional<InputSeqMatcher> input_matchers_;
-  absl::optional<NodeSeqMatcher> control_deps_;
-  absl::optional<AttrKeyValuePair> attr_;
+  std::optional<std::string> name_;
+  std::optional<std::string> op_;
+  std::optional<std::string> assigned_device_;
+  std::optional<Tensor> constant_value_;
+  std::optional<InputSeqMatcher> input_matchers_;
+  std::optional<NodeSeqMatcher> control_deps_;
+  std::optional<AttrKeyValuePair> attr_;
 };
 
 ::testing::Matcher<const Node*> NodeWith(
@@ -162,39 +162,40 @@ impl::NodeMatcherProperties Inputs(
 impl::NodeMatcherProperties CtrlDeps(
     absl::Span<const ::testing::Matcher<const Node*>> control_deps);
 
-impl::NodeMatcherProperties Attr(std::pair<string, AttrValue> attrs);
-impl::NodeMatcherProperties Attr(string name);
+impl::NodeMatcherProperties Attr(std::pair<std::string, AttrValue> attrs);
+impl::NodeMatcherProperties Attr(std::string name);
 
-std::pair<string, AttrValue> AttrLiteralHelper(
-    const std::pair<string, bool>& bool_attr);
+std::pair<std::string, AttrValue> AttrLiteralHelper(
+    const std::pair<std::string, bool>& bool_attr);
 
-std::pair<string, AttrValue> AttrLiteralHelper(
-    const std::pair<string, absl::Span<const int>>& int_list_attr);
+std::pair<std::string, AttrValue> AttrLiteralHelper(
+    const std::pair<std::string, absl::Span<const int>>& int_list_attr);
 
-std::pair<string, AttrValue> AttrLiteralHelper(
-    const std::pair<string, absl::Span<const string>>& string_list_attr);
+std::pair<std::string, AttrValue> AttrLiteralHelper(
+    const std::pair<std::string, absl::Span<const std::string>>&
+        string_list_attr);
 }  // namespace impl
 
 // -----------------------------------------------------------------------------
 // Public interface.
 
 // Matches a node with name `name`.
-impl::NodeMatcherProperties Name(string name);
+impl::NodeMatcherProperties Name(std::string name);
 
 // Matches a node with op `op`.
-impl::NodeMatcherProperties Op(string op);
+impl::NodeMatcherProperties Op(std::string op);
 
 // Matches a node with assigned device `assigned_device`.
-impl::NodeMatcherProperties AssignedDevice(string assigned_device);
+impl::NodeMatcherProperties AssignedDevice(std::string assigned_device);
 
 // Matches a node with a boolean typed attribute named `name` and with value
 // `value`.
 template <typename ValueTy>
-impl::NodeMatcherProperties Attr(const string& name, ValueTy value) {
+impl::NodeMatcherProperties Attr(const std::string& name, ValueTy value) {
   return impl::Attr({impl::AttrLiteralHelper({name, value})});
 }
 
-inline impl::NodeMatcherProperties Attr(const string& name) {
+inline impl::NodeMatcherProperties Attr(const std::string& name) {
   return impl::Attr(name);
 }
 

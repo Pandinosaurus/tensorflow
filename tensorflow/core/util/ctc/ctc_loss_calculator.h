@@ -16,9 +16,17 @@ limitations under the License.
 #ifndef TENSORFLOW_CORE_UTIL_CTC_CTC_LOSS_CALCULATOR_H_
 #define TENSORFLOW_CORE_UTIL_CTC_CTC_LOSS_CALCULATOR_H_
 
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
 #include <vector>
 
-#include "third_party/eigen3/Eigen/Core"
+#include "absl/log/check.h"
+#include "absl/log/log.h"
+#include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
+#include "absl/strings/str_join.h"
+#include "Eigen/Core"  // from @eigen_archive
 #include "tensorflow/core/framework/device_base.h"
 #include "tensorflow/core/lib/core/errors.h"
 #include "tensorflow/core/lib/core/status.h"
@@ -65,13 +73,12 @@ class CTCLossCalculator {
 
   template <typename VectorIn, typename VectorOut, typename MatrixIn,
             typename MatrixOut>
-  Status CalculateLoss(const VectorIn& seq_len, const LabelSequences& labels,
-                       const std::vector<MatrixIn>& inputs,
-                       bool preprocess_collapse_repeated,
-                       bool ctc_merge_repeated,
-                       bool ignore_longer_outputs_than_inputs, VectorOut* loss,
-                       std::vector<MatrixOut>* gradients,
-                       DeviceBase::CpuWorkerThreads* workers = nullptr) const;
+  absl::Status CalculateLoss(
+      const VectorIn& seq_len, const LabelSequences& labels,
+      const std::vector<MatrixIn>& inputs, bool preprocess_collapse_repeated,
+      bool ctc_merge_repeated, bool ignore_longer_outputs_than_inputs,
+      VectorOut* loss, std::vector<MatrixOut>* gradients,
+      DeviceBase::CpuWorkerThreads* workers = nullptr) const;
 
  private:
   void CalculateForwardVariables(const std::vector<int>& l_prime,
@@ -94,11 +101,13 @@ class CTCLossCalculator {
   // batch.  Return value:
   //    max_{b in batch_size} l_primes[b].size()
   template <typename Vector>
-  Status PopulateLPrimes(bool preprocess_collapse_repeated,
-                         bool ignore_longer_outputs_than_inputs, int batch_size,
-                         int num_classes, const Vector& seq_len,
-                         const LabelSequences& labels, size_t* max_u_prime,
-                         LabelSequences* l_primes) const;
+  absl::Status PopulateLPrimes(bool preprocess_collapse_repeated,
+                               bool ignore_longer_outputs_than_inputs,
+                               int batch_size, int num_classes,
+                               const Vector& seq_len,
+                               const LabelSequences& labels,
+                               size_t* max_u_prime,
+                               LabelSequences* l_primes) const;
 
   // Utility indices for the CTC algorithm.
   int blank_index_;
@@ -111,7 +120,7 @@ class CTCLossCalculator {
 template <class T>
 template <typename VectorIn, typename VectorOut, typename MatrixIn,
           typename MatrixOut>
-Status CTCLossCalculator<T>::CalculateLoss(
+absl::Status CTCLossCalculator<T>::CalculateLoss(
     const VectorIn& seq_len, const LabelSequences& labels,
     const std::vector<MatrixIn>& inputs, bool preprocess_collapse_repeated,
     bool ctc_merge_repeated, bool ignore_longer_outputs_than_inputs,
@@ -122,7 +131,7 @@ Status CTCLossCalculator<T>::CalculateLoss(
   auto num_time_steps = inputs.size();
 
   if (loss == nullptr) {
-    return errors::InvalidArgument("loss == nullptr");
+    return absl::InvalidArgumentError("loss == nullptr");
   }
 
   bool requires_backprop = (gradients != nullptr);
@@ -131,7 +140,7 @@ Status CTCLossCalculator<T>::CalculateLoss(
   auto num_classes = inputs[0].cols();
 
   if (loss->size() != batch_size) {
-    return errors::InvalidArgument("loss.size() != batch_size");
+    return absl::InvalidArgumentError("loss.size() != batch_size");
   }
   loss->setZero();
 
@@ -152,10 +161,11 @@ Status CTCLossCalculator<T>::CalculateLoss(
   auto max_seq_len = seq_len(0);
   for (int b = 0; b < batch_size; b++) {
     if (seq_len(b) < 0) {
-      return errors::InvalidArgument("seq_len(", b, ") < 0");
+      return absl::InvalidArgumentError(absl::StrCat("seq_len(", b, ") < 0"));
     }
     if (seq_len(b) > num_time_steps) {
-      return errors::InvalidArgument("seq_len(", b, ") > num_time_steps");
+      return absl::InvalidArgumentError(
+          absl::StrCat("seq_len(", b, ") > num_time_steps"));
     }
     max_seq_len = std::max(seq_len(b), max_seq_len);
   }
@@ -164,7 +174,7 @@ Status CTCLossCalculator<T>::CalculateLoss(
   // and calculate the maximum necessary allocation size.
   LabelSequences l_primes(batch_size);
   size_t max_u_prime = 0;
-  Status l_p_ret = PopulateLPrimes(
+  absl::Status l_p_ret = PopulateLPrimes(
       preprocess_collapse_repeated, ignore_longer_outputs_than_inputs,
       batch_size, num_classes, seq_len, labels, &max_u_prime, &l_primes);
   if (!l_p_ret.ok()) {
@@ -188,7 +198,7 @@ Status CTCLossCalculator<T>::CalculateLoss(
                    "target output (CTC works only with shorter target sequence "
                    "than input sequence). You can turn this into a warning by "
                    "using the flag ignore_longer_outputs_than_inputs - "
-                << b << ": " << str_util::Join(labels[b], " ");
+                << b << ": " << absl::StrJoin(labels[b], " ");
         continue;
       }
 
@@ -279,33 +289,34 @@ Status CTCLossCalculator<T>::CalculateLoss(
   } else {
     ComputeLossAndGradients(0, batch_size);
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 template <class T>
 template <typename Vector>
-Status CTCLossCalculator<T>::PopulateLPrimes(
+absl::Status CTCLossCalculator<T>::PopulateLPrimes(
     bool preprocess_collapse_repeated, bool ignore_longer_outputs_than_inputs,
     int batch_size, int num_classes, const Vector& seq_len,
     const LabelSequences& labels, size_t* max_u_prime,
     LabelSequences* l_primes) const {
   // labels is a Label array of size batch_size
   if (labels.size() != batch_size) {
-    return errors::InvalidArgument(
-        "labels.size() != batch_size: ", labels.size(), " vs. ", batch_size);
+    return absl::InvalidArgumentError(absl::StrCat(
+        "labels.size() != batch_size: ", labels.size(), " vs. ", batch_size));
   }
 
   *max_u_prime = 0;  // keep track of longest l' modified label sequence.
   for (int b = 0; b < batch_size; b++) {
     // Assume label is in Label proto
     const std::vector<int>& label = labels[b];
-    if (label.size() == 0) {
-      return errors::InvalidArgument("Labels length is zero in batch ", b);
+    if (label.empty()) {
+      return absl::InvalidArgumentError(
+          absl::StrCat("Labels length is zero in batch ", b));
     }
 
     // If debugging: output the labels coming into training.
     //
-    VLOG(2) << "label for batch: " << b << ": " << str_util::Join(label, " ");
+    VLOG(2) << "label for batch: " << b << ": " << absl::StrJoin(label, " ");
 
     // Target indices, length = U.
     std::vector<int> l;
@@ -313,35 +324,34 @@ Status CTCLossCalculator<T>::PopulateLPrimes(
     // Convert label from DistBelief
     bool finished_sequence = false;
     for (int i = 0; i < label.size(); ++i) {
+      // Validate each label before using it so out-of-range values do not
+      // silently alias as sequence terminators.
+      if (label[i] < 0) {
+        return absl::InvalidArgumentError(
+            absl::StrCat("All labels must be nonnegative integers, batch: ", b,
+                         " labels: ", absl::StrJoin(label, ",")));
+      } else if (label[i] >= num_classes) {
+        return absl::InvalidArgumentError(
+            absl::StrCat("No label may be greater than num_classes. ",
+                         "num_classes: ", num_classes, ", batch: ", b,
+                         " labels: ", absl::StrJoin(label, ",")));
+      }
       if (i == 0 || !preprocess_collapse_repeated || label[i] != label[i - 1]) {
-        if (label[i] >= num_classes - 1) {
+        if (label[i] == num_classes - 1) {
           finished_sequence = true;
         } else {
           if (finished_sequence) {
             // Saw an invalid sequence with non-null following null
             // labels.
-            return errors::InvalidArgument(
+            return absl::InvalidArgumentError(absl::StrCat(
                 "Saw a non-null label (index >= num_classes - 1) "
                 "following a ",
                 "null label, batch: ", b, " num_classes: ", num_classes,
-                " labels: ", str_util::Join(label, ","),
-                " labels seen so far: ", str_util::Join(l, ","));
+                " labels: ", absl::StrJoin(label, ","),
+                " labels seen so far: ", absl::StrJoin(l, ",")));
           }
           l.push_back(label[i]);
         }
-      }
-    }
-
-    for (int l_i : l) {
-      if (l_i < 0) {
-        return errors::InvalidArgument(
-            "All labels must be nonnegative integers, batch: ", b,
-            " labels: ", str_util::Join(l, ","));
-      } else if (l_i >= num_classes) {
-        return errors::InvalidArgument(
-            "No label may be greater than num_classes. ",
-            "num_classes: ", num_classes, ", batch: ", b,
-            " labels: ", str_util::Join(l, ","));
       }
     }
     if (!ignore_longer_outputs_than_inputs) {
@@ -349,12 +359,12 @@ Status CTCLossCalculator<T>::PopulateLPrimes(
       int time = seq_len(b) - output_delay_;
       int required_time = label.size();
       if (required_time > time) {
-        return errors::InvalidArgument(
+        return absl::InvalidArgumentError(absl::StrCat(
             "Not enough time for target transition sequence ("
             "required: ",
             required_time, ", available: ", time, ")", b,
             "You can turn this error into a warning by using the flag "
-            "ignore_longer_outputs_than_inputs");
+            "ignore_longer_outputs_than_inputs"));
       }
     }
     // Target indices with blanks before each index and a blank at the end.
@@ -363,7 +373,7 @@ Status CTCLossCalculator<T>::PopulateLPrimes(
     GetLPrimeIndices(l, &l_primes->at(b));
     *max_u_prime = std::max(*max_u_prime, l_primes->at(b).size());
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 // Calculates the alpha(t, u) as described in (GravesTh) Section 7.3.
@@ -386,9 +396,12 @@ void CTCLossCalculator<TT>::CalculateForwardVariables(
 
   // Initial alpha values in (GravesTh) Eq 7.5 and Eq 7.6.
   log_alpha->coeffRef(0, 0) = log(y(blank_index_, output_delay_));
-  // Below, l_prime[1] == labels[0]
-  auto label_0 = (l_prime.size() > 1) ? l_prime[1] : blank_index_;
-  log_alpha->coeffRef(1, 0) = log(y(label_0, output_delay_));
+  // Below, l_prime[1] == labels[0]. When the target sequence is empty the
+  // modified sequence l_prime is just a single blank (U == 1), so there is no
+  // second row to initialize; writing it would corrupt the heap.
+  if (U > 1) {
+    log_alpha->coeffRef(1, 0) = log(y(l_prime[1], output_delay_));
+  }
 
   for (int t = 1; t < T; ++t) {
     // If there is not enough time to output the remaining labels or
@@ -442,7 +455,9 @@ void CTCLossCalculator<TT>::CalculateBackwardVariables(
   CHECK_EQ(U, log_beta->rows());
 
   // Initial beta values in (GravesTh) Eq 7.13: log of probability 1.
-  for (int u = U - 2; u < U; ++u) log_beta->coeffRef(u, T - 1) = 0;
+  // Clamp the lower bound to 0 so an empty target sequence (U == 1) does not
+  // index row -1, which would corrupt the heap.
+  for (int u = std::max(0, U - 2); u < U; ++u) log_beta->coeffRef(u, T - 1) = 0;
 
   for (int t = T - 1 - 1; t >= 0; --t) {
     // If there is not enough time to output the remaining labels or

@@ -38,6 +38,15 @@ extern const char* const kXlaInternalScopeAttr;  // "_XlaInternalScope"
 // The id of the compiled cluster.
 extern const char* const kXlaClusterIdAttr;  // "_xla_compile_id"
 
+// Implies per-cluster deterministic XLA ops.
+extern const char* const kXlaDeterministicAttr;  // "_XlaDeterministic"
+
+[[deprecated("XLA:CPU/GPU devices are deprecated")]] void
+RequestXlaDevicesCreation();
+
+[[deprecated("XLA:CPU/GPU devices are deprecated")]] bool
+XlaDevicesCreationRequired();
+
 }  // namespace tensorflow
 
 #endif  // TENSORFLOW_COMPILER_JIT_DEFS_H_

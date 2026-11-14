@@ -13,18 +13,27 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include <algorithm>
+#include <cstdint>
+#include <limits>
 #include <memory>
 #include <string>
+#include <utility>
 
-#include "absl/memory/memory.h"
-#include "pybind11/pybind11.h"
+#include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
+#include "absl/strings/string_view.h"
+#include "pybind11/pybind11.h"  // from @pybind11
 #include "tensorflow/core/lib/core/errors.h"
 #include "tensorflow/core/lib/core/stringpiece.h"
 #include "tensorflow/core/lib/io/record_reader.h"
 #include "tensorflow/core/lib/io/record_writer.h"
 #include "tensorflow/core/lib/io/zlib_compression_options.h"
+#include "tensorflow/core/lib/io/zlib_outputbuffer.h"
 #include "tensorflow/core/platform/env.h"
+#include "tensorflow/core/platform/errors.h"
 #include "tensorflow/core/platform/file_system.h"
+#include "tensorflow/core/platform/mutex.h"
 #include "tensorflow/core/platform/types.h"
 #include "tensorflow/python/lib/core/pybind11_absl.h"
 #include "tensorflow/python/lib/core/pybind11_status.h"
@@ -37,58 +46,96 @@ class PyRecordReader {
  public:
   // NOTE(sethtroisi): At this time PyRecordReader doesn't benefit from taking
   // RecordReaderOptions, if this changes the API can be updated at that time.
-  static tensorflow::Status New(const std::string& filename,
-                                const std::string& compression_type,
-                                PyRecordReader** out) {
-    std::unique_ptr<tensorflow::RandomAccessFile> file;
-    TF_RETURN_IF_ERROR(
-        tensorflow::Env::Default()->NewRandomAccessFile(filename, &file));
-    auto options =
-        tensorflow::io::RecordReaderOptions::CreateRecordReaderOptions(
-            compression_type);
-    options.buffer_size = kReaderBufferSize;
-    auto reader =
-        absl::make_unique<tensorflow::io::RecordReader>(file.get(), options);
-    *out = new PyRecordReader(std::move(file), std::move(reader));
-    return tensorflow::Status::OK();
+  static absl::Status New(const std::string& filename,
+                          const std::string& compression_type,
+                          PyRecordReader** out) {
+    auto tmp = new PyRecordReader(filename, compression_type);
+    TF_RETURN_IF_ERROR(tmp->Reopen());
+    *out = tmp;
+    return absl::OkStatus();
   }
 
   PyRecordReader() = delete;
   ~PyRecordReader() { Close(); }
 
-  tensorflow::Status ReadNextRecord(tensorflow::tstring* out) {
-    if (IsClosed()) {
-      return tensorflow::errors::FailedPrecondition("Reader is closed.");
+  absl::Status ReadNextRecord(tensorflow::tstring* out) {
+    tensorflow::mutex_lock lock(mutex_);
+    if (IsClosedInternal()) {
+      return absl::FailedPreconditionError("Reader is closed.");
     }
-
     return reader_->ReadRecord(&offset_, out);
   }
 
-  bool IsClosed() const { return file_ == nullptr && reader_ == nullptr; }
+  bool IsClosed() const {
+    tensorflow::mutex_lock lock(mutex_);
+    return IsClosedInternal();
+  }
 
   void Close() {
+    tensorflow::mutex_lock lock(mutex_);
     reader_ = nullptr;
     file_ = nullptr;
   }
 
+  // Reopen a closed writer by re-opening the file and re-creating the reader,
+  // but preserving the prior read offset. If not closed, returns an error.
+  //
+  // This is useful to allow "refreshing" the underlying file handle, in cases
+  // where the file was replaced with a newer version containing additional data
+  // that otherwise wouldn't be available via the existing file handle. This
+  // allows the file to be polled continuously using the same iterator, even as
+  // it grows, which supports use cases such as TensorBoard.
+  absl::Status Reopen() {
+    tensorflow::mutex_lock lock(mutex_);
+    if (!IsClosedInternal()) {
+      return absl::FailedPreconditionError("Reader is not closed.");
+    }
+    TF_RETURN_IF_ERROR(
+        tensorflow::Env::Default()->NewRandomAccessFile(filename_, &file_));
+    reader_ =
+        std::make_unique<tensorflow::io::RecordReader>(file_.get(), options_);
+    return absl::OkStatus();
+  }
+
  private:
-  static constexpr tensorflow::uint64 kReaderBufferSize = 16 * 1024 * 1024;
+  bool IsClosedInternal() const {
+    return file_ == nullptr && reader_ == nullptr;
+  }
 
-  PyRecordReader(std::unique_ptr<tensorflow::RandomAccessFile> file,
-                 std::unique_ptr<tensorflow::io::RecordReader> reader)
-      : offset_(0), file_(std::move(file)), reader_(std::move(reader)) {}
+  static constexpr uint64_t kReaderBufferSize = 16 * 1024 * 1024;
 
-  tensorflow::uint64 offset_;
+  PyRecordReader(const std::string& filename,
+                 const std::string& compression_type)
+      : filename_(filename),
+        options_(CreateOptions(compression_type)),
+        offset_(0),
+        file_(nullptr),
+        reader_(nullptr) {}
+
+  static tensorflow::io::RecordReaderOptions CreateOptions(
+      const std::string& compression_type) {
+    auto options =
+        tensorflow::io::RecordReaderOptions::CreateRecordReaderOptions(
+            compression_type);
+    options.buffer_size = kReaderBufferSize;
+    return options;
+  }
+
+  const std::string filename_;
+  const tensorflow::io::RecordReaderOptions options_;
+  uint64_t offset_;
   std::unique_ptr<tensorflow::RandomAccessFile> file_;
   std::unique_ptr<tensorflow::io::RecordReader> reader_;
+  mutable tensorflow::mutex mutex_;
 
-  TF_DISALLOW_COPY_AND_ASSIGN(PyRecordReader);
+  PyRecordReader(const PyRecordReader&) = delete;
+  void operator=(const PyRecordReader&) = delete;
 };
 
 class PyRecordRandomReader {
  public:
-  static tensorflow::Status New(const std::string& filename,
-                                PyRecordRandomReader** out) {
+  static absl::Status New(const std::string& filename,
+                          PyRecordRandomReader** out) {
     std::unique_ptr<tensorflow::RandomAccessFile> file;
     TF_RETURN_IF_ERROR(
         tensorflow::Env::Default()->NewRandomAccessFile(filename, &file));
@@ -96,32 +143,39 @@ class PyRecordRandomReader {
         tensorflow::io::RecordReaderOptions::CreateRecordReaderOptions("");
     options.buffer_size = kReaderBufferSize;
     auto reader =
-        absl::make_unique<tensorflow::io::RecordReader>(file.get(), options);
+        std::make_unique<tensorflow::io::RecordReader>(file.get(), options);
     *out = new PyRecordRandomReader(std::move(file), std::move(reader));
-    return tensorflow::Status::OK();
+    return absl::OkStatus();
   }
 
   PyRecordRandomReader() = delete;
   ~PyRecordRandomReader() { Close(); }
 
-  tensorflow::Status ReadRecord(tensorflow::uint64* offset,
-                                tensorflow::tstring* out) {
-    if (IsClosed()) {
-      return tensorflow::errors::FailedPrecondition(
-          "Random TFRecord Reader is closed.");
+  absl::Status ReadRecord(uint64_t* offset, tensorflow::tstring* out) {
+    tensorflow::mutex_lock lock(mutex_);
+    if (IsClosedInternal()) {
+      return absl::FailedPreconditionError("Random TFRecord Reader is closed.");
     }
     return reader_->ReadRecord(offset, out);
   }
 
-  bool IsClosed() const { return file_ == nullptr && reader_ == nullptr; }
+  bool IsClosed() const {
+    tensorflow::mutex_lock lock(mutex_);
+    return IsClosedInternal();
+  }
 
   void Close() {
+    tensorflow::mutex_lock lock(mutex_);
     reader_ = nullptr;
     file_ = nullptr;
   }
 
  private:
-  static constexpr tensorflow::uint64 kReaderBufferSize = 16 * 1024 * 1024;
+  bool IsClosedInternal() const {
+    return file_ == nullptr && reader_ == nullptr;
+  }
+
+  static constexpr uint64_t kReaderBufferSize = 16 * 1024 * 1024;
 
   PyRecordRandomReader(std::unique_ptr<tensorflow::RandomAccessFile> file,
                        std::unique_ptr<tensorflow::io::RecordReader> reader)
@@ -129,38 +183,101 @@ class PyRecordRandomReader {
 
   std::unique_ptr<tensorflow::RandomAccessFile> file_;
   std::unique_ptr<tensorflow::io::RecordReader> reader_;
+  mutable tensorflow::mutex mutex_;
 
-  TF_DISALLOW_COPY_AND_ASSIGN(PyRecordRandomReader);
+  PyRecordRandomReader(const PyRecordRandomReader&) = delete;
+  void operator=(const PyRecordRandomReader&) = delete;
 };
+
+// A WritableFile that discards everything written to it.
+class NullWritableFile : public tensorflow::WritableFile {
+ public:
+  absl::Status Append(absl::string_view data) override {
+    return absl::OkStatus();
+  }
+  absl::Status Close() override { return absl::OkStatus(); }
+  absl::Status Flush() override { return absl::OkStatus(); }
+  absl::Status Sync() override { return absl::OkStatus(); }
+};
+
+// Formats `message` with every zlib option, so the error names the bad value.
+absl::Status ZlibOptionsError(
+    absl::string_view message,
+    const tensorflow::io::ZlibCompressionOptions& zlib) {
+  return absl::InvalidArgumentError(absl::StrCat(
+      "Invalid TFRecordWriter options for ZLIB/GZIP compression: ", message,
+      " (window_bits=", static_cast<int>(zlib.window_bits),
+      ", compression_level=", static_cast<int>(zlib.compression_level),
+      ", compression_method=", static_cast<int>(zlib.compression_method),
+      ", mem_level=", static_cast<int>(zlib.mem_level),
+      ", compression_strategy=", static_cast<int>(zlib.compression_strategy),
+      ", input_buffer_size=", zlib.input_buffer_size,
+      ", output_buffer_size=", zlib.output_buffer_size, ")"));
+}
+
+// RecordWriter aborts the process when its zlib stream fails to initialize.
+// Run the same ZlibOutputBuffer::Init() on a NullWritableFile first, so that
+// invalid options are returned as an error instead.
+absl::Status CheckZlibOptions(
+    const tensorflow::io::RecordWriterOptions& options) {
+  if (options.compression_type !=
+      tensorflow::io::RecordWriterOptions::ZLIB_COMPRESSION) {
+    return absl::OkStatus();
+  }
+  const tensorflow::io::ZlibCompressionOptions& zlib = options.zlib_options;
+  // ZlibOutputBuffer takes int32_t sizes. Reject sizes that do not fit
+  // instead of letting them wrap.
+  constexpr int64_t kMaxSize = std::numeric_limits<int32_t>::max();
+  if (zlib.input_buffer_size < 0 || zlib.input_buffer_size > kMaxSize ||
+      zlib.output_buffer_size < 0 || zlib.output_buffer_size > kMaxSize) {
+    return ZlibOptionsError(
+        absl::StrCat("buffer sizes must be between 0 and ", kMaxSize), zlib);
+  }
+  // Init() reads the output size only to reject values <= 1 and does not
+  // touch the buffers, so small probe buffers give the same result.
+  // Do not call Close() when Init() fails: for output_buffer_size <= 1 the
+  // zlib stream was never set up, and the destructor's data-loss warning is
+  // expected there.
+  NullWritableFile null_file;
+  tensorflow::io::ZlibOutputBuffer buffer(
+      &null_file, /*input_buffer_bytes=*/0,
+      static_cast<int32_t>(std::min<int64_t>(zlib.output_buffer_size, 64)),
+      zlib);
+  absl::Status status = buffer.Init();
+  if (!status.ok()) return ZlibOptionsError(status.message(), zlib);
+  return buffer.Close();
+}
 
 class PyRecordWriter {
  public:
-  static tensorflow::Status New(
-      const std::string& filename,
-      const tensorflow::io::RecordWriterOptions& options,
-      PyRecordWriter** out) {
+  static absl::Status New(const std::string& filename,
+                          const tensorflow::io::RecordWriterOptions& options,
+                          PyRecordWriter** out) {
+    TF_RETURN_IF_ERROR(CheckZlibOptions(options));
     std::unique_ptr<tensorflow::WritableFile> file;
     TF_RETURN_IF_ERROR(
         tensorflow::Env::Default()->NewWritableFile(filename, &file));
     auto writer =
-        absl::make_unique<tensorflow::io::RecordWriter>(file.get(), options);
+        std::make_unique<tensorflow::io::RecordWriter>(file.get(), options);
     *out = new PyRecordWriter(std::move(file), std::move(writer));
-    return tensorflow::Status::OK();
+    return absl::OkStatus();
   }
 
   PyRecordWriter() = delete;
-  ~PyRecordWriter() { Close(); }
+  ~PyRecordWriter() { (void)Close(); }
 
-  tensorflow::Status WriteRecord(tensorflow::StringPiece record) {
-    if (IsClosed()) {
-      return tensorflow::errors::FailedPrecondition("Writer is closed.");
+  absl::Status WriteRecord(absl::string_view record) {
+    tensorflow::mutex_lock lock(mutex_);
+    if (IsClosedInternal()) {
+      return absl::FailedPreconditionError("Writer is closed.");
     }
     return writer_->WriteRecord(record);
   }
 
-  tensorflow::Status Flush() {
-    if (IsClosed()) {
-      return tensorflow::errors::FailedPrecondition("Writer is closed.");
+  absl::Status Flush() {
+    tensorflow::mutex_lock lock(mutex_);
+    if (IsClosedInternal()) {
+      return absl::FailedPreconditionError("Writer is closed.");
     }
 
     auto status = writer_->Flush();
@@ -172,9 +289,13 @@ class PyRecordWriter {
     return status;
   }
 
-  bool IsClosed() const { return file_ == nullptr && writer_ == nullptr; }
+  bool IsClosed() const {
+    tensorflow::mutex_lock lock(mutex_);
+    return IsClosedInternal();
+  }
 
-  tensorflow::Status Close() {
+  absl::Status Close() {
+    tensorflow::mutex_lock lock(mutex_);
     if (writer_ != nullptr) {
       auto status = writer_->Close();
       writer_ = nullptr;
@@ -185,85 +306,109 @@ class PyRecordWriter {
       file_ = nullptr;
       if (!status.ok()) return status;
     }
-    return tensorflow::Status::OK();
+    return absl::OkStatus();
   }
 
  private:
+  bool IsClosedInternal() const { return writer_ == nullptr; }
+
   PyRecordWriter(std::unique_ptr<tensorflow::WritableFile> file,
                  std::unique_ptr<tensorflow::io::RecordWriter> writer)
       : file_(std::move(file)), writer_(std::move(writer)) {}
 
   std::unique_ptr<tensorflow::WritableFile> file_;
   std::unique_ptr<tensorflow::io::RecordWriter> writer_;
+  mutable tensorflow::mutex mutex_;
 
-  TF_DISALLOW_COPY_AND_ASSIGN(PyRecordWriter);
+  PyRecordWriter(const PyRecordWriter&) = delete;
+  void operator=(const PyRecordWriter&) = delete;
 };
 
-PYBIND11_MODULE(_pywrap_record_io, m) {
+PYBIND11_MODULE(_pywrap_record_io, m, pybind11::mod_gil_not_used()) {
   py::class_<PyRecordReader>(m, "RecordIterator")
       .def(py::init(
           [](const std::string& filename, const std::string& compression_type) {
-            tensorflow::Status status;
+            absl::Status status;
             PyRecordReader* self = nullptr;
             {
               py::gil_scoped_release release;
               status = PyRecordReader::New(filename, compression_type, &self);
             }
-            MaybeRaiseRegisteredFromStatus(status);
+            tsl::MaybeRaiseRegisteredFromStatus(status);
             return self;
           }))
       .def("__iter__", [](const py::object& self) { return self; })
       .def("__next__",
            [](PyRecordReader* self) {
-             if (self->IsClosed()) {
+             bool is_closed;
+             {
+               py::gil_scoped_release release;
+               is_closed = self->IsClosed();
+             }
+             if (is_closed) {
                throw py::stop_iteration();
              }
 
              tensorflow::tstring record;
-             tensorflow::Status status;
+             absl::Status status;
              {
                py::gil_scoped_release release;
                status = self->ReadNextRecord(&record);
              }
-             if (tensorflow::errors::IsOutOfRange(status)) {
+             if (absl::IsOutOfRange(status)) {
                // Don't close because the file being read could be updated
                // in-between
                // __next__ calls.
                throw py::stop_iteration();
              }
-             MaybeRaiseRegisteredFromStatus(status);
+             tsl::MaybeRaiseRegisteredFromStatus(status);
              return py::bytes(record);
            })
-      .def("close", [](PyRecordReader* self) { self->Close(); });
+      .def("close",
+           [](PyRecordReader* self) {
+             py::gil_scoped_release release;
+             self->Close();
+           })
+      .def("reopen", [](PyRecordReader* self) {
+        absl::Status status;
+        {
+          py::gil_scoped_release release;
+          status = self->Reopen();
+        }
+        tsl::MaybeRaiseRegisteredFromStatus(status);
+      });
 
   py::class_<PyRecordRandomReader>(m, "RandomRecordReader")
       .def(py::init([](const std::string& filename) {
-        tensorflow::Status status;
+        absl::Status status;
         PyRecordRandomReader* self = nullptr;
         {
           py::gil_scoped_release release;
           status = PyRecordRandomReader::New(filename, &self);
         }
-        MaybeRaiseRegisteredFromStatus(status);
+        tsl::MaybeRaiseRegisteredFromStatus(status);
         return self;
       }))
       .def("read",
-           [](PyRecordRandomReader* self, tensorflow::uint64 offset) {
-             tensorflow::uint64 temp_offset = offset;
+           [](PyRecordRandomReader* self, uint64_t offset) {
+             uint64_t temp_offset = offset;
              tensorflow::tstring record;
-             tensorflow::Status status;
+             absl::Status status;
              {
                py::gil_scoped_release release;
                status = self->ReadRecord(&temp_offset, &record);
              }
-             if (tensorflow::errors::IsOutOfRange(status)) {
-               throw py::index_error(tensorflow::strings::StrCat(
-                   "Out of range at reading offset ", offset));
+             if (absl::IsOutOfRange(status)) {
+               throw py::index_error(
+                   absl::StrCat("Out of range at reading offset ", offset));
              }
-             MaybeRaiseRegisteredFromStatus(status);
+             tsl::MaybeRaiseRegisteredFromStatus(status);
              return py::make_tuple(py::bytes(record), temp_offset);
            })
-      .def("close", [](PyRecordRandomReader* self) { self->Close(); });
+      .def("close", [](PyRecordRandomReader* self) {
+        py::gil_scoped_release release;
+        self->Close();
+      });
 
   using tensorflow::io::ZlibCompressionOptions;
   py::class_<ZlibCompressionOptions>(m, "ZlibCompressionOptions")
@@ -293,36 +438,51 @@ PYBIND11_MODULE(_pywrap_record_io, m) {
       .def(py::init(
           [](const std::string& filename, const RecordWriterOptions& options) {
             PyRecordWriter* self = nullptr;
-            tensorflow::Status status;
+            absl::Status status;
             {
               py::gil_scoped_release release;
               status = PyRecordWriter::New(filename, options, &self);
             }
-            MaybeRaiseRegisteredFromStatus(status);
+            tsl::MaybeRaiseRegisteredFromStatus(status);
             return self;
           }))
       .def("__enter__", [](const py::object& self) { return self; })
       .def("__exit__",
            [](PyRecordWriter* self, py::args) {
-             MaybeRaiseRegisteredFromStatus(self->Close());
+             absl::Status status;
+             {
+               py::gil_scoped_release release;
+               status = self->Close();
+             }
+             tsl::MaybeRaiseRegisteredFromStatus(status);
            })
       .def(
           "write",
-          [](PyRecordWriter* self, tensorflow::StringPiece record) {
-            tensorflow::Status status;
+          [](PyRecordWriter* self, absl::string_view record) {
+            absl::Status status;
             {
               py::gil_scoped_release release;
               status = self->WriteRecord(record);
             }
-            MaybeRaiseRegisteredFromStatus(status);
+            tsl::MaybeRaiseRegisteredFromStatus(status);
           },
           py::arg("record"))
       .def("flush",
            [](PyRecordWriter* self) {
-             MaybeRaiseRegisteredFromStatus(self->Flush());
+             absl::Status status;
+             {
+               py::gil_scoped_release release;
+               status = self->Flush();
+             }
+             tsl::MaybeRaiseRegisteredFromStatus(status);
            })
       .def("close", [](PyRecordWriter* self) {
-        MaybeRaiseRegisteredFromStatus(self->Close());
+        absl::Status status;
+        {
+          py::gil_scoped_release release;
+          status = self->Close();
+        }
+        tsl::MaybeRaiseRegisteredFromStatus(status);
       });
 }
 

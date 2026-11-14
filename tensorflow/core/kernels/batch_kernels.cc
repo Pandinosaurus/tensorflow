@@ -15,28 +15,50 @@ limitations under the License.
 
 #include "tensorflow/core/kernels/batch_kernels.h"
 
+#include <algorithm>
+#include <cstdint>
+#include <memory>
+#include <optional>
+#include <string>
+#include <unordered_set>
+#include <utility>
+
+#include "absl/base/attributes.h"
+#include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
+#include "absl/strings/string_view.h"
+#include "absl/synchronization/notification.h"
+#include "xla/tsl/platform/criticality.h"
+#include "xla/tsl/platform/errors.h"
+#include "xla/tsl/platform/statusor.h"
 #include "tensorflow/core/common_runtime/device_mgr.h"
 #include "tensorflow/core/framework/device.h"
 #include "tensorflow/core/framework/function.h"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/op_requires.h"
+#include "tensorflow/core/framework/register_types.h"
 #include "tensorflow/core/framework/resource_mgr.h"
 #include "tensorflow/core/framework/tensor.h"
+#include "tensorflow/core/framework/tensor_shape.h"
 #include "tensorflow/core/framework/tensor_util.h"
 #include "tensorflow/core/framework/types.h"
 #include "tensorflow/core/kernels/batching_util/adaptive_shared_batch_scheduler.h"
 #include "tensorflow/core/kernels/batching_util/batch_resource_base.h"
+#include "tensorflow/core/kernels/batching_util/batch_scheduler.h"
+#include "tensorflow/core/kernels/batching_util/batch_scheduler_utils.h"
 #include "tensorflow/core/kernels/batching_util/bounded_executor.h"
 #include "tensorflow/core/kernels/batching_util/concat_split_util.h"
 #include "tensorflow/core/kernels/batching_util/periodic_function.h"
+#include "tensorflow/core/kernels/batching_util/warmup.h"
 #include "tensorflow/core/kernels/ops_util.h"
+#include "tensorflow/core/lib/gtl/cleanup.h"
 #include "tensorflow/core/lib/monitoring/gauge.h"
 #include "tensorflow/core/lib/random/random.h"
 #include "tensorflow/core/platform/errors.h"
 #include "tensorflow/core/platform/logging.h"
-#include "tensorflow/core/platform/macros.h"
 #include "tensorflow/core/platform/numbers.h"
+#include "tensorflow/core/platform/refcount.h"
+#include "tensorflow/core/platform/status.h"
 #include "tensorflow/core/platform/threadpool.h"
 
 namespace tensorflow {
@@ -47,61 +69,63 @@ constexpr char kMinInflightBatchesAttr[] = "_min_inflight_batches";
 constexpr char kInitialInflightBatchesAttr[] = "_initial_inflight_batches";
 constexpr char kMaxInflightBatchesAttr[] = "_max_inflight_batches";
 constexpr char kBatchesToAverageOverAttr[] = "_batches_to_average_over";
+constexpr char kFullBatchSchedulingBoostMicros[] =
+    "_full_batch_scheduling_boost_micros";
 
 // Default thread count in the per-process batching thread pool.
 constexpr int64_t kBatchThreadPoolSize = 128;
 }  // namespace
 
 // Per-model inflight batches parameters.
-const int64_t kMinInflightBatches = 16;
-const int64_t kInitialInflightBatches = 16;
-const int64_t kBatchesToAverageOver = 10;
-const int64_t kMaxInflightBatches = 64;
-
-auto* batch_op_split_usage = monitoring::Gauge<string, 1>::New(
-    "/tensorflow/serving/batching/enable_large_batch_splitting",
-    "Tracks the usage of attribute `enable_large_batch_splitting` for "
-    "BatchFunction kernel in a saved model.",
-    "model_name");
+ABSL_CONST_INIT const int64_t kMinInflightBatches = 1;
+ABSL_CONST_INIT const int64_t kInitialInflightBatches = 2;
+ABSL_CONST_INIT const int64_t kBatchesToAverageOver = 10;
+ABSL_CONST_INIT const int64_t kMaxInflightBatches = 64;
 
 void RecordBatchSplitUsage(
-    absl::optional<bool> maybe_enable_large_batch_splitting,
-    const string& model_name) {
+    std::optional<bool> maybe_enable_large_batch_splitting,
+    absl::string_view model_name) {
+  static auto* cell = monitoring::Gauge<std::string, 1>::New(
+      "/tensorflow/serving/batching/enable_large_batch_splitting",
+      "Tracks the usage of attribute `enable_large_batch_splitting` for "
+      "BatchFunction kernel in a saved model.",
+      "model_name");
   if (maybe_enable_large_batch_splitting.has_value()) {
     if (maybe_enable_large_batch_splitting.value()) {
-      batch_op_split_usage->GetCell(model_name)->Set("true");
+      cell->GetCell(model_name)->Set("true");
     } else {
-      batch_op_split_usage->GetCell(model_name)->Set("false");
+      cell->GetCell(model_name)->Set("false");
     }
   } else {
-    batch_op_split_usage->GetCell(model_name)->Set("unset");
+    cell->GetCell(model_name)->Set("unset");
   }
 }
 
 void RecordBatchParamNumBatchThreads(int64_t num_batch_threads,
-                                     const string& model_name) {
+                                     absl::string_view model_name) {
   static auto* cell = monitoring::Gauge<int64_t, 1>::New(
       "/tensorflow/serving/batching/num_batch_threads",
       "Tracks the number of batch threads of a model.", "model_name");
   cell->GetCell(model_name)->Set(num_batch_threads);
 }
 
-const string& GetModelName(OpKernelContext* ctx) {
-  static string* kModelNameUnset = new string("model_name_unset");
-  if (!ctx->session_metadata()) return *kModelNameUnset;
-  if (ctx->session_metadata()->name().empty()) return *kModelNameUnset;
+absl::string_view GetModelName(OpKernelContext* ctx) {
+  if (ctx->session_metadata() == nullptr ||
+      ctx->session_metadata()->name().empty()) {
+    return "model_name_unset";
+  }
   return ctx->session_metadata()->name();
 }
 
 using ::tensorflow::concat_split_util::Concat;
 using ::tensorflow::concat_split_util::Split;
 
-int32 NumBatchThreadsFromEnvironmentWithDefault(int default_num_batch_threads) {
+int32_t NumBatchThreadsFromEnvironmentWithDefault(
+    int default_num_batch_threads) {
   int32_t num;
   const char* val = std::getenv("TF_NUM_BATCH_THREADS");
 
-  return (val && strings::safe_strto32(val, &num)) ? num
-                                                   : default_num_batch_threads;
+  return (val && absl::SimpleAtoi(val, &num)) ? num : default_num_batch_threads;
 }
 
 static thread::ThreadPool* GetOrCreateBatchThreadsPool() {
@@ -111,7 +135,7 @@ static thread::ThreadPool* GetOrCreateBatchThreadsPool() {
     options.num_threads =
         NumBatchThreadsFromEnvironmentWithDefault(kBatchThreadPoolSize);
 
-    options.thread_name = std::string("adaptive_batch_threads");
+    options.thread_name = "adaptive_batch_threads";
 
     auto status_or_executor = serving::BoundedExecutor::Create(options);
     if (!status_or_executor.ok()) {
@@ -120,7 +144,7 @@ static thread::ThreadPool* GetOrCreateBatchThreadsPool() {
       return nullptr;
     }
     static serving::BoundedExecutor* executor =
-        status_or_executor.ValueOrDie().release();
+        status_or_executor.value().release();
     return new thread::ThreadPool(executor);
   }();
   return shared_thread_pool;
@@ -129,80 +153,153 @@ static thread::ThreadPool* GetOrCreateBatchThreadsPool() {
 // A class encapsulating the state and logic for batching tensors.
 class BatchResource : public serving::BatchResourceBase {
  public:
-  static Status Create(int32_t num_batch_threads,
-                       int32_t max_execution_batch_size,
-                       int32_t batch_timeout_micros,
-                       int32_t max_enqueued_batches,
-                       const std::vector<int32>& allowed_batch_sizes,
-                       FunctionLibraryRuntime::Handle fhandle,
-                       FunctionLibraryRuntime* flib,
-                       bool enable_large_batch_splitting,
-                       std::unique_ptr<BatchResource>* resource) {
+  struct BatchTask : serving::BatchResourceBase::BatchTask {
+    FunctionLibraryRuntime::Handle fhandle;
+
+    explicit BatchTask(FunctionLibraryRuntime::Handle fhandle)
+        : fhandle(fhandle) {}
+
+   protected:
+    std::unique_ptr<serving::BatchResourceBase::BatchTask> CreateDerivedTask()
+        override {
+#if defined(PLATFORM_GOOGLE)
+      // ScopedCriticality is needed to ensure that the criticality is set
+      // correctly for the derived task.
+      tsl::criticality::ScopedCriticality scoped_criticality(
+          this->criticality());
+#endif
+      return std::make_unique<BatchTask>(fhandle);
+    }
+  };
+
+  static absl::Status Create(bool has_process_batch_function,
+                             int32_t num_batch_threads,
+                             int32_t max_execution_batch_size,
+                             int32_t batch_timeout_micros,
+                             int32_t max_enqueued_batches,
+                             const std::vector<int32_t>& allowed_batch_sizes,
+                             bool enable_large_batch_splitting,
+                             std::unique_ptr<BatchResource>* resource) {
+    return Create(has_process_batch_function, num_batch_threads,
+                  max_execution_batch_size, batch_timeout_micros,
+                  max_enqueued_batches, allowed_batch_sizes,
+                  /*low_priority_max_batch_size=*/0,
+                  /*low_priority_batch_timeout_micros=*/0,
+                  /*low_priority_max_enqueued_batches=*/0,
+                  /*low_priority_allowed_batch_sizes=*/{},
+                  /*mixed_priority_batching_policy=*/
+                  serving::MixedPriorityBatchingPolicy::
+                      kLowPriorityPaddingWithMaxBatchSize,
+                  enable_large_batch_splitting,
+                  /*enable_priority_aware_batch_scheduler=*/false,
+                  /*enable_priority_aware_batch_scheduler_resplit=*/false,
+                  /*enable_batching_task_lazy_cancellation=*/false,
+                  /*batch_padding_policy=*/"PAD_UP",
+                  /*num_warmup_batch_threads=*/0,
+                  /*per_criticality_batch_timeout_micros=*/{}, resource);
+  }
+
+  static absl::Status Create(
+      bool has_process_batch_function, int32_t num_batch_threads,
+      int32_t max_execution_batch_size, int32_t batch_timeout_micros,
+      int32_t max_enqueued_batches,
+      const std::vector<int32_t>& allowed_batch_sizes,
+      int32_t low_priority_max_batch_size,
+      int32_t low_priority_batch_timeout_micros,
+      int32_t low_priority_max_enqueued_batches,
+      const std::vector<int32_t>& low_priority_allowed_batch_sizes,
+      serving::MixedPriorityBatchingPolicy mixed_priority_batching_policy,
+      bool enable_large_batch_splitting,
+      bool enable_priority_aware_batch_scheduler,
+      bool enable_priority_aware_batch_scheduler_resplit,
+      bool enable_batching_task_lazy_cancellation,
+      absl::string_view batch_padding_policy, int32_t num_warmup_batch_threads,
+      const std::vector<int64_t>& per_criticality_batch_timeout_micros,
+      std::unique_ptr<BatchResource>* resource) {
     BatcherT::Options batcher_options;
     batcher_options.num_batch_threads = num_batch_threads;
+    batcher_options.num_warmup_batch_threads = num_warmup_batch_threads;
+    if (mixed_priority_batching_policy ==
+        serving::MixedPriorityBatchingPolicy::kPriorityMerge) {
+      batcher_options.use_global_scheduler = true;
+      batcher_options.rank_queues = true;
+    }
+    if (enable_priority_aware_batch_scheduler) {
+      batcher_options.use_global_scheduler = true;
+      batcher_options.rank_queues = true;
+    }
+    LOG(INFO) << "Batcher options: "
+              << "num_batch_threads=" << batcher_options.num_batch_threads
+              << ", num_warmup_batch_threads="
+              << batcher_options.num_warmup_batch_threads
+              << ", use_global_scheduler="
+              << batcher_options.use_global_scheduler
+              << ", rank_queues=" << batcher_options.rank_queues;
     std::shared_ptr<BatcherT> batcher;
     TF_RETURN_IF_ERROR(BatcherT::Create(batcher_options, &batcher));
 
     resource->reset(new BatchResource(
-        fhandle, flib, std::move(batcher),
-        GetBatcherQueueOptions(num_batch_threads, max_execution_batch_size,
-                               batch_timeout_micros, max_enqueued_batches,
-                               allowed_batch_sizes,
-                               enable_large_batch_splitting),
+        has_process_batch_function, std::move(batcher),
+        GetBatcherQueueOptions(
+            num_batch_threads, max_execution_batch_size, batch_timeout_micros,
+            max_enqueued_batches, allowed_batch_sizes,
+            enable_large_batch_splitting,
+            /*disable_padding=*/false, batch_padding_policy,
+            low_priority_max_batch_size, low_priority_batch_timeout_micros,
+            low_priority_max_enqueued_batches, low_priority_allowed_batch_sizes,
+            mixed_priority_batching_policy,
+            enable_priority_aware_batch_scheduler,
+            enable_priority_aware_batch_scheduler_resplit,
+            enable_batching_task_lazy_cancellation,
+            per_criticality_batch_timeout_micros),
         allowed_batch_sizes));
-    return Status::OK();
+    return absl::OkStatus();
   }
 
-  static Status Create(
+  static absl::Status Create(
+      bool has_process_batch_function,
       AdaptiveBatcherT::Options adaptive_shared_batch_scheduler_options,
       int32_t max_batch_size, int32_t batch_timeout_micros,
       int32_t max_enqueued_batches,
-      const std::vector<int32>& allowed_batch_sizes,
-      FunctionLibraryRuntime::Handle fhandle, FunctionLibraryRuntime* flib,
+      const std::vector<int32_t>& allowed_batch_sizes,
       std::unique_ptr<BatchResource>* resource) {
     std::shared_ptr<AdaptiveBatcherT> batcher;
     TF_RETURN_IF_ERROR(AdaptiveBatcherT::Create(
         adaptive_shared_batch_scheduler_options, &batcher));
 
     resource->reset(new BatchResource(
-        fhandle, flib, std::move(batcher),
+        has_process_batch_function, std::move(batcher),
         GetAdaptiveBatcherQueueOptions(
             max_batch_size, batch_timeout_micros, max_enqueued_batches,
-            true /* enable large batch split */, allowed_batch_sizes),
+            /*enable_large_batch_splitting=*/true, allowed_batch_sizes,
+            /*disable_padding=*/false),
         allowed_batch_sizes));
-    return Status::OK();
+    return absl::OkStatus();
   }
 
-  string DebugString() const final { return "BatchResource"; }
+  std::string DebugString() const final { return "BatchResource"; }
 
  private:
-  BatchResource(FunctionLibraryRuntime::Handle fhandle,
-                FunctionLibraryRuntime* flib, std::shared_ptr<BatcherT> batcher,
+  BatchResource(bool has_process_batch_function,
+                std::shared_ptr<BatcherT> batcher,
                 const BatcherT::QueueOptions& batcher_queue_options,
-                std::vector<int32> allowed_batch_sizes)
-      : BatchResourceBase(
-            /*has_process_batch_function=*/fhandle != kInvalidHandle,
-            std::move(batcher), batcher_queue_options,
-            std::move(allowed_batch_sizes)),
-        fhandle_(fhandle),
-        flib_(flib) {}
+                std::vector<int32_t> allowed_batch_sizes)
+      : BatchResourceBase(has_process_batch_function, std::move(batcher),
+                          batcher_queue_options,
+                          std::move(allowed_batch_sizes)) {}
 
-  BatchResource(FunctionLibraryRuntime::Handle fhandle,
-                FunctionLibraryRuntime* flib,
+  BatchResource(bool has_process_batch_function,
                 std::shared_ptr<AdaptiveBatcherT> batcher,
                 const AdaptiveBatcherT::QueueOptions& batcher_queue_options,
-                std::vector<int32> allowed_batch_sizes)
-      : BatchResourceBase(
-            /*has_process_batch_function=*/fhandle != kInvalidHandle,
-            std::move(batcher), batcher_queue_options,
-            std::move(allowed_batch_sizes)),
-        fhandle_(fhandle),
-        flib_(flib) {}
+                std::vector<int32_t> allowed_batch_sizes)
+      : BatchResourceBase(has_process_batch_function, std::move(batcher),
+                          batcher_queue_options,
+                          std::move(allowed_batch_sizes)) {}
 
   void ProcessFuncBatchImpl(
-      const BatchTask& last_task, absl::Span<const Tensor> inputs,
-      std::vector<Tensor>* combined_outputs,
-      std::function<void(const Status&)> done) const override {
+      const serving::BatchResourceBase::BatchTask& last_task,
+      absl::Span<const Tensor> inputs, std::vector<Tensor>* combined_outputs,
+      std::function<void(const absl::Status&)> done) const override {
     auto* last_task_context = last_task.context;
     FunctionLibraryRuntime::Options opts;
     opts.step_container = last_task_context->step_container();
@@ -215,22 +312,22 @@ class BatchResource : public serving::BatchResourceBase {
     // times in parallel with the same rendezvous, a _Send node from one run
     // might be matched with a _Recv node of a different run. Not setting the
     // rendezvous causes a new rendezvous to be used for each run.
-    Notification done_notif;
+    absl::Notification done_notif;
 
-    flib_->Run(opts, fhandle_, inputs, combined_outputs,
-               [&](const Status& run_status) {
-                 done(run_status);
-                 done_notif.Notify();
-               });
+    auto* flib = last_task_context->function_library();
+    FunctionLibraryRuntime::Handle fhandle =
+        absl::down_cast<const BatchTask&>(last_task).fhandle;
+    flib->Run(opts, fhandle, inputs, combined_outputs,
+              [&](const absl::Status& run_status) {
+                done(run_status);
+                done_notif.Notify();
+              });
     // By waiting for the notification we are ensuring that this thread isn't
     // used for processing other batches, which gives the batches time to
     // coalesce upstream. So overall the number of batches going through the
     // devices goes down, improving latency and throughput in most cases.
     done_notif.WaitForNotification();
   }
-
-  FunctionLibraryRuntime::Handle fhandle_;
-  FunctionLibraryRuntime* flib_;
 };
 
 BatchFunctionKernel::BatchFunctionKernel(OpKernelConstruction* c)
@@ -243,17 +340,49 @@ BatchFunctionKernel::BatchFunctionKernel(OpKernelConstruction* c)
   OP_REQUIRES_OK(c, c->GetAttr("batch_timeout_micros", &batch_timeout_micros_));
   OP_REQUIRES_OK(c, c->GetAttr("max_enqueued_batches", &max_enqueued_batches_));
   OP_REQUIRES_OK(c, c->GetAttr("allowed_batch_sizes", &allowed_batch_sizes_));
-
+  OP_REQUIRES_OK(c, c->GetAttr("low_priority_max_batch_size",
+                               &low_priority_max_batch_size_));
+  OP_REQUIRES_OK(c, c->GetAttr("low_priority_batch_timeout_micros",
+                               &low_priority_batch_timeout_micros_));
+  OP_REQUIRES_OK(c, c->GetAttr("low_priority_allowed_batch_sizes",
+                               &low_priority_allowed_batch_sizes_));
+  OP_REQUIRES_OK(c, c->GetAttr("low_priority_max_enqueued_batches",
+                               &low_priority_max_enqueued_batches_));
+  OP_REQUIRES_OK(c,
+                 c->GetAttr("mixed_priority_policy", &mixed_priority_policy_));
+  OP_REQUIRES_OK(c, c->GetAttr("batch_padding_policy", &batch_padding_policy_));
   OP_REQUIRES_OK(c, c->GetAttr("f", &func_));
-  flib_ = c->function_library();
 
   if (c->HasAttr("enable_large_batch_splitting")) {
     OP_REQUIRES_OK(c, c->GetAttr("enable_large_batch_splitting",
                                  &enable_large_batch_splitting_));
     has_attribute_enable_large_batch_splitting_ = true;
-  } else {
-    enable_large_batch_splitting_ = false;
-    has_attribute_enable_large_batch_splitting_ = false;
+  }
+
+  if (c->HasAttr("enable_priority_aware_batch_scheduler")) {
+    OP_REQUIRES_OK(c, c->GetAttr("enable_priority_aware_batch_scheduler",
+                                 &enable_priority_aware_batch_scheduler_));
+  }
+
+  if (c->HasAttr("enable_priority_aware_batch_scheduler_resplit")) {
+    OP_REQUIRES_OK(c,
+                   c->GetAttr("enable_priority_aware_batch_scheduler_resplit",
+                              &enable_priority_aware_batch_scheduler_resplit_));
+  }
+
+  if (c->HasAttr("per_criticality_batch_timeout_micros")) {
+    OP_REQUIRES_OK(c, c->GetAttr("per_criticality_batch_timeout_micros",
+                                 &per_criticality_batch_timeout_micros_));
+  }
+
+  if (c->HasAttr("enable_batching_task_lazy_cancellation")) {
+    OP_REQUIRES_OK(c, c->GetAttr("enable_batching_task_lazy_cancellation",
+                                 &enable_batching_task_lazy_cancellation_));
+  }
+
+  if (c->HasAttr("num_warmup_batch_threads")) {
+    OP_REQUIRES_OK(
+        c, c->GetAttr("num_warmup_batch_threads", &num_warmup_batch_threads_));
   }
 
   // Helper function `SetAdaptiveBatchSchedulerOptions` calls
@@ -269,7 +398,7 @@ BatchFunctionKernel::BatchFunctionKernel(OpKernelConstruction* c)
     // `batcher_queue_` is the key to find queue for this batch-op in the
     // graph.
     // Use `shared_name_` and name() as prefix for `batcher_queue_`.
-    // Note name() is unique per session (from session metadata).
+    // Note name() is node_def.name so unique per graph def.
     batcher_queue_ = name() + "/" + shared_name_ + batcher_queue_;
   }
 
@@ -280,34 +409,48 @@ BatchFunctionKernel::BatchFunctionKernel(OpKernelConstruction* c)
   }
 
   OP_REQUIRES_OK(c, ValidateAllowedBatchSizes());
+  OP_REQUIRES_OK(c, ValidatePerCriticalityBatchTimeoutMicros());
 }
 
 bool BatchFunctionKernel::IsExpensive() { return false; }
 
 void BatchFunctionKernel::ComputeAsync(OpKernelContext* c, DoneCallback done) {
   RecordBatchSplitUsage(has_attribute_enable_large_batch_splitting_
-                            ? absl::make_optional(enable_large_batch_splitting_)
-                            : absl::nullopt,
+                            ? std::make_optional(enable_large_batch_splitting_)
+                            : std::nullopt,
                         GetModelName(c));
-  // TODO(b/173255290): Add num_batch_threads_ parameter to TFRT batch kernel.
   RecordBatchParamNumBatchThreads(num_batch_threads_, GetModelName(c));
 
-  std::function<Status(BatchResource**)> creator;
+  std::function<absl::Status(BatchResource**)> creator;
 
   FunctionLibraryRuntime::Handle handle;
   OP_REQUIRES_OK_ASYNC(c, GetOrCreateFunctionHandle(c, &handle), done);
 
-  if (adaptive_batch_scheduler_options_ != absl::nullopt) {
-    creator = [this, handle](BatchResource** r) {
+  if (adaptive_batch_scheduler_options_ != std::nullopt) {
+    creator = [this,
+               session_metadata = c->session_metadata()](BatchResource** r) {
       serving::AdaptiveSharedBatchScheduler<
           serving::BatchResourceBase::BatchTask>::Options
           adaptive_shared_batch_scheduler_options;
       adaptive_shared_batch_scheduler_options.thread_pool_name =
           "adaptive_batch_threads";
-      adaptive_shared_batch_scheduler_options.num_batch_threads =
-          adaptive_batch_scheduler_options_->max_in_flight_batches_limit;
       adaptive_shared_batch_scheduler_options.thread_pool =
           GetOrCreateBatchThreadsPool();
+
+      // When we explicitly specify 'thread_pool', you'd think ASBS would ignore
+      // 'num_batch_threads', but in fact ASBS still uses num_batch_threads as
+      // the max number of in-flight batches.  It makes no sense to have more
+      // in-flight batches than threads (it would result in strictly bad
+      // batching decisions), so we cap this parameter (which otherwise comes
+      // from the saved model) to the actual number of batch threads (which
+      // comes from a process-wide environment variable).
+      //
+      // We have to apply the same capping to min_ and initial_
+      // in_flight_batches_limit below to produce valid configurations.
+      adaptive_shared_batch_scheduler_options.num_batch_threads = std::min(
+          NumBatchThreadsFromEnvironmentWithDefault(kBatchThreadPoolSize),
+          adaptive_batch_scheduler_options_->max_in_flight_batches_limit);
+
       // adaptive_shared_batch_scheduler_options.full_batch_scheduling_boost_micros
       // is 0 (default value) intentionally, so tasks are scheduled in a FIFO
       // way.
@@ -321,29 +464,62 @@ void BatchFunctionKernel::ComputeAsync(OpKernelContext* c, DoneCallback done) {
       // the batch processing latency (which varies on a model basis).
       // If a non-zero value is not set properly, it harms tail latency.
       adaptive_shared_batch_scheduler_options.min_in_flight_batches_limit =
-          adaptive_batch_scheduler_options_->min_in_flight_batches_limit;
-      adaptive_shared_batch_scheduler_options.initial_in_flight_batches_limit =
-          adaptive_batch_scheduler_options_->initial_in_flight_batches_limit;
+          std::min(
+              NumBatchThreadsFromEnvironmentWithDefault(kBatchThreadPoolSize),
+              adaptive_batch_scheduler_options_->min_in_flight_batches_limit);
+      adaptive_shared_batch_scheduler_options
+          .initial_in_flight_batches_limit = std::min(
+          NumBatchThreadsFromEnvironmentWithDefault(kBatchThreadPoolSize),
+          adaptive_batch_scheduler_options_->initial_in_flight_batches_limit);
       adaptive_shared_batch_scheduler_options.batches_to_average_over =
           adaptive_batch_scheduler_options_->batches_to_average_over;
-      adaptive_shared_batch_scheduler_options.fifo_scheduling = true;
+      if (adaptive_batch_scheduler_options_
+              ->full_batch_scheduling_boost_micros != -1) {
+        adaptive_shared_batch_scheduler_options
+            .full_batch_scheduling_boost_micros =
+            adaptive_batch_scheduler_options_
+                ->full_batch_scheduling_boost_micros;
+        adaptive_shared_batch_scheduler_options.fifo_scheduling = false;
+      } else {
+        adaptive_shared_batch_scheduler_options.fifo_scheduling = true;
+      }
       std::unique_ptr<BatchResource> new_resource;
       TF_RETURN_IF_ERROR(BatchResource::Create(
+          /*has_process_batch_function=*/true,
           adaptive_shared_batch_scheduler_options, max_batch_size_,
           batch_timeout_micros_, max_enqueued_batches_, allowed_batch_sizes_,
-          handle, flib_, &new_resource));
+          &new_resource));
+      if (session_metadata) {
+        new_resource->set_session_metadata(*session_metadata);
+      }
       *r = new_resource.release();
-      return Status::OK();
+      return absl::OkStatus();
     };
   } else {
-    creator = [this, handle](BatchResource** r) {
+    creator = [this,
+               session_metadata = c->session_metadata()](BatchResource** r) {
+      TF_ASSIGN_OR_RETURN(
+          serving::MixedPriorityBatchingPolicy mixed_priority_batching_policy,
+          serving::GetMixedPriorityBatchingPolicy(mixed_priority_policy_));
+
       std::unique_ptr<BatchResource> new_resource;
       TF_RETURN_IF_ERROR(BatchResource::Create(
-          num_batch_threads_, max_batch_size_, batch_timeout_micros_,
-          max_enqueued_batches_, allowed_batch_sizes_, handle, flib_,
-          enable_large_batch_splitting_, &new_resource));
+          /*has_process_batch_function=*/true, num_batch_threads_,
+          max_batch_size_, batch_timeout_micros_, max_enqueued_batches_,
+          allowed_batch_sizes_, low_priority_max_batch_size_,
+          low_priority_batch_timeout_micros_,
+          low_priority_max_enqueued_batches_, low_priority_allowed_batch_sizes_,
+          mixed_priority_batching_policy, enable_large_batch_splitting_,
+          enable_priority_aware_batch_scheduler_,
+          enable_priority_aware_batch_scheduler_resplit_,
+          enable_batching_task_lazy_cancellation_, batch_padding_policy_,
+          num_warmup_batch_threads_, per_criticality_batch_timeout_micros_,
+          &new_resource));
+      if (session_metadata) {
+        new_resource->set_session_metadata(*session_metadata);
+      }
       *r = new_resource.release();
-      return Status::OK();
+      return absl::OkStatus();
     };
   }
 
@@ -352,44 +528,57 @@ void BatchFunctionKernel::ComputeAsync(OpKernelContext* c, DoneCallback done) {
                        c->resource_manager()->LookupOrCreate(
                            container_, shared_name_, &br, creator),
                        done);
-  const Status status =
-      br->RegisterInput(random::New64(), c, batcher_queue_, done);
+  const uint64_t guid = random::New64();
+  auto create_batch_task_fn =
+      [handle]() -> absl::StatusOr<
+                     std::unique_ptr<serving::BatchResourceBase::BatchTask>> {
+    return {std::make_unique<BatchResource::BatchTask>(handle)};
+  };
+  absl::Status status;
+  if (serving::ShouldWarmupAllBatchSizes(c)) {
+    status = br->RegisterWarmupInputs(guid, c, batcher_queue_,
+                                      create_batch_task_fn, done);
+  } else {
+    status =
+        br->RegisterInput(guid, c, batcher_queue_, create_batch_task_fn, done);
+  }
   br->Unref();
   OP_REQUIRES_OK_ASYNC(c, status, done);
   // Assume br calls done, so nothing to do here.
 }
 
-Status BatchFunctionKernel::InstantiateFunction(
+absl::Status BatchFunctionKernel::InstantiateFunction(
     OpKernelContext* c, FunctionLibraryRuntime::Handle* handle) const {
   // TODO(b/173748062): Merge this instantiation logic with PartitionedCall.
-  if (!flib_) {
-    return errors::Internal("No function library");
+  FunctionLibraryRuntime* flib = c->function_library();
+  if (!flib) {
+    return absl::InternalError("No function library");
   }
 
   FunctionLibraryRuntime::InstantiateOptions opts;
-  opts.target = flib_->device() == nullptr ? "" : flib_->device()->name();
+  opts.target = flib->device() == nullptr ? "" : flib->device()->name();
   opts.is_multi_device_function = true;
-  const ConfigProto* config = flib_->config_proto();
+  const ConfigProto* config = flib->config_proto();
   if (config) {
     opts.config_proto = *config;
   }
 
   Device* cpu_device;
-  TF_RETURN_IF_ERROR(flib_->device_mgr()->LookupDevice("CPU:0", &cpu_device));
+  TF_RETURN_IF_ERROR(flib->device_mgr()->LookupDevice("CPU:0", &cpu_device));
 
   const FunctionDef* fdef =
-      flib_->GetFunctionLibraryDefinition()->Find(func_.name());
+      flib->GetFunctionLibraryDefinition()->Find(func_.name());
   if (!fdef) {
-    return errors::NotFound("Failed to find definition for function \"",
-                            func_.name(), "\"");
+    return absl::NotFoundError(absl::StrCat(
+        "Failed to find definition for function \"", func_.name(), "\""));
   }
   OpInputList in_tensors;
   TF_RETURN_IF_ERROR(c->input_list("in_tensors", &in_tensors));
   for (int i = 0; i < in_tensors.size(); i++) {
     if (in_tensors[i].dtype() == DT_RESOURCE) {
-      return errors::InvalidArgument(
-          "BatchFunction cannot take resource inputs but input ", i,
-          " is a resource.");
+      return absl::InvalidArgumentError(
+          absl::StrCat("BatchFunction cannot take resource inputs but input ",
+                       i, " is a resource."));
     } else {
       // Currently, inputs are on CPU since they are concatenated on CPU
       opts.input_devices.push_back(cpu_device->name());
@@ -411,15 +600,15 @@ Status BatchFunctionKernel::InstantiateFunction(
     opts.output_devices.push_back(cpu_device->name());
   }
   if (opts.input_devices.size() != signature.input_arg_size()) {
-    return errors::InvalidArgument(
+    return absl::InvalidArgumentError(absl::StrCat(
         "Function takes ", signature.input_arg_size(), " argument(s) but ",
-        opts.input_devices.size(), " argument(s) were passed");
+        opts.input_devices.size(), " argument(s) were passed"));
   }
-  return flib_->Instantiate(func_.name(), AttrSlice(&func_.attr()), opts,
-                            handle);
+  return flib->Instantiate(func_.name(), AttrSlice(&func_.attr()), opts,
+                           handle);
 }
 
-Status BatchFunctionKernel::GetOrCreateFunctionHandle(
+absl::Status BatchFunctionKernel::GetOrCreateFunctionHandle(
     OpKernelContext* c, FunctionLibraryRuntime::Handle* handle) {
   mutex_lock ml(mu_);
   if (!fhandle_) {
@@ -428,35 +617,57 @@ Status BatchFunctionKernel::GetOrCreateFunctionHandle(
   } else {
     *handle = fhandle_.value();
   }
-  return Status::OK();
+  return absl::OkStatus();
+}
+
+absl::Status BatchFunctionKernel::ValidatePerCriticalityBatchTimeoutMicros()
+    const {
+  if (per_criticality_batch_timeout_micros_.empty()) {
+    return absl::OkStatus();
+  }
+  if (per_criticality_batch_timeout_micros_.size() !=
+      tsl::criticality::kAllCriticalitiesDescending.size()) {
+    return absl::InvalidArgumentError(absl::StrCat(
+        "per_criticality_batch_timeout_micros must be either empty or of size ",
+        tsl::criticality::kAllCriticalitiesDescending.size()));
+  }
+  for (const int64_t timeout : per_criticality_batch_timeout_micros_) {
+    if (timeout < 0) {
+      return absl::InvalidArgumentError(
+          absl::StrCat("per_criticality_batch_timeout_micros must contain "
+                       "nonnegative values; found negative timeout ",
+                       timeout));
+    }
+  }
+  return absl::OkStatus();
 }
 
 // Validates 'allowed_batch_sizes_'. The entries must increase monotonically.
 // If large batch split is not enabled, the last one must equal
 // `max_batch_size_`. otherwise the last element must be smaller than or equal
 // to `max_batch_size_`.
-Status BatchFunctionKernel::ValidateAllowedBatchSizes() const {
+absl::Status BatchFunctionKernel::ValidateAllowedBatchSizes() const {
   if (allowed_batch_sizes_.empty()) {
-    return Status::OK();
+    return absl::OkStatus();
   }
   int32_t last_size = 0;
   for (size_t i = 0; i < allowed_batch_sizes_.size(); ++i) {
     const int32_t size = allowed_batch_sizes_.at(i);
     if (i > 0 && size <= last_size) {
-      return errors::InvalidArgument(
+      return absl::InvalidArgumentError(
           "allowed_batch_sizes entries must be monotonically increasing");
     }
 
     if ((!enable_large_batch_splitting_) &&
         (i == allowed_batch_sizes_.size() - 1) && (size != max_batch_size_)) {
-      return errors::InvalidArgument(
+      return absl::InvalidArgumentError(
           "final entry in allowed_batch_sizes must equal max_batch_size when "
           "enable_large_batch_splitting is False");
     }
 
     last_size = size;
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 // Initialize vars by reading from op-kernel-construction.
@@ -505,6 +716,11 @@ void BatchFunctionKernel::SetAdaptiveBatchSchedulerOptions(
                                  &options.max_in_flight_batches_limit));
   }
 
+  if (c->HasAttr(kFullBatchSchedulingBoostMicros)) {
+    OP_REQUIRES_OK(c, c->GetAttr(kFullBatchSchedulingBoostMicros,
+                                 &options.full_batch_scheduling_boost_micros));
+  }
+
   // At this point, the batch kernel is configured to use adaptive scheduling.
   // To validate or return error at kernel construction time, invokes
   // `GetOrCreateBatchThreadsPool` and validates returned `thread_pool` is
@@ -514,7 +730,7 @@ void BatchFunctionKernel::SetAdaptiveBatchSchedulerOptions(
   thread::ThreadPool* thread_pool = GetOrCreateBatchThreadsPool();
   OP_REQUIRES(
       c, thread_pool != nullptr,
-      errors::FailedPrecondition("Failed to create batch threads pool"));
+      absl::FailedPreconditionError("Failed to create batch threads pool"));
 
   adaptive_batch_scheduler_options_ = options;
 }
@@ -524,6 +740,12 @@ REGISTER_KERNEL_BUILDER(Name("BatchFunction").Device(DEVICE_CPU),
 // TODO(b/173748277): Accept inputs/outputs on the device.
 REGISTER_KERNEL_BUILDER(Name("BatchFunction")
                             .Device(DEVICE_GPU)
+                            .HostMemory("in_tensors")
+                            .HostMemory("captured_tensors")
+                            .HostMemory("out_tensors"),
+                        BatchFunctionKernel);
+REGISTER_KERNEL_BUILDER(Name("BatchFunction")
+                            .Device(DEVICE_DEFAULT)
                             .HostMemory("in_tensors")
                             .HostMemory("captured_tensors")
                             .HostMemory("out_tensors"),
@@ -552,21 +774,27 @@ class BatchKernel : public AsyncOpKernel {
 
   void ComputeAsync(OpKernelContext* c, DoneCallback done) final {
     BatchResource* br;
-    std::function<Status(BatchResource**)> creator = [this](BatchResource** r) {
-      std::unique_ptr<BatchResource> new_resource;
-      TF_RETURN_IF_ERROR(BatchResource::Create(
-          num_batch_threads_, max_batch_size_, batch_timeout_micros_,
-          max_enqueued_batches_, allowed_batch_sizes_, kInvalidHandle,
-          /*flib=*/nullptr, false, &new_resource));
-      *r = new_resource.release();
-      return Status::OK();
-    };
+    std::function<absl::Status(BatchResource**)> creator =
+        [this](BatchResource** r) {
+          std::unique_ptr<BatchResource> new_resource;
+          TF_RETURN_IF_ERROR(BatchResource::Create(
+              /*has_process_batch_function=*/false, num_batch_threads_,
+              max_batch_size_, batch_timeout_micros_, max_enqueued_batches_,
+              allowed_batch_sizes_, false, &new_resource));
+          *r = new_resource.release();
+          return absl::OkStatus();
+        };
     OP_REQUIRES_OK_ASYNC(c,
                          c->resource_manager()->LookupOrCreate(
                              container_, shared_name_, &br, creator),
                          done);
-    const Status status =
-        br->RegisterInput(random::New64(), c, batcher_queue_, done);
+    const absl::Status status = br->RegisterInput(
+        random::New64(), c, batcher_queue_,
+        []() -> absl::StatusOr<
+                 std::unique_ptr<serving::BatchResourceBase::BatchTask>> {
+          return {std::make_unique<BatchResource::BatchTask>(kInvalidHandle)};
+        },
+        done);
     br->Unref();
     OP_REQUIRES_OK_ASYNC(c, status, done);
     // Assume br calls done, so nothing to do here.
@@ -574,35 +802,35 @@ class BatchKernel : public AsyncOpKernel {
 
   // Validates 'allowed_batch_sizes_'. The entries must increase
   // monotonically, and the last one must equal 'max_batch_size_'.
-  Status ValidateAllowedBatchSizes() const {
+  absl::Status ValidateAllowedBatchSizes() const {
     if (allowed_batch_sizes_.empty()) {
-      return Status::OK();
+      return absl::OkStatus();
     }
     int32_t last_size = 0;
     for (size_t i = 0; i < allowed_batch_sizes_.size(); ++i) {
       const int32_t size = allowed_batch_sizes_.at(i);
       if (i > 0 && size <= last_size) {
-        return errors::InvalidArgument(
+        return absl::InvalidArgumentError(
             "allowed_batch_sizes entries must be monotonically increasing");
       }
       if (i == allowed_batch_sizes_.size() - 1 && size != max_batch_size_) {
-        return errors::InvalidArgument(
+        return absl::InvalidArgumentError(
             "final entry in allowed_batch_sizes must equal max_batch_size");
       }
       last_size = size;
     }
-    return Status::OK();
+    return absl::OkStatus();
   }
 
  private:
-  string container_;
-  string shared_name_;
-  string batcher_queue_;
-  int32 num_batch_threads_;
-  int32 max_batch_size_;
-  int32 batch_timeout_micros_;
-  int32 max_enqueued_batches_;
-  std::vector<int32> allowed_batch_sizes_;
+  std::string container_;
+  std::string shared_name_;
+  std::string batcher_queue_;
+  int32_t num_batch_threads_;
+  int32_t max_batch_size_;
+  int32_t batch_timeout_micros_;
+  int32_t max_enqueued_batches_;
+  std::vector<int32_t> allowed_batch_sizes_;
 };
 
 REGISTER_KERNEL_BUILDER(Name("Batch").Device(DEVICE_CPU), BatchKernel);
@@ -628,26 +856,47 @@ class UnbatchResource : public ResourceBase {
     timeout_enforcer_ = nullptr;
   }
 
-  string DebugString() const final { return "UnbatchResource"; }
+  std::string DebugString() const final { return "UnbatchResource"; }
 
-  Status Compute(OpKernelContext* context, AsyncOpKernel::DoneCallback done) {
+  absl::Status Compute(OpKernelContext* context,
+                       AsyncOpKernel::DoneCallback done) {
     const Tensor& data_t = context->input(0);
     const Tensor& batch_index_t = context->input(1);
 
+    // The rank must be validated before any dim_size access, which has
+    // undefined behavior for out-of-range dimension indices.
+    if (!TensorShapeUtils::IsMatrix(batch_index_t.shape())) {
+      return absl::InvalidArgumentError(
+          absl::StrCat("Wrong shape for index tensor. Expected a matrix of "
+                       "shape [batch_size, 3]; Got: ",
+                       batch_index_t.shape().DebugString(), "."));
+    }
+    if (data_t.dims() == 0) {
+      return absl::InvalidArgumentError(
+          absl::StrCat("Wrong shape for data tensor. Expected at least a "
+                       "vector; Got: ",
+                       data_t.shape().DebugString(), "."));
+    }
     if (batch_index_t.shape().dim_size(0) > data_t.shape().dim_size(0)) {
-      return errors::InvalidArgument(
+      return absl::InvalidArgumentError(absl::StrCat(
           "Wrong shape for index tensor. Expected 0th dimension size to be no "
           "greater than ",
           data_t.shape().dim_size(0),
-          "; Got: ", batch_index_t.shape().dim_size(0), ".");
+          "; Got: ", batch_index_t.shape().dim_size(0), "."));
     }
     if (batch_index_t.shape().dim_size(1) != 3) {
-      return errors::InvalidArgument(
+      return absl::InvalidArgumentError(absl::StrCat(
           "Wrong shape for index tensor. Expected 1st dimension size to be 3 ; "
           "Got: ",
-          batch_index_t.shape().dim_size(1), ".");
+          batch_index_t.shape().dim_size(1), "."));
     }
 
+    if (!TensorShapeUtils::IsScalar(context->input(2).shape())) {
+      return absl::InvalidArgumentError(
+          absl::StrCat("Input id should be scalar; "
+                       "Got: ",
+                       context->input(2).DebugString(), "."));
+    }
     const int64_t batch_key = context->input(2).scalar<int64_t>()();
     const bool nonempty_input = batch_index_t.dim_size(0) > 0;
 
@@ -661,7 +910,19 @@ class UnbatchResource : public ResourceBase {
       auto batch_indices =
           batch_index_t.shaped<int64_t, 2>({batch_index_t.dim_size(0), 3});
       for (int i = 0; i < batch_index_t.dim_size(0); ++i) {
-        sizes.push_back(batch_indices(i, 2) - batch_indices(i, 1));
+        const int64_t start = batch_indices(i, 1);
+        const int64_t end = batch_indices(i, 2);
+        if (start < 0 || end < start) {
+          return absl::InvalidArgumentError(absl::StrCat(
+              "Invalid start/end indices in batch_index at row ", i, ": start=",
+              start, ", end=", end, ". Expected 0 <= start <= end."));
+        }
+        if (end > data_t.shape().dim_size(0)) {
+          return absl::InvalidArgumentError(absl::StrCat(
+              "Invalid end index in batch_index at row ", i, ": end=", end,
+              " exceeds dimension 0 size ", data_t.shape().dim_size(0), "."));
+        }
+        sizes.push_back(end - start);
         batch_keys.push_back(batch_indices(i, 0));
       }
 
@@ -670,7 +931,7 @@ class UnbatchResource : public ResourceBase {
 
     // Critical section.
     std::vector<AsyncOpKernel::DoneCallback> done_callbacks_to_call;
-    Status status = [&]() -> Status {
+    absl::Status status = [&]() -> absl::Status {
       mutex_lock ml(mu_);
 
       // Check to see whether the tensor we want is already ready.
@@ -679,20 +940,31 @@ class UnbatchResource : public ResourceBase {
         context->set_output(0, tensor_it->second.tensor);
         waiting_tensors_.erase(tensor_it);
         done_callbacks_to_call.push_back(done);
-        return Status::OK();
+        return absl::OkStatus();
       }
 
-      const uint64 deadline_micros =
+      const uint64_t deadline_micros =
           Env::Default()->NowMicros() + timeout_micros_;
 
-      // Add ourselves to the waitlist for tensors.
-      if (!waiting_callbacks_
-               .emplace(batch_key,
-                        WaitingCallback{deadline_micros, context, done})
-               .second) {
-        return errors::AlreadyExists(
+      if (waiting_callbacks_.find(batch_key) != waiting_callbacks_.end()) {
+        return absl::AlreadyExistsError(
             "Multiple session runs with the same batch key.");
       }
+
+      if (nonempty_input) {
+        std::unordered_set<int64_t> seen_keys;
+        for (const int64_t key : batch_keys) {
+          if (!seen_keys.insert(key).second ||
+              waiting_tensors_.find(key) != waiting_tensors_.end()) {
+            return absl::AlreadyExistsError(
+                "Multiple tensors returned for same batch key.");
+          }
+        }
+      }
+
+      // Add ourselves to the waitlist for tensors.
+      waiting_callbacks_.emplace(
+          batch_key, WaitingCallback{deadline_micros, context, done});
 
       // If we have a non-empty tensor, finish the waitlisted runs,
       // and store any remaining pieces.
@@ -707,18 +979,13 @@ class UnbatchResource : public ResourceBase {
             // Note: the deadline here is in case we are arriving late and the
             // kernel that should rendezvous with this tensor has already waited
             // and timed out.
-            if (!waiting_tensors_
-                     .emplace(batch_keys[i],
-                              WaitingTensor{deadline_micros, split_inputs[i]})
-                     .second) {
-              return errors::AlreadyExists(
-                  "Multiple tensors returned for same batch key.");
-            }
+            waiting_tensors_.emplace(
+                batch_keys[i], WaitingTensor{deadline_micros, split_inputs[i]});
           }
         }
       }
 
-      return Status::OK();
+      return absl::OkStatus();
     }();
 
     for (const AsyncOpKernel::DoneCallback& done_callback :
@@ -732,7 +999,7 @@ class UnbatchResource : public ResourceBase {
  private:
   // Evicts waiting tensors and callbacks that have exceeded their deadline.
   void EnforceTimeout() {
-    const uint64 now = Env::Default()->NowMicros();
+    const uint64_t now = Env::Default()->NowMicros();
     std::vector<WaitingCallback> evicted_callbacks;
 
     {
@@ -760,24 +1027,25 @@ class UnbatchResource : public ResourceBase {
     }
 
     for (const WaitingCallback& evicted_callback : evicted_callbacks) {
-      evicted_callback.context->CtxFailureWithWarning(errors::DeadlineExceeded(
-          "Batched data did not arrive within timeout window."));
+      evicted_callback.context->CtxFailureWithWarning(
+          absl::DeadlineExceededError(
+              "Batched data did not arrive within timeout window."));
       evicted_callback.done();
     }
   }
 
   struct WaitingTensor {
-    uint64 deadline_micros;
+    uint64_t deadline_micros;
     Tensor tensor;
   };
 
   struct WaitingCallback {
-    uint64 deadline_micros;
+    uint64_t deadline_micros;
     OpKernelContext* context;
     AsyncOpKernel::DoneCallback done;
   };
 
-  const int32 timeout_micros_;
+  const int32_t timeout_micros_;
 
   mutex mu_;
 
@@ -807,26 +1075,26 @@ class UnbatchKernel : public AsyncOpKernel {
   }
 
   void ComputeAsync(OpKernelContext* c, DoneCallback done) final {
+    auto cleanup = gtl::MakeCleanup([&done]() { done(); });
     UnbatchResource* ubr;
-    std::function<Status(UnbatchResource**)> creator =
+    std::function<absl::Status(UnbatchResource**)> creator =
         [this](UnbatchResource** r) {
           *r = new UnbatchResource(timeout_micros_);
-          return Status::OK();
+          return absl::OkStatus();
         };
     OP_REQUIRES_OK_ASYNC(c,
                          c->resource_manager()->LookupOrCreate(
                              container_, shared_name_, &ubr, creator),
-                         done);
-    auto status = ubr->Compute(c, done);
-    ubr->Unref();
-    OP_REQUIRES_OK_ASYNC(c, status, done);
-    // Assume ubr calls done, so nothing to do here.
+                         []() {});
+    core::ScopedUnref unref_ubr(ubr);
+    OP_REQUIRES_OK_ASYNC(c, ubr->Compute(c, done), []() {});
+    cleanup.release();
   }
 
  private:
-  string container_;
-  string shared_name_;
-  int32 timeout_micros_;
+  std::string container_;
+  std::string shared_name_;
+  int32_t timeout_micros_;
 };
 REGISTER_KERNEL_BUILDER(Name("Unbatch").Device(DEVICE_CPU), UnbatchKernel);
 
@@ -834,14 +1102,14 @@ REGISTER_KERNEL_BUILDER(Name("Unbatch").Device(DEVICE_CPU), UnbatchKernel);
 // deterministically for the gradient of unbatch.
 class UnbatchGradResource : public ResourceBase {
  public:
-  UnbatchGradResource() {}
+  UnbatchGradResource() = default;
 
-  string DebugString() const final { return "UnbatchGradResource"; }
+  std::string DebugString() const final { return "UnbatchGradResource"; }
 
   // Flushes the information for one batch, given its context and done
   // callback. Clears all information about it from the available_tensors_.
-  Status OutputBatch(OpKernelContext* context,
-                     const AsyncOpKernel::DoneCallback& done)
+  absl::Status OutputBatch(OpKernelContext* context,
+                           const AsyncOpKernel::DoneCallback& done)
       TF_EXCLUSIVE_LOCKS_REQUIRED(mu_) {
     const Tensor& batch_index_t = context->input(1);
     auto batch_index =
@@ -850,7 +1118,7 @@ class UnbatchGradResource : public ResourceBase {
     for (int i = 0; i < batch_index_t.dim_size(0); ++i) {
       auto available_it = available_tensors_.find(batch_index(i, 0));
       if (available_it == available_tensors_.end()) {
-        return errors::Internal("bad bookkeeping of available tensors.");
+        return absl::InternalError("bad bookkeeping of available tensors.");
       }
       tensors.push_back(available_it->second);
       available_tensors_.erase(available_it);
@@ -864,37 +1132,60 @@ class UnbatchGradResource : public ResourceBase {
     TF_RETURN_IF_ERROR(Concat<type>(context, tensors, &concatenated_tensor)); \
     context->set_output(0, concatenated_tensor);                              \
     break;
-      TF_CALL_ALL_TYPES(CASE);
+      TF_CALL_ALL_TYPES(CASE) TF_CALL_float8_e4m3fn(CASE);
 #undef CASE
       default:
-        return errors::InvalidArgument("Unsupported data type: ", type);
+        return absl::InvalidArgumentError(
+            absl::StrCat("Unsupported data type: ", type));
     }
     done();
-    return Status::OK();
+    return absl::OkStatus();
   }
 
   // Ingests data from one invocation of the op.
-  Status Compute(OpKernelContext* context,
-                 const AsyncOpKernel::DoneCallback& done) {
+  absl::Status Compute(OpKernelContext* context,
+                       const AsyncOpKernel::DoneCallback& done) {
     const Tensor& data_t = context->input(0);
     const Tensor& batch_index_t = context->input(1);
     const Tensor& grad_t = context->input(2);
+    const Tensor& batch_key_t = context->input(3);
 
-    mutex_lock ml(mu_);
+    if (!TensorShapeUtils::IsScalar(batch_key_t.shape())) {
+      return absl::InvalidArgumentError(absl::StrCat(
+          "Expected `id` to be scalar. Received ", batch_key_t.DebugString()));
+    }
+    if (!TensorShapeUtils::IsVectorOrHigher(grad_t.shape())) {
+      return absl::InvalidArgumentError(
+          absl::StrCat("Expected `grad` to have rank at least 1. Received ",
+                       grad_t.shape().DebugString()));
+    }
+    if (!TensorShapeUtils::IsMatrix(batch_index_t.shape())) {
+      return absl::InvalidArgumentError(
+          absl::StrCat("Wrong shape for index tensor. Expected a matrix of "
+                       "shape [batch_size, 3]; Got: ",
+                       batch_index_t.shape().DebugString(), "."));
+    }
+    if (batch_index_t.dim_size(1) != 3) {
+      return absl::InvalidArgumentError(absl::StrCat(
+          "Wrong shape for index tensor. Expected 1st dimension size to be 3; "
+          "Got: ",
+          batch_index_t.dim_size(1), "."));
+    }
+    if (data_t.NumElements() > 0 && batch_index_t.NumElements() == 0) {
+      return absl::InvalidArgumentError(
+          "batch_index is empty while the tensor isn't.");
+    }
 
     const int64_t batch_key = context->input(3).scalar<int64_t>()();
+    mutex_lock ml(mu_);
     // Mark our tensor as available.
     if (!available_tensors_.emplace(batch_key, grad_t).second) {
-      return errors::InvalidArgument("Two runs with the same batch key.");
+      return absl::InvalidArgumentError("Two runs with the same batch key.");
     }
 
     // Check whether we have a valid input tensor and, if so, create its
     // dispatch logic.
     if (data_t.NumElements() > 0) {
-      if (batch_index_t.NumElements() == 0) {
-        return errors::InvalidArgument(
-            "batch_index is empty while the tensor isn't.");
-      }
       std::unordered_set<int64_t> missing_tensors;
       const auto batch_index =
           batch_index_t.shaped<int64_t, 2>({batch_index_t.dim_size(0), 3});
@@ -907,26 +1198,36 @@ class UnbatchGradResource : public ResourceBase {
       if (missing_tensors.empty()) {
         return OutputBatch(context, done);
       }
-      if (!available_batches_
-               .emplace(batch_key, Batch{missing_tensors, context, done})
-               .second) {
-        return errors::InvalidArgument(
+      if (available_batches_.find(batch_key) != available_batches_.end()) {
+        return absl::InvalidArgumentError(
             "Batch key with valid batch used twice.");
       }
       for (const int64_t i : missing_tensors) {
-        if (!desired_tensor_to_batch_map_.emplace(i, batch_key).second) {
-          return errors::InvalidArgument(
+        if (desired_tensor_to_batch_map_.find(i) !=
+            desired_tensor_to_batch_map_.end()) {
+          return absl::InvalidArgumentError(
               "Missing tensor wanted by more than one batch.");
         }
       }
+      auto desire_it = desired_tensor_to_batch_map_.find(batch_key);
+      if (desire_it != desired_tensor_to_batch_map_.end() &&
+          available_batches_.find(desire_it->second) ==
+              available_batches_.end()) {
+        desired_tensor_to_batch_map_.erase(desire_it);
+        return absl::InvalidArgumentError("Batch no longer exists.");
+      }
+      available_batches_.emplace(batch_key,
+                                 Batch{missing_tensors, context, done});
+      for (const int64_t i : missing_tensors) {
+        desired_tensor_to_batch_map_.emplace(i, batch_key);
+      }
     } else {
       // If we don't have a valid input tensor we can output an empty tensor and
-      // call our done closure.
+      // call our done closure once all bookkeeping succeeds.
       TensorShape output_shape(grad_t.shape());
       output_shape.set_dim(0, 0);
       Tensor* output = nullptr;
       TF_RETURN_IF_ERROR(context->allocate_output(0, output_shape, &output));
-      done();
     }
 
     // Search to see whether our tensor is desired by any existing batch.
@@ -936,18 +1237,26 @@ class UnbatchGradResource : public ResourceBase {
       auto batch_it = available_batches_.find(desire_it->second);
       desired_tensor_to_batch_map_.erase(desire_it);
       if (batch_it == available_batches_.end()) {
-        return errors::InvalidArgument("Batch no longer exists.");
+        return absl::InvalidArgumentError("Batch no longer exists.");
       }
       batch_it->second.missing_tensors.erase(batch_key);
       // If all tensors are available we should concatenate them and dispatch
       // the batch.
       if (batch_it->second.missing_tensors.empty()) {
-        TF_RETURN_IF_ERROR(
-            OutputBatch(batch_it->second.context, batch_it->second.done));
+        OpKernelContext* batch_context = batch_it->second.context;
+        AsyncOpKernel::DoneCallback batch_done = batch_it->second.done;
         available_batches_.erase(batch_it);
+        absl::Status batch_status = OutputBatch(batch_context, batch_done);
+        if (!batch_status.ok()) {
+          batch_context->CtxFailureWithWarning(batch_status);
+          batch_done();
+        }
       }
     }
-    return Status::OK();
+    if (data_t.NumElements() == 0) {
+      done();
+    }
+    return absl::OkStatus();
   }
 
  private:
@@ -993,25 +1302,25 @@ class UnbatchGradKernel : public AsyncOpKernel {
   }
 
   void ComputeAsync(OpKernelContext* c, DoneCallback done) final {
+    auto cleanup = gtl::MakeCleanup([&done]() { done(); });
     UnbatchGradResource* ubr;
-    std::function<Status(UnbatchGradResource**)> creator =
+    std::function<absl::Status(UnbatchGradResource**)> creator =
         [](UnbatchGradResource** r) {
           *r = new UnbatchGradResource();
-          return Status::OK();
+          return absl::OkStatus();
         };
     OP_REQUIRES_OK_ASYNC(c,
                          c->resource_manager()->LookupOrCreate(
                              container_, shared_name_, &ubr, creator),
-                         done);
-    Status status = ubr->Compute(c, done);
-    ubr->Unref();
-    OP_REQUIRES_OK_ASYNC(c, status, done);
-    // Assume ubr calls done, so nothing to do here.
+                         []() {});
+    core::ScopedUnref unref_ubr(ubr);
+    OP_REQUIRES_OK_ASYNC(c, ubr->Compute(c, done), []() {});
+    cleanup.release();
   }
 
  private:
-  string container_;
-  string shared_name_;
+  std::string container_;
+  std::string shared_name_;
 };
 REGISTER_KERNEL_BUILDER(Name("UnbatchGrad").Device(DEVICE_CPU),
                         UnbatchGradKernel);

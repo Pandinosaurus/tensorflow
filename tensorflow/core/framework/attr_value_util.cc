@@ -15,59 +15,108 @@ limitations under the License.
 
 #include "tensorflow/core/framework/attr_value_util.h"
 
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <initializer_list>
 #include <string>
-#include <unordered_map>
+#include <utility>
 #include <vector>
 
+#include "absl/base/casts.h"
+#include "absl/log/log.h"
+#include "absl/status/status.h"
 #include "absl/strings/escaping.h"
+#include "absl/strings/match.h"
+#include "absl/strings/str_cat.h"
+#include "absl/strings/str_join.h"
+#include "absl/strings/strip.h"
+#include "absl/types/span.h"
 #include "tensorflow/core/framework/attr_value.pb_text.h"
-#include "tensorflow/core/framework/tensor.pb_text.h"
+#include "tensorflow/core/framework/tensor.h"
+#include "tensorflow/core/framework/tensor.pb.h"
+#include "tensorflow/core/framework/tensor_shape.h"
 #include "tensorflow/core/framework/tensor_shape.pb.h"
 #include "tensorflow/core/framework/types.h"
 #include "tensorflow/core/framework/types.pb_text.h"
 #include "tensorflow/core/lib/core/errors.h"
 #include "tensorflow/core/lib/core/stringpiece.h"
-#include "tensorflow/core/lib/hash/hash.h"
+#include "tensorflow/core/lib/gtl/array_slice.h"
 #include "tensorflow/core/lib/strings/proto_serialization.h"
 #include "tensorflow/core/lib/strings/str_util.h"
-#include "tensorflow/core/platform/protobuf.h"
+#include "tensorflow/core/platform/fingerprint.h"
+#include "tensorflow/core/platform/hash.h"
+#include "tensorflow/core/platform/numbers.h"
+#include "tensorflow/core/platform/tstring.h"
+#include "tensorflow/core/platform/types.h"
+#include "tensorflow/core/util/overflow.h"
 
 namespace tensorflow {
-namespace {
 
-// Do not construct large tensors to compute their hash or compare for equality.
-constexpr int kMaxAttrValueTensorByteSize = 32 * 1024 * 1024;  // 32mb
-
-// Limit nesting of tensors to 100 deep to prevent memory overflow.
-constexpr int kMaxTensorNestDepth = 100;
-
+namespace attr_value_util_internal {
 // Return the size of the tensor represented by this TensorProto. If shape is
 // not fully defined return -1.
 int64_t TensorByteSize(const TensorProto& t) {
   // num_elements returns -1 if shape is not fully defined.
-  int64_t num_elems = TensorShape(t.tensor_shape()).num_elements();
-  return num_elems < 0 ? -1 : num_elems * DataTypeSize(t.dtype());
+  auto result = PartialTensorShape::BuildPartialTensorShape(t.tensor_shape());
+  if (!result.ok()) {
+    VLOG(1) << "Error encounted while computing computing tensor byte size: "
+            << result.status();
+    return -1;
+  }
+  int64_t num_elems = result.value().num_elements();
+  if (num_elems < 0) {
+    return -1;
+  }
+
+  int64_t tensor_byte_size =
+      MultiplyWithoutOverflow(num_elems, DataTypeSize(t.dtype()));
+  if (tensor_byte_size < 0) {
+    VLOG(1)
+        << "Overflow encountered when computing tensor byte size, multiplying "
+        << num_elems << " with " << DataTypeSize(t.dtype());
+    return -1;
+  }
+  return tensor_byte_size;
 }
+}  // namespace attr_value_util_internal
+
+namespace {
+
+// Do not construct large tensors to compute their hash, compare for equality,
+// or construct long DebugString.
+constexpr int kMaxAttrValueTensorByteSize = 32 * 1024 * 1024;  // 32mb
+
+// Limit nesting of tensors and recursive AttrValues to 100 deep to prevent
+// stack overflow.
+constexpr int kMaxTensorNestDepth = 100;
+constexpr int kMaxAttrValueNestDepth = 100;
 
 // Compute TensorProto hash by creating a Tensor, serializing it as tensor
-// content, and computing a hash of it's string representation. This is unsafe
-// operation, because large tensors can be represented as TensorProto, but can't
-// be serialized to tensor content.
-uint64 TensorProtoHash(const TensorProto& tp) {
+// content, and computing a hash of it's string representation. If it's failed
+// to serialize, compute hash based on TensorProto string representation.
+// This approach may result different hash codes with identical Tensors if they
+// are defined with different TensorProto representations.
+uint64_t TensorProtoHash(const TensorProto& tp) {
   Tensor tensor(tp.dtype());
   bool success = tensor.FromProto(tp);
-  DCHECK(success);
-  TensorProto p;
-  tensor.AsProtoTensorContent(&p);
-  return DeterministicProtoHash64(p);
+  if (success) {
+    TensorProto p;
+    tensor.AsProtoTensorContent(&p);
+    return DeterministicProtoHash64(p);
+  } else {
+    return DeterministicProtoHash64(tp);
+  }
 }
 
 // Do not create large tensors in memory, compute hash based on TensorProto
 // string representation. Tensors with identical content potentially can have a
 // different hash code if they are defined with different TensorProto
 // representations.
-uint64 FastTensorProtoHash(const TensorProto& tp) {
-  if (TensorByteSize(tp) > kMaxAttrValueTensorByteSize) {
+uint64_t FastTensorProtoHash(const TensorProto& tp) {
+  if (attr_value_util_internal::TensorByteSize(tp) >
+      kMaxAttrValueTensorByteSize) {
     return DeterministicProtoHash64(tp);
   } else {
     return TensorProtoHash(tp);
@@ -80,8 +129,10 @@ bool AreTensorProtosEqual(const TensorProto& lhs, const TensorProto& rhs,
   // conversion to an actual Tensor if we can quickly rule out equality
   // by comparing the Tensor size since different sized Tensors are definitely
   // different.
-  const int64_t lhs_tensor_bytes = TensorByteSize(lhs);
-  const int64_t rhs_tensor_bytes = TensorByteSize(rhs);
+  const int64_t lhs_tensor_bytes =
+      attr_value_util_internal::TensorByteSize(lhs);
+  const int64_t rhs_tensor_bytes =
+      attr_value_util_internal::TensorByteSize(rhs);
   if (lhs_tensor_bytes != rhs_tensor_bytes) {
     return false;
   }
@@ -131,18 +182,69 @@ bool AreTensorProtosEqual(const TensorProto& lhs, const TensorProto& rhs,
   return AreSerializedProtosEqual(lhs_tp, rhs_tp);
 }
 
-using TensorProtoHasher = std::function<uint64(const TensorProto&)>;
+using TensorProtoHasher = std::function<uint64_t(const TensorProto&)>;
 
-uint64 AttrValueHash(const AttrValue& a, const TensorProtoHasher& tensor_hash) {
+uint64_t AttrValueHashImpl(const AttrValue& a,
+                           const TensorProtoHasher& tensor_hash, int depth);
+
+uint64_t HashNameAttrList(const NameAttrList& func,
+                          const TensorProtoHasher& tensor_hash, int depth) {
+  if (depth > kMaxAttrValueNestDepth) return 0;
+  uint64_t h = Hash64(func.name());
+  std::vector<std::pair<absl::string_view, const AttrValue*>> entries;
+  entries.reserve(func.attr_size());
+  for (const auto& pair : func.attr()) {
+    entries.emplace_back(pair.first, &pair.second);
+  }
+  std::sort(
+      entries.begin(), entries.end(),
+      [](const auto& lhs, const auto& rhs) { return lhs.first < rhs.first; });
+  for (const auto& entry : entries) {
+    h = Hash64(entry.first.data(), entry.first.size(), h);
+    h = Hash64Combine(AttrValueHashImpl(*entry.second, tensor_hash, depth), h);
+  }
+  return h;
+}
+
+uint64_t AttrValueHashImpl(const AttrValue& a,
+                           const TensorProtoHasher& tensor_hash, int depth) {
   if (a.has_tensor()) return tensor_hash(a.tensor());
 
   if (a.has_func()) {
-    const NameAttrList& func = a.func();
-    uint64 h = Hash64(func.name());
-    std::map<string, AttrValue> map(func.attr().begin(), func.attr().end());
-    for (const auto& pair : map) {
-      h = Hash64(pair.first.data(), pair.first.size(), h);
-      h = Hash64Combine(AttrValueHash(pair.second, tensor_hash), h);
+    return HashNameAttrList(a.func(), tensor_hash, depth + 1);
+  }
+
+  if (a.has_list() && a.list().func_size() > 0) {
+    const auto& list = a.list();
+    uint64_t h = 0;
+    for (const NameAttrList& func : list.func()) {
+      h = Hash64Combine(HashNameAttrList(func, tensor_hash, depth + 1), h);
+    }
+    if (list.s_size() == 0 && list.i_size() == 0 && list.f_size() == 0 &&
+        list.b_size() == 0 && list.type_size() == 0 && list.shape_size() == 0 &&
+        list.tensor_size() == 0) {
+      return h;
+    }
+    for (const std::string& s : list.s()) {
+      h = Hash64Combine(h, Hash64(s.data(), s.size()));
+    }
+    for (int64_t v : list.i()) {
+      h = Hash64Combine(h, static_cast<uint64_t>(v));
+    }
+    for (float v : list.f()) {
+      h = Hash64Combine(h, absl::bit_cast<uint32_t>(v));
+    }
+    for (bool v : list.b()) {
+      h = Hash64Combine(h, v ? 1 : 0);
+    }
+    for (int v : list.type()) {
+      h = Hash64Combine(h, static_cast<uint64_t>(v));
+    }
+    for (const TensorShapeProto& shape : list.shape()) {
+      h = Hash64Combine(h, DeterministicProtoHash64(shape));
+    }
+    for (const TensorProto& tensor : list.tensor()) {
+      h = Hash64Combine(h, DeterministicProtoHash64(tensor));
     }
     return h;
   }
@@ -151,99 +253,99 @@ uint64 AttrValueHash(const AttrValue& a, const TensorProtoHasher& tensor_hash) {
   return DeterministicProtoHash64(a);
 }
 
-string SummarizeString(const string& str) {
-  string escaped = absl::CEscape(str);
+std::string SummarizeString(const std::string& str) {
+  std::string escaped = absl::CEscape(str);
 
   // If the string is long, replace the middle with ellipses.
   constexpr int kMaxStringSummarySize = 80;
   if (escaped.size() >= kMaxStringSummarySize) {
-    StringPiece prefix(escaped);
-    StringPiece suffix = prefix;
+    absl::string_view prefix(escaped);
+    absl::string_view suffix = prefix;
     prefix.remove_suffix(escaped.size() - 10);
     suffix.remove_prefix(escaped.size() - 10);
-    return strings::StrCat("\"", prefix, "...", suffix, "\"");
+    return absl::StrCat("\"", prefix, "...", suffix, "\"");
   } else {
-    return strings::StrCat("\"", escaped, "\"");
+    return absl::StrCat("\"", escaped, "\"");
   }
 }
 
-string SummarizeTensor(const TensorProto& tensor_proto) {
+std::string SummarizeTensor(const TensorProto& tensor_proto) {
   Tensor t;
-  if (!t.FromProto(tensor_proto)) {
-    return strings::StrCat(
+  int64_t tensor_byte_size =
+      attr_value_util_internal::TensorByteSize(tensor_proto);
+  if (tensor_byte_size > kMaxAttrValueTensorByteSize ||
+      tensor_byte_size == -1  // Unknown shape
+  ) {
+    // Do not load large or unknown-shape Tensor to compute detailed
+    // DebugString()
+    return absl::StrCat("<TensorProto: ", tensor_proto.ShortDebugString(), ">");
+  } else if (!t.FromProto(tensor_proto)) {
+    return absl::StrCat(
         "<Invalid TensorProto: ", tensor_proto.ShortDebugString(), ">");
   }
   return t.DebugString();
 }
 
-string SummarizeFunc(const NameAttrList& func) {
-  std::vector<string> entries;
+std::string SummarizeAttrValueImpl(const AttrValue& attr_value, int depth);
+
+std::string SummarizeFunc(const NameAttrList& func, int depth) {
+  if (depth > kMaxAttrValueNestDepth) {
+    return "<AttrValue nesting limit exceeded>";
+  }
+  std::vector<std::string> entries;
   for (const auto& p : func.attr()) {
     entries.push_back(
-        strings::StrCat(p.first, "=", SummarizeAttrValue(p.second)));
+        absl::StrCat(p.first, "=", SummarizeAttrValueImpl(p.second, depth)));
   }
   std::sort(entries.begin(), entries.end());
-  return strings::StrCat(func.name(), "[", absl::StrJoin(entries, ", "), "]");
+  return absl::StrCat(func.name(), "[", absl::StrJoin(entries, ", "), "]");
 }
 
-bool ParseAttrValueHelper_TensorNestsUnderLimit(int limit, string to_parse) {
+bool ParseAttrValueHelper_NestsUnderLimit(int limit,
+                                          absl::string_view to_parse) {
+  if (limit <= 0) return false;
   int nests = 0;
-  int maxed_out = to_parse.length();
-  int open_curly = to_parse.find('{');
-  int open_bracket = to_parse.find('<');
-  int close_curly = to_parse.find('}');
-  int close_bracket = to_parse.find('>');
-  if (open_curly == -1) {
-    open_curly = maxed_out;
-  }
-  if (open_bracket == -1) {
-    open_bracket = maxed_out;
-  }
-  int min = std::min(open_curly, open_bracket);
-  do {
-    if (open_curly == maxed_out && open_bracket == maxed_out) {
-      return true;
+  for (size_t i = 0; i < to_parse.size(); ++i) {
+    const char c = to_parse[i];
+    if (c == '#') {
+      const size_t newline = to_parse.find('\n', i + 1);
+      if (newline == absl::string_view::npos) break;
+      i = newline;
+      continue;
     }
-    if (min == open_curly) {
-      nests += 1;
-      open_curly = to_parse.find('{', open_curly + 1);
-      if (open_curly == -1) {
-        open_curly = maxed_out;
+    if (c == '\'' || c == '"') {
+      const char quote = c;
+      ++i;
+      while (i < to_parse.size()) {
+        if (to_parse[i] == '\\') {
+          i += 2;
+          continue;
+        }
+        if (to_parse[i] == quote) break;
+        ++i;
       }
-    } else if (min == open_bracket) {
-      nests += 1;
-      open_bracket = to_parse.find('<', open_bracket + 1);
-      if (open_bracket == -1) {
-        open_bracket = maxed_out;
-      }
-    } else if (min == close_curly) {
-      nests -= 1;
-      close_curly = to_parse.find('}', close_curly + 1);
-      if (close_curly == -1) {
-        close_curly = maxed_out;
-      }
-    } else if (min == close_bracket) {
-      nests -= 1;
-      close_bracket = to_parse.find('>', close_bracket + 1);
-      if (close_bracket == -1) {
-        close_bracket = maxed_out;
-      }
+      if (i >= to_parse.size()) return false;
+      continue;
     }
-    min = std::min({open_curly, open_bracket, close_curly, close_bracket});
-  } while (nests < 100);
-  return false;
+    if (c == '{' || c == '<') {
+      ++nests;
+      if (nests >= limit) return false;
+    } else if (c == '}' || c == '>') {
+      if (nests == 0) return false;
+      --nests;
+    }
+  }
+  return true;
 }
 
-}  // namespace
-
-string SummarizeAttrValue(const AttrValue& attr_value) {
+std::string SummarizeAttrValueImpl(const AttrValue& attr_value, int depth) {
   switch (attr_value.value_case()) {
     case AttrValue::kS:
       return SummarizeString(attr_value.s());
     case AttrValue::kI:
-      return strings::StrCat(attr_value.i());
+      return absl::StrCat(attr_value.i());
     case AttrValue::kF:
-      return strings::StrCat(attr_value.f());
+      return absl::StrCat(strings::LegacyPrecision(attr_value.f()));
     case AttrValue::kB:
       return attr_value.b() ? "true" : "false";
     case AttrValue::kType:
@@ -253,18 +355,19 @@ string SummarizeAttrValue(const AttrValue& attr_value) {
     case AttrValue::kTensor:
       return SummarizeTensor(attr_value.tensor());
     case AttrValue::kList: {
-      std::vector<string> pieces;
+      std::vector<std::string> pieces;
       if (attr_value.list().s_size() > 0) {
         for (int i = 0; i < attr_value.list().s_size(); ++i) {
           pieces.push_back(SummarizeString(attr_value.list().s(i)));
         }
       } else if (attr_value.list().i_size() > 0) {
         for (int i = 0; i < attr_value.list().i_size(); ++i) {
-          pieces.push_back(strings::StrCat(attr_value.list().i(i)));
+          pieces.push_back(absl::StrCat(attr_value.list().i(i)));
         }
       } else if (attr_value.list().f_size() > 0) {
         for (int i = 0; i < attr_value.list().f_size(); ++i) {
-          pieces.push_back(strings::StrCat(attr_value.list().f(i)));
+          pieces.push_back(
+              absl::StrCat(strings::LegacyPrecision(attr_value.list().f(i))));
         }
       } else if (attr_value.list().b_size() > 0) {
         for (int i = 0; i < attr_value.list().b_size(); ++i) {
@@ -285,28 +388,42 @@ string SummarizeAttrValue(const AttrValue& attr_value) {
         }
       } else if (attr_value.list().func_size() > 0) {
         for (int i = 0; i < attr_value.list().func_size(); ++i) {
-          pieces.push_back(SummarizeFunc(attr_value.list().func(i)));
+          pieces.push_back(SummarizeFunc(attr_value.list().func(i), depth + 1));
         }
       }
-      constexpr int kMaxListSummarySize = 50;
+      constexpr int kMaxListSummarySize = 30;
       if (pieces.size() >= kMaxListSummarySize) {
-        pieces.erase(pieces.begin() + 5, pieces.begin() + (pieces.size() - 6));
+        // The message is exposed to users, so create a separate fingerprint
+        // ID in the case of long lists.
+        uint64_t fingerprint =
+            Fingerprint64(absl::StrJoin(pieces.begin(), pieces.end(), ","));
+        pieces.erase(pieces.begin() + 5, pieces.end() - 6);
         pieces[5] = "...";
+        return absl::StrCat("[", absl::StrJoin(pieces, ", "),
+                            "]{attr_hash=", fingerprint, "}");
+      } else {
+        return absl::StrCat("[", absl::StrJoin(pieces, ", "), "]");
       }
-      return strings::StrCat("[", absl::StrJoin(pieces, ", "), "]");
     }
     case AttrValue::kFunc: {
-      return SummarizeFunc(attr_value.func());
+      return SummarizeFunc(attr_value.func(), depth + 1);
     }
     case AttrValue::kPlaceholder:
-      return strings::StrCat("$", attr_value.placeholder());
+      return absl::StrCat("$", attr_value.placeholder());
     case AttrValue::VALUE_NOT_SET:
       return "<Unknown AttrValue type>";
   }
   return "<Unknown AttrValue type>";  // Prevent missing return warning
 }
 
-Status AttrValueHasType(const AttrValue& attr_value, StringPiece type) {
+}  // namespace
+
+std::string SummarizeAttrValue(const AttrValue& attr_value) {
+  return SummarizeAttrValueImpl(attr_value, 0);
+}
+
+absl::Status AttrValueHasType(const AttrValue& attr_value,
+                              absl::string_view type) {
   int num_set = 0;
 
 #define VALIDATE_FIELD(name, type_string, oneof_case)                         \
@@ -342,7 +459,7 @@ Status AttrValueHasType(const AttrValue& attr_value, StringPiece type) {
 #undef VALIDATE_FIELD
 
   if (attr_value.value_case() == AttrValue::kPlaceholder) {
-    return errors::InvalidArgument(
+    return absl::InvalidArgumentError(
         "AttrValue had value with unexpected type 'placeholder'");
   }
 
@@ -354,8 +471,8 @@ Status AttrValueHasType(const AttrValue& attr_value, StringPiece type) {
   // support for GraphDef versions <= 4 is dropped.
   if (absl::StartsWith(type, "list(") && !attr_value.has_list()) {
     if (num_set) {
-      return errors::InvalidArgument(
-          "AttrValue missing value with expected type '", type, "'");
+      return absl::InvalidArgumentError(absl::StrCat(
+          "AttrValue missing value with expected type '", type, "'"));
     } else {
       // Indicate that we have a list, but an empty one.
       ++num_set;
@@ -364,49 +481,51 @@ Status AttrValueHasType(const AttrValue& attr_value, StringPiece type) {
 
   // Okay to have an empty list, but not to be missing a non-list value.
   if (num_set == 0 && !absl::StartsWith(type, "list(")) {
-    return errors::InvalidArgument(
-        "AttrValue missing value with expected type '", type, "'");
+    return absl::InvalidArgumentError(absl::StrCat(
+        "AttrValue missing value with expected type '", type, "'"));
   }
 
   // Ref types and DT_INVALID are illegal, and DataTypes must
   // be a valid enum type.
   if (type == "type") {
     if (!DataType_IsValid(attr_value.type())) {
-      return errors::InvalidArgument("AttrValue has invalid DataType enum: ",
-                                     attr_value.type());
+      return absl::InvalidArgumentError(absl::StrCat(
+          "AttrValue has invalid DataType enum: ", attr_value.type()));
     }
     if (IsRefType(attr_value.type())) {
-      return errors::InvalidArgument(
-          "AttrValue must not have reference type value of ",
-          DataTypeString(attr_value.type()));
+      return absl::InvalidArgumentError(
+          absl::StrCat("AttrValue must not have reference type value of ",
+                       DataTypeString(attr_value.type())));
     }
     if (attr_value.type() == DT_INVALID) {
-      return errors::InvalidArgument("AttrValue has invalid DataType");
+      return absl::InvalidArgumentError("AttrValue has invalid DataType");
     }
   } else if (type == "list(type)") {
     for (auto as_int : attr_value.list().type()) {
       const DataType dtype = static_cast<DataType>(as_int);
       if (!DataType_IsValid(dtype)) {
-        return errors::InvalidArgument("AttrValue has invalid DataType enum: ",
-                                       as_int);
+        return absl::InvalidArgumentError(
+            absl::StrCat("AttrValue has invalid DataType enum: ", as_int));
       }
       if (IsRefType(dtype)) {
-        return errors::InvalidArgument(
-            "AttrValue must not have reference type value of ",
-            DataTypeString(dtype));
+        return absl::InvalidArgumentError(
+            absl::StrCat("AttrValue must not have reference type value of ",
+                         DataTypeString(dtype)));
       }
       if (dtype == DT_INVALID) {
-        return errors::InvalidArgument("AttrValue contains invalid DataType");
+        return absl::InvalidArgumentError(
+            "AttrValue contains invalid DataType");
       }
     }
   }
 
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-bool ParseAttrValue(StringPiece type, StringPiece text, AttrValue* out) {
+bool ParseAttrValue(absl::string_view type, absl::string_view text,
+                    AttrValue* out) {
   // Parse type.
-  string field_name;
+  std::string field_name;
   bool is_list = absl::ConsumePrefix(&type, "list(");
   if (absl::ConsumePrefix(&type, "string")) {
     field_name = "s";
@@ -434,11 +553,11 @@ bool ParseAttrValue(StringPiece type, StringPiece text, AttrValue* out) {
   }
 
   // Construct a valid text proto message to parse.
-  string to_parse;
+  std::string to_parse;
   if (is_list) {
     // TextFormat parser considers "i: 7" to be the same as "i: [7]",
     // but we only want to allow list values with [].
-    StringPiece cleaned = text;
+    absl::string_view cleaned = text;
     str_util::RemoveLeadingWhitespace(&cleaned);
     str_util::RemoveTrailingWhitespace(&cleaned);
     if (cleaned.size() < 2 || cleaned[0] != '[' ||
@@ -454,15 +573,12 @@ bool ParseAttrValue(StringPiece type, StringPiece text, AttrValue* out) {
       out->mutable_list();
       return true;
     }
-    to_parse = strings::StrCat("list { ", field_name, ": ", text, " }");
+    to_parse = absl::StrCat("list { ", field_name, ": ", text, " }");
   } else {
-    to_parse = strings::StrCat(field_name, ": ", text);
+    to_parse = absl::StrCat(field_name, ": ", text);
   }
-  if (field_name == "tensor") {
-    if (!ParseAttrValueHelper_TensorNestsUnderLimit(kMaxTensorNestDepth,
-                                                    to_parse)) {
-      return false;
-    }
+  if (!ParseAttrValueHelper_NestsUnderLimit(kMaxTensorNestDepth, to_parse)) {
+    return false;
   }
   return ProtoParseFromString(to_parse, out);
 }
@@ -484,8 +600,8 @@ void SetAttrValue(const AttrValue& value, AttrValue* out) { *out = value; }
   DEFINE_SET_ATTR_VALUE_ONE(ARG_TYPE, FIELD)        \
   DEFINE_SET_ATTR_VALUE_LIST(gtl::ArraySlice<ARG_TYPE>, FIELD)
 
-DEFINE_SET_ATTR_VALUE_ONE(const string&, s)
-DEFINE_SET_ATTR_VALUE_LIST(gtl::ArraySlice<string>, s)
+DEFINE_SET_ATTR_VALUE_ONE(const std::string&, s)
+DEFINE_SET_ATTR_VALUE_LIST(absl::Span<const std::string>, s)
 DEFINE_SET_ATTR_VALUE_BOTH(const char*, s)
 DEFINE_SET_ATTR_VALUE_BOTH(int64_t, i)
 DEFINE_SET_ATTR_VALUE_BOTH(int32_t, i)
@@ -500,25 +616,26 @@ void SetAttrValue(const tstring& value, AttrValue* out) {
   out->set_s(value.data(), value.size());
 }
 
-void SetAttrValue(gtl::ArraySlice<tstring> value, AttrValue* out) {
+void SetAttrValue(absl::Span<const tstring> value, AttrValue* out) {
   out->mutable_list()->Clear();
   for (const auto& v : value) {
     out->mutable_list()->add_s(v.data(), v.size());
   }
 }
 
-void SetAttrValue(StringPiece value, AttrValue* out) {
+void SetAttrValue(absl::string_view value, AttrValue* out) {
   out->set_s(value.data(), value.size());
 }
 
-void SetAttrValue(const gtl::ArraySlice<StringPiece> value, AttrValue* out) {
+void SetAttrValue(const absl::Span<const absl::string_view> value,
+                  AttrValue* out) {
   out->mutable_list()->Clear();  // Create list() even if value empty.
   for (const auto& v : value) {
     out->mutable_list()->add_s(v.data(), v.size());
   }
 }
 
-void MoveAttrValue(std::vector<string>&& value, AttrValue* out) {
+void MoveAttrValue(std::vector<std::string>&& value, AttrValue* out) {
   out->mutable_list()->Clear();  // Create list() even if value empty.
   for (auto& v : value) {
     out->mutable_list()->add_s(std::move(v));
@@ -537,21 +654,21 @@ void SetAttrValue(const PartialTensorShape& value, AttrValue* out) {
   value.AsProto(out->mutable_shape());
 }
 
-void SetAttrValue(const gtl::ArraySlice<TensorShape> value, AttrValue* out) {
+void SetAttrValue(const absl::Span<const TensorShape> value, AttrValue* out) {
   out->mutable_list()->Clear();  // Create list() even if value empty.
   for (const auto& v : value) {
     v.AsProto(out->mutable_list()->add_shape());
   }
 }
 
-void SetAttrValue(gtl::ArraySlice<TensorShapeProto> value, AttrValue* out) {
+void SetAttrValue(absl::Span<const TensorShapeProto> value, AttrValue* out) {
   out->mutable_list()->Clear();  // Create list() even if value empty.
   for (const auto& v : value) {
     *out->mutable_list()->add_shape() = v;
   }
 }
 
-void SetAttrValue(const gtl::ArraySlice<PartialTensorShape> value,
+void SetAttrValue(const absl::Span<const PartialTensorShape> value,
                   AttrValue* out) {
   out->mutable_list()->Clear();  // Create list() even if value empty.
   for (const auto& v : value) {
@@ -567,7 +684,7 @@ void SetAttrValue(const Tensor& value, AttrValue* out) {
   }
 }
 
-void SetAttrValue(const gtl::ArraySlice<Tensor> value, AttrValue* out) {
+void SetAttrValue(const absl::Span<const Tensor> value, AttrValue* out) {
   out->mutable_list()->Clear();  // Create list() even if value empty.
   for (const auto& v : value) {
     if (v.NumElements() > 1) {
@@ -582,7 +699,7 @@ void SetAttrValue(const TensorProto& value, AttrValue* out) {
   *out->mutable_tensor() = value;
 }
 
-void SetAttrValue(const gtl::ArraySlice<TensorProto> value, AttrValue* out) {
+void SetAttrValue(const absl::Span<const TensorProto> value, AttrValue* out) {
   out->mutable_list()->Clear();  // Create list() even if value empty.
   for (const auto& v : value) {
     *out->mutable_list()->add_tensor() = v;
@@ -593,15 +710,74 @@ void SetAttrValue(const NameAttrList& value, AttrValue* out) {
   *out->mutable_func() = value;
 }
 
-void SetAttrValue(gtl::ArraySlice<NameAttrList> value, AttrValue* out) {
+void SetAttrValue(absl::Span<const NameAttrList> value, AttrValue* out) {
   out->mutable_list()->Clear();  // Create list() even if value empty.
   for (const auto& v : value) {
     *out->mutable_list()->add_func() = v;
   }
 }
 
-bool AreAttrValuesEqual(const AttrValue& a, const AttrValue& b,
-                        bool allow_false_negatives) {
+namespace {
+
+bool NonFuncListFieldsEqual(const AttrValue::ListValue& a,
+                            const AttrValue::ListValue& b) {
+  // Compare known non-func fields only. Unlike the serialized comparison
+  // used for other lists, ListValue-level unknown fields are ignored,
+  // matching top-level func comparison.
+  if (a.s_size() != b.s_size() || a.i_size() != b.i_size() ||
+      a.f_size() != b.f_size() || a.b_size() != b.b_size() ||
+      a.type_size() != b.type_size() || a.shape_size() != b.shape_size() ||
+      a.tensor_size() != b.tensor_size()) {
+    return false;
+  }
+  for (int i = 0; i < a.s_size(); ++i) {
+    if (a.s(i) != b.s(i)) return false;
+  }
+  for (int i = 0; i < a.i_size(); ++i) {
+    if (a.i(i) != b.i(i)) return false;
+  }
+  for (int i = 0; i < a.f_size(); ++i) {
+    // Serialized floats preserve signed zero and NaN payload bits.
+    if (absl::bit_cast<uint32_t>(a.f(i)) != absl::bit_cast<uint32_t>(b.f(i))) {
+      return false;
+    }
+  }
+  for (int i = 0; i < a.b_size(); ++i) {
+    if (a.b(i) != b.b(i)) return false;
+  }
+  for (int i = 0; i < a.type_size(); ++i) {
+    if (a.type(i) != b.type(i)) return false;
+  }
+  for (int i = 0; i < a.shape_size(); ++i) {
+    if (!AreSerializedProtosEqual(a.shape(i), b.shape(i))) return false;
+  }
+  for (int i = 0; i < a.tensor_size(); ++i) {
+    if (!AreSerializedProtosEqual(a.tensor(i), b.tensor(i))) return false;
+  }
+  return true;
+}
+
+bool AreAttrValuesEqualImpl(const AttrValue& a, const AttrValue& b,
+                            bool allow_false_negatives, int depth);
+
+bool AreNameAttrListsEqual(const NameAttrList& af, const NameAttrList& bf,
+                           bool allow_false_negatives, int depth) {
+  if (depth > kMaxAttrValueNestDepth) return false;
+  if (af.name() != bf.name()) return false;
+  if (af.attr_size() != bf.attr_size()) return false;
+  for (const auto& bm_pair : bf.attr()) {
+    const auto iter = af.attr().find(bm_pair.first);
+    if (iter == af.attr().end()) return false;
+    if (!AreAttrValuesEqualImpl(iter->second, bm_pair.second,
+                                allow_false_negatives, depth)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool AreAttrValuesEqualImpl(const AttrValue& a, const AttrValue& b,
+                            bool allow_false_negatives, int depth) {
   if (a.type() != b.type()) {
     return false;
   } else if (a.type() != DT_INVALID && b.type() != DT_INVALID) {
@@ -619,20 +795,22 @@ bool AreAttrValuesEqual(const AttrValue& a, const AttrValue& b,
   if (a.has_func() != b.has_func()) {
     return false;
   } else if (a.has_func() && b.has_func()) {
-    const NameAttrList& af = a.func();
-    const NameAttrList& bf = b.func();
-    if (af.name() != bf.name()) return false;
-    std::unordered_map<string, AttrValue> am(af.attr().begin(),
-                                             af.attr().end());
-    for (const auto& bm_pair : bf.attr()) {
-      const auto& iter = am.find(bm_pair.first);
-      if (iter == am.end()) return false;
-      if (!AreAttrValuesEqual(iter->second, bm_pair.second,
-                              allow_false_negatives))
+    return AreNameAttrListsEqual(a.func(), b.func(), allow_false_negatives,
+                                 depth + 1);
+  }
+
+  if (a.has_list() != b.has_list()) {
+    return false;
+  } else if (a.has_list() &&
+             (a.list().func_size() > 0 || b.list().func_size() > 0)) {
+    if (a.list().func_size() != b.list().func_size()) return false;
+    if (!NonFuncListFieldsEqual(a.list(), b.list())) return false;
+    for (int i = 0; i < a.list().func_size(); ++i) {
+      if (!AreNameAttrListsEqual(a.list().func(i), b.list().func(i),
+                                 allow_false_negatives, depth + 1)) {
         return false;
-      am.erase(iter);
+      }
     }
-    if (!am.empty()) return false;
     return true;
   }
 
@@ -641,20 +819,15 @@ bool AreAttrValuesEqual(const AttrValue& a, const AttrValue& b,
   return AreSerializedProtosEqual(a, b);
 }
 
-uint64 AttrValueHash(const AttrValue& a) {
-  return AttrValueHash(a, TensorProtoHash);
-}
-
-uint64 FastAttrValueHash(const AttrValue& a) {
-  return AttrValueHash(a, FastTensorProtoHash);
-}
-
-bool HasPlaceHolder(const AttrValue& val) {
+bool HasPlaceHolderImpl(const AttrValue& val, int depth) {
   switch (val.value_case()) {
     case AttrValue::kList: {
+      if (val.list().func_size() > 0 && depth >= kMaxAttrValueNestDepth) {
+        return true;
+      }
       for (const NameAttrList& func : val.list().func()) {
         for (const auto& p : func.attr()) {
-          if (HasPlaceHolder(p.second)) {
+          if (HasPlaceHolderImpl(p.second, depth + 1)) {
             return true;
           }
         }
@@ -662,8 +835,9 @@ bool HasPlaceHolder(const AttrValue& val) {
       break;
     }
     case AttrValue::kFunc:
+      if (depth >= kMaxAttrValueNestDepth) return true;
       for (const auto& p : val.func().attr()) {
-        if (HasPlaceHolder(p.second)) {
+        if (HasPlaceHolderImpl(p.second, depth + 1)) {
           return true;
         }
       }
@@ -676,13 +850,16 @@ bool HasPlaceHolder(const AttrValue& val) {
   return false;
 }
 
-bool SubstitutePlaceholders(const SubstituteFunc& substitute,
-                            AttrValue* value) {
+bool SubstitutePlaceholdersImpl(const SubstituteFunc& substitute,
+                                AttrValue* value, int depth) {
   switch (value->value_case()) {
     case AttrValue::kList: {
+      if (value->list().func_size() > 0 && depth >= kMaxAttrValueNestDepth) {
+        return false;
+      }
       for (NameAttrList& func : *value->mutable_list()->mutable_func()) {
         for (auto& p : *func.mutable_attr()) {
-          if (!SubstitutePlaceholders(substitute, &p.second)) {
+          if (!SubstitutePlaceholdersImpl(substitute, &p.second, depth + 1)) {
             return false;
           }
         }
@@ -690,8 +867,9 @@ bool SubstitutePlaceholders(const SubstituteFunc& substitute,
       break;
     }
     case AttrValue::kFunc:
+      if (depth >= kMaxAttrValueNestDepth) return false;
       for (auto& p : *(value->mutable_func()->mutable_attr())) {
-        if (!SubstitutePlaceholders(substitute, &p.second)) {
+        if (!SubstitutePlaceholdersImpl(substitute, &p.second, depth + 1)) {
           return false;
         }
       }
@@ -704,6 +882,28 @@ bool SubstitutePlaceholders(const SubstituteFunc& substitute,
       break;
   }
   return true;
+}
+
+}  // namespace
+
+bool AreAttrValuesEqual(const AttrValue& a, const AttrValue& b,
+                        bool allow_false_negatives) {
+  return AreAttrValuesEqualImpl(a, b, allow_false_negatives, 0);
+}
+
+uint64_t AttrValueHash(const AttrValue& a) {
+  return AttrValueHashImpl(a, TensorProtoHash, 0);
+}
+
+uint64_t FastAttrValueHash(const AttrValue& a) {
+  return AttrValueHashImpl(a, FastTensorProtoHash, 0);
+}
+
+bool HasPlaceHolder(const AttrValue& val) { return HasPlaceHolderImpl(val, 0); }
+
+bool SubstitutePlaceholders(const SubstituteFunc& substitute,
+                            AttrValue* value) {
+  return SubstitutePlaceholdersImpl(substitute, value, 0);
 }
 
 }  // namespace tensorflow

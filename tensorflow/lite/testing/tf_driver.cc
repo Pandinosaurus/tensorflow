@@ -14,11 +14,27 @@ limitations under the License.
 ==============================================================================*/
 #include "tensorflow/lite/testing/tf_driver.h"
 
+#include <cstddef>
+#include <cstdint>
+#include <cstdlib>
 #include <fstream>
-#include <iostream>
+#include <string>
+#include <utility>
+#include <vector>
 
+#include "absl/log/check.h"
 #include "absl/strings/escaping.h"
-#include "tensorflow/core/lib/gtl/array_slice.h"
+#include "absl/strings/str_cat.h"
+#include "absl/types/span.h"
+#include "tensorflow/core/framework/graph.pb.h"
+#include "tensorflow/core/framework/tensor.h"
+#include "tensorflow/core/framework/tensor_shape.h"
+#include "tensorflow/core/framework/types.h"
+#include "tensorflow/core/framework/types.pb.h"
+#include "tensorflow/core/platform/tstring.h"
+#include "tensorflow/core/public/session.h"
+#include "tensorflow/core/public/session_options.h"
+#include "tensorflow/lite/string_type.h"
 #include "tensorflow/lite/string_util.h"
 #include "tensorflow/lite/testing/join.h"
 #include "tensorflow/lite/testing/split.h"
@@ -30,7 +46,7 @@ namespace {
 
 tensorflow::Tensor CreateTensor(const tensorflow::DataType type,
                                 const std::vector<int64_t>& dim) {
-  tensorflow::TensorShape shape{tensorflow::gtl::ArraySlice<int64_t>{
+  tensorflow::TensorShape shape{absl::Span<const int64_t>{
       reinterpret_cast<const int64_t*>(dim.data()), dim.size()}};
   return {type, shape};
 }
@@ -119,12 +135,14 @@ TfDriver::TfDriver(const std::vector<string>& input_layer,
     input_tensors_[input_layer[i]] = {};
     CHECK(DataTypeFromString(input_layer_type[i], &input_types_[i]));
     input_shapes_[i] = Split<int64_t>(input_layer_shape[i], ",");
+    input_name_to_id_[input_layer[i]] = i;
   }
 
   output_ids_.resize(output_layer.size());
   output_tensors_.reserve(output_layer.size());
   for (int i = 0; i < output_layer.size(); i++) {
     output_ids_[i] = i;
+    output_name_to_id_[output_layer[i]] = i;
   }
 }
 
@@ -146,7 +164,56 @@ void TfDriver::LoadModel(const string& bin_file_path) {
   session_.reset(tensorflow::NewSession(options));
   auto status = session_->Create(graphdef);
   if (!status.ok()) {
-    Invalidate("Failed to create session. " + status.error_message());
+    Invalidate(absl::StrCat("Failed to create session. ", status.message()));
+  }
+}
+
+void TfDriver::ReshapeTensor(const string& name, const string& csv_values) {
+  if (!IsValid()) return;
+  int id = input_name_to_id_[name];
+  input_shapes_[id] = Split<int64_t>(csv_values, ",");
+  input_tensors_[input_names_[id]] =
+      CreateTensor(input_types_[id], input_shapes_[id]);
+  ResetTensor(name);
+}
+
+void TfDriver::ResetTensor(const std::string& name) {
+  if (!IsValid()) return;
+  int id = input_name_to_id_[name];
+  auto tensor = input_tensors_[input_names_[id]];
+  switch (input_types_[id]) {
+    case tensorflow::DT_FLOAT: {
+      FillTensorWithZeros<float>(&tensor);
+      break;
+    }
+    case tensorflow::DT_INT32: {
+      FillTensorWithZeros<int32_t>(&tensor);
+      break;
+    }
+    default:
+      Invalidate(absl::StrCat("Unsupported tensor type ", input_types_[id],
+                              tensorflow::DataType_Name(input_types_[id]),
+                              " in ResetInput"));
+      return;
+  }
+}
+string TfDriver::ReadOutput(const string& name) {
+  if (!IsValid()) return "";
+  return ReadOutput(output_tensors_[output_name_to_id_[name]]);
+}
+void TfDriver::Invoke(const std::vector<std::pair<string, string>>& inputs) {
+  if (!IsValid()) return;
+  for (const auto& input : inputs) {
+    auto id = input_name_to_id_[input.first];
+    auto tensor = CreateTensor(input_types_[id], input_shapes_[id]);
+    SetInput(input.second, &tensor);
+    input_tensors_[input_names_[id]] = tensor;
+  }
+  auto status = session_->Run({input_tensors_.begin(), input_tensors_.end()},
+                              output_names_, {}, &output_tensors_);
+  if (!status.ok()) {
+    Invalidate(
+        absl::StrCat("TensorFlow failed to run graph:", status.message()));
   }
 }
 
@@ -188,40 +255,6 @@ void TfDriver::SetInput(const string& values_as_string,
   }
 }
 
-void TfDriver::SetInput(int id, const string& values_as_string) {
-  if (!IsValid()) return;
-  auto tensor = CreateTensor(input_types_[id], input_shapes_[id]);
-  SetInput(values_as_string, &tensor);
-  input_tensors_[input_names_[id]] = tensor;
-}
-
-void TfDriver::ResetTensor(int id) {
-  if (!IsValid()) return;
-  auto tensor = input_tensors_[input_names_[id]];
-  switch (input_types_[id]) {
-    case tensorflow::DT_FLOAT: {
-      FillTensorWithZeros<float>(&tensor);
-      break;
-    }
-    case tensorflow::DT_INT32: {
-      FillTensorWithZeros<int32_t>(&tensor);
-      break;
-    }
-    default:
-      Invalidate(absl::StrCat("Unsupported tensor type ", input_types_[id],
-                              tensorflow::DataType_Name(input_types_[id]),
-                              " in ResetInput"));
-      return;
-  }
-}
-
-void TfDriver::ReshapeTensor(int id, const string& values_as_string) {
-  input_shapes_[id] = Split<int64_t>(values_as_string, ",");
-  input_tensors_[input_names_[id]] =
-      CreateTensor(input_types_[id], input_shapes_[id]);
-  ResetTensor(id);
-}
-
 string TfDriver::ReadOutput(const tensorflow::Tensor& tensor) {
   switch (tensor.dtype()) {
     case tensorflow::DT_FLOAT:
@@ -243,21 +276,6 @@ string TfDriver::ReadOutput(const tensorflow::Tensor& tensor) {
                               tensorflow::DataType_Name(tensor.dtype()),
                               " in ReadOutput"));
       return "";
-  }
-}
-
-string TfDriver::ReadOutput(int id) {
-  if (!IsValid()) return "";
-  return ReadOutput(output_tensors_[id]);
-}
-
-void TfDriver::Invoke() {
-  if (!IsValid()) return;
-  auto status = session_->Run({input_tensors_.begin(), input_tensors_.end()},
-                              output_names_, {}, &output_tensors_);
-  if (!status.ok()) {
-    Invalidate(absl::StrCat("TensorFlow failed to run graph:",
-                            status.error_message()));
   }
 }
 

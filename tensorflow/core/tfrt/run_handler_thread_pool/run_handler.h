@@ -13,17 +13,28 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#ifndef TENSORFLOW_CORE_TFRT_EXPERIMENTAL_RUN_HANDLER_THREAD_POOLL_RUN_HANDLER_H_
-#define TENSORFLOW_CORE_TFRT_EXPERIMENTAL_RUN_HANDLER_THREAD_POOLL_RUN_HANDLER_H_
+#ifndef TENSORFLOW_CORE_TFRT_RUN_HANDLER_THREAD_POOL_RUN_HANDLER_H_
+#define TENSORFLOW_CORE_TFRT_RUN_HANDLER_THREAD_POOL_RUN_HANDLER_H_
 
+#include <atomic>
 #include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <optional>
+#include <string>
+#include <utility>
+#include <vector>
 
+#include "absl/log/check.h"
+#include "absl/log/log.h"
 #include "tensorflow/core/lib/core/threadpool.h"
 #include "tensorflow/core/lib/histogram/histogram.h"
 #include "tensorflow/core/platform/context.h"
 #include "tensorflow/core/platform/mutex.h"
 #include "tensorflow/core/platform/thread_annotations.h"
 #include "tensorflow/core/protobuf/config.pb.h"
+#include "tensorflow/core/tfrt/runtime/work_queue_interface.h"
 #include "tfrt/host_context/task_function.h"  // from @tf_runtime
 namespace Eigen {
 struct ThreadPoolDevice;
@@ -148,6 +159,10 @@ class RunHandler {
   void ScheduleIntraOpClosure(TaskFunction fn);
 
   tensorflow::thread::ThreadPoolInterface* AsIntraThreadPoolInterface() const;
+
+  int NumThreads() const;
+
+  int64_t step_id() const;
 
   ~RunHandler();
 
@@ -404,7 +419,40 @@ class RunHandlerThreadPool {
 
 }  // namespace internal
 
+class RunHandlerWorkQueue : public tensorflow::tfrt_stub::WorkQueueInterface {
+ public:
+  explicit RunHandlerWorkQueue(std::unique_ptr<RunHandler> run_handler)
+      : WorkQueueInterface(run_handler->step_id(),
+                           run_handler->AsIntraThreadPoolInterface()),
+        run_handler_(std::move(run_handler)) {
+    DCHECK(run_handler_);
+  }
+  ~RunHandlerWorkQueue() override = default;
+
+  std::string name() const override { return "run_handler"; }
+
+  int GetParallelismLevel() const override;
+
+  void AddTask(TaskFunction work) override;
+
+  std::optional<TaskFunction> AddBlockingTask(TaskFunction work,
+                                              bool allow_queuing) override;
+
+  void Await(
+      llvm::ArrayRef<tfrt::RCReference<tfrt::AsyncValue>> values) override;
+
+  bool IsInWorkerThread() const override;
+
+  void Quiesce() override {
+    LOG(FATAL) << "RunHandlerWorkQueue::Quiesce() is not "  // Crash OK
+                  "implemented, and supposed to be removed.";
+  }
+
+ private:
+  std::unique_ptr<RunHandler> run_handler_;
+};
+
 }  // end namespace tf
 }  // end namespace tfrt
 
-#endif  // TENSORFLOW_CORE_TFRT_EXPERIMENTAL_RUN_HANDLER_THREAD_POOLL_RUN_HANDLER_H_
+#endif  // TENSORFLOW_CORE_TFRT_RUN_HANDLER_THREAD_POOL_RUN_HANDLER_H_

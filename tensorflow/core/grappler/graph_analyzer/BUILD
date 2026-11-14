@@ -1,7 +1,23 @@
-load("//tensorflow/core/platform:rules_cc.bzl", "cc_library")
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
 load("//tensorflow:tensorflow.bzl", "tf_cc_test")
+load("//tensorflow/core/platform:rules_cc.bzl", "cc_library")
 
 package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
     licenses = ["notice"],
 )
 
@@ -29,7 +45,10 @@ cc_library(
         "//tensorflow/core:tensorflow",
         "//tensorflow/core/grappler:op_types",
         "//tensorflow/core/grappler:utils",
+        "@com_google_absl//absl/log",
+        "@com_google_absl//absl/log:check",
         "@com_google_absl//absl/memory",
+        "@com_google_absl//absl/status",
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/strings:str_format",
     ],
@@ -46,6 +65,8 @@ cc_library(
         "//tensorflow/core:protos_all_cc",
         "//tensorflow/core:tensorflow",
         "//tensorflow/core/grappler/utils:transitive_fanin",
+        "@com_google_absl//absl/log",
+        "@com_google_absl//absl/status",
         "@com_google_absl//absl/strings",
     ],
 )
@@ -63,6 +84,8 @@ cc_library(
     deps = [
         ":graph_analyzer_lib",
         "//tensorflow/core:framework",
+        "//tensorflow/core/framework:graph_proto_cc",
+        "//tensorflow/core/framework:node_def_proto_cc",
         "//tensorflow/core/grappler:op_types",
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/strings:str_format",
@@ -90,7 +113,12 @@ tf_cc_test(
     deps = [
         ":graph_analyzer_lib",
         ":test_tools_lib",
+        "//tensorflow/core/framework:graph_proto_cc",
+        "//tensorflow/core/framework:node_def_proto_cc",
+        "//tensorflow/core/framework:op_def_proto_cc",
         "@com_google_absl//absl/memory",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings",
         "@com_google_googletest//:gtest_main",
     ],
 )
@@ -104,8 +132,13 @@ tf_cc_test(
     deps = [
         ":graph_analyzer_lib",
         ":test_tools_lib",
+        "//tensorflow/core/framework:graph_proto_cc",
+        "//tensorflow/core/framework:node_def_proto_cc",
         "//tensorflow/core/grappler:utils",
+        "@com_google_absl//absl/log",
+        "@com_google_absl//absl/log:check",
         "@com_google_absl//absl/memory",
+        "@com_google_absl//absl/status",
         "@com_google_absl//absl/strings:str_format",
         "@com_google_googletest//:gtest_main",
     ],
@@ -121,6 +154,7 @@ tf_cc_test(
         ":graph_analyzer_lib",
         ":test_tools_lib",
         "@com_google_absl//absl/memory",
+        "@com_google_absl//absl/status",
         "@com_google_googletest//:gtest_main",
     ],
 )
@@ -134,7 +168,10 @@ tf_cc_test(
     deps = [
         ":graph_analyzer_lib",
         ":test_tools_lib",
+        "//tensorflow/core/framework:graph_proto_cc",
+        "//tensorflow/core/framework:node_def_proto_cc",
         "@com_google_absl//absl/memory",
+        "@com_google_absl//absl/status",
         "@com_google_absl//absl/strings:str_format",
         "@com_google_googletest//:gtest_main",
     ],

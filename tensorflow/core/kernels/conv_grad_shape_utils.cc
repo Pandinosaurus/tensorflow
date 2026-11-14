@@ -15,6 +15,13 @@ limitations under the License.
 
 // See docs in ../ops/nn_ops.cc.
 
+#include <array>
+
+#include "absl/log/log.h"
+#include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
+#include "absl/strings/string_view.h"
+#include "absl/types/span.h"
 #define USE_EIGEN_TENSOR
 #define EIGEN_USE_THREADS
 
@@ -50,20 +57,20 @@ int ConvBackpropDimensions::SpatialPadding(const Padding& padding,
 
 namespace {
 
-Status ConvBackpropExtractAndVerifyDimension(
-    StringPiece label, const TensorShape& input_shape,
+absl::Status ConvBackpropExtractAndVerifyDimension(
+    absl::string_view label, const TensorShape& input_shape,
     const TensorShape& filter_shape, const TensorShape& output_shape,
-    const gtl::ArraySlice<int32> dilations, const std::vector<int32>& strides,
-    Padding padding, int64_t padding_before, int64_t padding_after,
-    int spatial_dim, int filter_spatial_dim,
-    ConvBackpropSpatialDimension* dim) {
+    const absl::Span<const int32_t> dilations,
+    const std::vector<int32_t>& strides, Padding padding,
+    int64_t padding_before, int64_t padding_after, int spatial_dim,
+    int filter_spatial_dim, ConvBackpropSpatialDimension* dim) {
   dim->input_size = input_shape.dim_size(spatial_dim);
   dim->filter_size = filter_shape.dim_size(filter_spatial_dim);
   dim->output_size = output_shape.dim_size(spatial_dim);
   dim->stride = strides[spatial_dim];
   dim->dilation = dilations[spatial_dim];
   int64_t out_size = 0;
-  TF_RETURN_IF_ERROR(GetWindowedOutputSizeVerboseV2(
+  TF_RETURN_IF_ERROR(GetWindowedOutputSizeVerbose(
       dim->input_size, dim->filter_size, dim->dilation, dim->stride, padding,
       &out_size, &padding_before, &padding_after));
   if (dim->output_size != out_size) {
@@ -87,39 +94,40 @@ Status ConvBackpropExtractAndVerifyDimension(
           << ", pad_before = " << dim->pad_before
           << ", pad_after = " << dim->pad_after
           << ", dilation = " << dim->dilation << ", strides = " << dim->stride;
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 }  // namespace
 
-Status ConvBackpropComputeDimensionsV2(
-    StringPiece label, int num_spatial_dims, const TensorShape& input_shape,
-    const TensorShape& filter_shape, const TensorShape& out_backprop_shape,
-    const gtl::ArraySlice<int32>& dilations, const std::vector<int32>& strides,
-    Padding padding, absl::Span<const int64_t> explicit_paddings,
-    TensorFormat data_format, ConvBackpropDimensions* dims) {
+absl::Status ConvBackpropComputeDimensionsV2(
+    absl::string_view label, int num_spatial_dims,
+    const TensorShape& input_shape, const TensorShape& filter_shape,
+    const TensorShape& out_backprop_shape,
+    const absl::Span<const int32_t> dilations,
+    const std::vector<int32_t>& strides, Padding padding,
+    absl::Span<const int64_t> explicit_paddings, TensorFormat data_format,
+    ConvBackpropDimensions* dims) {
   // The + 2 in the following line is for the batch and feature dimensions.
   const int num_dims = num_spatial_dims + 2;
   if (input_shape.dims() != num_dims) {
-    return errors::InvalidArgument(label, ": input must be ", num_dims,
-                                   "-dimensional");
+    return absl::InvalidArgumentError(
+        absl::StrCat(label, ": input must be ", num_dims, "-dimensional"));
   }
   if (filter_shape.dims() != num_dims) {
-    return errors::InvalidArgument(label, ": filter must be ", num_dims,
-                                   "-dimensional");
+    return absl::InvalidArgumentError(
+        absl::StrCat(label, ": filter must be ", num_dims, "-dimensional"));
   }
   if (out_backprop_shape.dims() != num_dims) {
-    return errors::InvalidArgument(label, ": out_backprop must be ", num_dims,
-                                   "-dimensional");
+    return absl::InvalidArgumentError(absl::StrCat(
+        label, ": out_backprop must be ", num_dims, "-dimensional"));
   }
   int batch_dim = GetTensorBatchDimIndex(num_dims, data_format);
   dims->batch_size = input_shape.dim_size(batch_dim);
   if (dims->batch_size != out_backprop_shape.dim_size(batch_dim)) {
-    return errors::InvalidArgument(
+    return absl::InvalidArgumentError(absl::StrCat(
         label, ": input and out_backprop must have the same batch size.",
-        " Input batch: ", dims->batch_size,
-        ", outbackprop batch: ", out_backprop_shape.dim_size(batch_dim),
-        ", batch_dim: ", batch_dim);
+        " Input batch: ", dims->batch_size, ", outbackprop batch: ",
+        out_backprop_shape.dim_size(batch_dim), ", batch_dim: ", batch_dim));
   }
 
   int feature_dim = GetTensorFeatureDimIndex(num_dims, data_format);
@@ -129,17 +137,17 @@ Status ConvBackpropComputeDimensionsV2(
   VLOG(2) << "input vs filter_in depth " << dims->in_depth << " "
           << filter_shape.dim_size(num_dims - 2);
   if (filter_shape.dim_size(num_dims - 2) <= 0) {
-    return errors ::InvalidArgument(
-        label, ": filter depth must be strictly greated than zero");
+    return absl::InvalidArgumentError(absl::StrCat(
+        label, ": filter depth must be strictly greated than zero"));
   }
   if (dims->in_depth % filter_shape.dim_size(num_dims - 2)) {
-    return errors::InvalidArgument(
-        label, ": input depth must be evenly divisible by filter depth");
+    return absl::InvalidArgumentError(absl::StrCat(
+        label, ": input depth must be evenly divisible by filter depth"));
   }
   dims->out_depth = filter_shape.dim_size(num_dims - 1);
   if (dims->out_depth != out_backprop_shape.dim_size(feature_dim)) {
-    return errors::InvalidArgument(
-        label, ": filter and out_backprop must have the same out_depth");
+    return absl::InvalidArgumentError(absl::StrCat(
+        label, ": filter and out_backprop must have the same out_depth"));
   }
   dims->spatial_dims.resize(num_spatial_dims);
   for (int i = 0; i < num_spatial_dims; ++i) {
@@ -154,52 +162,64 @@ Status ConvBackpropComputeDimensionsV2(
         strides, padding, padding_before, padding_after, image_dim, i,
         &dims->spatial_dims[i]));
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-Status ConvBackpropComputeDimensions(StringPiece label, int num_spatial_dims,
-                                     const TensorShape& input_shape,
-                                     const TensorShape& filter_shape,
-                                     const TensorShape& out_backprop_shape,
-                                     const std::vector<int32>& strides,
-                                     Padding padding, TensorFormat data_format,
-                                     ConvBackpropDimensions* dims) {
-  static constexpr std::array<int32, 5> one_dilations = {{1, 1, 1, 1, 1}};
+absl::Status ConvBackpropComputeDimensions(
+    absl::string_view label, int num_spatial_dims,
+    const TensorShape& input_shape, const TensorShape& filter_shape,
+    const TensorShape& out_backprop_shape, const std::vector<int32_t>& strides,
+    Padding padding, TensorFormat data_format, ConvBackpropDimensions* dims) {
+  static constexpr std::array<int32_t, 5> one_dilations = {{1, 1, 1, 1, 1}};
   return ConvBackpropComputeDimensionsV2(
       label, num_spatial_dims, input_shape, filter_shape, out_backprop_shape,
       one_dilations, strides, padding, /*explicit_paddings=*/{}, data_format,
       dims);
 }
 
-Status Conv2DBackpropComputeInputShape(const Tensor& input_sizes,
-                                       const TensorShape& filter_shape,
-                                       const TensorShape& out_backprop_shape,
-                                       const TensorFormat& data_format,
-                                       TensorShape* input_shape) {
+absl::Status Conv2DBackpropComputeInputShape(
+    const Tensor& input_sizes, const TensorShape& filter_shape,
+    const TensorShape& out_backprop_shape, const TensorFormat& data_format,
+    TensorShape* input_shape) {
+  if (filter_shape.dims() != 4) {
+    return absl::InvalidArgumentError(
+        absl::StrCat("Conv2DBackpropInput: filter must be 4-dimensional, not ",
+                     filter_shape.dims()));
+  }
+  if (out_backprop_shape.dims() != 4) {
+    return absl::InvalidArgumentError(absl::StrCat(
+        "Conv2DBackpropInput: out_backprop must be 4-dimensional, not ",
+        out_backprop_shape.dims()));
+  }
+
   if (!TensorShapeUtils::IsVector(input_sizes.shape())) {
-    return errors::InvalidArgument(
+    return absl::InvalidArgumentError(absl::StrCat(
         "Conv2DBackpropInput: input_sizes input must be 1-dim, not ",
-        input_sizes.dims());
+        input_sizes.dims()));
   }
 
   if (input_sizes.dim_size(0) == 4) {
-    return TensorShapeUtils::MakeShape(input_sizes.vec<int32>(), input_shape);
+    return TensorShapeUtils::MakeShape(input_sizes.vec<int32_t>(), input_shape);
   }
 
   if (input_sizes.dim_size(0) == 2) {
     const int batch_size = GetTensorDim(out_backprop_shape, data_format, 'N');
-    const int output_height = input_sizes.vec<int32>()(0);
-    const int output_width = input_sizes.vec<int32>()(1);
+    const int output_height = input_sizes.vec<int32_t>()(0);
+    const int output_width = input_sizes.vec<int32_t>()(1);
     const int output_depth = filter_shape.dim_size(2);
-    *input_shape = ShapeFromFormat(data_format, batch_size, output_height,
-                                   output_width, output_depth);
-    return Status::OK();
+    if (output_height < 0 || output_width < 0) {
+      return absl::InvalidArgumentError(absl::StrCat(
+          "Conv2DBackpropInput: elements of input_sizes must be >= 0, not ",
+          output_height, "x", output_width));
+    }
+    return ShapeFromFormatWithStatus(data_format, batch_size, output_height,
+                                     output_width, output_depth, input_shape);
   }
 
-  return errors::InvalidArgument(
-      "Conv2DBackpropInput requires input_sizes to "
-      "contain 4 values or 2 values, but got: ",
-      input_sizes.dim_size(0));
+  return absl::InvalidArgumentError(
+      absl::StrCat("Conv2DBackpropInput requires input_sizes to "
+                   "contain 4 values or 2 values, but got: ",
+                   input_sizes.dim_size(0)));
 }
 
 }  // namespace tensorflow

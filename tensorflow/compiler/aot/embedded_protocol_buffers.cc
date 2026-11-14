@@ -16,21 +16,25 @@ limitations under the License.
 #include "tensorflow/compiler/aot/embedded_protocol_buffers.h"
 
 #include <memory>
+#include <optional>
 #include <string>
 
+#include "absl/log/check.h"
 #include "absl/memory/memory.h"
 #include "absl/strings/str_replace.h"
-#include "llvm/ADT/Triple.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/LegacyPassManager.h"
 #include "llvm/IR/Module.h"
-#include "llvm/Support/TargetRegistry.h"
+#include "llvm/MC/TargetRegistry.h"
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/Target/TargetOptions.h"
-#include "tensorflow/compiler/xla/service/llvm_ir/llvm_type_conversion_util.h"
-#include "tensorflow/compiler/xla/util.h"
+#include "llvm/TargetParser/Triple.h"
+#include "xla/service/llvm_ir/llvm_type_conversion_util.h"
+#include "xla/tsl/platform/statusor.h"
+#include "xla/util.h"
+#include "tensorflow/core/lib/strings/proto_serialization.h"
 
 namespace tensorflow {
 namespace tfcompile {
@@ -39,9 +43,11 @@ using xla::llvm_ir::AsStringRef;
 
 static void AddEmbeddedProtocolBufferToLlvmModule(
     llvm::Module* module, const ::tensorflow::protobuf::MessageLite& proto,
-    absl::string_view unique_identifier, string* protobuf_array_symbol_name,
-    int64_t* protobuf_array_size) {
-  string protobuf_array_contents = proto.SerializeAsString();
+    absl::string_view unique_identifier,
+    std::string* protobuf_array_symbol_name, int64_t* protobuf_array_size) {
+  std::string protobuf_array_contents;
+  CHECK(::tensorflow::SerializeToStringDeterministic(proto,
+                                                     &protobuf_array_contents));
   *protobuf_array_symbol_name =
       absl::StrCat(unique_identifier, "_protobuf_array_contents");
   *protobuf_array_size = protobuf_array_contents.size();
@@ -56,10 +62,10 @@ static void AddEmbeddedProtocolBufferToLlvmModule(
       protobuf_array_initializer, AsStringRef(*protobuf_array_symbol_name));
 }
 
-static string CreateCPPShimExpression(
+static std::string CreateCPPShimExpression(
     absl::string_view qualified_cpp_protobuf_name,
     absl::string_view protobuf_array_symbol_name, int64_t protobuf_array_size) {
-  string code =
+  std::string code =
       "[]() {\n"
       "    {{PROTOBUF_NAME}}* proto = new {{PROTOBUF_NAME}};\n"
       "    proto->ParseFromArray(&{{ARRAY_SYMBOL}}[0], {{ARRAY_SIZE}});\n"
@@ -75,56 +81,56 @@ static string CreateCPPShimExpression(
       });
 }
 
-static StatusOr<string> CodegenModule(llvm::TargetMachine* target_machine,
-                                      std::unique_ptr<llvm::Module> module) {
+static absl::StatusOr<std::string> CodegenModule(
+    llvm::TargetMachine* target_machine, std::unique_ptr<llvm::Module> module) {
   llvm::SmallVector<char, 0> stream_buffer;
   llvm::raw_svector_ostream ostream(stream_buffer);
   llvm::legacy::PassManager codegen_passes;
 
   if (target_machine->addPassesToEmitFile(codegen_passes, ostream, nullptr,
-                                          llvm::CGFT_ObjectFile)) {
-    return xla::InternalError(
+                                          llvm::CodeGenFileType::ObjectFile)) {
+    return xla::Internal(
         "Could not create pass pipeline to generate object file");
   }
 
   codegen_passes.run(*module);
 
-  return string(stream_buffer.begin(), stream_buffer.end());
+  return std::string(stream_buffer.begin(), stream_buffer.end());
 }
 
-static StatusOr<std::unique_ptr<llvm::TargetMachine>>
+static absl::StatusOr<std::unique_ptr<llvm::TargetMachine>>
 GetTargetMachineFromTriple(absl::string_view target_triple) {
   std::string error;
-  std::string normalized_triple =
-      llvm::Triple::normalize(AsStringRef(absl::string_view(target_triple)));
+  llvm::Triple normalized_triple(
+      llvm::Triple::normalize(AsStringRef(absl::string_view(target_triple))));
   const llvm::Target* target =
       llvm::TargetRegistry::lookupTarget(normalized_triple, error);
   if (target == nullptr) {
-    return xla::InternalError("TargetRegistry::lookupTarget failed: %s",
-                              error.c_str());
+    return xla::Internal("TargetRegistry::lookupTarget failed: %s",
+                         error.c_str());
   }
 
   return absl::WrapUnique(target->createTargetMachine(
       normalized_triple, /*CPU=*/"",
-      /*Features=*/"", llvm::TargetOptions(), llvm::None));
+      /*Features=*/"", llvm::TargetOptions(), std::nullopt));
 }
 
-StatusOr<EmbeddedProtocolBuffers> CreateEmbeddedProtocolBuffers(
+absl::StatusOr<EmbeddedProtocolBuffers> CreateEmbeddedProtocolBuffers(
     absl::string_view target_triple,
     absl::Span<const ProtobufToEmbed> protobufs_to_embed) {
   TF_ASSIGN_OR_RETURN(std::unique_ptr<llvm::TargetMachine> target_machine,
                       GetTargetMachineFromTriple(target_triple));
 
   llvm::LLVMContext llvm_context;
-  std::unique_ptr<llvm::Module> module_with_serialized_proto =
-      absl::make_unique<llvm::Module>("embedded_data_module", llvm_context);
+  auto module_with_serialized_proto =
+      std::make_unique<llvm::Module>("embedded_data_module", llvm_context);
 
   EmbeddedProtocolBuffers result;
 
   for (const ProtobufToEmbed& protobuf_to_embed : protobufs_to_embed) {
-    string cpp_shim, cpp_variable_decl;
+    std::string cpp_shim, cpp_variable_decl;
     if (protobuf_to_embed.message) {
-      string protobuf_array_symbol_name;
+      std::string protobuf_array_symbol_name;
       int64_t protobuf_array_size;
 
       AddEmbeddedProtocolBufferToLlvmModule(

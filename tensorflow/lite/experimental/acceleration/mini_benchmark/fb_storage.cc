@@ -25,8 +25,9 @@ limitations under the License.
 #include <sstream>
 #include <string>
 
+#include "absl/base/attributes.h"
 #include "absl/strings/string_view.h"
-#include "tensorflow/lite/c/c_api_types.h"
+#include "tensorflow/lite/core/c/c_api_types.h"
 
 // We only really care about Android, but we want the code to be portable for
 // ease of testing. See also discussion in cl/224174491.
@@ -151,6 +152,6 @@ MinibenchmarkStatus FileStorage::AppendDataToFile(absl::string_view data) {
 #endif  // !_WIN32
 }
 
-const char kFlatbufferStorageIdentifier[] = "STO1";
+ABSL_CONST_INIT const char kFlatbufferStorageIdentifier[] = "STO1";
 }  // namespace acceleration
 }  // namespace tflite

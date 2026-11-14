@@ -15,47 +15,62 @@
 
 # C API for delegate plugins.
 
-load("//tensorflow:tensorflow.bzl", "get_compatible_with_portable")
+load("//tensorflow:tensorflow.default.bzl", "get_compatible_with_portable")
+load(
+    "//tensorflow/lite/core/shims:cc_library_with_tflite.bzl",
+    "cc_library_with_tflite_with_c_headers_test",
+)
 
 package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:LICENSE"],
     default_visibility = ["//visibility:private"],
     licenses = ["notice"],
 )
 
-cc_library(
+cc_library_with_tflite_with_c_headers_test(
     name = "delegate_plugin",
     hdrs = ["delegate_plugin.h"],
     compatible_with = get_compatible_with_portable(),
-    visibility = ["//visibility:public"],
-    deps = [
-        "//tensorflow/lite/c:common",
+    generate_opaque_delegate_target = True,
+    tflite_deps = [
+        "//tensorflow/lite/acceleration/configuration/c:delegate_plugin",
     ],
+    visibility = ["//visibility:public"],
 )
 
-cc_library(
+cc_library_with_tflite_with_c_headers_test(
     name = "nnapi_plugin",
-    srcs = ["nnapi_plugin.cc"],
     hdrs = ["nnapi_plugin.h"],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":delegate_plugin",
-        "//tensorflow/lite/c:common",
-        "//tensorflow/lite/delegates/nnapi:nnapi_delegate",
-        "//tensorflow/lite/experimental/acceleration/configuration:configuration_fbs",
-        "//tensorflow/lite/experimental/acceleration/configuration:nnapi_plugin_impl",
+    tflite_deps = [
+        "//tensorflow/lite/acceleration/configuration/c:nnapi_plugin",
     ],
+    visibility = ["//visibility:public"],
 )
 
-cc_library(
+cc_library_with_tflite_with_c_headers_test(
     name = "gpu_plugin",
-    srcs = ["gpu_plugin.cc"],
     hdrs = ["gpu_plugin.h"],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":delegate_plugin",
-        "//tensorflow/lite/c:common",
-        "//tensorflow/lite/delegates/gpu:delegate",
-        "//tensorflow/lite/experimental/acceleration/configuration:configuration_fbs",
-        "//tensorflow/lite/experimental/acceleration/configuration:gpu_plugin_impl",
+    tflite_deps = [
+        "//tensorflow/lite/acceleration/configuration/c:gpu_plugin",
     ],
+    visibility = ["//visibility:public"],
+)
+
+cc_library_with_tflite_with_c_headers_test(
+    name = "xnnpack_plugin",
+    hdrs = ["xnnpack_plugin.h"],
+    tflite_deps = [
+        "//tensorflow/lite/acceleration/configuration/c:xnnpack_plugin",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+cc_library_with_tflite_with_c_headers_test(
+    name = "stable_delegate",
+    hdrs = ["stable_delegate.h"],
+    generate_opaque_delegate_target = True,
+    tflite_deps = [
+        "//tensorflow/lite/acceleration/configuration/c:stable_delegate",
+    ],
+    visibility = ["//visibility:public"],
 )

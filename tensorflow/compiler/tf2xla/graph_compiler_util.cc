@@ -44,23 +44,24 @@ const char* const kFetchIdAttr = "_fetch_id";
 const char* const kShapeAttr = "_shape";
 const char* const kDebugNameAttr = "_debug_name";
 
-typedef std::unordered_map<string, Node*> NodeMap;
+typedef std::unordered_map<std::string, Node*> NodeMap;
 
 // Each feed id identifies the positional output of some node, which may consist
 // of multiple edges. AddPlaceholdersForFeeds has already replaced each fed
 // tensor with a placeholder.  For each feed tensor, replaces all edges so they
 // point from a new _Arg node instead. The newly created _Arg nodes are added to
 // `arg_nodes`.
-Status AddArgNodes(Graph* graph, const NodeMap& node_map,
-                   const protobuf::RepeatedPtrField<tf2xla::Feed>& feeds,
-                   const std::unordered_map<string, string>& feed_remapping,
-                   std::unordered_set<const Node*>* arg_nodes) {
+absl::Status AddArgNodes(
+    Graph* graph, const NodeMap& node_map,
+    const protobuf::RepeatedPtrField<tf2xla::Feed>& feeds,
+    const std::unordered_map<std::string, std::string>& feed_remapping,
+    std::unordered_set<const Node*>* arg_nodes) {
   for (int arg_index = 0; arg_index < feeds.size(); ++arg_index) {
     const tf2xla::Feed& feed = feeds[arg_index];
     // All feeds have been replaced by placeholders.
     const int output_index = 0;
 
-    const string key = TensorIdToString(feed.id());
+    const std::string key = TensorIdToString(feed.id());
     const auto remap_it = feed_remapping.find(key);
     auto node_it = node_map.find(remap_it->second);
     if (node_it == node_map.end()) {
@@ -68,8 +69,8 @@ Status AddArgNodes(Graph* graph, const NodeMap& node_map,
       absl::string_view name(remap_it->second);
       const auto index = name.find('/');
       if (index > 0) name.remove_prefix(index + 1);
-      return errors::InvalidArgument(
-          "Node is fed but not needed for fetching: ", name);
+      return absl::InvalidArgumentError(
+          absl::StrCat("Node is fed but not needed for fetching: ", name));
     }
     const Node* feed_node = node_it->second;
 
@@ -106,25 +107,27 @@ Status AddArgNodes(Graph* graph, const NodeMap& node_map,
       graph->RemoveEdge(edge);
     }
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 // Each fetch id identifies the positional output of some node.  For each fetch
 // node, adds a new _Retval node instead, and adds the node to `retval_nodes`.
-Status AddRetvalNodes(Graph* graph, const NodeMap& node_map,
-                      const protobuf::RepeatedPtrField<tf2xla::Fetch>& fetches,
-                      std::unordered_set<const Node*>* retval_nodes) {
+absl::Status AddRetvalNodes(
+    Graph* graph, const NodeMap& node_map,
+    const protobuf::RepeatedPtrField<tf2xla::Fetch>& fetches,
+    std::unordered_set<const Node*>* retval_nodes) {
   for (int ret_index = 0; ret_index < fetches.size(); ++ret_index) {
     const tf2xla::TensorId& id = fetches[ret_index].id();
     auto it = node_map.find(id.node_name());
     if (it == node_map.end()) {
-      return errors::NotFound("Can't find fetch id: ", TensorIdToString(id));
+      return absl::NotFoundError(
+          absl::StrCat("Can't find fetch id: ", TensorIdToString(id)));
     }
     Node* fetch_node = it->second;
     if (id.output_index() >= fetch_node->num_outputs()) {
-      return errors::InvalidArgument("Invalid fetch id: ", TensorIdToString(id),
-                                     ", output index should be < ",
-                                     fetch_node->num_outputs());
+      return absl::InvalidArgumentError(absl::StrCat(
+          "Invalid fetch id: ", TensorIdToString(id),
+          ", output index should be < ", fetch_node->num_outputs()));
     }
     // Connects fetch_node -> retval_node.
     Node* retval_node = nullptr;
@@ -138,16 +141,16 @@ Status AddRetvalNodes(Graph* graph, const NodeMap& node_map,
             .Finalize(graph, &retval_node));
     retval_nodes->insert(retval_node);
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 // RewriteAndPruneGraph identifies input and output edges (named by the feed and
 // fetch ids respectively), and rewrites the edges so that inputs flow from _Arg
 // nodes, and outputs flow to _Retval nodes.  This allows the symbolic graph
 // execution to know the input and output args for the generated function.
-Status RewriteAndPruneGraph(
+absl::Status RewriteAndPruneGraph(
     Graph* graph, const tf2xla::Config& config,
-    const std::unordered_map<string, string>& feed_remapping) {
+    const std::unordered_map<std::string, std::string>& feed_remapping) {
   NodeMap node_map;
   for (Node* n : graph->nodes()) {
     node_map[n->name()] = n;
@@ -162,7 +165,7 @@ Status RewriteAndPruneGraph(
   FixupSourceAndSinkEdges(graph);
   VLOG(2) << "Post prune: " << DumpGraphToFile("tfcompile_post_prune", *graph);
   // Sanity-check, to make sure the feeds and fetches still exist post-pruning.
-  std::set<string> missing_feeds, missing_fetches;
+  std::set<std::string> missing_feeds, missing_fetches;
   for (const tf2xla::Feed& feed : config.feed()) {
     missing_feeds.insert(TensorIdToString(feed.id()));
   }
@@ -171,34 +174,37 @@ Status RewriteAndPruneGraph(
   }
   for (const Node* n : graph->op_nodes()) {
     if (n->type_string() == FunctionLibraryDefinition::kArgOp) {
-      string feed_id;
+      std::string feed_id;
       TF_RETURN_IF_ERROR(GetNodeAttr(n->attrs(), kFeedIdAttr, &feed_id));
       if (missing_feeds.erase(feed_id) == 0) {
-        return errors::Aborted(FunctionLibraryDefinition::kArgOp,
-                               " node found with unknown feed id: ", feed_id);
+        return absl::AbortedError(
+            absl::StrCat(FunctionLibraryDefinition::kArgOp,
+                         " node found with unknown feed id: ", feed_id));
       }
     } else if (n->type_string() == FunctionLibraryDefinition::kRetOp) {
-      string fetch_id;
+      std::string fetch_id;
       TF_RETURN_IF_ERROR(GetNodeAttr(n->attrs(), kFetchIdAttr, &fetch_id));
       if (missing_fetches.erase(fetch_id) == 0) {
-        return errors::Aborted(FunctionLibraryDefinition::kRetOp,
-                               " node found with unknown fetch id: ", fetch_id);
+        return absl::AbortedError(
+            absl::StrCat(FunctionLibraryDefinition::kRetOp,
+                         " node found with unknown fetch id: ", fetch_id));
       }
     }
   }
   if (!missing_feeds.empty() || !missing_fetches.empty()) {
-    return errors::Aborted(
+    return absl::AbortedError(absl::StrCat(
         "Post graph-pruning",
         ", missing feeds: ", absl::StrJoin(missing_feeds, ", "),
-        ", missing fetches: ", absl::StrJoin(missing_fetches, ", "));
+        ", missing fetches: ", absl::StrJoin(missing_fetches, ", ")));
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 // CollectArgNodes collects _Arg nodes from the graph, and performs basic
 // sanity-checking to ensure the index and type attributes of each node are
 // initialized correctly.
-Status CollectArgNodes(const Graph& graph, std::vector<Node*>* arg_nodes) {
+absl::Status CollectArgNodes(const Graph& graph,
+                             std::vector<Node*>* arg_nodes) {
   std::map<int, Node*> indexed_arg_nodes;
   for (Node* n : graph.nodes()) {
     if (n->type_string() == FunctionLibraryDefinition::kArgOp) {
@@ -207,10 +213,10 @@ Status CollectArgNodes(const Graph& graph, std::vector<Node*>* arg_nodes) {
       auto insert_result = indexed_arg_nodes.insert({index, n});
       if (!insert_result.second) {
         const Node* dup = insert_result.first->second;
-        return errors::InvalidArgument(
+        return absl::InvalidArgumentError(absl::StrCat(
             "Multiple ", FunctionLibraryDefinition::kArgOp,
             " nodes with index ", index, ", ", FormatNodeForError(*n), " and ",
-            FormatNodeForError(*dup));
+            FormatNodeForError(*dup)));
       }
     }
   }
@@ -218,19 +224,19 @@ Status CollectArgNodes(const Graph& graph, std::vector<Node*>* arg_nodes) {
   for (const auto& index_node : indexed_arg_nodes) {
     const int arg_nodes_size = arg_nodes->size();
     if (index_node.first != arg_nodes_size) {
-      return errors::InvalidArgument(
+      return absl::InvalidArgumentError(absl::StrCat(
           "Expected ", FunctionLibraryDefinition::kArgOp, " node with index ",
-          arg_nodes->size(), ", but got index ", index_node.first);
+          arg_nodes->size(), ", but got index ", index_node.first));
     }
     arg_nodes->push_back(index_node.second);
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 }  // namespace
 
-Status CreateXlaArgs(const Graph& graph,
-                     std::vector<XlaCompiler::Argument>* xla_args) {
+absl::Status CreateXlaArgs(const Graph& graph,
+                           std::vector<XlaCompiler::Argument>* xla_args) {
   std::vector<Node*> arg_nodes;
   TF_RETURN_IF_ERROR(CollectArgNodes(graph, &arg_nodes));
   for (const Node* node : arg_nodes) {
@@ -243,7 +249,7 @@ Status CreateXlaArgs(const Graph& graph,
     TF_RETURN_IF_ERROR(GetNodeAttr(node->attrs(), kDebugNameAttr, &arg.name));
     xla_args->push_back(arg);
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 void PopulateXlaArgs(const tf2xla::Config& config,
@@ -262,8 +268,8 @@ void PopulateXlaArgs(const tf2xla::Config& config,
   }
 }
 
-Status InitGraph(const GraphDef& graph_def, const tf2xla::Config& config,
-                 std::unique_ptr<Graph>* graph) {
+absl::Status InitGraph(const GraphDef& graph_def, const tf2xla::Config& config,
+                       std::unique_ptr<Graph>* graph) {
   TF_RETURN_IF_ERROR(ValidateConfig(config));
 
   FunctionLibraryDefinition flib_def(OpRegistry::Global(), graph_def.library());
@@ -274,7 +280,7 @@ Status InitGraph(const GraphDef& graph_def, const tf2xla::Config& config,
   GraphDef first_copy_def = graph_def;
 
   // Maps from name:port of a feed to the name:port of the placeholder to use.
-  std::unordered_map<string, string> feed_remapping;
+  std::unordered_map<std::string, std::string> feed_remapping;
   TF_RETURN_IF_ERROR(AddPlaceholdersForFeeds(config, g->op_registry(),
                                              &feed_remapping, &first_copy_def));
 
@@ -306,7 +312,7 @@ Status InitGraph(const GraphDef& graph_def, const tf2xla::Config& config,
   TF_RETURN_IF_ERROR(g->AddFunctionLibrary(flib_def.ToProto()));
 
   *graph = std::move(g);
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 }  // namespace tensorflow

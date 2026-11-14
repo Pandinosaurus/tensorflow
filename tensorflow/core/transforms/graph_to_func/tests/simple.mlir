@@ -1,13 +1,29 @@
-// RUN: tfg-transforms-opt -pass-pipeline='tfg-lift-graph-to-func{feeds=Placeholder1:0,Placeholder2:0 fetches=SomeAdd3:0 control_rets=SomeAdd4}' %s | FileCheck %s
+// Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+// ==============================================================================
+// RUN: tfg-transforms-opt -pass-pipeline='builtin.module(tfg-lift-graph-to-func{feeds=Placeholder1,Placeholder2 fetches=SomeAdd3 control_rets=SomeAdd4})' %s | FileCheck %s
+// RUN: tfg-transforms-opt -pass-pipeline='builtin.module(tfg-lift-graph-to-func{feeds=Placeholder1,Placeholder2,Placeholder1 fetches=SomeAdd3,SomeAdd3 control_rets=SomeAdd4,SomeAdd4})' %s | FileCheck %s
 
 // Test that we can lift the graph into a function by using the provided feeds
 // as function arguments and the provided fetch as function results.
 
-// CHECK:   tfg.func @_mlir_lifted_graph(%Placeholder13A0: tensor<*xf32> {tfg.name = "Placeholder1:0"},
-// CHECK-NEXT:                           %Placeholder23A0: tensor<*xf32> {tfg.name = "Placeholder2:0"})
+// CHECK:   tfg.func @_mlir_lifted_graph(%Placeholder1_0: tensor<*xf32> {tfg.lifted_value_attr = ["Placeholder1", 0 : index], tfg.name = "Placeholder1_0"},
+// CHECK-NEXT:                           %Placeholder2_0: tensor<*xf32> {tfg.lifted_value_attr = ["Placeholder2", 0 : index], tfg.name = "Placeholder2_0"})
+// CHECK:   tfg.lifted_graph_version = #tf_type.version<producer = 34, min_consumer = 5>
 
 // Feeds substitution:
-// CHECK: Add(%Placeholder13A0, %Placeholder23A0) name("SomeAdd1")
+// CHECK: Add(%Placeholder1_0, %Placeholder2_0) name("SomeAdd1")
 
 // Fetch:
 // CHECK: %[[FETCH:.*]], %ctl_6 = Add{{.*}} name("SomeAdd3")

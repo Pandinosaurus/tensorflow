@@ -50,9 +50,10 @@ class PriorityQueue
  public:
   PriorityQueue(int32_t capacity, const DataTypeVector& component_dtypes,
                 const std::vector<TensorShape>& component_shapes,
-                const string& name);
+                const std::string& name);
 
-  Status Initialize() override;  // Must be called before any other method.
+  absl::Status Initialize()
+      override;  // Must be called before any other method.
 
   // Implementations of QueueInterface methods --------------------------------
 
@@ -64,28 +65,29 @@ class PriorityQueue
   void TryDequeueMany(int num_elements, OpKernelContext* ctx,
                       bool allow_small_batch,
                       CallbackWithTuple callback) override;
-  Status MatchesNodeDef(const NodeDef& node_def) override;
-  Status MatchesPriorityNodeDefTypes(const NodeDef& node_def) const;
-  Status MatchesPriorityNodeDefShapes(const NodeDef& node_def) const;
+  absl::Status MatchesNodeDef(const NodeDef& node_def) override;
+  absl::Status MatchesPriorityNodeDefTypes(const NodeDef& node_def) const;
+  absl::Status MatchesPriorityNodeDefShapes(const NodeDef& node_def) const;
 
-  int32 size() const override {
+  int32_t size() const override {
     mutex_lock lock(mu_);
     return queues_[0].size();
   }
 
  private:
-  ~PriorityQueue() override {}
+  ~PriorityQueue() override = default;
 
   // Helper for dequeuing a single element from queues_.
   void DequeueLocked(OpKernelContext* ctx, Tuple* tuple)
       TF_EXCLUSIVE_LOCKS_REQUIRED(mu_);
 
-  static Status GetElementComponentFromBatch(const Tuple& tuple, int index,
-                                             int component,
-                                             OpKernelContext* ctx,
-                                             Tensor* out_element);
+  static absl::Status GetElementComponentFromBatch(const Tuple& tuple,
+                                                   int index, int component,
+                                                   OpKernelContext* ctx,
+                                                   Tensor* out_element);
 
-  TF_DISALLOW_COPY_AND_ASSIGN(PriorityQueue);
+  PriorityQueue(const PriorityQueue&) = delete;
+  void operator=(const PriorityQueue&) = delete;
 };
 
 }  // namespace tensorflow

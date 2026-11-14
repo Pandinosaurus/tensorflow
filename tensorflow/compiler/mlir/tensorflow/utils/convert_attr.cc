@@ -28,8 +28,8 @@ namespace tensorflow {
 // Converts non func AttrValue proto into an MLIR attribute. Func attribute is
 // exclused in this function because the function might be renamed when the
 // function definition is imported.
-StatusOr<mlir::Attribute> ConvertNonFuncAttributeValue(const AttrValue& value,
-                                                       mlir::Builder* builder) {
+absl::StatusOr<mlir::Attribute> ConvertNonFuncAttributeValue(
+    const AttrValue& value, mlir::Builder* builder) {
   switch (value.value_case()) {
     case AttrValue::kI:
       return builder->getI64IntegerAttr(value.i());
@@ -73,11 +73,10 @@ StatusOr<mlir::Attribute> ConvertNonFuncAttributeValue(const AttrValue& value,
         attrs.push_back(attr);
       }
       if (!value.list().func().empty()) {
-        return tensorflow::errors::Unimplemented(
+        return absl::UnimplementedError(
             absl::StrCat("Attribute ", value.DebugString()));
       }
-      return builder->getArrayAttr(
-          llvm::makeArrayRef(attrs.begin(), attrs.end()));
+      return builder->getArrayAttr(llvm::ArrayRef(attrs.begin(), attrs.end()));
     }
     case AttrValue::VALUE_NOT_SET:
       return builder->getUnitAttr();
@@ -86,13 +85,13 @@ StatusOr<mlir::Attribute> ConvertNonFuncAttributeValue(const AttrValue& value,
       return mlir::TF::PlaceholderAttr::get(builder->getContext(),
                                             value.placeholder());
     default:
-      return tensorflow::errors::Unimplemented(
+      return absl::UnimplementedError(
           absl::StrCat("Attribute ", value.DebugString()));
   }
 }
 
-StatusOr<mlir::Attribute> ConvertAttributeValue(const AttrValue& value,
-                                                mlir::Builder* builder) {
+absl::StatusOr<mlir::Attribute> ConvertAttributeValue(const AttrValue& value,
+                                                      mlir::Builder* builder) {
   switch (value.value_case()) {
     case AttrValue::kFunc: {
       // TODO(b/156546237): Unify kFunc/NameAttrList attribute representation.

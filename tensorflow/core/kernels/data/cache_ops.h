@@ -16,6 +16,7 @@ limitations under the License.
 #ifndef TENSORFLOW_CORE_KERNELS_DATA_CACHE_OPS_H_
 #define TENSORFLOW_CORE_KERNELS_DATA_CACHE_OPS_H_
 
+#include "absl/status/status.h"
 #include "tensorflow/core/data/dataset_utils.h"
 #include "tensorflow/core/framework/resource_mgr.h"
 
@@ -62,7 +63,7 @@ class MemoryCacheManager : public ResourceBase {
  public:
   MemoryCacheManager() : cache_(std::make_shared<MemoryCache>()) {}
 
-  string DebugString() const override;
+  std::string DebugString() const override;
 
   std::shared_ptr<MemoryCache> get() { return cache_; }
 
@@ -77,12 +78,11 @@ class AnonymousMemoryCacheHandleOp
   explicit AnonymousMemoryCacheHandleOp(OpKernelConstruction* ctx);
 
  private:
-  string name() override;
-  Status CreateResource(OpKernelContext* ctx,
-                        std::unique_ptr<FunctionLibraryDefinition> flib_def,
-                        std::unique_ptr<ProcessFunctionLibraryRuntime> pflr,
-                        FunctionLibraryRuntime* lib,
-                        MemoryCacheManager** manager) override;
+  std::string name() override;
+  absl::Status CreateResource(
+      OpKernelContext* ctx, std::unique_ptr<FunctionLibraryDefinition> flib_def,
+      std::unique_ptr<ProcessFunctionLibraryRuntime> pflr,
+      FunctionLibraryRuntime* lib, MemoryCacheManager** manager) override;
 };
 
 // Deletes an instance of cache resource.

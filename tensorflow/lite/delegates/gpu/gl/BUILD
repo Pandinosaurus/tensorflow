@@ -1,13 +1,60 @@
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
 load("@flatbuffers//:build_defs.bzl", "flatbuffer_cc_library")
-load("//tensorflow/lite:special_rules.bzl", "tflite_portable_test_suite")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_cc//cc:cc_test.bzl", "cc_test")
 load(
     "//tensorflow/core/platform:build_config_root.bzl",
     "tf_gpu_tests_tags",
 )
+load("//tensorflow/lite:special_rules.bzl", "tflite_portable_test_suite")
+load("//tensorflow/lite/delegates/gpu:build_defs.bzl", "gpu_delegate_linkopts")
 
 package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:LICENSE"],
     default_visibility = ["//visibility:public"],
     licenses = ["notice"],
+)
+
+cc_library(
+    name = "android_sync",
+    srcs = ["android_sync.cc"],
+    hdrs = ["android_sync.h"],
+    linkopts = gpu_delegate_linkopts(),
+    deps = [
+        ":portable",
+        "//tensorflow/lite/delegates/gpu/common:status",
+    ],
+)
+
+cc_test(
+    name = "android_sync_test",
+    srcs = ["android_sync_test.cc"],
+    linkopts = gpu_delegate_linkopts(),
+    tags = tf_gpu_tests_tags() + [
+        "local",
+        "nobuilder",
+        "notap",
+        "tflite_not_portable_ios",
+    ],
+    deps = [
+        ":android_sync",
+        ":egl_environment",
+        "@com_google_googletest//:gtest_main",
+    ],
 )
 
 cc_library(
@@ -20,23 +67,23 @@ cc_library(
         ":compiler",
         ":compiler_options",
         ":gl_call",
-        ":request_gpu_info",
         ":node_shader",
         ":object",
         ":object_manager",
         ":portable",
+        ":request_gpu_info",
         ":runtime",
         ":runtime_options",
         ":stats",
         ":variable",
-        "@com_google_absl//absl/container:flat_hash_map",
-        "@com_google_absl//absl/memory",
-        "@com_google_absl//absl/strings",
         "//tensorflow/lite/delegates/gpu/common:model",
         "//tensorflow/lite/delegates/gpu/common:status",
         "//tensorflow/lite/delegates/gpu/common:types",
         "//tensorflow/lite/delegates/gpu/common:util",
         "//tensorflow/lite/delegates/gpu/gl/workgroups:calculator",
+        "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/memory",
+        "@com_google_absl//absl/strings",
     ] + select({
         "//tensorflow/lite/delegates/gpu:tflite_gpu_binary_release": [],
         "//conditions:default": [
@@ -212,6 +259,7 @@ cc_test(
     linkopts = [
         "-lEGL",
         "-lGLESv2",
+        "-lm",
     ],
     tags = tf_gpu_tests_tags() + [
         "local",
@@ -386,6 +434,8 @@ cc_library(
         ":portable",
         "//tensorflow/lite/delegates/gpu/common:gpu_info",
         "//tensorflow/lite/delegates/gpu/common:status",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:status_macros",
         "@com_google_absl//absl/strings",
     ],
 )
@@ -416,6 +466,7 @@ cc_library(
         "//tensorflow/lite/delegates/gpu/gl/runtime:shared_buffer",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/types:span",
     ],
 )
 
@@ -445,6 +496,9 @@ cc_library(
 cc_test(
     name = "serialization_test",
     srcs = ["serialization_test.cc"],
+    linkopts = [
+        "-lm",
+    ],
     tags = [
         "local",
         "nobuilder",

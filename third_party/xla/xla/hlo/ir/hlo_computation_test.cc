@@ -1,0 +1,1032 @@
+/* Copyright 2025 The OpenXLA Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+==============================================================================*/
+
+#include "xla/hlo/ir/hlo_computation.h"
+
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <gmock/gmock.h>
+#include <gtest/gtest.h>
+#include "absl/container/flat_hash_map.h"
+#include "absl/log/check.h"
+#include "absl/status/status.h"
+#include "absl/strings/match.h"
+#include "absl/strings/str_cat.h"
+#include "absl/strings/string_view.h"
+#include "xla/hlo/ir/hlo_input_output_alias_config.h"
+#include "xla/hlo/ir/hlo_instruction.h"
+#include "xla/hlo/ir/hlo_module.h"
+#include "xla/hlo/ir/hlo_opcode.h"
+#include "xla/hlo/ir/hlo_print_options.h"
+#include "xla/hlo/parser/hlo_parser.h"
+#include "xla/hlo/testlib/hlo_hardware_independent_test_base.h"
+#include "xla/service/hlo.pb.h"
+#include "xla/service/hlo_module_config.h"
+#include "xla/shape.h"
+#include "xla/shape_util.h"
+#include "xla/tsl/platform/test_benchmark.h"
+#include "xla/xla_data.pb.h"
+
+namespace xla {
+namespace {
+
+using HLOComputationTest = HloHardwareIndependentTestBase;
+
+int64_t CountControlEdges(const HloComputation& computation) {
+  int64_t count = 0;
+  for (const auto& instruction : computation.instructions()) {
+    count += instruction->control_successors().size();
+  }
+  return count;
+}
+
+TEST_F(HLOComputationTest, DefUseOrder) {
+  absl::string_view hlo_string = R"(
+HloModule module
+
+sum {
+  a = f32[] parameter(0)
+  b = f32[] parameter(1)
+  ROOT out = f32[] add(a, b)
+}
+
+ENTRY entry {
+  p0 = f32[100] parameter(0), parameter_replication={false}
+  p1 = f32[100] parameter(1), parameter_replication={false}
+  add0 = f32[100] add(p0, p1)
+  mul0 = f32[100] multiply(p0, p1)
+  div0 = f32[100] divide(p0, p1)
+  reduce0 = f32[100] all-reduce(add0), replica_groups={}, to_apply=sum, channel_id=1
+  reduce1 = f32[100] all-reduce(mul0), replica_groups={}, to_apply=sum, channel_id=1
+  reduce2 = f32[100] all-reduce(div0), replica_groups={}, to_apply=sum, channel_id=1
+  add1 = f32[100] add(reduce0, reduce1)
+  ROOT out = f32[100] add(add1, reduce2)
+})";
+
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
+                          ParseAndReturnVerifiedModule(hlo_string));
+
+  EXPECT_EQ(CountControlEdges(*module->entry_computation()), 0);
+
+  const HloInstruction* root = module->entry_computation()->root_instruction();
+  const HloInstruction* add1 = root->operand(0);     // t = add(c1, c2)
+  const HloInstruction* reduce2 = root->operand(1);  // c3 = all-reduce(i2)...
+  EXPECT_EQ(add1->opcode(), HloOpcode::kAdd);
+  EXPECT_EQ(reduce2->opcode(), HloOpcode::kAllReduce);
+
+  const HloInstruction* reduce0 = add1->operand(0);
+  const HloInstruction* reduce1 = add1->operand(1);
+  EXPECT_EQ(reduce0->opcode(), HloOpcode::kAllReduce);
+  EXPECT_EQ(reduce1->opcode(), HloOpcode::kAllReduce);
+
+  bool found_add0 = false;
+  // Verify that i0 is before c1.
+  auto post_order = module->entry_computation()->MakeInstructionPostOrder();
+  for (const auto& instruction : post_order) {
+    if (instruction->name() == "reduce0") {
+      EXPECT_TRUE(found_add0);
+    }
+    if (instruction->name() == "add0") {
+      found_add0 = true;
+    }
+  }
+
+  // Verify that MakeInstructionPostOrder() is idempotent.
+  auto post_order_2 = module->entry_computation()->MakeInstructionPostOrder();
+  EXPECT_EQ(post_order, post_order_2);
+}
+
+TEST_F(HLOComputationTest, ReplaceInstructionPreservesMetadataPayload) {
+  absl::string_view hlo_string = R"(
+HloModule module
+
+ENTRY entry {
+  p0 = f32[10] parameter(0)
+  ROOT neg = f32[10] negate(p0)
+})";
+  ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
+                       ParseAndReturnVerifiedModule(hlo_string));
+  HloComputation* computation = module->entry_computation();
+  HloInstruction* old_instr = computation->root_instruction();
+
+  OpMetadata metadata;
+  metadata.set_op_name("old_op");
+  metadata.mutable_metadata_payload()->set_value("tokamax:payload");
+  old_instr->set_metadata(metadata);
+
+  // The replacement carries its own op_name, so overwrite_op_name is false.
+  HloInstruction* new_instr = computation->AddInstruction(
+      HloInstruction::CreateUnary(old_instr->shape(), HloOpcode::kNegate,
+                                  old_instr->mutable_operand(0)));
+  new_instr->mutable_metadata().set_op_name("new_op");
+
+  ASSERT_OK(computation->ReplaceInstruction(old_instr, new_instr));
+
+  EXPECT_EQ(new_instr->metadata().op_name(), "new_op");
+  ASSERT_TRUE(new_instr->metadata().has_metadata_payload());
+  EXPECT_EQ(new_instr->metadata().metadata_payload().value(),
+            "tokamax:payload");
+}
+
+TEST_F(HLOComputationTest, MakeInstructionPostOrder) {
+  absl::string_view hlo_string = R"(
+HloModule module
+
+ENTRY entry {
+  p0 = f32[100] parameter(0)
+  p1 = f32[100] parameter(1)
+  add0 = f32[100] add(p0, p1)
+  mul0 = f32[100] multiply(p0, add0)
+  ROOT div0 = f32[100] divide(p1, mul0)
+})";
+
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
+                          ParseAndReturnVerifiedModule(hlo_string));
+
+  auto post_order = module->entry_computation()->MakeInstructionPostOrder();
+
+  // Verify the order of instructions in the post order.
+  bool found_p0 = false;
+  bool found_p1 = false;
+  bool found_add0 = false;
+  bool found_mul0 = false;
+  for (HloInstruction* instruction : post_order) {
+    if (instruction->name() == "add0") {
+      EXPECT_TRUE(found_p0);
+      EXPECT_TRUE(found_p1);
+      found_add0 = true;
+    } else if (instruction->name() == "mul0") {
+      EXPECT_TRUE(found_p0);
+      EXPECT_TRUE(found_add0);
+      found_mul0 = true;
+    } else if (instruction->name() == "div0") {
+      EXPECT_TRUE(found_p1);
+      EXPECT_TRUE(found_mul0);
+    } else if (instruction->name() == "p0") {
+      found_p0 = true;
+    } else if (instruction->name() == "p1") {
+      found_p1 = true;
+    }
+  }
+
+  // Verify that MakeInstructionPostOrder() is idempotent.
+  auto post_order_2 = module->entry_computation()->MakeInstructionPostOrder();
+  EXPECT_EQ(post_order, post_order_2);
+}
+
+// Test AddCallee
+TEST_F(HLOComputationTest, AddCallee) {
+  absl::string_view hlo_string = R"(
+HloModule module
+diff {
+  a = f32[] parameter(0)
+  b = f32[] parameter(1)
+  ROOT out = f32[] add(a, b)
+}
+
+sum {
+  a = f32[] parameter(0)
+  b = f32[] parameter(1)
+  ROOT out = f32[] add(a, b)
+}
+
+ENTRY entry {
+  p0 = f32[100] parameter(0), parameter_replication={false}
+  p1 = f32[100] parameter(1), parameter_replication={false}
+  map0 = f32[100] map(p0, p1), to_apply=diff
+  ROOT map1 = f32[100] map(p0, map0), to_apply=sum
+}
+)";
+
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
+                          ParseAndReturnVerifiedModule(hlo_string));
+  HloComputation* entry = module->entry_computation();
+  HloComputation* sum = module->GetComputationWithName("sum");
+  ASSERT_NE(entry, nullptr);
+  ASSERT_NE(sum, nullptr);
+
+  EXPECT_EQ(entry->callee_computations().size(), 2);
+  EXPECT_TRUE(entry->callee_computations().contains(sum));
+  EXPECT_EQ(sum->caller_computations().size(), 1);
+  EXPECT_EQ(sum->caller_computations().count(entry), 1);
+
+  // Get the operands of the add.
+  HloInstruction* entry_a = entry->root_instruction()->mutable_operand(0);
+  HloInstruction* entry_b = entry->root_instruction()->mutable_operand(1);
+
+  // Create a new computation and add it as a callee.
+  auto builder = HloComputation::Builder("mul");
+  auto a = builder.AddInstruction(
+      HloInstruction::CreateParameter(0, ShapeUtil::MakeShape(F32, {}), "a"));
+  auto b = builder.AddInstruction(
+      HloInstruction::CreateParameter(1, ShapeUtil::MakeShape(F32, {}), "b"));
+
+  builder.AddInstruction(HloInstruction::CreateBinary(
+      ShapeUtil::MakeShape(F32, {}), HloOpcode::kMultiply, a, b));
+
+  HloComputation* mul_comp = module->AddEmbeddedComputation(builder.Build());
+
+  auto map = HloInstruction::CreateMap(entry->root_instruction()->shape(),
+                                       {entry_a, entry_b}, mul_comp);
+
+  // Add the new computation as a callee of the entry computation.
+  EXPECT_EQ(entry->ReplaceWithNewInstruction(entry->root_instruction(),
+                                             std::move(map)),
+            absl::OkStatus());
+
+  HloComputation* mul_int = module->GetComputationWithName("mul");
+
+  EXPECT_EQ(entry->callee_computations().size(), 2);
+  EXPECT_FALSE(entry->callee_computations().contains(sum));
+  EXPECT_EQ(entry->callee_computations().count(mul_int), 1);
+  EXPECT_EQ(sum->caller_computations().size(), 0);
+  EXPECT_EQ(mul_int->caller_computations().size(), 1);
+  EXPECT_TRUE(mul_int->caller_computations().contains(entry));
+}
+TEST_F(HLOComputationTest, ComputationsWithDifferentParamCountAreNotEqual) {
+  absl::string_view hlo_string = R"(
+comp1 {
+  p = f32[] parameter(0)
+  ROOT out = f32[] negate(p)
+}
+
+ENTRY comp2 {
+  p0 = f32[] parameter(0)
+  p1 = f32[] parameter(1)
+  ROOT out = f32[] negate(p0)
+})";
+
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
+                          ParseAndReturnVerifiedModule(hlo_string));
+
+  const HloComputation* c1 = module->GetComputationWithName("comp1");
+  const HloComputation* c2 = module->GetComputationWithName("comp2");
+  EXPECT_NE(*c1, *c2);
+}
+
+TEST_F(HLOComputationTest, CanonicalizeLocalIds) {
+  absl::string_view hlo_string_1 = R"(
+HloModule module1
+
+ENTRY entry {
+  p0 = f32[] parameter(0)
+  p1 = f32[] parameter(1)
+  add0 = f32[] add(p0, p1)
+  mul0 = f32[] multiply(p0, p1)
+  ROOT out = f32[] add(add0, mul0)
+})";
+
+  absl::string_view hlo_string_2 = R"(
+HloModule module2
+
+ENTRY entry {
+  p0 = f32[] parameter(0)
+  p1 = f32[] parameter(1)
+  mul0 = f32[] multiply(p0, p1)
+  add0 = f32[] add(p0, p1)
+  ROOT out = f32[] add(add0, mul0)
+})";
+
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module1,
+                          ParseAndReturnVerifiedModule(hlo_string_1));
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module2,
+                          ParseAndReturnVerifiedModule(hlo_string_2));
+
+  HloComputation* comp1 = module1->entry_computation();
+  HloComputation* comp2 = module2->entry_computation();
+
+  auto get_local_id = [](HloComputation* comp, absl::string_view name) {
+    for (const auto& inst : comp->instructions()) {
+      if (absl::StrContains(inst->name(), name)) {
+        return inst->local_id();
+      }
+    }
+    return -1;
+  };
+
+  // Verify initial IDs for comp2 reflect construction order: mul0 then add0.
+  // p0:0, p1:1, mul0:2, add0:3, out:4
+  EXPECT_EQ(get_local_id(comp2, "mul0"), 2);
+  EXPECT_EQ(get_local_id(comp2, "add0"), 3);
+
+  comp1->CanonicalizeLocalIds();
+  comp2->CanonicalizeLocalIds();
+
+  // We expect the same post-order: p0, p1, add0, mul0, out
+  // So IDs should be 0, 1, 2, 3, 4 respectively.
+
+  EXPECT_EQ(get_local_id(comp1, "p0"), 0);
+  EXPECT_EQ(get_local_id(comp1, "p1"), 1);
+  EXPECT_EQ(get_local_id(comp1, "add0"), 2);
+  EXPECT_EQ(get_local_id(comp1, "mul0"), 3);
+  EXPECT_EQ(get_local_id(comp1, "out"), 4);
+
+  EXPECT_EQ(get_local_id(comp2, "p0"), 0);
+  EXPECT_EQ(get_local_id(comp2, "p1"), 1);
+  EXPECT_EQ(get_local_id(comp2, "add0"), 2);
+  EXPECT_EQ(get_local_id(comp2, "mul0"), 3);
+  EXPECT_EQ(get_local_id(comp2, "out"), 4);
+}
+
+// An instruction outside the destroyed computation that uses one of its
+// instructions is left with null operand slots, the state
+// DetachFromOperandsAndUsers leaves behind. The user names the instruction
+// twice so that every slot is scanned.
+TEST_F(HLOComputationTest, DestroyingComputationClearsOperandsOfOutsideUsers) {
+  const Shape shape = ShapeUtil::MakeShape(F32, {});
+  auto builder = HloComputation::Builder("inside");
+  HloInstruction* param = builder.AddInstruction(
+      HloInstruction::CreateParameter(0, shape, "param"));
+  HloInstruction* negate = builder.AddInstruction(
+      HloInstruction::CreateUnary(shape, HloOpcode::kNegate, param));
+  std::unique_ptr<HloComputation> computation = builder.Build();
+
+  std::unique_ptr<HloInstruction> outside_user =
+      HloInstruction::CreateBinary(shape, HloOpcode::kAdd, negate, negate);
+  ASSERT_EQ(outside_user->parent(), nullptr);
+  ASSERT_EQ(negate->user_count(), 1);
+
+  computation.reset();
+
+  EXPECT_EQ(outside_user->operand(0), nullptr);
+  EXPECT_EQ(outside_user->operand(1), nullptr);
+}
+
+// The reverse direction: an instruction of the destroyed computation uses an
+// outside instruction, twice. The outside instruction drops the deleted user
+// from its user list.
+TEST_F(HLOComputationTest, DestroyingComputationDropsUsersOfOutsideOperands) {
+  const Shape shape = ShapeUtil::MakeShape(F32, {});
+  std::unique_ptr<HloInstruction> outside_operand =
+      HloInstruction::CreateParameter(0, shape, "outside");
+  auto builder = HloComputation::Builder("inside");
+  HloInstruction* add = builder.AddInstruction(HloInstruction::CreateBinary(
+      shape, HloOpcode::kAdd, outside_operand.get(), outside_operand.get()));
+  std::unique_ptr<HloComputation> computation = builder.Build();
+  ASSERT_EQ(outside_operand->user_count(), 1);
+  ASSERT_EQ(outside_operand->users().front(), add);
+
+  computation.reset();
+
+  EXPECT_EQ(outside_operand->user_count(), 0);
+}
+
+// A computation removed from its module is destroyed by HloModule::Cleanup.
+// Unlike the two tests above, the outside instructions have a parent
+// computation here, so treating only parentless instructions as outside would
+// fail this test.
+TEST_F(HLOComputationTest, ModuleCleanupUnlinksEdgesToSurvivingComputations) {
+  const Shape shape = ShapeUtil::MakeShape(F32, {});
+  // A plain HloModule: a VerifiedHloModule would fail on the null operand in
+  // its destructor.
+  HloModule module("module", GetModuleConfigForTest());
+
+  auto removed_builder = HloComputation::Builder("removed");
+  HloInstruction* removed_param = removed_builder.AddInstruction(
+      HloInstruction::CreateParameter(0, shape, "param"));
+  HloInstruction* removed_negate = removed_builder.AddInstruction(
+      HloInstruction::CreateUnary(shape, HloOpcode::kNegate, removed_param));
+  HloComputation* removed =
+      module.AddEmbeddedComputation(removed_builder.Build());
+
+  auto kept_builder = HloComputation::Builder("kept");
+  HloInstruction* kept_param = kept_builder.AddInstruction(
+      HloInstruction::CreateParameter(0, shape, "param"));
+  HloInstruction* kept_negate = kept_builder.AddInstruction(
+      HloInstruction::CreateUnary(shape, HloOpcode::kNegate, removed_negate));
+  module.AddEntryComputation(kept_builder.Build());
+  removed->AddInstruction(
+      HloInstruction::CreateUnary(shape, HloOpcode::kNegate, kept_param));
+  ASSERT_EQ(kept_negate->operand(0), removed_negate);
+  ASSERT_EQ(kept_param->user_count(), 1);
+
+  ASSERT_OK(module.RemoveEmbeddedComputation(removed));
+  module.Cleanup();
+
+  EXPECT_EQ(kept_negate->operand(0), nullptr);
+  EXPECT_EQ(kept_param->user_count(), 0);
+}
+
+// The fusion reads x at all three parameters. Dropping two of them keeps the
+// fusion among x's users, since the third still reads x.
+TEST_F(HLOComputationTest,
+       RemovingFusionParametersKeepsUserOfOperandReadTwice) {
+  constexpr absl::string_view kHlo = R"(
+HloModule m
+
+f {
+  p0 = f32[8] parameter(0)
+  p1 = f32[8] parameter(1)
+  p2 = f32[8] parameter(2)
+  a = f32[8] negate(p0)
+  b = f32[8] negate(p1)
+  ROOT n = f32[8] negate(p2)
+}
+
+ENTRY e {
+  x = f32[8] parameter(0)
+  ROOT fusion = f32[8] fusion(x, x, x), kind=kLoop, calls=f
+}
+)";
+  // Unverified: the fusion holds dead instructions, as after a multi output
+  // fusion loses outputs.
+  ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
+                       ParseAndReturnUnverifiedModule(kHlo));
+  HloInstruction* fusion = module->entry_computation()->root_instruction();
+  HloComputation* fused = fusion->fused_instructions_computation();
+  ASSERT_OK(fused->RemoveInstructionAndUnusedOperands(
+      FindInstruction(module.get(), "a")));
+  ASSERT_OK(fused->RemoveInstructionAndUnusedOperands(
+      FindInstruction(module.get(), "b")));
+  const HloInstruction* x =
+      module->entry_computation()->parameter_instruction(0);
+  EXPECT_EQ(fusion->operand_count(), 1);
+  ASSERT_EQ(x->user_count(), 1);
+  EXPECT_EQ(x->users().front(), fusion);
+}
+
+TEST_F(HLOComputationTest, PrintWithCompactGTE) {
+  absl::string_view hlo_string = R"(
+HloModule module
+
+ENTRY entry {
+  p0 = (f32[10], f32[20]) parameter(0)
+  gte0 = f32[10] get-tuple-element(p0), index=0
+  gte1 = f32[20] get-tuple-element(p0), index=1
+  ROOT out = (f32[10], f32[20]) tuple(gte0, gte1)
+})";
+
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
+                          ParseAndReturnVerifiedModule(hlo_string));
+
+  HloComputation* computation = module->entry_computation();
+
+  HloPrintOptions options;
+  options.set_compact_gte(true);
+  options.set_print_ids(false);
+
+  std::string printed = computation->ToString(options);
+
+  EXPECT_FALSE(absl::StrContains(printed, "get-tuple-element"));
+  EXPECT_TRUE(absl::StrContains(printed, "tuple(%p0#0, %p0#1)"));
+}
+
+TEST_F(HLOComputationTest, PrintWithCompactGTENested) {
+  absl::string_view hlo_string = R"(
+HloModule module
+
+ENTRY entry {
+  p0 = ((f32[10], f32[20]), f32[30]) parameter(0)
+  gte0 = (f32[10], f32[20]) get-tuple-element(p0), index=0
+  gte1 = f32[10] get-tuple-element(gte0), index=0
+  gte2 = f32[20] get-tuple-element(gte0), index=1
+  gte3 = f32[30] get-tuple-element(p0), index=1
+  ROOT out = (f32[10], f32[20], f32[30]) tuple(gte1, gte2, gte3)
+})";
+
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
+                          ParseAndReturnVerifiedModule(hlo_string));
+
+  HloComputation* computation = module->entry_computation();
+
+  HloPrintOptions options;
+  options.set_compact_gte(true);
+  options.set_print_ids(false);
+
+  std::string printed = computation->ToString(options);
+
+  EXPECT_FALSE(absl::StrContains(printed, "get-tuple-element"));
+  EXPECT_TRUE(absl::StrContains(printed, "tuple(%p0#0#0, %p0#0#1, %p0#1)"));
+}
+
+TEST_F(HLOComputationTest, PrintWithCompactGTECanonical) {
+  absl::string_view hlo_string = R"(
+HloModule module
+
+ENTRY entry {
+  p0 = (f32[10], f32[20]) parameter(0)
+  gte0 = f32[10] get-tuple-element(p0), index=0
+  gte1 = f32[20] get-tuple-element(p0), index=1
+  ROOT out = (f32[10], f32[20]) tuple(gte0, gte1)
+})";
+
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
+                          ParseAndReturnVerifiedModule(hlo_string));
+
+  HloComputation* computation = module->entry_computation();
+
+  HloPrintOptions options = HloPrintOptions::Canonical();
+  options.set_compact_gte(true);
+
+  std::string printed = computation->ToString(options);
+
+  EXPECT_FALSE(absl::StrContains(printed, "get-tuple-element"));
+  EXPECT_TRUE(absl::StrContains(printed, "tmp_0#0"));
+  EXPECT_TRUE(absl::StrContains(printed, "tmp_0#1"));
+}
+
+TEST_F(HLOComputationTest, PrintWithCompactGTERoot) {
+  absl::string_view hlo_string = R"(
+HloModule module
+
+ENTRY entry {
+  p0 = (f32[10], f32[20]) parameter(0)
+  ROOT gte0 = f32[10] get-tuple-element(p0), index=0
+})";
+
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
+                          ParseAndReturnVerifiedModule(hlo_string));
+
+  HloComputation* computation = module->entry_computation();
+
+  HloPrintOptions options;
+  options.set_compact_gte(true);
+  options.set_print_ids(false);
+
+  std::string printed = computation->ToString(options);
+
+  EXPECT_TRUE(absl::StrContains(
+      printed, "ROOT %gte0 = f32[10]{0} get-tuple-element(%p0), index=0"));
+}
+
+TEST_F(HLOComputationTest, BackendConfig) {
+  auto builder = HloComputation::Builder("test_comp");
+  builder.AddInstruction(
+      HloInstruction::CreateParameter(0, ShapeUtil::MakeShape(F32, {}), "p0"));
+  std::unique_ptr<HloComputation> computation = builder.Build();
+
+  EXPECT_FALSE(computation->has_backend_config());
+  computation->set_raw_backend_config_string("custom_config");
+  EXPECT_TRUE(computation->has_backend_config());
+  EXPECT_EQ(computation->raw_backend_config_string(), "custom_config");
+
+  std::unique_ptr<HloComputation> cloned = computation->Clone();
+  EXPECT_TRUE(cloned->has_backend_config());
+  EXPECT_EQ(cloned->raw_backend_config_string(), "custom_config");
+
+  computation->clear_backend_config();
+  EXPECT_FALSE(computation->has_backend_config());
+}
+
+TEST_F(HLOComputationTest, BackendConfigProtoRoundTrip) {
+  auto module = CreateNewVerifiedModule();
+  auto builder = HloComputation::Builder("test_comp");
+  builder.AddInstruction(
+      HloInstruction::CreateParameter(0, ShapeUtil::MakeShape(F32, {}), "p0"));
+  HloComputation* computation = module->AddEntryComputation(builder.Build());
+
+  computation->set_raw_backend_config_string(
+      R"({"custom_key":"custom_value"})");
+  EXPECT_TRUE(computation->has_backend_config());
+
+  HloComputationProto proto;
+  computation->ToProto(&proto);
+  EXPECT_EQ(proto.backend_config(), R"({"custom_key":"custom_value"})");
+
+  absl::flat_hash_map<int64_t, HloComputation*> computation_map;
+  ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloComputation> deserialized,
+                       HloComputation::CreateFromProto(proto, computation_map));
+  EXPECT_TRUE(deserialized->has_backend_config());
+  EXPECT_EQ(deserialized->raw_backend_config_string(),
+            R"({"custom_key":"custom_value"})");
+
+  HloComputationProto roundtrip_proto;
+  deserialized->ToProto(&roundtrip_proto);
+  EXPECT_EQ(roundtrip_proto.backend_config(), proto.backend_config());
+}
+
+TEST_F(HLOComputationTest,
+       SetRootInstructionPreservesAliasWhenNewRootMatchesAliasConfigShape) {
+  absl::string_view hlo_string = R"(
+HloModule module, input_output_alias={ {}: (0, {}, must-alias) }
+
+ENTRY entry {
+  p0 = f32[4] parameter(0)
+  ROOT neg = f32[4] negate(p0)
+})";
+  ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
+                       ParseAndReturnVerifiedModule(hlo_string));
+  HloComputation* entry = module->entry_computation();
+  HloInstruction* old_root = entry->root_instruction();
+  Shape orig_shape = old_root->shape();
+
+  // Mutate the old root's shape in place before wrapping it back to orig_shape.
+  *old_root->mutable_shape() = ShapeUtil::MakeTupleShape({orig_shape});
+  HloInstruction* gte = entry->AddInstruction(
+      HloInstruction::CreateGetTupleElement(orig_shape, old_root, 0));
+  entry->set_root_instruction(gte, /*accept_different_shape=*/true);
+
+  EXPECT_TRUE(module->input_output_alias_config().OutputHasAnyAlias());
+  EXPECT_EQ(module->input_output_alias_config().GetAliasedParameter({}),
+            HloInputOutputAliasConfig::Alias(
+                0, {}, HloInputOutputAliasConfig::kMustAlias));
+  // Restore old_root shape for VerifiedHloModule destructor verification.
+  *old_root->mutable_shape() = orig_shape;
+  entry->set_root_instruction(old_root, /*accept_different_shape=*/true);
+  ASSERT_OK(entry->RemoveInstruction(gte));
+}
+
+TEST_F(HLOComputationTest,
+       SetRootInstructionCrashesWhenOverwritingNonEmptyAliasConfig) {
+  absl::string_view hlo_string = R"(
+HloModule module, input_output_alias={ {}: (0, {}, must-alias) }
+
+ENTRY entry {
+  p0 = f32[4] parameter(0)
+  p1 = f32[8] parameter(1)
+  ROOT neg = f32[4] negate(p0)
+})";
+  ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
+                       ParseAndReturnVerifiedModule(hlo_string));
+  HloComputation* entry = module->entry_computation();
+  HloInstruction* p1 = entry->parameter_instruction(1);
+
+  EXPECT_DEATH(entry->set_root_instruction(p1, /*accept_different_shape=*/true),
+               "Cannot overwrite non-empty input_output_alias_config");
+}
+
+std::unique_ptr<HloComputation> MakeComputationWithParameters(
+    int num_parameters, absl::string_view name = "comp") {
+  const Shape shape = ShapeUtil::MakeShape(F32, {});
+  auto builder = HloComputation::Builder(name);
+  HloInstruction* root = nullptr;
+  for (int i = 0; i < num_parameters; ++i) {
+    HloInstruction* param = builder.AddInstruction(
+        HloInstruction::CreateParameter(i, shape, absl::StrCat("p", i)));
+    if (i == 0) {
+      root = param;
+    }
+  }
+  return builder.Build(root);
+}
+
+TEST_F(HLOComputationTest,
+       RemoveInstructionRejectsUnparentedOrForeignInstruction) {
+  auto comp1 = MakeComputationWithParameters(1, "comp1");
+  auto comp2 = MakeComputationWithParameters(1, "comp2");
+  HloInstruction* foreign = comp2->root_instruction();
+
+  // Foreign instruction from another computation.
+  EXPECT_FALSE(comp1->RemoveInstruction(foreign).ok());
+
+  // Null instruction.
+  EXPECT_FALSE(comp1->RemoveInstruction(nullptr).ok());
+}
+
+TEST_F(HLOComputationTest, RemoveInstructionRejectsAlreadyDeadInstruction) {
+  auto comp = MakeComputationWithParameters(1);
+  HloInstruction* dead_neg = comp->AddInstruction(HloInstruction::CreateUnary(
+      comp->root_instruction()->shape(), HloOpcode::kNegate,
+      comp->root_instruction()));
+
+  ASSERT_OK(comp->RemoveInstruction(dead_neg));
+  EXPECT_TRUE(comp->IsMarkedAsDead(dead_neg));
+  EXPECT_EQ(dead_neg->parent(), nullptr);
+
+  // Removing it again should return an error, not crash with negative index.
+  EXPECT_FALSE(comp->RemoveInstruction(dead_neg).ok());
+}
+
+TEST_F(HLOComputationTest, RemoveInstructionClearsParameterSlot) {
+  auto comp = MakeComputationWithParameters(2, "fusion");
+  HloInstruction* p1 = comp->parameter_instruction(1);
+
+  ASSERT_NE(p1, nullptr);
+  ASSERT_OK(comp->ForceRemoveInstruction(p1));
+  EXPECT_EQ(comp->parameter_instruction(1), nullptr);
+}
+
+std::vector<std::unique_ptr<HloComputation>> MakeNestedComputationChain(
+    const Shape& leaf_shape, int depth) {
+  std::vector<std::unique_ptr<HloComputation>> chain;
+  chain.reserve(depth + 1);
+
+  auto leaf_builder = HloComputation::Builder("leaf");
+  HloInstruction* p = leaf_builder.AddInstruction(
+      HloInstruction::CreateParameter(0, leaf_shape, "p"));
+  chain.push_back(leaf_builder.Build(p));
+
+  for (int i = 0; i < depth; ++i) {
+    auto builder = HloComputation::Builder(absl::StrCat("comp_", i));
+    HloInstruction* call = builder.AddInstruction(
+        HloInstruction::CreateCall(leaf_shape, {}, chain.back().get()));
+    chain.push_back(builder.Build(call));
+  }
+  return chain;
+}
+
+TEST_F(HLOComputationTest, DeeplyNestedComputationsEqualIterative) {
+  constexpr int kDepth = 2000;
+  const Shape f32_shape = ShapeUtil::MakeShape(F32, {});
+  const Shape s32_shape = ShapeUtil::MakeShape(S32, {});
+
+  auto chain1 = MakeNestedComputationChain(f32_shape, kDepth);
+  auto chain2 = MakeNestedComputationChain(f32_shape, kDepth);
+  auto chain3 = MakeNestedComputationChain(s32_shape, kDepth);
+
+  EXPECT_TRUE(chain1.back()->Equal(*chain2.back(), true));
+  EXPECT_FALSE(chain1.back()->Equal(*chain3.back(), true));
+}
+
+TEST_F(HLOComputationTest, MakeInstructionPostOrderFromVisitsOnlyAncestors) {
+  constexpr absl::string_view kHlo = R"(
+HloModule m
+
+ENTRY entry {
+  p0 = f32[4] parameter(0)
+  p1 = f32[4] parameter(1)
+  a = f32[4] add(p0, p1)
+  n = f32[4] negate(p1)
+  ROOT t = (f32[4], f32[4]) tuple(a, n)
+}
+)";
+  ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
+                       ParseAndReturnVerifiedModule(kHlo));
+  HloComputation* entry = module->entry_computation();
+  HloInstruction* p0 = entry->parameter_instruction(0);
+  HloInstruction* p1 = entry->parameter_instruction(1);
+  HloInstruction* a = entry->GetInstructionWithName("a");
+
+  EXPECT_THAT(entry->MakeInstructionPostOrderFrom(*a),
+              ::testing::ElementsAre(p0, p1, a));
+}
+
+TEST_F(HLOComputationTest, CloneRewiresMultiOperandInstructions) {
+  constexpr absl::string_view kHlo = R"(
+HloModule m
+
+ENTRY entry {
+  p0 = f32[4] parameter(0)
+  p1 = f32[4] parameter(1)
+  p2 = f32[4] parameter(2)
+  t0 = (f32[4], f32[4], f32[4]) tuple(p0, p1, p2)
+  t1 = (f32[4], f32[4], f32[4]) tuple(p2, p0, p1)
+  gte = f32[4] get-tuple-element(t1), index=0
+  ROOT out = ((f32[4], f32[4], f32[4]), (f32[4], f32[4], f32[4]), f32[4]) tuple(t0, t1, gte)
+}
+)";
+  ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
+                       ParseAndReturnVerifiedModule(kHlo));
+  HloComputation* entry = module->entry_computation();
+  std::unique_ptr<HloComputation> cloned = entry->Clone();
+  const HloInstruction* cloned_p0 = cloned->parameter_instruction(0);
+  const HloInstruction* cloned_p1 = cloned->parameter_instruction(1);
+  const HloInstruction* cloned_p2 = cloned->parameter_instruction(2);
+  const HloInstruction* cloned_root = cloned->root_instruction();
+  ASSERT_EQ(cloned_root->operand_count(), 3);
+  const HloInstruction* cloned_t0 = cloned_root->operand(0);
+  const HloInstruction* cloned_t1 = cloned_root->operand(1);
+  const HloInstruction* cloned_gte = cloned_root->operand(2);
+  EXPECT_THAT(cloned_t0->operands(),
+              ::testing::ElementsAre(cloned_p0, cloned_p1, cloned_p2));
+  EXPECT_THAT(cloned_t1->operands(),
+              ::testing::ElementsAre(cloned_p2, cloned_p0, cloned_p1));
+  EXPECT_THAT(cloned_gte->operands(), ::testing::ElementsAre(cloned_t1));
+}
+
+TEST_F(HLOComputationTest,
+       ToProtoSerializesAllComputationsInstructionsAndOperands) {
+  constexpr absl::string_view kHlo = R"(
+HloModule m
+
+sub {
+  sp0 = f32[4] parameter(0)
+  ROOT sneg = f32[4] negate(sp0)
+}
+
+ENTRY entry {
+  p0 = f32[4] parameter(0)
+  p1 = f32[4] parameter(1)
+  called = f32[4] call(p0), to_apply=sub
+  ROOT t = (f32[4], f32[4], f32[4]) tuple(p0, p1, called)
+}
+)";
+  ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
+                       ParseAndReturnVerifiedModule(kHlo));
+  HloComputation* entry = module->entry_computation();
+  const HloInstruction* p0 = entry->parameter_instruction(0);
+  const HloInstruction* p1 = entry->parameter_instruction(1);
+  const HloInstruction* called = entry->GetInstructionWithName("called");
+  const HloInstruction* t = entry->root_instruction();
+
+  HloModuleProto module_proto = module->ToProto();
+  ASSERT_EQ(module_proto.computations_size(), module->computation_count());
+  const HloComputationProto& entry_proto =
+      module_proto.computations(module_proto.computations_size() - 1);
+  EXPECT_EQ(entry_proto.id(), entry->unique_id());
+  ASSERT_EQ(entry_proto.instructions_size(), entry->instruction_count());
+  const HloInstructionProto& root_proto =
+      entry_proto.instructions(entry_proto.instructions_size() - 1);
+  EXPECT_EQ(root_proto.id(), t->unique_id());
+  EXPECT_THAT(root_proto.operand_ids(),
+              ::testing::ElementsAre(p0->unique_id(), p1->unique_id(),
+                                     called->unique_id()));
+
+  HloInstructionProto inst_proto;
+  inst_proto.add_operand_ids(999999);
+  t->ToProto(&inst_proto);
+  EXPECT_THAT(inst_proto.operand_ids(),
+              ::testing::ElementsAre(999999, p0->unique_id(), p1->unique_id(),
+                                     called->unique_id()));
+}
+
+TEST_F(HLOComputationTest, IsRestrictedAsyncComputation) {
+  constexpr absl::string_view kHlo = R"(
+HloModule m
+
+main_thread_comp {
+  main_param = f32[4] parameter(0)
+  ROOT main_neg = f32[4] negate(main_param)
+}
+
+barrier_comp {
+  barrier_param = (f32[4]) parameter(0)
+  barrier_gte = f32[4] get-tuple-element(barrier_param), index=0
+  ROOT barrier_tuple = (f32[4]) tuple(barrier_gte)
+}
+
+parallel_thread_comp {
+  parallel_param = f32[4] parameter(0)
+  ROOT parallel_neg = f32[4] negate(parallel_param)
+}, execution_thread="parallel"
+
+collectives_group_comp {
+  group_param = f32[4] parameter(0)
+  ROOT group_neg = f32[4] negate(group_param)
+}
+
+ENTRY non_async_comp {
+  p0 = f32[4] parameter(0)
+  main_start = ((f32[4]), f32[4], s32[]) async-start(p0), calls=main_thread_comp
+  main_done = f32[4] async-done(main_start)
+  
+  barrier_in = (f32[4]) tuple(main_done)
+  barrier_start = (((f32[4])), (f32[4]), s32[]) async-start(barrier_in), calls=barrier_comp
+  barrier_done = (f32[4]) async-done(barrier_start)
+  
+  barrier_out = f32[4] get-tuple-element(barrier_done), index=0
+  parallel_start = ((f32[4]), f32[4], s32[]) async-start(barrier_out), calls=parallel_thread_comp, async_execution_thread="parallel"
+  parallel_done = f32[4] async-done(parallel_start)
+  
+  group_start = ((f32[4]), f32[4], s32[]) async-start(parallel_done), calls=collectives_group_comp, frontend_attributes={_collectives_group=""}
+  ROOT group_done = f32[4] async-done(group_start)
+}
+)";
+  ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
+                       ParseAndReturnVerifiedModule(kHlo));
+
+  // Sync computations are not restricted.
+  EXPECT_FALSE(module->GetComputationWithName("non_async_comp")
+                   ->IsRestrictedAsyncComputation());
+
+  // Main thread async computations are restricted.
+  EXPECT_TRUE(module->GetComputationWithName("main_thread_comp")
+                  ->IsRestrictedAsyncComputation());
+
+  // Async barriers are restricted.
+  EXPECT_TRUE(module->GetComputationWithName("barrier_comp")
+                  ->IsRestrictedAsyncComputation());
+
+  // Non-main thread async computations are not restricted.
+  EXPECT_FALSE(module->GetComputationWithName("parallel_thread_comp")
+                   ->IsRestrictedAsyncComputation());
+
+  // Collective group computations are not restricted.
+  EXPECT_FALSE(module->GetComputationWithName("collectives_group_comp")
+                   ->IsRestrictedAsyncComputation());
+}
+
+std::unique_ptr<HloComputation> MakeAddChainComputation(
+    int num_instructions, absl::string_view name = "add_chain") {
+  const Shape shape = ShapeUtil::MakeShape(F32, {4});
+  HloComputation::Builder builder(name);
+  HloInstruction* p0 =
+      builder.AddInstruction(HloInstruction::CreateParameter(0, shape, "p0"));
+  HloInstruction* prev = p0;
+  for (int i = 1; i < num_instructions; ++i) {
+    prev = builder.AddInstruction(
+        HloInstruction::CreateBinary(shape, HloOpcode::kAdd, prev, p0));
+  }
+  return builder.Build(prev);
+}
+
+void BM_MakeInstructionPostOrderFrom(::testing::benchmark::State& state) {
+  std::unique_ptr<HloComputation> comp =
+      MakeAddChainComputation(state.range(0), "bm_postorder_from");
+  HloInstruction* root = comp->root_instruction();
+  for (auto s : state) {
+    std::vector<HloInstruction*> post_order =
+        comp->MakeInstructionPostOrderFrom(*root);
+    tsl::testing::DoNotOptimize(post_order);
+  }
+}
+// NOLINTNEXTLINE(misc-include-cleaner)
+BENCHMARK(BM_MakeInstructionPostOrderFrom)->Arg(16)->Arg(1024);
+
+void BM_CloneComputation(::testing::benchmark::State& state) {
+  std::unique_ptr<HloComputation> comp =
+      MakeAddChainComputation(state.range(0), "bm_clone");
+  for (auto s : state) {
+    std::unique_ptr<HloComputation> cloned = comp->Clone();
+    tsl::testing::DoNotOptimize(cloned);
+  }
+}
+// NOLINTNEXTLINE(misc-include-cleaner)
+BENCHMARK(BM_CloneComputation)->Arg(16)->Arg(1024);
+
+void BM_ModuleToProto(::testing::benchmark::State& state) {
+  HloModule module("bm_to_proto", HloModuleConfig());
+  module.AddEntryComputation(MakeAddChainComputation(state.range(0), "entry"));
+  for (auto s : state) {
+    HloModuleProto proto = module.ToProto();
+    tsl::testing::DoNotOptimize(proto);
+  }
+}
+// NOLINTNEXTLINE(misc-include-cleaner)
+BENCHMARK(BM_ModuleToProto)->Arg(16)->Arg(1024);
+
+void BM_Defuse(::testing::benchmark::State& state) {
+  const Shape shape = ShapeUtil::MakeShape(F32, {4});
+  std::unique_ptr<HloComputation> fused_template =
+      MakeAddChainComputation(state.range(0), "fused_template");
+
+  constexpr int kBatchSize = 16;
+  while (state.KeepRunningBatch(kBatchSize)) {
+    state.PauseTiming();
+    auto module = std::make_unique<HloModule>("bm_defuse", HloModuleConfig());
+    HloComputation::Builder entry_builder("entry");
+    HloInstruction* p0 = entry_builder.AddInstruction(
+        HloInstruction::CreateParameter(0, shape, "p0"));
+    std::vector<HloInstruction*> fusions;
+    fusions.reserve(kBatchSize);
+    HloInstruction* root = p0;
+    for (int b = 0; b < kBatchSize; ++b) {
+      HloComputation* fused_comp =
+          module->AddEmbeddedComputation(fused_template->Clone());
+      HloInstruction* fusion =
+          entry_builder.AddInstruction(HloInstruction::CreateFusion(
+              shape, HloInstruction::FusionKind::kLoop, {p0}, fused_comp));
+      fusions.push_back(fusion);
+      root = entry_builder.AddInstruction(
+          HloInstruction::CreateUnary(shape, HloOpcode::kNegate, fusion));
+    }
+    module->AddEntryComputation(entry_builder.Build(root));
+    state.ResumeTiming();
+
+    for (HloInstruction* fusion : fusions) {
+      CHECK_OK(fusion->Defuse());
+    }
+
+    state.PauseTiming();
+    module.reset();
+    state.ResumeTiming();
+  }
+}
+// NOLINTNEXTLINE(misc-include-cleaner)
+BENCHMARK(BM_Defuse)->Arg(16)->Arg(1024);
+
+void BM_ReplaceAllUsesWithDifferentShape(::testing::benchmark::State& state) {
+  const int num_users = state.range(0);
+  const Shape shape0 = ShapeUtil::MakeShape(F32, {4});
+  const Shape shape1 = ShapeUtil::MakeShape(F32, {2, 2});
+  HloComputation::Builder builder("bm_replace_uses");
+  HloInstruction* p0 =
+      builder.AddInstruction(HloInstruction::CreateParameter(0, shape0, "p0"));
+  HloInstruction* p1 =
+      builder.AddInstruction(HloInstruction::CreateParameter(1, shape1, "p1"));
+  std::vector<HloInstruction*> users;
+  users.reserve(num_users);
+  for (int i = 0; i < num_users; ++i) {
+    users.push_back(builder.AddInstruction(
+        HloInstruction::CreateUnary(shape0, HloOpcode::kNegate, p0)));
+  }
+  HloInstruction* root =
+      builder.AddInstruction(HloInstruction::CreateTuple(users));
+  std::unique_ptr<HloComputation> comp = builder.Build(root);
+
+  for (auto s : state) {
+    CHECK_OK(p0->ReplaceAllUsesWithDifferentShape(p1));
+    std::swap(p0, p1);
+  }
+}
+// NOLINTNEXTLINE(misc-include-cleaner)
+BENCHMARK(BM_ReplaceAllUsesWithDifferentShape)->Arg(4)->Arg(16);
+
+}  // namespace
+}  // namespace xla

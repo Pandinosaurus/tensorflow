@@ -15,13 +15,16 @@ limitations under the License.
 
 #include <Python.h>
 
+#include <string>
 #include <vector>
 
+#include "absl/log/check.h"
 #include "absl/types/span.h"
-#include "pybind11/pybind11.h"
-#include "pybind11/pytypes.h"
-#include "pybind11/stl.h"
+#include "pybind11/pybind11.h"  // from @pybind11
+#include "pybind11/pytypes.h"  // from @pybind11
+#include "pybind11/stl.h"  // from @pybind11
 #include "tensorflow/core/platform/logging.h"
+#include "tensorflow/python/lib/core/safe_pyobject_ptr.h"
 #include "tensorflow/python/util/function_parameter_canonicalizer.h"
 
 namespace py = pybind11;
@@ -54,7 +57,7 @@ PYBIND11_MODULE(_function_parameter_canonicalizer_binding_for_test, m) {
       }))
       .def("canonicalize", [](FunctionParameterCanonicalizerWrapper& self,
                               py::args args, py::kwargs kwargs) {
-        std::vector<PyObject*> result_raw(
+        std::vector<tensorflow::Safe_PyObjectPtr> result_raw(
             self.function_parameter_canonicalizer_.GetArgSize());
 
         bool is_suceeded = self.function_parameter_canonicalizer_.Canonicalize(
@@ -66,7 +69,9 @@ PYBIND11_MODULE(_function_parameter_canonicalizer_binding_for_test, m) {
         }
 
         py::list result;
-        for (PyObject* obj : result_raw) result.append(obj);
+        for (const auto& obj : result_raw) {
+          result.append(py::handle(obj.get()));
+        }
         return result;
       });
 }

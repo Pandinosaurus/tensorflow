@@ -13,6 +13,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include <cstdint>
+#include <limits>
+
 #include "tensorflow/core/framework/fake_input.h"
 #include "tensorflow/core/framework/node_def_builder.h"
 #include "tensorflow/core/framework/shape_inference.h"
@@ -37,7 +40,7 @@ class RaggedTensorToSparseTest : public ::tensorflow::OpsTestBase {
   // populates the `splits` input with the given values.
   template <typename T>
   void BuildRaggedTensorToSparseGraph(
-      const std::vector<std::vector<int64>>& rt_nested_splits,
+      const std::vector<std::vector<int64_t>>& rt_nested_splits,
       const TensorShape& rt_dense_values_shape,
       const std::vector<T>& rt_dense_values) {
     const auto& dtype = DataTypeToEnum<T>::v();
@@ -86,6 +89,47 @@ TEST_F(RaggedTensorToSparseTest, EmptyRows) {
                                test::AsTensor<int>({1, 2, 3, 4, 5, 6}));
   test::ExpectTensorEqual<int64_t>(*GetOutput(kSparseDenseShapeOutput),
                                    test::AsTensor<int64_t>({5, 4}));
+}
+
+TEST_F(RaggedTensorToSparseTest, EmptyValuesRank1) {
+  BuildRaggedTensorToSparseGraph<int>({{0, 0, 0}}, TensorShape({0}), {});
+  TF_ASSERT_OK(RunOpKernel());
+  test::ExpectTensorEqual<int64_t>(
+      *GetOutput(kSparseIndicesOutput),
+      test::AsTensor<int64_t>({}, TensorShape({0, 2})));
+  test::ExpectTensorEqual<int>(*GetOutput(kSparseValuesOutput),
+                               test::AsTensor<int>({}));
+  test::ExpectTensorEqual<int64_t>(*GetOutput(kSparseDenseShapeOutput),
+                                   test::AsTensor<int64_t>({2, 0}));
+}
+
+TEST_F(RaggedTensorToSparseTest, EmptyValuesWithInnerZeroDimension) {
+  BuildRaggedTensorToSparseGraph<int>({{0, 2}}, TensorShape({2, 0}), {});
+  TF_ASSERT_OK(RunOpKernel());
+  test::ExpectTensorEqual<int64_t>(
+      *GetOutput(kSparseIndicesOutput),
+      test::AsTensor<int64_t>({}, TensorShape({0, 3})));
+  test::ExpectTensorEqual<int>(*GetOutput(kSparseValuesOutput),
+                               test::AsTensor<int>({}));
+  test::ExpectTensorEqual<int64_t>(*GetOutput(kSparseDenseShapeOutput),
+                                   test::AsTensor<int64_t>({1, 2, 0}));
+}
+
+TEST_F(RaggedTensorToSparseTest, EmptyValuesWithLargeDenseSuffix) {
+  constexpr int64_t kSuffixSize = std::numeric_limits<int32_t>::max();
+  BuildRaggedTensorToSparseGraph<int>(
+      {{0}},                          // splits
+      TensorShape({0, kSuffixSize}),  // values.shape
+      {});                            // values
+  TF_ASSERT_OK(RunOpKernel());
+  test::ExpectTensorEqual<int64_t>(
+      *GetOutput(kSparseIndicesOutput),
+      test::AsTensor<int64_t>({}, TensorShape({0, 3})));
+  test::ExpectTensorEqual<int>(*GetOutput(kSparseValuesOutput),
+                               test::AsTensor<int>({}));
+  test::ExpectTensorEqual<int64_t>(
+      *GetOutput(kSparseDenseShapeOutput),
+      test::AsTensor<int64_t>({0, 0, kSuffixSize}));
 }
 
 TEST_F(RaggedTensorToSparseTest, OneSplits_Values2D) {
@@ -182,7 +226,7 @@ TEST_F(RaggedTensorToSparseTest, NoSplits) {
                    .Attr("T", dtype)
                    .Finalize(node_def()));
   EXPECT_TRUE(absl::StartsWith(
-      InitOp().error_message(),
+      InitOp().message(),
       "Value for attr 'RAGGED_RANK' of 0 must be at least minimum 1"));
 }
 
@@ -190,8 +234,7 @@ TEST_F(RaggedTensorToSparseTest, InvalidArg_BadSplitStart) {
   BuildRaggedTensorToSparseGraph<int>({{5, 7, 10}},      // splits
                                       TensorShape({0}),  // values.shape
                                       {});               // values
-  EXPECT_EQ("First value of ragged splits must be 0.",
-            RunOpKernel().error_message());
+  EXPECT_EQ("First value of ragged splits must be 0.", RunOpKernel().message());
 }
 
 TEST_F(RaggedTensorToSparseTest, InvalidArg_BadSplitLengths1) {
@@ -201,7 +244,7 @@ TEST_F(RaggedTensorToSparseTest, InvalidArg_BadSplitLengths1) {
   EXPECT_EQ(
       "Final value of ragged splits must match the length "
       "the corresponding ragged values.",
-      RunOpKernel().error_message());
+      RunOpKernel().message());
 }
 
 TEST_F(RaggedTensorToSparseTest, InvalidArg_BadSplitLengths2) {
@@ -211,14 +254,14 @@ TEST_F(RaggedTensorToSparseTest, InvalidArg_BadSplitLengths2) {
   EXPECT_EQ(
       "Final value of ragged splits must match the length "
       "the corresponding ragged values.",
-      RunOpKernel().error_message());
+      RunOpKernel().message());
 }
 
 TEST_F(RaggedTensorToSparseTest, InvalidArg_EmptySplits) {
   BuildRaggedTensorToSparseGraph<int>({{}},              // splits
                                       TensorShape({0}),  // values.shape
                                       {});               // values
-  EXPECT_EQ("ragged splits may not be empty.", RunOpKernel().error_message());
+  EXPECT_EQ("ragged splits may not be empty.", RunOpKernel().message());
 }
 
 }  // namespace

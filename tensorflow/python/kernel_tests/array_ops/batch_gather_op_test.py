@@ -14,10 +14,6 @@
 # ==============================================================================
 """Tests for tensorflow.ops.tf.gather."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 from absl.testing import parameterized
 import numpy as np
 
@@ -111,6 +107,13 @@ class GatherTest(test.TestCase, parameterized.TestCase):
       params = [[0, 1, 2], [3, 4, 5]]
       with self.assertRaisesOpError(r"indices\[0\] = 7 is not in \[0, 2\)"):
         self.evaluate(array_ops.batch_gather(params, [7]))
+
+  @test_util.disable_xla("Cannot force cpu placement for xla_gpu test")
+  def testBadBatchedIndicesCPU(self):
+    with ops.device_v2("cpu:0"):
+      params = [[0, 1, 2], [3, 4, 5]]
+      with self.assertRaisesOpError(r"indices\[0,0\] = 3 is not in \[0, 3\)"):
+        self.evaluate(array_ops.batch_gather(params, [[3], [0]]))
 
   def testEmptySlices(self):
     with self.session():

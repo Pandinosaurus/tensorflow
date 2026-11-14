@@ -14,12 +14,15 @@ limitations under the License.
 ==============================================================================*/
 #include "tensorflow/core/tfrt/run_handler_thread_pool/run_handler_concurrent_work_queue.h"
 
-#include <cstdio>
 #include <memory>
+#include <utility>
 
+#include <gmock/gmock.h>
 #include <gtest/gtest.h>
-#include "absl/strings/str_cat.h"
-#include "absl/time/time.h"
+#include "absl/status/status.h"
+#include "absl/status/status_matchers.h"
+#include "absl/strings/match.h"
+#include "xla/tsl/protobuf/error_codes.pb.h"
 #include "tensorflow/core/platform/errors.h"
 #include "tensorflow/core/platform/mutex.h"
 #include "tensorflow/core/platform/status_matchers.h"
@@ -46,7 +49,7 @@ class RunHandlerThreadWorkQueueTest : public ::testing::Test {
     options.num_complementary_threads = kNumComplementaryThreads;
     options.num_main_threads = kNumMainThreads;
     options.init_timeout_ms = 100;
-    queue_ = std::make_unique<RunHandlerThreadWorkQueue>(options);
+    pool_ = std::make_unique<RunHandlerThreadWorkQueue>(options);
 
     // decoded_diagnostic_handler does nothing.
     auto decoded_diagnostic_handler = [&](const DecodedDiagnostic& diag) {};
@@ -59,30 +62,31 @@ class RunHandlerThreadWorkQueueTest : public ::testing::Test {
                                           std::move(work_queue));
     RequestContextBuilder req_ctx_builder{host_.get(),
                                           /*resource_context=*/nullptr};
-    TF_CHECK_OK(
-        queue_->InitializeRequest(&req_ctx_builder, &intra_op_threadpool_));
+    auto queue = pool_->InitializeRequest(/*request_id=*/100, /*priority=*/0);
+    TF_CHECK_OK(queue.status());
+    queue_ = std::move(*queue);
     auto req_ctx = std::move(req_ctx_builder).build();
     ASSERT_TRUE(static_cast<bool>(req_ctx));
     exec_ctx_ = std::make_unique<ExecutionContext>(std::move(*req_ctx));
   }
 
-  std::unique_ptr<RunHandlerThreadWorkQueue> queue_;
+  std::unique_ptr<RunHandlerThreadWorkQueue> pool_;
+  std::unique_ptr<tensorflow::tfrt_stub::WorkQueueInterface> queue_;
   std::unique_ptr<HostContext> host_;
   std::unique_ptr<ExecutionContext> exec_ctx_;
-  tensorflow::thread::ThreadPoolInterface* intra_op_threadpool_ = nullptr;
 };
 
 TEST_F(RunHandlerThreadWorkQueueTest, RunningBlockingTask) {
   int n = 0;
   tensorflow::mutex m;
   for (int i = 0; i < 10; ++i) {
-    queue_->AddBlockingTask(*exec_ctx_, TaskFunction([&n, &m] {
-      tensorflow::mutex_lock lock(m);
-      ++n;
-    }),
-                            true);
+    ASSERT_FALSE(pool_->AddBlockingTask(TaskFunction([&n, &m] {
+                                          tensorflow::mutex_lock lock(m);
+                                          ++n;
+                                        }),
+                                        true));
   }
-  queue_->Quiesce();
+  pool_->Quiesce();
   EXPECT_EQ(n, 10);
 }
 
@@ -90,13 +94,13 @@ TEST_F(RunHandlerThreadWorkQueueTest, RunningBlockingTaskNoExecCtx) {
   int n = 0;
   tensorflow::mutex m;
   for (int i = 0; i < 10; ++i) {
-    queue_->AddBlockingTask(TaskFunction([&n, &m] {
-                              tensorflow::mutex_lock lock(m);
-                              ++n;
-                            }),
-                            true);
+    pool_->AddBlockingTask(TaskFunction([&n, &m] {
+                             tensorflow::mutex_lock lock(m);
+                             ++n;
+                           }),
+                           true);
   }
-  queue_->Quiesce();
+  pool_->Quiesce();
   EXPECT_EQ(n, 10);
 }
 
@@ -104,30 +108,17 @@ TEST_F(RunHandlerThreadWorkQueueTest, RunningBlockingTaskNoQueueing) {
   int n = 0;
   tensorflow::mutex m;
   for (int i = 0; i < 10; ++i) {
-    queue_->AddBlockingTask(*exec_ctx_, TaskFunction([&n, &m] {
-      tensorflow::mutex_lock lock(m);
-      ++n;
-    }),
-                            false);
+    ASSERT_FALSE(pool_->AddBlockingTask(TaskFunction([&n, &m] {
+                                          tensorflow::mutex_lock lock(m);
+                                          ++n;
+                                        }),
+                                        false));
   }
-  queue_->Quiesce();
+  pool_->Quiesce();
   EXPECT_EQ(n, 10);
 }
 
 TEST_F(RunHandlerThreadWorkQueueTest, RunningNonBlockingTask) {
-  int n = 0;
-  tensorflow::mutex m;
-  for (int i = 0; i < 10; ++i) {
-    queue_->AddTask(*exec_ctx_, TaskFunction([&n, &m] {
-      tensorflow::mutex_lock lock(m);
-      ++n;
-    }));
-  }
-  queue_->Quiesce();
-  EXPECT_EQ(n, 10);
-}
-
-TEST_F(RunHandlerThreadWorkQueueTest, RunningNonBlockingTaskWithNoExecCtx) {
   int n = 0;
   tensorflow::mutex m;
   for (int i = 0; i < 10; ++i) {
@@ -136,7 +127,20 @@ TEST_F(RunHandlerThreadWorkQueueTest, RunningNonBlockingTaskWithNoExecCtx) {
       ++n;
     }));
   }
-  queue_->Quiesce();
+  pool_->Quiesce();
+  EXPECT_EQ(n, 10);
+}
+
+TEST_F(RunHandlerThreadWorkQueueTest, RunningNonBlockingTaskWithNoExecCtx) {
+  int n = 0;
+  tensorflow::mutex m;
+  for (int i = 0; i < 10; ++i) {
+    pool_->AddTask(TaskFunction([&n, &m] {
+      tensorflow::mutex_lock lock(m);
+      ++n;
+    }));
+  }
+  pool_->Quiesce();
   EXPECT_EQ(n, 10);
 }
 
@@ -144,34 +148,31 @@ TEST_F(RunHandlerThreadWorkQueueTest, RunningMixedTask) {
   int n = 0;
   tensorflow::mutex m;
   for (int i = 0; i < 10; ++i) {
-    queue_->AddTask(*exec_ctx_, TaskFunction([&n, &m] {
+    queue_->AddTask(TaskFunction([&n, &m] {
       tensorflow::mutex_lock lock(m);
       ++n;
     }));
-    queue_->AddBlockingTask(*exec_ctx_, TaskFunction([&n, &m] {
-      tensorflow::mutex_lock lock(m);
-      ++n;
-    }),
-                            true);
+    ASSERT_FALSE(pool_->AddBlockingTask(TaskFunction([&n, &m] {
+                                          tensorflow::mutex_lock lock(m);
+                                          ++n;
+                                        }),
+                                        true));
   }
-  queue_->Quiesce();
+  pool_->Quiesce();
   EXPECT_EQ(n, 20);
 }
 
 TEST_F(RunHandlerThreadWorkQueueTest, NameReturnsValidString) {
-  EXPECT_EQ(queue_->name(),
-            absl::StrCat("RunHandlerThreadWorkQueue C++ work queue (",
-                         kNumMainThreads, " main threads, ",
-                         kNumComplementaryThreads, " complementary threads)"));
+  EXPECT_TRUE(absl::StrContains(pool_->name(), "RunHandlerThreadWorkQueue"));
 }
 
 TEST_F(RunHandlerThreadWorkQueueTest, GetParallelismLevelOk) {
-  EXPECT_EQ(queue_->GetParallelismLevel(),
+  EXPECT_EQ(pool_->GetParallelismLevel(),
             kNumComplementaryThreads + kNumMainThreads);
 }
 
 TEST_F(RunHandlerThreadWorkQueueTest, IsWorkerThreadOk) {
-  EXPECT_TRUE(queue_->IsInWorkerThread());
+  EXPECT_TRUE(pool_->IsInWorkerThread());
 }
 
 TEST_F(RunHandlerThreadWorkQueueTest, NoHandlerReturnsError) {
@@ -181,12 +182,11 @@ TEST_F(RunHandlerThreadWorkQueueTest, NoHandlerReturnsError) {
   options.init_timeout_ms = 1;
   options.max_concurrent_handler = 0;
   auto queue = std::make_unique<RunHandlerThreadWorkQueue>(options);
-  tensorflow::thread::ThreadPoolInterface* interface;
   tfrt::RequestContextBuilder ctx_builder(nullptr, nullptr);
   EXPECT_THAT(
-      queue->InitializeRequest(&ctx_builder, &interface),
-      tensorflow::testing::StatusIs(
-          tensorflow::error::INTERNAL,
+      queue->InitializeRequest(/*request_id=*/100, /*priority=*/0),
+      absl_testing::StatusIs(
+          absl::StatusCode::kDeadlineExceeded,
           "Could not obtain RunHandler for request after waiting for 1 ms."));
 }
 

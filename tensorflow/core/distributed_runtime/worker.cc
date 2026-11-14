@@ -15,21 +15,28 @@ limitations under the License.
 
 #include "tensorflow/core/distributed_runtime/worker.h"
 
+#include <utility>
+
+#include "xla/tsl/protobuf/distributed_runtime_payloads.pb.h"
 #include "tensorflow/core/common_runtime/collective_executor_mgr.h"
 #include "tensorflow/core/common_runtime/device_mgr.h"
 #include "tensorflow/core/common_runtime/process_util.h"
 #include "tensorflow/core/common_runtime/scoped_allocator_mgr.h"
 #include "tensorflow/core/common_runtime/step_stats_collector.h"
+#include "tensorflow/core/distributed_runtime/error_payloads.h"
 #include "tensorflow/core/distributed_runtime/rendezvous_mgr_interface.h"
 #include "tensorflow/core/distributed_runtime/tensor_coding.h"
 #include "tensorflow/core/distributed_runtime/worker_session.h"
 #include "tensorflow/core/framework/collective.h"
-#include "tensorflow/core/platform/tracing.h"
 #include "tensorflow/core/profiler/lib/device_profiler_session.h"
+#include "tsl/platform/tracing.h"
 
 namespace tensorflow {
 
-Worker::Worker(WorkerEnv* env) : env_(env), recent_request_ids_(100000) {
+Worker::Worker(WorkerEnv* env)
+    : env_(env), recent_request_ids_(100000, env_->experimental_num_shards) {
+  DCHECK_GT(env_->experimental_num_shards, 0);
+
   // Enable log history collection in StatusGroup so that recent warning and
   // error log messages will be attached to the root error status to be
   // forwarded to the master.
@@ -46,13 +53,13 @@ void Worker::GetStatusAsync(CallOptions* opts, const GetStatusRequest* request,
   for (auto& d : devices) {
     response->add_device_attributes()->Swap(&d);
   }
-  done(Status::OK());
+  done(absl::OkStatus());
 }
 
 void Worker::CreateWorkerSessionAsync(const CreateWorkerSessionRequest* request,
                                       CreateWorkerSessionResponse* response,
                                       StatusCallback done) {
-  Status s = env_->session_mgr->CreateSession(
+  absl::Status s = env_->session_mgr->CreateSession(
       request->session_handle(), request->server_def(),
       request->cluster_device_attributes(), request->isolate_session_state(),
       request->master_task(), request->master_incarnation());
@@ -63,7 +70,7 @@ void Worker::DeleteWorkerSessionAsync(CallOptions* opts,
                                       const DeleteWorkerSessionRequest* request,
                                       DeleteWorkerSessionResponse* response,
                                       StatusCallback done) {
-  Status s = env_->session_mgr->DeleteSession(request->session_handle());
+  absl::Status s = env_->session_mgr->DeleteSession(request->session_handle());
   done(s);
 }
 
@@ -71,7 +78,7 @@ void Worker::RegisterGraphAsync(const RegisterGraphRequest* request,
                                 RegisterGraphResponse* response,
                                 StatusCallback done) {
   std::shared_ptr<WorkerSession> session;
-  Status s;
+  absl::Status s;
   if (request->create_worker_session_called()) {
     s = env_->session_mgr->WorkerSessionForSession(request->session_handle(),
                                                    &session);
@@ -80,9 +87,9 @@ void Worker::RegisterGraphAsync(const RegisterGraphRequest* request,
   }
   if (s.ok()) {
     s = session->graph_mgr()->Register(
-        request->session_handle(), request->graph_def(), session.get(),
+        request->session_handle(), request->graph_def(),
         request->graph_options(), request->debug_options(),
-        request->config_proto(), request->collective_graph_key(),
+        request->config_proto(), request->collective_graph_key(), session.get(),
         session->cluster_flr(), response->mutable_graph_handle());
   }
   done(s);
@@ -92,7 +99,7 @@ void Worker::DeregisterGraphAsync(const DeregisterGraphRequest* request,
                                   DeregisterGraphResponse* response,
                                   StatusCallback done) {
   std::shared_ptr<WorkerSession> session;
-  Status s;
+  absl::Status s;
   if (request->create_worker_session_called()) {
     s = env_->session_mgr->WorkerSessionForSession(request->session_handle(),
                                                    &session);
@@ -107,20 +114,23 @@ void Worker::DeregisterGraphAsync(const DeregisterGraphRequest* request,
 }
 
 void Worker::AbortStep(int64_t step_id) {
-  Rendezvous* rendez = env_->rendezvous_mgr->Find(step_id);
-  SchedNonBlockingClosureAfter(1000000, [rendez, step_id]() {
+  tsl::core::RefCountPtr<RemoteRendezvous> rendez =
+      env_->rendezvous_mgr->Find(step_id);
+  // Do not abort if it's a context global instance for eager op-by-op execution
+  if (rendez->IsRemoteEagerContextDefault()) return;
+  SchedNonBlockingClosureAfter(1000000, [rendez = std::move(rendez),
+                                         step_id]() {
     // Delay a bit before aborting the step. This way, the root
     // cause may return first back to the client instead of this
     // cancellation generated abort error.
-    rendez->StartAbort(errors::Aborted("Step ", step_id,
-                                       " cancelled.  Cancelling rendezvous."));
-    rendez->Unref();
+    rendez->StartAbort(absl::AbortedError(
+        absl::StrCat("Step ", step_id, " cancelled.  Cancelling rendezvous.")));
   });
 }
 
-Status Worker::PrepareRunGraph(RunGraphRequestWrapper* req,
-                               GraphMgr::NamedTensors* in,
-                               GraphMgr::NamedTensors* out) {
+absl::Status Worker::PrepareRunGraph(RunGraphRequestWrapper* req,
+                                     GraphMgr::NamedTensors* in,
+                                     GraphMgr::NamedTensors* out) {
   static Tensor empty_tensor(DT_FLOAT);
   if (req->num_sends() > 0) {
     Tensor val;
@@ -132,16 +142,16 @@ Status Worker::PrepareRunGraph(RunGraphRequestWrapper* req,
   for (size_t i = 0; i < req->num_recvs(); ++i) {
     out->insert({req->recv_key(i), empty_tensor});
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 void Worker::RunGraphAsync(CallOptions* opts, RunGraphRequestWrapper* request,
                            MutableRunGraphResponseWrapper* response,
                            StatusCallback done) {
   if (request->store_errors_in_response_body()) {
-    done = [response, done](const Status& status) {
+    done = [response, done](const absl::Status& status) {
       response->set_status(status);
-      done(Status::OK());
+      done(absl::OkStatus());
     };
   }
   if (request->is_partial()) {
@@ -164,8 +174,8 @@ void Worker::DoRunGraph(CallOptions* opts, RunGraphRequestWrapper* request,
                         StatusCallback done) {
   const int64_t step_id = request->step_id();
   TRACEPRINTF("RunGraph: %lld", step_id);
-  Status s = recent_request_ids_.TrackUnique(request->request_id(),
-                                             "RunGraph (Worker)", request);
+  absl::Status s = recent_request_ids_.TrackUnique(
+      request->request_id(), "RunGraph (Worker)", request);
   if (!s.ok()) {
     done(s);
     return;
@@ -217,15 +227,15 @@ void Worker::DoRunGraph(CallOptions* opts, RunGraphRequestWrapper* request,
     delete collector;
     delete device_profiler_session;
     delete out;
-    done(errors::Aborted("Call was aborted"));
+    done(absl::AbortedError("Call was aborted"));
     return;
   }
   session->graph_mgr()->ExecuteAsync(
-      request->graph_handle(), step_id, session.get(), request->exec_opts(),
-      collector, response, cm, in,
+      request->graph_handle(), step_id, request->exec_opts(), in, session.get(),
+      collector, response, cm, env_->session_mgr->GetCoordinationServiceAgent(),
       [this, step_id, response, session, cm, out, token, collector,
-       device_profiler_session, opts, done](const Status& status) {
-        Status s = status;
+       device_profiler_session, opts, done](const absl::Status& status) {
+        absl::Status s = status;
         if (s.ok()) {
           s = session->graph_mgr()->RecvOutputs(step_id, out);
         }
@@ -241,7 +251,7 @@ void Worker::DoRunGraph(CallOptions* opts, RunGraphRequestWrapper* request,
 
         if (s.ok()) {
           for (const auto& p : *out) {
-            const string& key = p.first;
+            const std::string& key = p.first;
             const Tensor& val = p.second;
             response->AddRecv(key, val);
           }
@@ -261,9 +271,9 @@ void Worker::DoPartialRunGraph(CallOptions* opts,
                                MutableRunGraphResponseWrapper* response,
                                StatusCallback done) {
   const int64_t step_id = request->step_id();
-  const string& graph_handle = request->graph_handle();
+  const std::string& graph_handle = request->graph_handle();
   TRACEPRINTF("PartialRunGraph: %lld", step_id);
-  Status s = recent_request_ids_.TrackUnique(
+  absl::Status s = recent_request_ids_.TrackUnique(
       request->request_id(), "PartialRunGraph (Worker)", request);
   if (!s.ok()) {
     done(s);
@@ -285,7 +295,7 @@ void Worker::DoPartialRunGraph(CallOptions* opts,
   GraphMgr::NamedTensors in;
   GraphMgr::NamedTensors* out = new GraphMgr::NamedTensors;
   s = PrepareRunGraph(request, &in, out);
-  auto finish = [done, out, opts](const Status& s) {
+  auto finish = [done, out, opts](const absl::Status& s) {
     opts->ClearCancelCallback();
     delete out;
     done(s);
@@ -313,9 +323,10 @@ void Worker::DoPartialRunGraph(CallOptions* opts,
     cancellation_manager_.RegisterCallback(token,
                                            [cm]() { cm->StartCancel(); });
     session->graph_mgr()->ExecuteAsync(
-        graph_handle, step_id, session.get(), request->exec_opts(),
-        nullptr /* collector */, nullptr /* response */, cm, in,
-        [this, token, step_id, session](Status s) {
+        graph_handle, step_id, request->exec_opts(), in, session.get(),
+        /*collector=*/nullptr, /*response=*/nullptr, cm,
+        env_->session_mgr->GetCoordinationServiceAgent(),
+        [this, token, step_id, session](absl::Status s) {
           cancellation_manager_.DeregisterCallback(token);
           partial_run_mgr_.ExecutorDone(step_id, s);
         });
@@ -329,11 +340,12 @@ void Worker::DoPartialRunGraph(CallOptions* opts,
   }
 
   session->graph_mgr()->RecvOutputsAsync(
-      step_id, out, [this, out, request, response, step_id, finish](Status s) {
+      step_id, out,
+      [this, out, request, response, step_id, finish](absl::Status s) {
         if (s.ok()) {
           // Construct and return the resp.
           for (const auto& p : *out) {
-            const string& key = p.first;
+            const std::string& key = p.first;
             const Tensor& val = p.second;
             response->AddRecv(key, val);
           }
@@ -354,32 +366,32 @@ void Worker::CleanupGraphAsync(const CleanupGraphRequest* request,
   if (env_->collective_executor_mgr) {
     env_->collective_executor_mgr->Cleanup(step_id);
   }
-  for (Device* d : env_->local_devices) {
+  for (Device* d : env_->device_mgr->ListDevices()) {
     ScopedAllocatorMgr* sam = d->GetScopedAllocatorMgr();
     if (sam) {
       sam->Cleanup(step_id);
     }
   }
-  done(Status::OK());
+  done(absl::OkStatus());
 }
 
 void Worker::CleanupAllAsync(const CleanupAllRequest* request,
                              CleanupAllResponse* response,
                              StatusCallback done) {
-  std::vector<string> containers;
+  std::vector<std::string> containers;
   for (const auto& c : request->container()) containers.push_back(c);
   env_->device_mgr->ClearContainers(containers);
-  done(Status::OK());
+  done(absl::OkStatus());
 }
 
 void Worker::LoggingAsync(const LoggingRequest* request,
                           LoggingResponse* response, StatusCallback done) {
-  done(errors::Unimplemented("Logging"));
+  done(absl::UnimplementedError("Logging"));
 }
 
 void Worker::TracingAsync(const TracingRequest* request,
                           TracingResponse* response, StatusCallback done) {
-  done(errors::Unimplemented("Tracing"));
+  done(absl::UnimplementedError("Tracing"));
 }
 
 void Worker::RecvBufAsync(CallOptions* opts, const RecvBufRequest* request,
@@ -388,7 +400,7 @@ void Worker::RecvBufAsync(CallOptions* opts, const RecvBufRequest* request,
   // it is not currently used for worker-to-worker communication. Use a
   // transport-specific implementation (such as `GrpcWorker::RecvBufAsync()`)
   // instead.
-  done(errors::Unimplemented("Worker::RecvBufAsync()"));
+  done(absl::UnimplementedError("Worker::RecvBufAsync()"));
 }
 
 void Worker::CompleteGroupAsync(CallOptions* opts,
@@ -396,7 +408,7 @@ void Worker::CompleteGroupAsync(CallOptions* opts,
                                 CompleteGroupResponse* response,
                                 StatusCallback done) {
   if (!request->has_device_attributes()) {
-    done(errors::Internal(
+    done(absl::InternalError(
         "CompleteGroupRequest device_attributes is not set. Make sure you're "
         "running the same version of Tensorflow on all workers."));
     return;
@@ -408,7 +420,8 @@ void Worker::CompleteGroupAsync(CallOptions* opts,
     group_params->device_type = DeviceType(request->device_type());
     env_->collective_executor_mgr->GetParamResolver()->CompleteGroupAsync(
         request->device_attributes(), group_params, &cancellation_manager_,
-        [response, group_params, done = std::move(done)](const Status& s) {
+        [response, group_params,
+         done = std::move(done)](const absl::Status& s) {
           if (s.ok()) {
             response->set_group_key(group_params->group_key);
             response->set_group_size(group_params->group_size);
@@ -426,8 +439,8 @@ void Worker::CompleteGroupAsync(CallOptions* opts,
           done(s);
         });
   } else {
-    done(
-        errors::Internal("Runtime not initialized with CollectiveExecutorMgr"));
+    done(absl::InternalError(
+        "Runtime not initialized with CollectiveExecutorMgr"));
   }
 }
 
@@ -439,8 +452,8 @@ void Worker::CompleteInstanceAsync(CallOptions* opts,
     env_->collective_executor_mgr->GetParamResolver()->CompleteInstanceAsync(
         request, response, &cancellation_manager_, done);
   } else {
-    done(
-        errors::Internal("Runtime not initialized with CollectiveExecutorMgr"));
+    done(absl::InternalError(
+        "Runtime not initialized with CollectiveExecutorMgr"));
   }
 }
 
@@ -451,31 +464,34 @@ void Worker::GetStepSequenceAsync(const GetStepSequenceRequest* request,
     env_->collective_executor_mgr->GetStepSequenceAsync(request, response,
                                                         done);
   } else {
-    done(
-        errors::Internal("Runtime not initialized with CollectiveExecutorMgr"));
+    done(absl::InternalError(
+        "Runtime not initialized with CollectiveExecutorMgr"));
   }
 }
 
 // Helper for RecvTensor. Validates "key" and returns the source
 // device in "*src_dev".
-Status Worker::PrepareRecvTensor(const Rendezvous::ParsedKey& parsed,
-                                 Device** src_dev) {
+absl::Status Worker::PrepareRecvTensor(const Rendezvous::ParsedKey& parsed,
+                                       Device** src_dev) {
   // Figures out which device the tensor is hosted on.
-  string local_name = DeviceNameUtils::LocalName(parsed.src_device);
+  std::string local_name = DeviceNameUtils::LocalName(parsed.src_device);
   TF_RETURN_IF_ERROR(env_->device_mgr->LookupDevice(local_name, src_dev));
 
   // Does the device have the right incarnation number we expect?
   if ((*src_dev)->attributes().incarnation() != parsed.src_incarnation) {
-    return errors::Aborted(
-        "RecvTensor expects a different device incarnation: ",
-        parsed.src_incarnation, " vs. ", (*src_dev)->attributes().incarnation(),
-        ". Your worker job (\"",
-        env_->session_mgr->LegacySession()->worker_name(),
-        "\") was probably restarted. Check your "
-        "worker job for the reason why it was restarted.");
+    return errors::AbortedWithPayloads(
+        strings::StrCat("RecvTensor expects a different device incarnation: ",
+                        parsed.src_incarnation, " vs. ",
+                        (*src_dev)->attributes().incarnation(),
+                        ". Your worker job (\"",
+                        env_->session_mgr->LegacySession()->worker_name(),
+                        "\") was probably restarted. Check your "
+                        "worker job for the reason why it was restarted."),
+        {{kWorkerPossiblyRestarted,
+          distributed_runtime::WorkerPossiblyRestarted().SerializeAsString()}});
   }
 
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 void Worker::RecvTensorAsync(CallOptions* opts,
@@ -485,7 +501,7 @@ void Worker::RecvTensorAsync(CallOptions* opts,
   // it is not currently used for worker-to-worker communication. Use a
   // transport-specific implementation (such as `GrpcWorker::RecvTensorAsync()`)
   // instead.
-  done(errors::Unimplemented("Worker::RecvTensorAsync()"));
+  done(absl::UnimplementedError("Worker::RecvTensorAsync()"));
 }
 
 }  // namespace tensorflow

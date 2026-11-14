@@ -1,3 +1,18 @@
+// Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+// ==============================================================================
+
 syntax = "proto3";
 
 package tensorflow;
@@ -14,6 +29,7 @@ option go_package = "github.com/tensorflow/tensorflow/tensorflow/go/core/framewo
 
 // Protocol buffer representing a tensor.
 message TensorProto {
+  // Data type of the tensor.
   DataType dtype = 1;
 
   // Shape of the tensor.  TODO(touts): sort out the 0-rank issues.
@@ -83,6 +99,10 @@ message TensorProto {
 
   // DT_UINT64
   repeated uint64 uint64_val = 17 [packed = true];
+
+  // DT_FLOAT8_*, use variable-sized set of bytes
+  // (i.e. the equivalent of repeated uint8, if such a thing existed).
+  bytes float8_val = 18;
 }
 
 // Protocol buffer representing the serialization format of DT_VARIANT tensors.

@@ -12,25 +12,42 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <memory>
+#include <new>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <gtest/gtest.h>
 #include "tensorflow/c/experimental/stream_executor/stream_executor.h"
 #include "tensorflow/c/experimental/stream_executor/stream_executor_internal.h"
 #include "tensorflow/c/experimental/stream_executor/stream_executor_test_util.h"
 #include "tensorflow/cc/client/client_session.h"
 #include "tensorflow/cc/framework/scope.h"
 #include "tensorflow/cc/ops/standard_ops.h"
+#include "xla/stream_executor/event.h"
+#include "xla/stream_executor/platform_manager.h"
+#include "xla/tsl/framework/bfc_allocator.h"
 #include "tensorflow/core/common_runtime/pluggable_device/pluggable_device_factory.h"
+#include "tensorflow/core/framework/attr_value.pb.h"
+#include "tensorflow/core/framework/function.pb.h"
 #include "tensorflow/core/framework/function_testlib.h"
+#include "tensorflow/core/framework/types.pb.h"
 #include "tensorflow/core/graph/node_builder.h"
 #include "tensorflow/core/kernels/ops_testutil.h"
-#include "tensorflow/stream_executor/event.h"
-#include "tensorflow/stream_executor/multi_platform_manager.h"
+#include "tsl/platform/mem.h"
 
 namespace tensorflow {
 namespace {
 
 class WhileOpTest : public OpsTestBase {
  protected:
-  WhileOpTest() {}
+  WhileOpTest() = default;
   void SetUp() override {
     stream_executor::test_util::PopulateDefaultPlatform(&platform_,
                                                         &platform_fns_);
@@ -46,6 +63,55 @@ class WhileOpTest : public OpsTestBase {
   SP_StreamExecutor se_;
   SP_TimerFns timer_fns_;
 };
+
+FunctionDef LessThanOrEqualToNWithCast(int64_t N) {
+  typedef FunctionDefHelper FDH;
+  const Tensor kN = test::AsScalar<int64_t>(N);
+  return FDH::Define(
+      // Name
+      "LessThanOrEqualToNWithCast",
+      // Args
+      {"x: T"},
+      // Return values
+      {"z: bool"},
+      // Attr def
+      {"T: {float, double, int32, int64}"},
+      // Nodes
+      {
+          {{"N"}, "Const", {}, {{"value", kN}, {"dtype", DT_INT64}}},
+          {{"y"}, "_HostCast", {"N"}, {{"SrcT", DT_INT64}, {"DstT", DT_INT32}}},
+          {{"x_cst"}, "_HostCast", {"x"}, {{"SrcT", "$T"}, {"DstT", DT_INT32}}},
+          {{"z"}, "LessEqual", {"x_cst", "y"}, {{"T", DT_INT32}}},
+      });
+}
+
+FunctionDef XTimesTwoWithCast() {
+  typedef FunctionDefHelper FDH;
+  const Tensor kTwo = test::AsScalar<int64_t>(2);
+  return FDH::Define(
+      // Name
+      "XTimesTwoWithCast",
+      // Args
+      {"x: T"},
+      // Return values
+      {"y: T"},
+      // Attr def
+      {"T: {float, double, int32, int64}"},
+      // Nodes
+      {
+          {{"two"}, "Const", {}, {{"value", kTwo}, {"dtype", DT_INT64}}},
+          {{"two_cst"},
+           "_HostCast",
+           {"two"},
+           {{"SrcT", DT_INT64}, {"DstT", DT_INT32}}},
+          {{"x_cst"}, "_HostCast", {"x"}, {{"SrcT", "$T"}, {"DstT", DT_INT32}}},
+          {{"y_cast"}, "Mul", {"x_cst", "two_cst"}, {{"T", DT_INT32}}},
+          {{"y"},
+           "_HostCast",
+           {"y_cast"},
+           {{"SrcT", DT_INT32}, {"DstT", "$T"}}},
+      });
+}
 
 TEST_F(WhileOpTest, WhileOpCPUBuildWithPluggableDevice) {
   const std::string platform_name = "MY_TEST";
@@ -71,7 +137,11 @@ TEST_F(WhileOpTest, WhileOpCPUBuildWithPluggableDevice) {
   };
 
   se_.host_memory_allocate = [](const SP_Device* const device, uint64_t size) {
-    return malloc(size);
+    const size_t alignment =
+        std::max(size_t{tsl::BFCAllocator::kMinAllocationSize},
+                 size_t{EIGEN_MAX_ALIGN_BYTES});
+    return tsl::port::AlignedMalloc(size,
+                                    static_cast<std::align_val_t>(alignment));
   };
   se_.host_memory_deallocate = [](const SP_Device* const device, void* mem) {
     free(mem);
@@ -80,7 +150,11 @@ TEST_F(WhileOpTest, WhileOpCPUBuildWithPluggableDevice) {
   se_.allocate = [](const SP_Device* const device, uint64_t size,
                     int64_t memory_space, SP_DeviceMemoryBase* const mem) {
     mem->struct_size = SP_DEVICE_MEMORY_BASE_STRUCT_SIZE;
-    mem->opaque = malloc(size);
+    const size_t alignment =
+        std::max(size_t{tsl::BFCAllocator::kMinAllocationSize},
+                 size_t{EIGEN_MAX_ALIGN_BYTES});
+    mem->opaque = tsl::port::AlignedMalloc(
+        size, static_cast<std::align_val_t>(alignment));
     mem->size = size;
   };
   se_.deallocate = [](const SP_Device* const device,
@@ -109,8 +183,8 @@ TEST_F(WhileOpTest, WhileOpCPUBuildWithPluggableDevice) {
           std::move(platform_fns_),
           stream_executor::test_util::DestroyPlatformFns,
           std::move(device_fns_), std::move(se_), std::move(timer_fns_)));
-  SE_CHECK_OK(stream_executor::MultiPlatformManager::RegisterPlatform(
-      std::move(cplatform)));
+  TF_CHECK_OK(
+      stream_executor::PlatformManager::RegisterPlatform(std::move(cplatform)));
 
   DeviceFactory::Register(
       platform_type, new PluggableDeviceFactory(platform_type, platform_name),
@@ -120,8 +194,8 @@ TEST_F(WhileOpTest, WhileOpCPUBuildWithPluggableDevice) {
   OpsTestBase::SetDevice(platform_type.c_str(), std::move(plug_device));
   std::unique_ptr<Graph> graph(new Graph(OpRegistry::Global()));
   Scope root = Scope::NewRootScope().ExitOnError();
-  FunctionDef x_times_two = test::function::XTimesTwo();
-  FunctionDef less_than_or_eq = test::function::LessThanOrEqualToN(8);
+  FunctionDef x_times_two = XTimesTwoWithCast();
+  FunctionDef less_than_or_eq = LessThanOrEqualToNWithCast(8);
 
   FunctionDefLibrary f_lib_proto;
   *f_lib_proto.add_function() = x_times_two;
@@ -130,10 +204,10 @@ TEST_F(WhileOpTest, WhileOpCPUBuildWithPluggableDevice) {
   TF_ASSERT_OK(root.graph()->AddFunctionLibrary(f_lib_proto));
   auto a = ops::Placeholder(root.WithOpName("A"), DT_FLOAT);
   AttrValue cond_func;
-  cond_func.mutable_func()->set_name("LessThanOrEqualToN");
+  cond_func.mutable_func()->set_name("LessThanOrEqualToNWithCast");
   (*cond_func.mutable_func()->mutable_attr())["T"].set_type(DT_FLOAT);
   AttrValue body_func;
-  body_func.mutable_func()->set_name("XTimesTwo");
+  body_func.mutable_func()->set_name("XTimesTwoWithCast");
   (*body_func.mutable_func()->mutable_attr())["T"].set_type(DT_FLOAT);
 
   std::vector<NodeBuilder::NodeOut> inputs({NodeBuilder::NodeOut(a.node())});

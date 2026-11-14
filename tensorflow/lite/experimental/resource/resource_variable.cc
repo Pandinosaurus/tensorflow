@@ -17,8 +17,11 @@ limitations under the License.
 
 #include <cstdlib>
 #include <cstring>
-#include <map>
 #include <memory>
+
+#include "tensorflow/lite/c/common.h"
+#include "tensorflow/lite/core/c/c_api_types.h"
+#include "tensorflow/lite/experimental/resource/resource_base.h"
 
 namespace tflite {
 namespace resource {
@@ -52,6 +55,7 @@ TfLiteStatus ResourceVariable::AssignFrom(const TfLiteTensor* tensor) {
 
   // Copy primitive parameters.
   memset(&tensor_, 0, sizeof(tensor_));
+  tensor_.name = "ResourceVariable";
   tensor_.allocation_type = kTfLiteDynamic;
   tensor_.type = tensor->type;
   tensor_.params = tensor->params;
@@ -73,27 +77,29 @@ TfLiteStatus ResourceVariable::AssignFrom(const TfLiteTensor* tensor) {
     tensor_.bytes = old_bytes;
   }
 
-  memcpy(tensor_.data.raw, tensor->data.raw, tensor_.bytes);
+  if (tensor->data.raw) {
+    memcpy(tensor_.data.raw, tensor->data.raw, tensor_.bytes);
+  }
   is_initialized_ = true;
 
   return kTfLiteOk;
 }
 
-void CreateResourceVariableIfNotAvailable(ResourceMap* resources,
-                                          int resource_id) {
-  if (resources->count(resource_id) != 0) {
-    return;
-  }
-  resources->emplace(resource_id,
-                     std::unique_ptr<ResourceVariable>(new ResourceVariable()));
+TfLiteStatus CreateResourceVariableIfNotAvailable(ResourceMap* resources,
+                                                  int resource_id) {
+  return CreateTypedResourceIfNotAvailable(
+      resources, resource_id, ResourceBase::ResourceType::kResourceVariable,
+      []() { return std::make_unique<ResourceVariable>(); });
 }
 
 ResourceVariable* GetResourceVariable(ResourceMap* resources, int resource_id) {
-  auto it = resources->find(resource_id);
-  if (it != resources->end()) {
-    return static_cast<ResourceVariable*>(it->second.get());
-  }
-  return nullptr;
+  return GetTypedResource<ResourceVariable>(
+      resources, resource_id, ResourceBase::ResourceType::kResourceVariable);
+}
+
+bool IsBuiltinResource(const TfLiteTensor* tensor) {
+  return tensor && tensor->type == kTfLiteResource &&
+         tensor->delegate == nullptr;
 }
 
 }  // namespace resource

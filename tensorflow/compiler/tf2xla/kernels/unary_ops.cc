@@ -15,22 +15,28 @@ limitations under the License.
 
 // Native XLA implementations of simple unary Ops
 
-#include "tensorflow/compiler/tf2xla/kernels/cwise_ops.h"
+#include <array>
+#include <cmath>
+
+#include "absl/status/statusor.h"
 #include "tensorflow/compiler/tf2xla/mlir_xla_op_kernel.h"
-#include "tensorflow/compiler/tf2xla/type_util.h"
-#include "tensorflow/compiler/tf2xla/xla_helpers.h"
+#include "tensorflow/compiler/tf2xla/xla_op_kernel.h"
 #include "tensorflow/compiler/tf2xla/xla_op_registry.h"
-#include "tensorflow/compiler/xla/client/client_library.h"
-#include "tensorflow/compiler/xla/client/lib/arithmetic.h"
-#include "tensorflow/compiler/xla/client/lib/constants.h"
-#include "tensorflow/compiler/xla/client/lib/math.h"
-#include "tensorflow/compiler/xla/client/xla_builder.h"
-#include "tensorflow/compiler/xla/primitive_util.h"
-#include "tensorflow/compiler/xla/xla_data.pb.h"
-#include "tensorflow/core/framework/kernel_def_builder.h"
+#include "xla/hlo/builder/lib/constants.h"
+#include "xla/hlo/builder/lib/math.h"
+#include "xla/hlo/builder/xla_builder.h"
+#include "xla/tsl/platform/statusor.h"
+#include "xla/xla_data.pb.h"
+#include "tensorflow/core/framework/op_kernel.h"
+#include "tensorflow/core/framework/types.h"
+#include "tensorflow/core/framework/types.pb.h"
 
 namespace tensorflow {
 namespace {
+
+constexpr std::array<DataType, 7> kReciprocalGpuTypes = {
+    {DT_HALF, DT_FLOAT, DT_DOUBLE, DT_BFLOAT16, DT_INT64, DT_COMPLEX64,
+     DT_COMPLEX128}};
 
 #define XLAJIT_MAKE_UNARY(NAME, COMPUTATION)                           \
   class NAME##Op : public XlaOpKernel {                                \
@@ -46,6 +52,15 @@ namespace {
   };                                                                   \
   REGISTER_XLA_OP(Name(#NAME), NAME##Op);
 
+// We don't have kernels for all integer types, so we limit the supported types.
+#define REGISTER_XLA_RECIPROCAL_OP(BUILDER, OP)                      \
+  REGISTER_XLA_OP(BUILDER.TypeConstraint("T", kFloatAndComplexTypes) \
+                      .Device(DEVICE_CPU_XLA_JIT),                   \
+                  OP);                                               \
+  REGISTER_XLA_OP(BUILDER.TypeConstraint("T", kReciprocalGpuTypes)   \
+                      .Device(DEVICE_GPU_XLA_JIT),                   \
+                  OP)
+
 XLAJIT_MAKE_UNARY(ComplexAbs, xla::Abs(x));
 
 XLAJIT_MAKE_UNARY(Angle, xla::Atan2(xla::Imag(x), xla::Real(x)));
@@ -54,16 +69,17 @@ XLAJIT_MAKE_UNARY(Conj, xla::Conj(x));
 
 // Return x if x>0, otherwise -x.
 REGISTER_XLA_OP(Name("Abs"), MlirXlaOpKernel);
-XLAJIT_MAKE_UNARY(Acos, xla::Acos(x));
-XLAJIT_MAKE_UNARY(Acosh, xla::Acosh(x));
-XLAJIT_MAKE_UNARY(Asin, xla::Asin(x))
-XLAJIT_MAKE_UNARY(Asinh, xla::Asinh(x));
+REGISTER_XLA_OP(Name("Acos"), MlirXlaOpKernel);
+REGISTER_XLA_OP(Name("Acosh"), MlirXlaOpKernel);
+REGISTER_XLA_OP(Name("Asin"), MlirXlaOpKernel);
+REGISTER_XLA_OP(Name("Asinh"), MlirXlaOpKernel);
 REGISTER_XLA_OP(Name("Atan"), MlirXlaOpKernel);
-XLAJIT_MAKE_UNARY(Atanh, xla::Atanh(x));
+REGISTER_XLA_OP(Name("Atanh"), MlirXlaOpKernel);
 REGISTER_XLA_OP(Name("Ceil"), MlirXlaOpKernel);
 REGISTER_XLA_OP(Name("Cos"), MlirXlaOpKernel);
-XLAJIT_MAKE_UNARY(Cosh, xla::Cosh(x));
+REGISTER_XLA_OP(Name("Cosh"), MlirXlaOpKernel);
 XLAJIT_MAKE_UNARY(Sin, xla::Sin(x));
+XLAJIT_MAKE_UNARY(Tan, xla::Tan(x));
 REGISTER_XLA_OP(Name("Exp"), MlirXlaOpKernel);
 REGISTER_XLA_OP(Name("Expm1"), MlirXlaOpKernel);
 REGISTER_XLA_OP(Name("Floor"), MlirXlaOpKernel);
@@ -72,7 +88,9 @@ REGISTER_XLA_OP(Name("IsInf"), MlirXlaOpKernel);
 REGISTER_XLA_OP(Name("IsNan"), MlirXlaOpKernel);
 // Return 1/x
 XLAJIT_MAKE_UNARY(Inv, xla::ScalarLike(x, 1.0) / x);
+REGISTER_XLA_RECIPROCAL_OP(Name("Inv"), InvOp);
 REGISTER_XLA_OP(Name("Reciprocal"), MlirXlaOpKernel);
+REGISTER_XLA_RECIPROCAL_OP(Name("Reciprocal"), MlirXlaOpKernel);
 XLAJIT_MAKE_UNARY(Log, xla::Log(x));
 REGISTER_XLA_OP(Name("Log1p"), MlirXlaOpKernel);
 
@@ -83,7 +101,21 @@ XLAJIT_MAKE_UNARY(PopulationCount,
 XLAJIT_MAKE_UNARY(Neg, -x);
 
 XLAJIT_MAKE_UNARY(Rint, xla::RoundToEven(x));
-XLAJIT_MAKE_UNARY(Round, xla::RoundToEven(x));
+
+class RoundOp : public XlaOpKernel {
+ public:
+  explicit RoundOp(OpKernelConstruction* ctx) : XlaOpKernel(ctx) {}
+  void Compile(XlaOpKernelContext* ctx) override {
+    xla::XlaOp x = ctx->Input(0);
+    // Round on integers is a no-op; xla::RoundToEven rejects non-float types.
+    if (DataTypeIsInteger(ctx->input_type(0))) {
+      ctx->SetOutput(0, x);
+    } else {
+      ctx->SetOutput(0, xla::RoundToEven(x));
+    }
+  }
+};
+REGISTER_XLA_OP(Name("Round"), RoundOp);
 
 REGISTER_XLA_OP(Name("Rsqrt"), MlirXlaOpKernel);
 
@@ -91,10 +123,10 @@ REGISTER_XLA_OP(Name("Sigmoid"), MlirXlaOpKernel);
 
 // Returns NaN if x is NaN, 0 if x is 0, -1 if x < 0 and 1 if x > 0.
 REGISTER_XLA_OP(Name("Sign"), MlirXlaOpKernel);
-XLAJIT_MAKE_UNARY(Sinh, xla::Sinh(x));
+REGISTER_XLA_OP(Name("Sinh"), MlirXlaOpKernel);
 
 static xla::XlaOp Softplus(xla::XlaBuilder* b, xla::XlaOp features) {
-  return b->ReportErrorOrReturn([&]() -> StatusOr<xla::XlaOp> {
+  return b->ReportErrorOrReturn([&]() -> absl::StatusOr<xla::XlaOp> {
     TF_ASSIGN_OR_RETURN(auto shape, b->GetShape(features));
     xla::XlaOp threshold =
         Log(xla::Epsilon(b, shape.element_type())) + ScalarLike(features, 2.0);
@@ -117,7 +149,6 @@ XLAJIT_MAKE_UNARY(Softplus, Softplus(b, x));
 XLAJIT_MAKE_UNARY(Softsign, x / (xla::Abs(x) + xla::ScalarLike(x, 1.0)));
 REGISTER_XLA_OP(Name("Sqrt"), MlirXlaOpKernel);
 XLAJIT_MAKE_UNARY(Square, x* x);
-XLAJIT_MAKE_UNARY(Tan, xla::Tan(x));
 REGISTER_XLA_OP(Name("Tanh"), MlirXlaOpKernel);
 REGISTER_XLA_OP(Name("Real"), MlirXlaOpKernel);
 REGISTER_XLA_OP(Name("Imag"), MlirXlaOpKernel);
@@ -132,6 +163,8 @@ REGISTER_XLA_OP(Name("Lgamma"), MlirXlaOpKernel);
 XLAJIT_MAKE_UNARY(Digamma, xla::Digamma(x));
 XLAJIT_MAKE_UNARY(BesselI0e, xla::BesselI0e(x));
 XLAJIT_MAKE_UNARY(BesselI1e, xla::BesselI1e(x));
+XLAJIT_MAKE_UNARY(BesselI0, xla::BesselI0e(x) * xla::Exp(xla::Abs(x)));
+XLAJIT_MAKE_UNARY(BesselI1, xla::BesselI1e(x) * xla::Exp(xla::Abs(x)));
 
 }  // namespace
 }  // namespace tensorflow

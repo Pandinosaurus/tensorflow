@@ -12,8 +12,8 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
-#ifndef TENSORFLOW_PYTHON_UTIL_PYTHON_API_INFO_H_
-#define TENSORFLOW_PYTHON_UTIL_PYTHON_API_INFO_H_
+#ifndef TENSORFLOW_PYTHON_FRAMEWORK_PYTHON_API_INFO_H_
+#define TENSORFLOW_PYTHON_FRAMEWORK_PYTHON_API_INFO_H_
 
 #include <Python.h>
 
@@ -21,6 +21,8 @@ limitations under the License.
 #include <string>
 #include <vector>
 
+#include "absl/base/attributes.h"
+#include "absl/status/status.h"
 #include "absl/types/span.h"
 #include "tensorflow/core/framework/op_def.pb.h"
 #include "tensorflow/core/framework/types.pb.h"
@@ -143,15 +145,16 @@ class PythonAPIInfo {
   //   defaults_tuple: Tuple containing default values for the parameters,
   //     right-aligned with `param_names` -- i.e., `defaults[-i]` is the default
   //     for `param_names[-i]`.
-  Status Initialize(const OpDef& op_def, const std::vector<string> param_names,
-                    PyObject* defaults_tuple);
+  absl::Status Initialize(const OpDef& op_def,
+                          const std::vector<std::string> param_names,
+                          PyObject* defaults_tuple);
 
   // Initialize this PythonAPIInfo based on the registered OpDef for the given
   // operation.
   //
   // Args:
   //   op_name: The registered name of the operation (e.g. "AddV2").
-  Status InitializeFromRegisteredOp(const std::string& op_name);
+  absl::Status InitializeFromRegisteredOp(const std::string& op_name);
 
   // Initializes this PythonAPIInfo based on a set of parameter specifications.
   //
@@ -167,10 +170,10 @@ class PythonAPIInfo {
   //
   // Note: the `name` parameter should not be included in `input_specs` or
   // `attr_specs`.
-  Status InitializeFromParamSpecs(
+  absl::Status InitializeFromParamSpecs(
       const std::map<std::string, std::string>& input_specs,
       const std::map<std::string, std::string>& attr_specs,
-      const std::vector<string> param_names, PyObject* defaults_tuple);
+      const std::vector<std::string> param_names, PyObject* defaults_tuple);
 
   // The name of the API that is described by this PythonAPIInfo.
   const char* api_name() const { return api_name_; }
@@ -214,7 +217,7 @@ class PythonAPIInfo {
   }
 
   // Returns a string summarizing the internal state of this type converter.
-  string DebugInfo() const;
+  std::string DebugInfo() const;
 
  private:
   // Adds an entry to the attributes_ vector based on the given `AttrDef`.
@@ -226,7 +229,7 @@ class PythonAPIInfo {
   // If `attr_def` describes an int attribute, then adds a value to
   // inputs_with_number_attrs_ (to record any tensor inputs that use this
   // value as a list length).
-  Status InitializeAttribute(
+  absl::Status InitializeAttribute(
       const OpDef::AttrDef& attr_def,
       const std::map<std::string, ParamIndex>& param_name_to_index);
 
@@ -241,23 +244,24 @@ class PythonAPIInfo {
   // If `arg_def`'s dtype is described by a `list(type)` attr, then updates the
   // appropriate value in `inputs_with_type_list_attrs_` with information about
   // the `arg_def`.
-  Status InitializeInput(const OpDef::ArgDef& arg_def,
-                         const std::map<std::string, int>& param_name_to_index);
+  absl::Status InitializeInput(
+      const OpDef::ArgDef& arg_def,
+      const std::map<std::string, int>& param_name_to_index);
 
   // Checks that the OpDef used to initialize this PythonAPIInfo
   // had an AttrDef or ArgDef specification for each parameter.
-  Status CheckParamNames() const;
+  absl::Status CheckParamNames() const;
 
   // Searches inputs_with_type_attrs_ for an input with the given name.
-  InputsWithTypeAttr* FindInputsWithTypeAttr(const string& name);
+  InputsWithTypeAttr* FindInputsWithTypeAttr(const std::string& name);
 
   // Searches inputs_with_type_list_attrs_ for an input with the given name.
-  InputsWithTypeListAttr* FindInputsWithTypeListAttr(const string& name);
+  InputsWithTypeListAttr* FindInputsWithTypeListAttr(const std::string& name);
 
   // Searches inputs_with_type_list_attrs_ for an input with the given name.
-  InputsWithNumberAttr* FindInputsWithNumberAttr(const string& name);
+  InputsWithNumberAttr* FindInputsWithNumberAttr(const std::string& name);
 
-  ABSL_MUST_USE_RESULT
+  [[nodiscard]]
   bool InferLengthAttributes(const absl::Span<PyObject*> params,
                              std::vector<int64_t>& inferred_length_attrs) const;
 
@@ -295,4 +299,4 @@ class PythonAPIInfo {
 
 }  // namespace tensorflow
 
-#endif  // TENSORFLOW_PYTHON_UTIL_PYTHON_API_INFO_H_
+#endif  // TENSORFLOW_PYTHON_FRAMEWORK_PYTHON_API_INFO_H_

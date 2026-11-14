@@ -29,14 +29,14 @@ class PrefetchDatasetParams : public DatasetParams {
                         DataTypeVector output_dtypes,
                         std::vector<PartialTensorShape> output_shapes,
                         int64_t slack_period, bool legacy_autotune,
-                        int64_t buffer_size_min, string node_name)
+                        int64_t buffer_size_min, std::string node_name)
       : DatasetParams(std::move(output_dtypes), std::move(output_shapes),
                       std::move(node_name)),
         buffer_size_(buffer_size),
         slack_period_(slack_period),
         legacy_autotune_(legacy_autotune),
         buffer_size_min_(buffer_size_min) {
-    input_dataset_params_.push_back(absl::make_unique<T>(input_dataset_params));
+    input_dataset_params_.push_back(std::make_unique<T>(input_dataset_params));
     iterator_prefix_ =
         name_utils::IteratorPrefix(input_dataset_params.dataset_type(),
                                    input_dataset_params.iterator_prefix());
@@ -46,14 +46,15 @@ class PrefetchDatasetParams : public DatasetParams {
     return {CreateTensor<int64_t>(TensorShape({}), {buffer_size_})};
   }
 
-  Status GetInputNames(std::vector<string>* input_names) const override {
+  absl::Status GetInputNames(
+      std::vector<std::string>* input_names) const override {
     input_names->clear();
     input_names->emplace_back(PrefetchDatasetOp::kInputDataset);
     input_names->emplace_back(PrefetchDatasetOp::kBufferSize);
-    return Status::OK();
+    return absl::OkStatus();
   }
 
-  Status GetAttributes(AttributeVector* attr_vector) const override {
+  absl::Status GetAttributes(AttributeVector* attr_vector) const override {
     attr_vector->clear();
     attr_vector->emplace_back("output_types", output_dtypes_);
     attr_vector->emplace_back("output_shapes", output_shapes_);
@@ -61,10 +62,10 @@ class PrefetchDatasetParams : public DatasetParams {
     attr_vector->emplace_back("legacy_autotune", legacy_autotune_);
     attr_vector->emplace_back("buffer_size_min", buffer_size_min_);
     attr_vector->emplace_back("metadata", "");
-    return Status::OK();
+    return absl::OkStatus();
   }
 
-  string dataset_type() const override {
+  std::string dataset_type() const override {
     return PrefetchDatasetOp::kDatasetType;
   }
 

@@ -25,13 +25,13 @@ limitations under the License.
 
 namespace tensorflow {
 namespace serving {
-StatusOr<std::unique_ptr<BoundedExecutor>> BoundedExecutor::Create(
+absl::StatusOr<std::unique_ptr<BoundedExecutor>> BoundedExecutor::Create(
     const Options& options) {
   if (options.env == nullptr) {
-    return errors::InvalidArgument("options.env must not be nullptr");
+    return absl::InvalidArgumentError("options.env must not be nullptr");
   }
   if (options.num_threads <= 0) {
-    return errors::InvalidArgument("options.num_threads must be positive");
+    return absl::InvalidArgumentError("options.num_threads must be positive");
   }
   return absl::WrapUnique(new BoundedExecutor(options));
 }

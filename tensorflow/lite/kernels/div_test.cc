@@ -14,6 +14,7 @@ limitations under the License.
 ==============================================================================*/
 #include <stdint.h>
 
+#include <limits>
 #include <vector>
 
 #include <gmock/gmock.h>
@@ -49,12 +50,19 @@ class BaseDivOpModel : public SingleOpModel {
   int output_;
 };
 
-class FloatDivOpModel : public BaseDivOpModel {
+template <typename T>
+class DivOpModel : public BaseDivOpModel {
  public:
   using BaseDivOpModel::BaseDivOpModel;
 
-  std::vector<float> GetOutput() { return ExtractVector<float>(output_); }
+  std::vector<T> GetOutput() { return ExtractVector<T>(output_); }
 };
+
+template <typename T>
+class FloatDivTest : public ::testing::Test {};
+
+using FloatDivTestTypes = ::testing::Types<float, half, Eigen::bfloat16>;
+TYPED_TEST_SUITE(FloatDivTest, FloatDivTestTypes);
 
 class IntegerDivOpModel : public BaseDivOpModel {
  public:
@@ -82,78 +90,144 @@ inline float GetTolerance(int min, int max) {
   return kQuantizedTolerance;
 }
 
-TEST(FloatDivOpTest, NoActivation) {
-  FloatDivOpModel m({TensorType_FLOAT32, {1, 2, 2, 1}},
-                    {TensorType_FLOAT32, {1, 2, 2, 1}},
-                    {TensorType_FLOAT32, {}}, ActivationFunctionType_NONE);
-  m.PopulateTensor<float>(m.input1(), {-0.2, 0.2, -1.2, 0.8});
-  m.PopulateTensor<float>(m.input2(), {0.5, 0.2, -1.5, 0.5});
-  m.Invoke();
+TYPED_TEST(FloatDivTest, NoActivationInplaceInput0) {
+  using T = TypeParam;
+  DivOpModel<T> m({GetTensorType<T>(), {1, 2, 2, 1}},
+                  {GetTensorType<T>(), {1, 2, 2, 1}}, {GetTensorType<T>(), {}},
+                  ActivationFunctionType_NONE);
+  m.template PopulateTensor<T>(m.input1(), {-0.2, 0.2, -1.2, 0.8});
+  m.template PopulateTensor<T>(m.input2(), {0.5, 0.2, -1.5, 0.5});
+  const int kInplaceInputTensorIdx = 0;
+  const int kInplaceOutputTensorIdx = 0;
+  const TfLiteTensor* input_tensor = m.GetInputTensor(kInplaceInputTensorIdx);
+  TfLiteTensor* output_tensor = m.GetOutputTensor(kInplaceOutputTensorIdx);
+  output_tensor->data.data = input_tensor->data.data;
+  TFLITE_INVOKE_AND_CHECK(T, &m);
   EXPECT_THAT(m.GetOutput(),
-              ElementsAreArray(ArrayFloatNear({-0.4, 1.0, 0.8, 1.6})));
+              ElementsAreArray(ArrayFloatNear(
+                  {-0.4, 1.0, 0.8, 1.6},
+                  static_cast<float>(NumericLimits<T>::epsilon() * 10))));
+  EXPECT_EQ(output_tensor->data.data, input_tensor->data.data);
 }
 
-TEST(FloatDivOpTest, ActivationRELU_N1_TO_1) {
-  FloatDivOpModel m(
-      {TensorType_FLOAT32, {1, 2, 2, 1}}, {TensorType_FLOAT32, {1, 2, 2, 1}},
-      {TensorType_FLOAT32, {}}, ActivationFunctionType_RELU_N1_TO_1);
-  m.PopulateTensor<float>(m.input1(), {-0.2, 0.2, -1.2, 0.8});
-  m.PopulateTensor<float>(m.input2(), {0.1, 0.2, -1.5, 0.5});
-  m.Invoke();
+TYPED_TEST(FloatDivTest, NoActivationInplaceInput1) {
+  using T = TypeParam;
+  DivOpModel<T> m({GetTensorType<T>(), {1, 2, 2, 1}},
+                  {GetTensorType<T>(), {1, 2, 2, 1}}, {GetTensorType<T>(), {}},
+                  ActivationFunctionType_NONE);
+  m.template PopulateTensor<T>(m.input1(), {-0.2, 0.2, -1.2, 0.8});
+  m.template PopulateTensor<T>(m.input2(), {0.5, 0.2, -1.5, 0.5});
+  const int kInplaceInputTensorIdx = 1;
+  const int kInplaceOutputTensorIdx = 0;
+  const TfLiteTensor* input_tensor = m.GetInputTensor(kInplaceInputTensorIdx);
+  TfLiteTensor* output_tensor = m.GetOutputTensor(kInplaceOutputTensorIdx);
+  output_tensor->data.data = input_tensor->data.data;
+  TFLITE_INVOKE_AND_CHECK(T, &m);
   EXPECT_THAT(m.GetOutput(),
-              ElementsAreArray(ArrayFloatNear({-1.0, 1.0, 0.8, 1.0})));
+              ElementsAreArray(ArrayFloatNear(
+                  {-0.4, 1.0, 0.8, 1.6},
+                  static_cast<float>(NumericLimits<T>::epsilon() * 10))));
+  EXPECT_EQ(output_tensor->data.data, input_tensor->data.data);
 }
 
-TEST(FloatDivOpTest, VariousInputShapes) {
+TYPED_TEST(FloatDivTest, NoActivation) {
+  using T = TypeParam;
+  DivOpModel<T> m({GetTensorType<T>(), {1, 2, 2, 1}},
+                  {GetTensorType<T>(), {1, 2, 2, 1}}, {GetTensorType<T>(), {}},
+                  ActivationFunctionType_NONE);
+  m.template PopulateTensor<T>(m.input1(), {-0.2, 0.2, -1.2, 0.8});
+  m.template PopulateTensor<T>(m.input2(), {0.5, 0.2, -1.5, 0.5});
+  TFLITE_INVOKE_AND_CHECK(T, &m);
+  EXPECT_THAT(m.GetOutput(),
+              ElementsAreArray(ArrayFloatNear(
+                  {-0.4, 1.0, 0.8, 1.6},
+                  static_cast<float>(NumericLimits<T>::epsilon() * 10))));
+}
+
+TYPED_TEST(FloatDivTest, ActivationRELU_N1_TO_1) {
+  using T = TypeParam;
+  DivOpModel<T> m({GetTensorType<T>(), {1, 2, 2, 1}},
+                  {GetTensorType<T>(), {1, 2, 2, 1}}, {GetTensorType<T>(), {}},
+                  ActivationFunctionType_RELU_N1_TO_1);
+  m.template PopulateTensor<T>(m.input1(), {-0.2, 0.2, -1.2, 0.8});
+  m.template PopulateTensor<T>(m.input2(), {0.1, 0.2, -1.5, 0.5});
+  TFLITE_INVOKE_AND_CHECK(T, &m);
+  EXPECT_THAT(m.GetOutput(),
+              ElementsAreArray(ArrayFloatNear(
+                  {-1.0, 1.0, 0.8, 1.0},
+                  static_cast<float>(NumericLimits<T>::epsilon() * 10))));
+}
+
+TYPED_TEST(FloatDivTest, VariousInputShapes) {
+  using T = TypeParam;
   std::vector<std::vector<int>> test_shapes = {
       {6}, {2, 3}, {2, 1, 3}, {1, 3, 1, 2}};
   for (int i = 0; i < test_shapes.size(); ++i) {
-    FloatDivOpModel m({TensorType_FLOAT32, test_shapes[i]},
-                      {TensorType_FLOAT32, test_shapes[i]},
-                      {TensorType_FLOAT32, {}}, ActivationFunctionType_NONE);
-    m.PopulateTensor<float>(m.input1(), {-2.0, 0.2, 0.3, 0.8, 1.1, -2.0});
-    m.PopulateTensor<float>(m.input2(), {0.1, 0.2, 0.6, 0.5, -1.1, -0.1});
-    m.Invoke();
-    EXPECT_THAT(
-        m.GetOutput(),
-        ElementsAreArray(ArrayFloatNear({-20.0, 1.0, 0.5, 1.6, -1.0, 20.0})))
+    DivOpModel<T> m({GetTensorType<T>(), test_shapes[i]},
+                    {GetTensorType<T>(), test_shapes[i]},
+                    {GetTensorType<T>(), {}}, ActivationFunctionType_NONE);
+    m.template PopulateTensor<T>(m.input1(), {-2.0, 0.2, 0.3, 0.8, 1.1, -2.0});
+    m.template PopulateTensor<T>(m.input2(), {0.1, 0.2, 0.6, 0.5, -1.1, -0.1});
+    TFLITE_INVOKE_AND_CHECK(T, &m);
+    EXPECT_THAT(m.GetOutput(),
+                ElementsAreArray(ArrayFloatNear(
+                    {-20.0, 1.0, 0.5, 1.6, -1.0, 20.0},
+                    static_cast<float>(NumericLimits<T>::epsilon() * 10))))
         << "With shape number " << i;
   }
 }
 
-TEST(FloatDivOpTest, WithBroadcast) {
+TYPED_TEST(FloatDivTest, WithBroadcast) {
+  using T = TypeParam;
   std::vector<std::vector<int>> test_shapes = {
       {8}, {2, 4}, {2, 1, 4}, {1, 2, 2, 2}};
   for (int i = 0; i < test_shapes.size(); ++i) {
-    FloatDivOpModel m({TensorType_FLOAT32, test_shapes[i]},
-                      {TensorType_FLOAT32, {}},  // always a scalar
-                      {TensorType_FLOAT32, {}}, ActivationFunctionType_NONE);
-    m.PopulateTensor<float>(m.input1(),
-                            {-0.2, 0.2, 0.07, 0.08, 0.11, -0.123, -0.32, 0.54});
-    m.PopulateTensor<float>(m.input2(), {0.1});
-    m.Invoke();
+    DivOpModel<T> m({GetTensorType<T>(), test_shapes[i]},
+                    {GetTensorType<T>(), {}},  // always a scalar
+                    {GetTensorType<T>(), {}}, ActivationFunctionType_NONE);
+    m.template PopulateTensor<T>(
+        m.input1(), {-0.2, 0.2, 0.07, 0.08, 0.11, -0.123, -0.32, 0.54});
+    m.template PopulateTensor<T>(m.input2(), {0.1});
+    TFLITE_INVOKE_AND_CHECK(T, &m);
     EXPECT_THAT(m.GetOutput(),
                 ElementsAreArray(ArrayFloatNear(
-                    {-2.0, 2.0, 0.7, 0.8, 1.1, -1.23, -3.2, 5.4})))
+                    {-2.0, 2.0, 0.7, 0.8, 1.1, -1.23, -3.2, 5.4},
+                    static_cast<float>(NumericLimits<T>::epsilon() * 10))))
         << "With shape number " << i;
   }
 }
 
-TEST(FloatDivOpTest, WithBroadcast5D) {
+TYPED_TEST(FloatDivTest, WithBroadcast5D) {
+  using T = TypeParam;
   std::vector<std::vector<int>> test_shapes = {{1, 2, 1, 2, 2}};
   for (int i = 0; i < test_shapes.size(); ++i) {
-    FloatDivOpModel m({TensorType_FLOAT32, test_shapes[i]},
-                      {TensorType_FLOAT32, {}},  // always a scalar
-                      {TensorType_FLOAT32, {}}, ActivationFunctionType_NONE);
-    m.PopulateTensor<float>(m.input1(),
-                            {-0.2, 0.2, 0.07, 0.08, 0.11, -0.123, -0.32, 0.54});
-    m.PopulateTensor<float>(m.input2(), {0.1});
-    m.Invoke();
+    DivOpModel<T> m({GetTensorType<T>(), test_shapes[i]},
+                    {GetTensorType<T>(), {}},  // always a scalar
+                    {GetTensorType<T>(), {}}, ActivationFunctionType_NONE);
+    m.template PopulateTensor<T>(
+        m.input1(), {-0.2, 0.2, 0.07, 0.08, 0.11, -0.123, -0.32, 0.54});
+    m.template PopulateTensor<T>(m.input2(), {0.1});
+    TFLITE_INVOKE_AND_CHECK(T, &m);
     EXPECT_THAT(m.GetOutput(),
                 ElementsAreArray(ArrayFloatNear(
-                    {-2.0, 2.0, 0.7, 0.8, 1.1, -1.23, -3.2, 5.4})))
+                    {-2.0, 2.0, 0.7, 0.8, 1.1, -1.23, -3.2, 5.4},
+                    static_cast<float>(NumericLimits<T>::epsilon() * 10))))
         << "With shape number " << i;
   }
+}
+
+TYPED_TEST(FloatDivTest, WithBroadcast6D) {
+  using T = TypeParam;
+  DivOpModel<T> m({GetTensorType<T>(), {1, 2, 1, 1, 2, 2}},
+                  {GetTensorType<T>(), {1, 1, 2}}, {GetTensorType<T>(), {}},
+                  ActivationFunctionType_NONE);
+  m.template PopulateTensor<T>(m.input1(), {2, 6, 4, 12, 6, 18, 8, 24});
+  m.template PopulateTensor<T>(m.input2(), {2, 3});
+  TFLITE_INVOKE_AND_CHECK(T, &m);
+  EXPECT_THAT(m.GetOutput(),
+              ElementsAreArray(ArrayFloatNear(
+                  {1, 2, 2, 4, 3, 6, 4, 8},
+                  static_cast<float>(NumericLimits<T>::epsilon() * 10))));
 }
 
 TEST(IntegerDivOpTest, NoActivation) {
@@ -162,7 +236,7 @@ TEST(IntegerDivOpTest, NoActivation) {
                       ActivationFunctionType_NONE);
   m.PopulateTensor<int32_t>(m.input1(), {-2, 2, -15, 8});
   m.PopulateTensor<int32_t>(m.input2(), {5, -2, -3, 5});
-  m.Invoke();
+  ASSERT_EQ(m.Invoke(), kTfLiteOk);
   EXPECT_THAT(m.GetOutput(), ElementsAreArray({0, -1, 5, 1}));
 }
 
@@ -172,7 +246,7 @@ TEST(IntegerDivOpTest, ActivationRELU_N1_TO_1) {
                       ActivationFunctionType_RELU_N1_TO_1);
   m.PopulateTensor<int32_t>(m.input1(), {-2, 2, -12, 8});
   m.PopulateTensor<int32_t>(m.input2(), {1, 2, -15, 5});
-  m.Invoke();
+  ASSERT_EQ(m.Invoke(), kTfLiteOk);
   EXPECT_THAT(m.GetOutput(), ElementsAreArray({-1, 1, 0, 1}));
 }
 
@@ -185,7 +259,7 @@ TEST(IntegerDivOpTest, VariousInputShapes) {
                         {TensorType_INT32, {}}, ActivationFunctionType_NONE);
     m.PopulateTensor<int32_t>(m.input1(), {-20, 2, 3, 8, 11, -20});
     m.PopulateTensor<int32_t>(m.input2(), {1, 2, 6, 5, -11, -1});
-    m.Invoke();
+    ASSERT_EQ(m.Invoke(), kTfLiteOk);
     EXPECT_THAT(m.GetOutput(), ElementsAreArray({-20, 1, 0, 1, -1, 20}))
         << "With shape number " << i;
   }
@@ -200,7 +274,7 @@ TEST(IntegerDivOpTest, WithBroadcast) {
                         {TensorType_INT32, {}}, ActivationFunctionType_NONE);
     m.PopulateTensor<int32_t>(m.input1(), {-20, 21, 7, 8, 11, -123, -42, -48});
     m.PopulateTensor<int32_t>(m.input2(), {3});
-    m.Invoke();
+    ASSERT_EQ(m.Invoke(), kTfLiteOk);
     EXPECT_THAT(m.GetOutput(),
                 ElementsAreArray({-6, 7, 2, 2, 3, -41, -14, -16}))
         << "With shape number " << i;
@@ -216,7 +290,7 @@ void QuantizedNoActivation() {
                         ActivationFunctionType_NONE);
   m.QuantizeAndPopulate<integer_dtype>(m.input1(), {-0.8, -0.2, 0.3, 0.7});
   m.QuantizeAndPopulate<integer_dtype>(m.input2(), {-0.8, 0.4, 0.8, 1.0});
-  m.Invoke();
+  ASSERT_EQ(m.Invoke(), kTfLiteOk);
   EXPECT_THAT(m.GetDequantizedOutput<integer_dtype>(),
               ElementsAreArray(ArrayFloatNear({1.0, -0.5, 0.375, 0.7},
                                               kQuantizedTolerance)));
@@ -224,6 +298,14 @@ void QuantizedNoActivation() {
 
 TEST(QuantizedDivOpTest, QuantizedNoActivationUInt8) {
   QuantizedNoActivation<TensorType_UINT8, uint8_t>();
+}
+
+TEST(QuantizedDivOpTest, QuantizedNoActivationInt8) {
+  QuantizedNoActivation<TensorType_INT8, int8_t>();
+}
+
+TEST(QuantizedDivOpTest, QuantizedNoActivationInt16) {
+  QuantizedNoActivation<TensorType_INT16, int16_t>();
 }
 
 template <TensorType tensor_type, typename integer_dtype>
@@ -242,7 +324,7 @@ void QuantizedActivationRELU_N1_TO_1() {
                           ActivationFunctionType_RELU_N1_TO_1);
     m.QuantizeAndPopulate<integer_dtype>(m.input1(), inputs1[i]);
     m.QuantizeAndPopulate<integer_dtype>(m.input2(), inputs2[i]);
-    m.Invoke();
+    ASSERT_EQ(m.Invoke(), kTfLiteOk);
     EXPECT_THAT(
         m.GetDequantizedOutput<integer_dtype>(),
         ElementsAreArray(ArrayFloatNear(results[i], kQuantizedTolerance)))
@@ -252,6 +334,14 @@ void QuantizedActivationRELU_N1_TO_1() {
 
 TEST(QuantizedDivOpTest, QuantizedActivationRELU_N1_TO_1UInt8) {
   QuantizedActivationRELU_N1_TO_1<TensorType_UINT8, uint8_t>();
+}
+
+TEST(QuantizedDivOpTest, QuantizedActivationRELU_N1_TO_1Int8) {
+  QuantizedActivationRELU_N1_TO_1<TensorType_INT8, int8_t>();
+}
+
+TEST(QuantizedDivOpTest, QuantizedActivationRELU_N1_TO_1Int16) {
+  QuantizedActivationRELU_N1_TO_1<TensorType_INT16, int16_t>();
 }
 
 template <TensorType tensor_type, typename integer_dtype>
@@ -268,7 +358,7 @@ void QuantizedVariousInputShapes() {
                                          {-2.0, 0.2, 1.7, 0.9, 0.4, 2.0});
     m.QuantizeAndPopulate<integer_dtype>(m.input2(),
                                          {1.3, 0.3, 1.1, 0.4, -1.1, 1.9});
-    m.Invoke();
+    ASSERT_EQ(m.Invoke(), kTfLiteOk);
     EXPECT_THAT(
         m.GetDequantizedOutput<integer_dtype>(),
         ElementsAreArray(ArrayFloatNear(
@@ -279,6 +369,14 @@ void QuantizedVariousInputShapes() {
 
 TEST(QuantizedDivOpTest, QuantizedVariousInputShapesUInt8) {
   QuantizedVariousInputShapes<TensorType_UINT8, uint8_t>();
+}
+
+TEST(QuantizedDivOpTest, QuantizedVariousInputShapesInt8) {
+  QuantizedVariousInputShapes<TensorType_INT8, int8_t>();
+}
+
+TEST(QuantizedDivOpTest, QuantizedVariousInputShapesInt16) {
+  QuantizedVariousInputShapes<TensorType_INT16, int16_t>();
 }
 
 template <TensorType tensor_type, typename integer_dtype>
@@ -293,7 +391,7 @@ void QuantizedWithBroadcast() {
     m.QuantizeAndPopulate<integer_dtype>(
         m.input1(), {-2.0, 0.2, 0.7, 0.8, -0.5, 1.1, -1.3, 1.2});
     m.QuantizeAndPopulate<integer_dtype>(m.input2(), {0.7});
-    m.Invoke();
+    ASSERT_EQ(m.Invoke(), kTfLiteOk);
     EXPECT_THAT(m.GetDequantizedOutput<integer_dtype>(),
                 ElementsAreArray(ArrayFloatNear(
                     {-2.857, 0.286, 1.0, 1.143, -0.714, 1.571, -1.857, 1.714},
@@ -304,6 +402,82 @@ void QuantizedWithBroadcast() {
 
 TEST(QuantizedDivOpTest, QuantizedWithBroadcastUInt8) {
   QuantizedWithBroadcast<TensorType_UINT8, uint8_t>();
+}
+
+TEST(QuantizedDivOpTest, QuantizedWithBroadcastInt8) {
+  QuantizedWithBroadcast<TensorType_INT8, int8_t>();
+}
+
+TEST(QuantizedDivOpTest, QuantizedWithBroadcastInt16) {
+  QuantizedWithBroadcast<TensorType_INT16, int16_t>();
+}
+
+// Tests for signed integer overflow guard (INT32_MIN / -1).
+// This exercises the fix for
+// https://github.com/tensorflow/tensorflow/issues/124409
+
+TEST(IntegerDivOpTest, Int32MinDivNegOne_Saturates) {
+  // INT32_MIN / -1 would overflow to +2147483648 which can't fit in int32.
+  // The fix saturates this to INT32_MAX (2147483647).
+  IntegerDivOpModel m({TensorType_INT32, {1, 1, 4, 1}},
+                      {TensorType_INT32, {1, 1, 4, 1}}, {TensorType_INT32, {}},
+                      ActivationFunctionType_NONE);
+  const int32_t int32_min = std::numeric_limits<int32_t>::min();  // -2147483648
+  const int32_t int32_max = std::numeric_limits<int32_t>::max();  //  2147483647
+  m.PopulateTensor<int32_t>(m.input1(), {int32_min, int32_min, -10, 10});
+  m.PopulateTensor<int32_t>(m.input2(), {-1, 1, -1, -1});
+  ASSERT_EQ(m.Invoke(), kTfLiteOk);
+  EXPECT_THAT(m.GetOutput(), ElementsAreArray({int32_max, int32_min, 10, -10}));
+}
+
+TEST(IntegerDivOpTest, Int32MinDivNegOne_Broadcast) {
+  // Test the broadcast path with INT32_MIN / -1.
+  IntegerDivOpModel m({TensorType_INT32, {1, 1, 4, 1}},
+                      {TensorType_INT32, {}},  // scalar broadcast
+                      {TensorType_INT32, {}}, ActivationFunctionType_NONE);
+  const int32_t int32_min = std::numeric_limits<int32_t>::min();
+  const int32_t int32_max = std::numeric_limits<int32_t>::max();
+  m.PopulateTensor<int32_t>(m.input1(), {int32_min, -100, 0, 100});
+  m.PopulateTensor<int32_t>(m.input2(), {-1});
+  ASSERT_EQ(m.Invoke(), kTfLiteOk);
+  EXPECT_THAT(m.GetOutput(), ElementsAreArray({int32_max, 100, 0, -100}));
+}
+
+TEST(IntegerDivOpTest, NormalNegOneDivision) {
+  // Verify that dividing normal values by -1 still works correctly.
+  IntegerDivOpModel m({TensorType_INT32, {1, 2, 2, 1}},
+                      {TensorType_INT32, {1, 2, 2, 1}}, {TensorType_INT32, {}},
+                      ActivationFunctionType_NONE);
+  m.PopulateTensor<int32_t>(m.input1(), {-100, 50, 0, 2147483647});
+  m.PopulateTensor<int32_t>(m.input2(), {-1, -1, -1, -1});
+  ASSERT_EQ(m.Invoke(), kTfLiteOk);
+  EXPECT_THAT(m.GetOutput(), ElementsAreArray({100, -50, 0, -2147483647}));
+}
+
+// END overflow guard tests
+
+TEST(QuantizedDivOpTest, AsymmetricQuantizedDivisorZeroCheck) {
+  // Case 1: Divisor is real 0.0 (quantized to -128). This should FAIL.
+  {
+    QuantizedDivOpModel m({TensorType_INT8, {1, 1}, -1.0, 1.0},
+                          {TensorType_INT8, {1, 1}, 0.0, 2.0},
+                          {TensorType_INT8, {}, -1.0, 1.0},
+                          ActivationFunctionType_NONE);
+    m.QuantizeAndPopulate<int8_t>(m.input1(), {1.0});
+    m.QuantizeAndPopulate<int8_t>(m.input2(), {0.0});
+    ASSERT_NE(m.Invoke(), kTfLiteOk);
+  }
+
+  // Case 2: Divisor is real 1.0 (quantized to ~0). This should PASS.
+  {
+    QuantizedDivOpModel m({TensorType_INT8, {1, 1}, -1.0, 1.0},
+                          {TensorType_INT8, {1, 1}, 0.0, 2.0},
+                          {TensorType_INT8, {}, -1.0, 1.0},
+                          ActivationFunctionType_NONE);
+    m.QuantizeAndPopulate<int8_t>(m.input1(), {1.0});
+    m.QuantizeAndPopulate<int8_t>(m.input2(), {1.0});
+    ASSERT_EQ(m.Invoke(), kTfLiteOk);
+  }
 }
 
 }  // namespace

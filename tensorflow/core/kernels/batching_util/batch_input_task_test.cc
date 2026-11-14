@@ -21,6 +21,7 @@ limitations under the License.
 #include <tuple>
 #include <utility>
 
+#include "absl/status/status.h"
 #include "tensorflow/core/common_runtime/device.h"
 #include "tensorflow/core/framework/allocator.h"
 #include "tensorflow/core/framework/device_factory.h"
@@ -32,6 +33,7 @@ limitations under the License.
 #include "tensorflow/core/framework/types.pb.h"
 #include "tensorflow/core/kernels/batching_util/batch_resource_base.h"
 #include "tensorflow/core/kernels/batching_util/input_split_metadata.h"
+#include "tensorflow/core/kernels/batching_util/threadsafe_status.h"
 #include "tensorflow/core/lib/core/status_test_util.h"
 #include "tensorflow/core/platform/status_matchers.h"
 #include "tensorflow/core/platform/test.h"
@@ -60,7 +62,7 @@ namespace {
 
 using TensorMatrix = std::vector<std::vector<Tensor>>;
 
-using SplitFunc = std::function<Status(
+using SplitFunc = std::function<absl::Status(
     std::unique_ptr<BatchResourceBase::BatchTask>* input_task,
     int first_output_task_size, int input_batch_size_limit,
     std::vector<std::unique_ptr<BatchResourceBase::BatchTask>>* output_tasks)>;
@@ -114,7 +116,7 @@ class BatchInputTaskTest : public ::testing::Test {
     device_ = DeviceFactory::NewDevice("CPU", SessionOptions{},
                                        "/job:a/replica:0/task:0");
 
-    Status op_kernel_creation_status;
+    absl::Status op_kernel_creation_status;
     batch_kernel_ = CreateOpKernel(
         DEVICE_CPU, device_.get(), device_->GetAllocator(AllocatorAttributes{}),
         CreateBatchKernelNodeDef(), TF_GRAPH_DEF_VERSION,
@@ -142,24 +144,24 @@ class BatchInputTaskTest : public ::testing::Test {
 };
 
 TEST_F(BatchInputTaskTest, BatchInputToSplitTasks) {
-  auto batch_task = std::make_unique<BatchResourceBase::BatchTask>();
+  bool batch_task_done_callback_executed = false;
+  auto status = std::make_shared<ThreadSafeStatus>();
+  auto done_callback = [&batch_task_done_callback_executed]() {
+    batch_task_done_callback_executed = true;
+  };
+  auto batch_task = std::make_unique<BatchResourceBase::BatchTask>(
+      std::move(done_callback), std::move(status));
 
-  batch_task->inputs.push_back(CreateTensor<int64>(
+  batch_task->inputs.push_back(CreateTensor<int64_t>(
       TensorShape({5, 2, 1}), {1, 2, 3, 4, 5, 6, 7, 8, 9, 10}));
-  batch_task->inputs.push_back(CreateTensor<int64>(
+  batch_task->inputs.push_back(CreateTensor<int64_t>(
       TensorShape({5, 1, 2}), {11, 12, 13, 14, 15, 16, 17, 18, 19, 20}));
 
   batch_task->captured_inputs.push_back(
-      CreateTensor<int64>(TensorShape{1}, {0}));
+      CreateTensor<int64_t>(TensorShape{1}, {0}));
 
   batch_task->context = op_kernel_context();
-
-  bool batch_task_done_callback_executed = false;
   batch_task->output = std::make_shared<TensorMatrix>();
-  batch_task->status = std::make_shared<ThreadSafeStatus>();
-  batch_task->done_callback = [&batch_task_done_callback_executed]() {
-    batch_task_done_callback_executed = true;
-  };
 
   auto batch_input_task =
       std::make_shared<BatchInputTask<BatchResourceBase::BatchTask>>(
@@ -191,7 +193,7 @@ TEST_F(BatchInputTaskTest, BatchInputToSplitTasks) {
     auto batch_task = output_tasks[i]->GetSplitTask();
     ASSERT_NE(batch_task, nullptr);
     EXPECT_EQ(batch_task->size(), expected_task_sizes[i]);
-    batch_task->done_callback();
+    batch_task->FinishTask(absl::OkStatus());
 
     // `GetSplitTask` returns nullptr from the 2nd call and on.
     EXPECT_EQ(output_tasks[i]->GetSplitTask(), nullptr);

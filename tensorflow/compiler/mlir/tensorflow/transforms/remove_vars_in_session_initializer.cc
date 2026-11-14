@@ -13,12 +13,10 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include <algorithm>
-#include <vector>
+#include <memory>
 
-#include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallVector.h"
-#include "mlir/IR/Builders.h"  // from @llvm-project
+#include "mlir/Dialect/Func/IR/FuncOps.h"  // from @llvm-project
 #include "mlir/IR/BuiltinOps.h"  // from @llvm-project
 #include "mlir/IR/UseDefLists.h"  // from @llvm-project
 #include "mlir/Pass/Pass.h"  // from @llvm-project
@@ -29,21 +27,16 @@ limitations under the License.
 namespace mlir {
 namespace tf_saved_model {
 namespace {
-using mlir::Operation;
+
 using mlir::TF::VarHandleOp;
 
+#define GEN_PASS_DEF_REMOVEVARIABLESINSESSIONINITIALIZERPASS
+#include "tensorflow/compiler/mlir/tensorflow/transforms/tf_savedmodel_passes.h.inc"
+
 class RemoveVariablesInSessionInitializerPass
-    : public PassWrapper<RemoveVariablesInSessionInitializerPass,
-                         OperationPass<ModuleOp>> {
+    : public impl::RemoveVariablesInSessionInitializerPassBase<
+          RemoveVariablesInSessionInitializerPass> {
  public:
-  StringRef getArgument() const final {
-    return "tf-saved-model-remove-vars-in-session-initializer";
-  }
-
-  StringRef getDescription() const final {
-    return "Remove variables in tf saved model's session initializer.";
-  }
-
   void runOnOperation() override;
 };
 
@@ -60,7 +53,7 @@ void RecursiveRemove(Operation* op,
   erase_list.push_back(op);
 
   for (auto& use : op->getOpOperands()) {
-    if (auto op_result = use.get().dyn_cast<mlir::OpResult>()) {
+    if (auto op_result = mlir::dyn_cast<mlir::OpResult>(use.get())) {
       Operation* def = op_result.getDefiningOp();
       if (!dead_ops.insert(def).second) continue;
       RecursiveRemove(def, erase_list, dead_ops);
@@ -84,21 +77,10 @@ void RemoveVariables(llvm::ArrayRef<VarHandleOp> vars) {
 }
 
 void RemoveVariablesInSessionInitializerPass::runOnOperation() {
-  ModuleOp module = getOperation();
-  SessionInitializerOp session_init_op = GetSessionInitializerOp(module);
+  ModuleOp module_op = getOperation();
 
-  if (!session_init_op) return;
-
-  SymbolTable symbol_table(module);
-
-  for (auto sym_ref : session_init_op.initializers()) {
-    FuncOp init_func_op = symbol_table.lookup<mlir::FuncOp>(
-        sym_ref.cast<FlatSymbolRefAttr>().getValue());
-
-    if (!init_func_op) {
-      module.emitError("no session initializer function found");
-      return signalPassFailure();
-    }
+  for (auto init_func_op : GetInitializerFunctions(module_op)) {
+    if (!init_func_op) return;
 
     if (init_func_op.getBlocks().size() != 1) {
       init_func_op.emitError("expects exactly one block in the MLIR function");
@@ -114,8 +96,6 @@ void RemoveVariablesInSessionInitializerPass::runOnOperation() {
 }
 
 }  // namespace
-
-static PassRegistration<RemoveVariablesInSessionInitializerPass> pass;
 
 std::unique_ptr<OperationPass<ModuleOp>>
 CreateRemoveVariablesInSessionInitializerPass() {

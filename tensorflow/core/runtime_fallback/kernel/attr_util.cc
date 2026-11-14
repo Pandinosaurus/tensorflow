@@ -17,21 +17,29 @@ limitations under the License.
 #include <assert.h>
 #include <stdlib.h>
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
+#include "absl/status/status.h"
+#include "absl/strings/numbers.h"
 #include "tensorflow/core/framework/types.pb.h"
 #include "tensorflow/core/platform/errors.h"
 #include "tensorflow/core/platform/status.h"
 #include "tensorflow/core/platform/str_util.h"
 #include "tensorflow/core/platform/stringpiece.h"
+#include "tensorflow/core/platform/types.h"
 #include "tensorflow/core/runtime_fallback/util/attr_util.h"
+#include "tensorflow/core/util/padding.h"
+#include "tfrt/core_runtime/op_attr_type.h"  // from @tf_runtime
+#include "tfrt/core_runtime/op_attrs.h"  // from @tf_runtime
+#include "tfrt/host_context/kernel_utils.h"  // from @tf_runtime
 
 namespace tensorflow {
 
 // TODO(annarev): merge this file with attr_util.cc
 // after reducing attr_util dependencies.
-DataType ParseTFDataType(StringPiece dtype) {
+DataType ParseTFDataType(absl::string_view dtype) {
   if (dtype == "DT_INT8") {
     return DataType::DT_INT8;
   } else if (dtype == "DT_INT32") {
@@ -48,7 +56,7 @@ DataType ParseTFDataType(StringPiece dtype) {
   }
 }
 
-bool ParseBoolAttrValue(StringPiece attr_value) {
+bool ParseBoolAttrValue(absl::string_view attr_value) {
   if (attr_value == "false") {
     return false;
   } else if (attr_value == "true") {
@@ -59,51 +67,52 @@ bool ParseBoolAttrValue(StringPiece attr_value) {
   }
 }
 
-Status ParseValue(StringPiece input, bool* value) {
+absl::Status ParseValue(absl::string_view input, bool* value) {
   *value = ParseBoolAttrValue(input);
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-Status ParseValue(StringPiece input, int32* value) {
+absl::Status ParseValue(absl::string_view input, int32_t* value) {
   bool parse_result = absl::SimpleAtoi(input, value);
   if (!parse_result) {
-    return errors::InvalidArgument("Could not parse int32 from ", input);
+    return absl::InvalidArgumentError(
+        absl::StrCat("Could not parse int32 from ", input));
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-Status ParseValue(StringPiece input, DataType* value) {
+absl::Status ParseValue(absl::string_view input, DataType* value) {
   *value = ParseTFDataType(input);
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-Status ParseValue(StringPiece input, std::string* value) {
+absl::Status ParseValue(absl::string_view input, std::string* value) {
   *value = std::string(input);
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-Status ParseValue(StringPiece input, std::vector<int32>* value) {
+absl::Status ParseValue(absl::string_view input, std::vector<int32_t>* value) {
   std::vector<std::string> parts = str_util::Split(input, ",");
   value->reserve(parts.size());
   for (const auto& value_str : parts) {
     int32_t value_int;
     bool parse_result = absl::SimpleAtoi(value_str, &value_int);
     if (!parse_result) {
-      return errors::InvalidArgument("Could not parse list of integers from ",
-                                     input);
+      return absl::InvalidArgumentError(
+          absl::StrCat("Could not parse list of integers from ", input));
     }
     value->push_back(value_int);
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-Status ParseValue(StringPiece input, Padding* value) {
+absl::Status ParseValue(absl::string_view input, Padding* value) {
   return GetPaddingFromString(input, value);
 }
 
-Status AddOpAttr(const std::string& name, const std::string& attr_value,
-                 tfrt::OpAttrs* opattrs) {
-  Status s;
+absl::Status AddOpAttr(const std::string& name, const std::string& attr_value,
+                       tfrt::OpAttrs* opattrs) {
+  absl::Status s;
   // Splits attr_value into type and value
   std::vector<absl::string_view> value_split = tfd::AttrValueSplit(attr_value);
   auto& type = value_split[0];
@@ -115,7 +124,7 @@ Status AddOpAttr(const std::string& name, const std::string& attr_value,
   } else if (type == "i32") {
     int32_t val;
     s = ParseValue(value, &val);
-    opattrs->Set<int32>(name, val);
+    opattrs->Set<int32_t>(name, val);
   } else if (type == "string" || type == "padding") {
     std::string val;
     s = ParseValue(value, &val);
@@ -125,21 +134,22 @@ Status AddOpAttr(const std::string& name, const std::string& attr_value,
     s = ParseValue(value, &val);
     opattrs->Set<tfrt::OpAttrType>(name, tfd::ConvertFromTfDataType(val));
   } else if (type == "list(i32)") {
-    std::vector<int32> val;
+    std::vector<int32_t> val;
     s = ParseValue(value, &val);
-    opattrs->SetArray<int32>(name, val);
+    opattrs->SetArray<int32_t>(name, val);
   }
   return s;
 }
 
-Status FillOpAttrs(tfrt::RemainingAttributes attrs, tfrt::OpAttrs* opattrs) {
+absl::Status FillOpAttrs(tfrt::RemainingAttributes attrs,
+                         tfrt::OpAttrs* opattrs) {
   int num_tf_attrs = attrs.size() / 2;
-  Status status;
+  absl::Status status;
   for (int i = 0; i < num_tf_attrs; ++i) {
     // Each TF attribute is represented as a pair of name and value strings.
     std::string name = attrs.GetStringAttribute(i * 2).str();
     std::string attr_value = attrs.GetStringAttribute(i * 2 + 1).str();
-    Status s = AddOpAttr(name, attr_value, opattrs);
+    absl::Status s = AddOpAttr(name, attr_value, opattrs);
     status.Update(s);
   }
   return status;

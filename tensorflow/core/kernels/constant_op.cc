@@ -24,7 +24,7 @@ limitations under the License.
 
 #include "tensorflow/core/kernels/constant_op.h"
 
-#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
+#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
 #include "tensorflow/core/framework/allocator.h"
 #include "tensorflow/core/framework/bounds_check.h"
 #include "tensorflow/core/framework/node_def.pb.h"
@@ -38,6 +38,7 @@ limitations under the License.
 #include "tensorflow/core/graph/graph_node_util.h"
 #include "tensorflow/core/kernels/fill_functor.h"
 #include "tensorflow/core/platform/macros.h"
+#include "tensorflow/core/platform/types.h"
 #include "tensorflow/core/profiler/lib/scoped_memory_debug_annotation.h"
 
 namespace tensorflow {
@@ -76,15 +77,15 @@ ConstantOp::ConstantOp(OpKernelConstruction* ctx)
     : OpKernel(ctx, StripTensorDataFromNodeDef(ctx), false),
       tensor_(ctx->output_type(0)) {
   const TensorProto* proto = nullptr;
-  profiler::ScopedMemoryDebugAnnotation op_annotation(name_view().data());
+  tsl::profiler::ScopedMemoryDebugAnnotation op_annotation(name_view());
   OP_REQUIRES_OK(ctx, ctx->GetAttr("value", &proto));
   OP_REQUIRES_OK(ctx, ctx->device()->MakeTensorFromProto(
                           *proto, AllocatorAttributes(), &tensor_));
   OP_REQUIRES(
       ctx, ctx->output_type(0) == tensor_.dtype(),
-      errors::InvalidArgument("Type mismatch between value (",
-                              DataTypeString(tensor_.dtype()), ") and dtype (",
-                              DataTypeString(ctx->output_type(0)), ")"));
+      absl::InvalidArgumentError(absl::StrCat(
+          "Type mismatch between value (", DataTypeString(tensor_.dtype()),
+          ") and dtype (", DataTypeString(ctx->output_type(0)), ")")));
 }
 
 void ConstantOp::Compute(OpKernelContext* ctx) {
@@ -109,17 +110,17 @@ REGISTER_KERNEL(GPU, Eigen::half);
 REGISTER_KERNEL(GPU, bfloat16);
 REGISTER_KERNEL(GPU, float);
 REGISTER_KERNEL(GPU, double);
-REGISTER_KERNEL(GPU, uint8);
-REGISTER_KERNEL(GPU, int8);
+REGISTER_KERNEL(GPU, uint8_t);
+REGISTER_KERNEL(GPU, int8_t);
 REGISTER_KERNEL(GPU, qint8);
-REGISTER_KERNEL(GPU, uint16);
-REGISTER_KERNEL(GPU, int16);
+REGISTER_KERNEL(GPU, uint16_t);
+REGISTER_KERNEL(GPU, int16_t);
 REGISTER_KERNEL(GPU, qint16);
 REGISTER_KERNEL(GPU, quint16);
-REGISTER_KERNEL(GPU, uint32);
+REGISTER_KERNEL(GPU, uint32_t);
 REGISTER_KERNEL(GPU, qint32);
 REGISTER_KERNEL(GPU, int64_t);
-REGISTER_KERNEL(GPU, uint64);
+REGISTER_KERNEL(GPU, uint64_t);
 REGISTER_KERNEL(GPU, complex64);
 REGISTER_KERNEL(GPU, complex128);
 REGISTER_KERNEL(GPU, bool);
@@ -154,18 +155,19 @@ class FillOp : public OpKernel {
         // TODO(rmlarsen): Disallow legacy use of scalars to represent shape.
         (TensorShapeUtils::IsVector(Tdims.shape()) ||
          TensorShapeUtils::IsScalar(Tdims.shape())),
-        errors::InvalidArgument("dims must represent a vector, got shape ",
-                                Tdims.shape().DebugString()));
+        absl::InvalidArgumentError(
+            absl::StrCat("dims must represent a vector, got shape ",
+                         Tdims.shape().DebugString())));
     const Tensor& Tvalue = context->input(1);
-    OP_REQUIRES(
-        context,
-        // TODO(rmlarsen): Disallow legacy use of length-1 vector to represent
-        // scalar.
-        TensorShapeUtils::IsScalar(Tvalue.shape()) ||
-            (TensorShapeUtils::IsVector(Tvalue.shape()) &&
-             Tvalue.shape().dim_size(0) == 1),
-        errors::InvalidArgument("value must represent a scalar, got shape ",
-                                Tvalue.shape().DebugString()));
+    OP_REQUIRES(context,
+                // TODO(rmlarsen): Disallow legacy use of length-1 vector to
+                // represent scalar.
+                TensorShapeUtils::IsScalar(Tvalue.shape()) ||
+                    (TensorShapeUtils::IsVector(Tvalue.shape()) &&
+                     Tvalue.shape().dim_size(0) == 1),
+                absl::InvalidArgumentError(
+                    absl::StrCat("value must represent a scalar, got shape ",
+                                 Tvalue.shape().DebugString())));
     auto dims = Tdims.flat<Index>();
     TensorShape shape;
     OP_REQUIRES_OK(context, TensorShapeUtils::MakeShape(
@@ -202,6 +204,8 @@ REGISTER_KERNEL(CPU, quint16);
 REGISTER_KERNEL(CPU, qint8);
 REGISTER_KERNEL(CPU, qint16);
 REGISTER_KERNEL(CPU, qint32);
+REGISTER_KERNEL(CPU, int4);
+REGISTER_KERNEL(CPU, uint4);
 #undef REGISTER_CPU_KERNEL
 
 #if (defined(GOOGLE_CUDA) && GOOGLE_CUDA) || \
@@ -212,26 +216,28 @@ REGISTER_KERNEL(GPU, float);
 REGISTER_KERNEL(GPU, double);
 REGISTER_KERNEL(GPU, complex64);
 REGISTER_KERNEL(GPU, complex128);
-REGISTER_KERNEL(GPU, uint8);
-REGISTER_KERNEL(GPU, int8);
-REGISTER_KERNEL(GPU, uint16);
-REGISTER_KERNEL(GPU, int16);
+REGISTER_KERNEL(GPU, uint8_t);
+REGISTER_KERNEL(GPU, int8_t);
+REGISTER_KERNEL(GPU, uint16_t);
+REGISTER_KERNEL(GPU, int16_t);
 REGISTER_KERNEL(GPU, int64_t);
 REGISTER_KERNEL(GPU, bool);
+REGISTER_KERNEL(GPU, int4);
+REGISTER_KERNEL(GPU, uint4);
 // Currently we do not support filling strings on GPU
+#endif
 
-// A special GPU kernel for int32.
+// A special DEVICE_DEFAULT kernel for int32.
 // TODO(b/25387198): Also enable int32 in device memory. This kernel
 // registration requires all int32 inputs and outputs to be in host memory.
 REGISTER_KERNEL_BUILDER(Name("Fill")
-                            .Device(DEVICE_GPU)
-                            .TypeConstraint<int32>("T")
-                            .TypeConstraint<int32>("index_type")
+                            .Device(DEVICE_DEFAULT)
+                            .TypeConstraint<int32_t>("T")
+                            .TypeConstraint<int32_t>("index_type")
                             .HostMemory("dims")
                             .HostMemory("value")
                             .HostMemory("output"),
-                        FillOp<CPUDevice, int32, int32>);
-#endif
+                        FillOp<CPUDevice, int32_t, int32_t>);
 
 #undef REGISTER_KERNEL
 
@@ -246,8 +252,8 @@ class ZerosLikeOp : public OpKernel {
     if (std::is_same<T, Variant>::value) {
       OP_REQUIRES(
           ctx, input.dims() == 0,
-          errors::InvalidArgument("ZerosLike non-scalar Tensor with "
-                                  "dtype=DT_VARIANT is not supported."));
+          absl::InvalidArgumentError("ZerosLike non-scalar Tensor with "
+                                     "dtype=DT_VARIANT is not supported."));
       const Variant& v = input.scalar<Variant>()();
       // DT_VARIANT tensors must be allocated on CPU since they wrap C++
       // objects which can not be efficiently represented in GPU memory.
@@ -279,27 +285,26 @@ REGISTER_CPU(Variant);
 
 #if (defined(GOOGLE_CUDA) && GOOGLE_CUDA) || \
     (defined(TENSORFLOW_USE_ROCM) && TENSORFLOW_USE_ROCM)
-#if !defined(MLIR_GENERATED_GPU_KERNELS_ENABLED) || \
-    !defined(MLIR_GENERATED_EXPERIMENTAL_KERNELS_ENABLED)
+#if !defined(MLIR_GENERATED_GPU_KERNELS_ENABLED)
 REGISTER_KERNEL(bool, GPU);
 REGISTER_KERNEL(Eigen::half, GPU);
 REGISTER_KERNEL(float, GPU);
 REGISTER_KERNEL(double, GPU);
 REGISTER_KERNEL(int64_t, GPU);
+REGISTER_KERNEL(complex64, GPU);
+REGISTER_KERNEL(complex128, GPU);
 #endif
 
 REGISTER_KERNEL(bfloat16, GPU);
-REGISTER_KERNEL(complex64, GPU);
-REGISTER_KERNEL(complex128, GPU);
 REGISTER_KERNEL(Variant, GPU);
-REGISTER_KERNEL_BUILDER(Name("ZerosLike")
-                            .Device(DEVICE_GPU)
-                            .TypeConstraint<int32>("T")
-                            .HostMemory("y"),
-                        ZerosLikeOp<CPUDevice, int32>);
 #endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM
-
 #undef REGISTER_KERNEL
+
+REGISTER_KERNEL_BUILDER(Name("ZerosLike")
+                            .Device(DEVICE_DEFAULT)
+                            .TypeConstraint<int32_t>("T")
+                            .HostMemory("y"),
+                        ZerosLikeOp<CPUDevice, int32_t>);
 
 template <typename Device, typename T>
 class OnesLikeOp : public OpKernel {
@@ -327,25 +332,25 @@ TF_CALL_POD_TYPES(REGISTER_CPU);
 
 #if (defined(GOOGLE_CUDA) && GOOGLE_CUDA) || \
     (defined(TENSORFLOW_USE_ROCM) && TENSORFLOW_USE_ROCM)
-#if !defined(MLIR_GENERATED_GPU_KERNELS_ENABLED) || \
-    !defined(MLIR_GENERATED_EXPERIMENTAL_KERNELS_ENABLED)
+#if !defined(MLIR_GENERATED_GPU_KERNELS_ENABLED)
 REGISTER_KERNEL(bool, GPU);
 REGISTER_KERNEL(Eigen::half, GPU);
 REGISTER_KERNEL(float, GPU);
 REGISTER_KERNEL(double, GPU);
 REGISTER_KERNEL(int64_t, GPU);
-#endif
-REGISTER_KERNEL(bfloat16, GPU);
 REGISTER_KERNEL(complex64, GPU);
 REGISTER_KERNEL(complex128, GPU);
-REGISTER_KERNEL_BUILDER(Name("OnesLike")
-                            .Device(DEVICE_GPU)
-                            .TypeConstraint<int32>("T")
-                            .HostMemory("y"),
-                        OnesLikeOp<CPUDevice, int32>);
+#endif
+REGISTER_KERNEL(bfloat16, GPU);
 #endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 
 #undef REGISTER_KERNEL
+
+REGISTER_KERNEL_BUILDER(Name("OnesLike")
+                            .Device(DEVICE_DEFAULT)
+                            .TypeConstraint<int32_t>("T")
+                            .HostMemory("y"),
+                        OnesLikeOp<CPUDevice, int32_t>);
 
 PlaceholderOp::PlaceholderOp(OpKernelConstruction* ctx) : OpKernel(ctx) {
   OP_REQUIRES_OK(ctx, ctx->GetAttr("shape", &expected_shape_));
@@ -354,15 +359,15 @@ PlaceholderOp::PlaceholderOp(OpKernelConstruction* ctx) : OpKernel(ctx) {
 void PlaceholderOp::Compute(OpKernelContext* ctx) {
   if (expected_shape_.dims() > 0) {
     OP_REQUIRES(ctx, false,
-                errors::InvalidArgument(
+                absl::InvalidArgumentError(absl::StrCat(
                     "You must feed a value for placeholder tensor '", name(),
                     "' with dtype ", DataTypeString(output_type(0)),
-                    " and shape ", expected_shape_.DebugString()));
+                    " and shape ", expected_shape_.DebugString())));
   } else {
     OP_REQUIRES(ctx, false,
-                errors::InvalidArgument(
+                absl::InvalidArgumentError(absl::StrCat(
                     "You must feed a value for placeholder tensor '", name(),
-                    "' with dtype ", DataTypeString(output_type(0))));
+                    "' with dtype ", DataTypeString(output_type(0)))));
   }
 }
 

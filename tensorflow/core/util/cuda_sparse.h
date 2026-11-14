@@ -13,8 +13,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#ifndef TENSORFLOW_CORE_KERNELS_LINALG_CUDA_SPARSE_H_
-#define TENSORFLOW_CORE_KERNELS_LINALG_CUDA_SPARSE_H_
+#ifndef TENSORFLOW_CORE_UTIL_CUDA_SPARSE_H_
+#define TENSORFLOW_CORE_UTIL_CUDA_SPARSE_H_
 
 // This header declares the class GpuSparse, which contains wrappers of
 // cuSparse libraries for use in TensorFlow kernels.
@@ -46,7 +46,8 @@ using gpusparseSpMMAlg_t = cusparseSpMMAlg_t;
 
 #elif TENSORFLOW_USE_ROCM
 
-#include "tensorflow/stream_executor/rocm/hipsparse_wrapper.h"
+#include "rocm/rocm_config.h"
+#include "xla/stream_executor/rocm/hipsparse_wrapper.h"
 
 using gpusparseStatus_t = hipsparseStatus_t;
 using gpusparseOperation_t = hipsparseOperation_t;
@@ -64,12 +65,17 @@ using gpusparseSpMMAlg_t = hipsparseSpMMAlg_t;
 
 #endif
 
+#include "xla/stream_executor/data_type.h"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/tensor.h"
 #include "tensorflow/core/framework/tensor_types.h"
 #include "tensorflow/core/lib/core/status.h"
 #include "tensorflow/core/platform/stream_executor.h"
 #include "tensorflow/core/public/version.h"
+
+#if GOOGLE_CUDA
+#include "xla/stream_executor/cuda/cuda_blas_utils.h"
+#endif
 
 // Macro that specializes a sparse method for all 4 standard
 // numeric types.
@@ -100,8 +106,7 @@ inline std::string ConvertGPUSparseErrorToString(
     RETURN_IF_STATUS(CUSPARSE_STATUS_MATRIX_TYPE_NOT_SUPPORTED)
 
     default:
-      return strings::StrCat("Unknown CUSPARSE error: ",
-                             static_cast<int>(status));
+      return absl::StrCat("Unknown CUSPARSE error: ", static_cast<int>(status));
 #elif TENSORFLOW_USE_ROCM
 
     RETURN_IF_STATUS(HIPSPARSE_STATUS_SUCCESS)
@@ -151,9 +156,8 @@ inline std::string ConvertGPUSparseErrorToString(
 
 #endif
 
-inline gpusparseOperation_t TransposeAndConjugateToGpuSparseOp(bool transpose,
-                                                               bool conjugate,
-                                                               Status* status) {
+inline gpusparseOperation_t TransposeAndConjugateToGpuSparseOp(
+    bool transpose, bool conjugate, absl::Status* status) {
 #if GOOGLE_CUDA
   if (transpose) {
     return conjugate ? CUSPARSE_OPERATION_CONJUGATE_TRANSPOSE
@@ -161,7 +165,7 @@ inline gpusparseOperation_t TransposeAndConjugateToGpuSparseOp(bool transpose,
   } else {
     if (conjugate) {
       DCHECK(status != nullptr);
-      *status = errors::InvalidArgument(
+      *status = absl::InvalidArgumentError(
           "Conjugate == True and transpose == False is not supported.");
     }
     return CUSPARSE_OPERATION_NON_TRANSPOSE;
@@ -181,6 +185,117 @@ inline gpusparseOperation_t TransposeAndConjugateToGpuSparseOp(bool transpose,
 #endif
 }
 
+#if GOOGLE_CUDA && (CUDA_VERSION >= 12000)
+
+template <typename T>
+struct ToGpuSparseIndexType;
+template <>
+struct ToGpuSparseIndexType<int> {
+  static constexpr cusparseIndexType_t value = CUSPARSE_INDEX_32I;
+};
+template <>
+struct ToGpuSparseIndexType<int64_t> {
+  static constexpr cusparseIndexType_t value = CUSPARSE_INDEX_64I;
+};
+
+class GpuSparseSpGEMMDescr {
+ public:
+  GpuSparseSpGEMMDescr() : initialized_(false) {}
+  ~GpuSparseSpGEMMDescr() {
+    if (initialized_) {
+      cusparseSpGEMM_destroyDescr(descr_);
+    }
+  }
+  absl::Status Initialize() {
+    if (initialized_) {
+      return absl::InternalError(
+          "Double initializion of GpuSparseSpGEMMDescr.");
+    }
+    TF_RETURN_IF_GPUSPARSE_ERROR(cusparseSpGEMM_createDescr(&descr_));
+    initialized_ = true;
+    return absl::OkStatus();
+  }
+  cusparseSpGEMMDescr_t& get() { return descr_; }
+
+ private:
+  bool initialized_;
+  cusparseSpGEMMDescr_t descr_;
+
+  GpuSparseSpGEMMDescr(const GpuSparseSpGEMMDescr&) = delete;
+  void operator=(const GpuSparseSpGEMMDescr&) = delete;
+};
+
+class GpuSparseSpMatDescr {
+ public:
+  GpuSparseSpMatDescr() : initialized_(false) {}
+  ~GpuSparseSpMatDescr() {
+    if (initialized_) {
+      cusparseDestroySpMat(descr_);
+    }
+  }
+  template <typename IndexType, typename FloatType>
+  absl::Status InitializeCsr(int64_t rows, int64_t cols, int64_t nnz,
+                             IndexType* csrRowOffsets, IndexType* csrColInd,
+                             FloatType* csrValues) {
+    if (initialized_) {
+      return absl::InternalError("Double initializion of gpusparseSpMatDescr.");
+    }
+    using stream_executor::cuda::AsCudaDataType;
+    using stream_executor::dnn::ToDataType;
+    TF_RETURN_IF_GPUSPARSE_ERROR(cusparseCreateCsr(
+        &descr_, rows, cols, nnz, csrRowOffsets, csrColInd, csrValues,
+        ToGpuSparseIndexType<IndexType>::value,
+        ToGpuSparseIndexType<IndexType>::value, CUSPARSE_INDEX_BASE_ZERO,
+        AsCudaDataType(ToDataType<FloatType>::value)));
+    initialized_ = true;
+    return absl::OkStatus();
+  }
+  gpusparseSpMatDescr_t& get() { return descr_; }
+
+ private:
+  bool initialized_;
+  cusparseSpMatDescr_t descr_;
+  GpuSparseSpMatDescr(const GpuSparseSpMatDescr&) = delete;
+  void operator=(const GpuSparseSpMatDescr&) = delete;
+};
+
+class GpuSparseConstSpMatDescr {
+ public:
+  GpuSparseConstSpMatDescr() : initialized_(false) {}
+  ~GpuSparseConstSpMatDescr() {
+    if (initialized_) {
+      cusparseDestroySpMat(descr_);
+    }
+  }
+  template <typename IndexType, typename FloatType>
+  absl::Status InitializeCsr(int64_t rows, int64_t cols, int64_t nnz,
+                             const IndexType* csrRowOffsets,
+                             const IndexType* csrColInd,
+                             const FloatType* csrValues) {
+    if (initialized_) {
+      return absl::InternalError("Double initializion of gpusparseSpMatDescr.");
+    }
+    using stream_executor::cuda::AsCudaDataType;
+    using stream_executor::dnn::ToDataType;
+    TF_RETURN_IF_GPUSPARSE_ERROR(cusparseCreateConstCsr(
+        &descr_, rows, cols, nnz, csrRowOffsets, csrColInd, csrValues,
+        ToGpuSparseIndexType<IndexType>::value,
+        ToGpuSparseIndexType<IndexType>::value, CUSPARSE_INDEX_BASE_ZERO,
+        AsCudaDataType(ToDataType<FloatType>::value)));
+    initialized_ = true;
+    return absl::OkStatus();
+  }
+  cusparseConstSpMatDescr_t& get() { return descr_; }
+
+ private:
+  bool initialized_;
+  cusparseConstSpMatDescr_t descr_;
+  GpuSparseConstSpMatDescr(const GpuSparseConstSpMatDescr&) = delete;
+  void operator=(const GpuSparseConstSpMatDescr&) = delete;
+};
+
+#endif
+
 // The GpuSparse class provides a simplified templated API for cuSparse
 // (http://docs.nvidia.com/cuda/cusparse/index.html).
 // An object of this class wraps static cuSparse instances,
@@ -195,13 +310,13 @@ class GpuSparse {
  public:
   // This object stores a pointer to context, which must outlive it.
   explicit GpuSparse(OpKernelContext* context);
-  virtual ~GpuSparse() {}
+  virtual ~GpuSparse() = default;
 
   // This initializes the GpuSparse class if it hasn't
   // been initialized yet.  All following public methods require the
   // class has been initialized.  Can be run multiple times; all
   // subsequent calls after the first have no effect.
-  Status Initialize();  // Move to constructor?
+  absl::Status Initialize();  // Move to constructor?
 
   // ====================================================================
   // Wrappers for cuSparse start here.
@@ -210,59 +325,62 @@ class GpuSparse {
   // Solves tridiagonal system of equations.
   // See: https://docs.nvidia.com/cuda/cusparse/index.html#gtsv2
   template <typename Scalar>
-  Status Gtsv2(int m, int n, const Scalar* dl, const Scalar* d,
-               const Scalar* du, Scalar* B, int ldb, void* pBuffer) const;
+  absl::Status Gtsv2(int m, int n, const Scalar* dl, const Scalar* d,
+                     const Scalar* du, Scalar* B, int ldb, void* pBuffer) const;
 
   // Computes the size of a temporary buffer used by Gtsv2.
   // See: https://docs.nvidia.com/cuda/cusparse/index.html#gtsv2_bufferSize
   template <typename Scalar>
-  Status Gtsv2BufferSizeExt(int m, int n, const Scalar* dl, const Scalar* d,
-                            const Scalar* du, const Scalar* B, int ldb,
-                            size_t* bufferSizeInBytes) const;
+  absl::Status Gtsv2BufferSizeExt(int m, int n, const Scalar* dl,
+                                  const Scalar* d, const Scalar* du,
+                                  const Scalar* B, int ldb,
+                                  size_t* bufferSizeInBytes) const;
 
   // Solves tridiagonal system of equations without partial pivoting.
   // See: https://docs.nvidia.com/cuda/cusparse/index.html#gtsv2_nopivot
   template <typename Scalar>
-  Status Gtsv2NoPivot(int m, int n, const Scalar* dl, const Scalar* d,
-                      const Scalar* du, Scalar* B, int ldb,
-                      void* pBuffer) const;
+  absl::Status Gtsv2NoPivot(int m, int n, const Scalar* dl, const Scalar* d,
+                            const Scalar* du, Scalar* B, int ldb,
+                            void* pBuffer) const;
 
   // Computes the size of a temporary buffer used by Gtsv2NoPivot.
   // See:
   // https://docs.nvidia.com/cuda/cusparse/index.html#gtsv2_nopivot_bufferSize
   template <typename Scalar>
-  Status Gtsv2NoPivotBufferSizeExt(int m, int n, const Scalar* dl,
-                                   const Scalar* d, const Scalar* du,
-                                   const Scalar* B, int ldb,
-                                   size_t* bufferSizeInBytes) const;
+  absl::Status Gtsv2NoPivotBufferSizeExt(int m, int n, const Scalar* dl,
+                                         const Scalar* d, const Scalar* du,
+                                         const Scalar* B, int ldb,
+                                         size_t* bufferSizeInBytes) const;
 
   // Solves a batch of tridiagonal systems of equations. Doesn't support
   // multiple right-hand sides per each system. Doesn't do pivoting.
   // See: https://docs.nvidia.com/cuda/cusparse/index.html#gtsv2stridedbatch
   template <typename Scalar>
-  Status Gtsv2StridedBatch(int m, const Scalar* dl, const Scalar* d,
-                           const Scalar* du, Scalar* x, int batchCount,
-                           int batchStride, void* pBuffer) const;
+  absl::Status Gtsv2StridedBatch(int m, const Scalar* dl, const Scalar* d,
+                                 const Scalar* du, Scalar* x, int batchCount,
+                                 int batchStride, void* pBuffer) const;
 
   // Computes the size of a temporary buffer used by Gtsv2StridedBatch.
   // See:
   // https://docs.nvidia.com/cuda/cusparse/index.html#gtsv2stridedbatch_bufferSize
   template <typename Scalar>
-  Status Gtsv2StridedBatchBufferSizeExt(int m, const Scalar* dl,
-                                        const Scalar* d, const Scalar* du,
-                                        const Scalar* x, int batchCount,
-                                        int batchStride,
-                                        size_t* bufferSizeInBytes) const;
+  absl::Status Gtsv2StridedBatchBufferSizeExt(int m, const Scalar* dl,
+                                              const Scalar* d, const Scalar* du,
+                                              const Scalar* x, int batchCount,
+                                              int batchStride,
+                                              size_t* bufferSizeInBytes) const;
 
   // Compresses the indices of rows or columns. It can be interpreted as a
   // conversion from COO to CSR sparse storage format. See:
   // http://docs.nvidia.com/cuda/cusparse/index.html#cusparse-lt-t-gt-csr2coo.
-  Status Csr2coo(const int* CsrRowPtr, int nnz, int m, int* cooRowInd) const;
+  absl::Status Csr2coo(const int* CsrRowPtr, int nnz, int m,
+                       int* cooRowInd) const;
 
   // Uncompresses the indices of rows or columns. It can be interpreted as a
   // conversion from CSR to COO sparse storage format. See:
   // http://docs.nvidia.com/cuda/cusparse/index.html#cusparse-lt-t-gt-coo2csr.
-  Status Coo2csr(const int* cooRowInd, int nnz, int m, int* csrRowPtr) const;
+  absl::Status Coo2csr(const int* cooRowInd, int nnz, int m,
+                       int* csrRowPtr) const;
 
 #if (GOOGLE_CUDA && (CUDA_VERSION < 10020)) || \
     (TENSORFLOW_USE_ROCM && TF_ROCM_VERSION < 40200)
@@ -291,12 +409,12 @@ class GpuSparse {
   // where A is a sparse matrix in CSR format, B and C are dense matricies in
   // column-major format. Returns needed workspace size in bytes.
   template <typename Scalar>
-  Status SpMMBufferSize(gpusparseOperation_t transA,
-                        gpusparseOperation_t transB, const Scalar* alpha,
-                        const gpusparseSpMatDescr_t matA,
-                        const gpusparseDnMatDescr_t matB, const Scalar* beta,
-                        gpusparseDnMatDescr_t matC, gpusparseSpMMAlg_t alg,
-                        size_t* bufferSize) const;
+  absl::Status SpMMBufferSize(gpusparseOperation_t transA,
+                              gpusparseOperation_t transB, const Scalar* alpha,
+                              const gpusparseSpMatDescr_t matA,
+                              const gpusparseDnMatDescr_t matB,
+                              const Scalar* beta, gpusparseDnMatDescr_t matC,
+                              gpusparseSpMMAlg_t alg, size_t* bufferSize) const;
 
   // Sparse-dense matrix multiplication y = alpha * op(A) * op(B) + beta * C,
   // where A is a sparse matrix in CSR format, B and C are dense matricies in
@@ -305,11 +423,11 @@ class GpuSparse {
   //
   // **NOTE** This is an in-place operation for data in C.
   template <typename Scalar>
-  Status SpMM(gpusparseOperation_t transA, gpusparseOperation_t transB,
-              const Scalar* alpha, const gpusparseSpMatDescr_t matA,
-              const gpusparseDnMatDescr_t matB, const Scalar* beta,
-              gpusparseDnMatDescr_t matC, gpusparseSpMMAlg_t alg,
-              int8* buffer) const;
+  absl::Status SpMM(gpusparseOperation_t transA, gpusparseOperation_t transB,
+                    const Scalar* alpha, const gpusparseSpMatDescr_t matA,
+                    const gpusparseDnMatDescr_t matB, const Scalar* beta,
+                    gpusparseDnMatDescr_t matC, gpusparseSpMMAlg_t alg,
+                    int8_t* buffer) const;
 #endif
 
   // Sparse-dense vector multiplication y = alpha * op(A) * x  + beta * y,
@@ -326,16 +444,16 @@ class GpuSparse {
                const Scalar* beta_host, Scalar* y) const;
 #else
   template <typename Scalar>
-  Status Csrmv(gpusparseOperation_t transA, int m, int n, int nnz,
-               const Scalar* alpha_host, const Scalar* csrSortedValA,
-               const int* csrSortedRowPtrA, const int* csrSortedColIndA,
-               const Scalar* x, const Scalar* beta_host, Scalar* y) const;
+  absl::Status Csrmv(gpusparseOperation_t transA, int m, int n, int nnz,
+                     const Scalar* alpha_host, const Scalar* csrSortedValA,
+                     const int* csrSortedRowPtrA, const int* csrSortedColIndA,
+                     const Scalar* x, const Scalar* beta_host, Scalar* y) const;
 #endif  // CUDA_VERSION < 10020
 
   // Computes workspace size for sparse - sparse matrix addition of matrices
   // stored in CSR format.
   template <typename Scalar>
-  Status CsrgeamBufferSizeExt(
+  absl::Status CsrgeamBufferSizeExt(
       int m, int n, const Scalar* alpha, const gpusparseMatDescr_t descrA,
       int nnzA, const Scalar* csrSortedValA, const int* csrSortedRowPtrA,
       const int* csrSortedColIndA, const Scalar* beta,
@@ -349,12 +467,12 @@ class GpuSparse {
   // output.  csrSortedRowPtrC must be preallocated on device with
   // m + 1 entries.  See:
   // http://docs.nvidia.com/cuda/cusparse/index.html#cusparse-lt-t-gt-csrgeam.
-  Status CsrgeamNnz(int m, int n, const gpusparseMatDescr_t descrA, int nnzA,
-                    const int* csrSortedRowPtrA, const int* csrSortedColIndA,
-                    const gpusparseMatDescr_t descrB, int nnzB,
-                    const int* csrSortedRowPtrB, const int* csrSortedColIndB,
-                    const gpusparseMatDescr_t descrC, int* csrSortedRowPtrC,
-                    int* nnzTotalDevHostPtr, void* workspace);
+  absl::Status CsrgeamNnz(
+      int m, int n, const gpusparseMatDescr_t descrA, int nnzA,
+      const int* csrSortedRowPtrA, const int* csrSortedColIndA,
+      const gpusparseMatDescr_t descrB, int nnzB, const int* csrSortedRowPtrB,
+      const int* csrSortedColIndB, const gpusparseMatDescr_t descrC,
+      int* csrSortedRowPtrC, int* nnzTotalDevHostPtr, void* workspace);
 
   // Computes sparse - sparse matrix addition of matrices
   // stored in CSR format.  This is part two: perform sparse-sparse
@@ -362,34 +480,22 @@ class GpuSparse {
   // with nnzTotalDevHostPtr entries (as calculated by CsrgeamNnz).  See:
   // http://docs.nvidia.com/cuda/cusparse/index.html#cusparse-lt-t-gt-csrgeam.
   template <typename Scalar>
-  Status Csrgeam(int m, int n, const Scalar* alpha,
-                 const gpusparseMatDescr_t descrA, int nnzA,
-                 const Scalar* csrSortedValA, const int* csrSortedRowPtrA,
-                 const int* csrSortedColIndA, const Scalar* beta,
-                 const gpusparseMatDescr_t descrB, int nnzB,
-                 const Scalar* csrSortedValB, const int* csrSortedRowPtrB,
-                 const int* csrSortedColIndB, const gpusparseMatDescr_t descrC,
-                 Scalar* csrSortedValC, int* csrSortedRowPtrC,
-                 int* csrSortedColIndC, void* workspace);
-
-#if GOOGLE_CUDA && (CUDA_VERSION >= 10000)
-  // Computes sparse-sparse matrix multiplication of matrices
-  // stored in CSR format.  This is part zero: calculate required workspace
-  // size.
-  template <typename Scalar>
-  Status CsrgemmBufferSize(
-      int m, int n, int k, const gpusparseMatDescr_t descrA, int nnzA,
-      const int* csrSortedRowPtrA, const int* csrSortedColIndA,
-      const gpusparseMatDescr_t descrB, int nnzB, const int* csrSortedRowPtrB,
-      const int* csrSortedColIndB, csrgemm2Info_t info, size_t* workspaceBytes);
-#endif
+  absl::Status Csrgeam(int m, int n, const Scalar* alpha,
+                       const gpusparseMatDescr_t descrA, int nnzA,
+                       const Scalar* csrSortedValA, const int* csrSortedRowPtrA,
+                       const int* csrSortedColIndA, const Scalar* beta,
+                       const gpusparseMatDescr_t descrB, int nnzB,
+                       const Scalar* csrSortedValB, const int* csrSortedRowPtrB,
+                       const int* csrSortedColIndB,
+                       const gpusparseMatDescr_t descrC, Scalar* csrSortedValC,
+                       int* csrSortedRowPtrC, int* csrSortedColIndC,
+                       void* workspace);
 
   // Computes sparse-sparse matrix multiplication of matrices
-  // stored in CSR format.  This is part one: calculate nnz of the
-  // output.  csrSortedRowPtrC must be preallocated on device with
-  // m + 1 entries.  See:
-  // http://docs.nvidia.com/cuda/cusparse/index.html#cusparse-lt-t-gt-csrgemm.
-#if (GOOGLE_CUDA && (CUDA_VERSION < 10000)) || TENSORFLOW_USE_ROCM
+  // stored in CSR format.
+#if TENSORFLOW_USE_ROCM
+  // Part one: calculate nnz of the output.
+  // csrSortedRowPtrC must be preallocated on device with m + 1 entries.
   Status CsrgemmNnz(gpusparseOperation_t transA, gpusparseOperation_t transB,
                     int m, int k, int n, const gpusparseMatDescr_t descrA,
                     int nnzA, const int* csrSortedRowPtrA,
@@ -398,23 +504,9 @@ class GpuSparse {
                     const int* csrSortedRowPtrB, const int* csrSortedColIndB,
                     const gpusparseMatDescr_t descrC, int* csrSortedRowPtrC,
                     int* nnzTotalDevHostPtr);
-#else
-  Status CsrgemmNnz(int m, int n, int k, const gpusparseMatDescr_t descrA,
-                    int nnzA, const int* csrSortedRowPtrA,
-                    const int* csrSortedColIndA,
-                    const gpusparseMatDescr_t descrB, int nnzB,
-                    const int* csrSortedRowPtrB, const int* csrSortedColIndB,
-                    const gpusparseMatDescr_t descrC, int* csrSortedRowPtrC,
-                    int* nnzTotalDevHostPtr, csrgemm2Info_t info,
-                    void* workspace);
-#endif
-
-  // Computes sparse - sparse matrix matmul of matrices
-  // stored in CSR format.  This is part two: perform sparse-sparse
-  // addition.  csrValC and csrColIndC must be allocated on the device
-  // with nnzTotalDevHostPtr entries (as calculated by CsrgemmNnz).  See:
-  // http://docs.nvidia.com/cuda/cusparse/index.html#cusparse-lt-t-gt-csrgemm.
-#if (GOOGLE_CUDA && (CUDA_VERSION < 10000)) || TENSORFLOW_USE_ROCM
+  // Part two: perform sparse-sparse matmul.
+  // csrValC and csrColIndC must be allocated on the device with
+  // nnzTotalDevHostPtr entries (as calculated by CsrgemmNnz).
   template <typename Scalar>
   Status Csrgemm(gpusparseOperation_t transA, gpusparseOperation_t transB,
                  int m, int k, int n, const gpusparseMatDescr_t descrA,
@@ -425,7 +517,27 @@ class GpuSparse {
                  const int* csrSortedColIndB, const gpusparseMatDescr_t descrC,
                  Scalar* csrSortedValC, int* csrSortedRowPtrC,
                  int* csrSortedColIndC);
-#else
+#elif CUDA_VERSION < 12000
+  // Part zero: calculate required workspace size.
+  template <typename Scalar>
+  Status CsrgemmBufferSize(
+      int m, int n, int k, const gpusparseMatDescr_t descrA, int nnzA,
+      const int* csrSortedRowPtrA, const int* csrSortedColIndA,
+      const gpusparseMatDescr_t descrB, int nnzB, const int* csrSortedRowPtrB,
+      const int* csrSortedColIndB, csrgemm2Info_t info, size_t* workspaceBytes);
+  // Part one: calculate nnz of the output.
+  // csrSortedRowPtrC must be preallocated on device with m + 1 entries.
+  Status CsrgemmNnz(int m, int n, int k, const gpusparseMatDescr_t descrA,
+                    int nnzA, const int* csrSortedRowPtrA,
+                    const int* csrSortedColIndA,
+                    const gpusparseMatDescr_t descrB, int nnzB,
+                    const int* csrSortedRowPtrB, const int* csrSortedColIndB,
+                    const gpusparseMatDescr_t descrC, int* csrSortedRowPtrC,
+                    int* nnzTotalDevHostPtr, csrgemm2Info_t info,
+                    void* workspace);
+  // Part two: perform sparse-sparse matmul.
+  // csrValC and csrColIndC must be allocated on the device with
+  // nnzTotalDevHostPtr entries (as calculated by CsrgemmNnz).
   template <typename Scalar>
   Status Csrgemm(int m, int n, int k, const gpusparseMatDescr_t descrA,
                  int nnzA, const Scalar* csrSortedValA,
@@ -436,21 +548,40 @@ class GpuSparse {
                  Scalar* csrSortedValC, int* csrSortedRowPtrC,
                  int* csrSortedColIndC, const csrgemm2Info_t info,
                  void* workspace);
+#else  // CUDA_VERSION >= 12000
+  template <typename Scalar>
+  absl::Status SpGEMM_workEstimation(GpuSparseConstSpMatDescr& matA,
+                                     GpuSparseConstSpMatDescr& matB,
+                                     GpuSparseSpMatDescr& matC,
+                                     GpuSparseSpGEMMDescr& spgemmDescr,
+                                     size_t* bufferSize1,
+                                     void* externalBuffer1);
+  template <typename Scalar>
+  absl::Status SpGEMM_compute(GpuSparseConstSpMatDescr& matA,
+                              GpuSparseConstSpMatDescr& matB,
+                              GpuSparseSpMatDescr& matC,
+                              GpuSparseSpGEMMDescr& spgemmDescr,
+                              size_t* bufferSize2, void* externalBuffer2);
+  template <typename Scalar>
+  absl::Status SpGEMM_copy(GpuSparseConstSpMatDescr& matA,
+                           GpuSparseConstSpMatDescr& matB,
+                           GpuSparseSpMatDescr& matC,
+                           GpuSparseSpGEMMDescr& spgemmDescr);
 #endif
 
   // In-place reordering of unsorted CSR to sorted CSR.
   // http://docs.nvidia.com/cuda/cusparse/index.html#cusparse-lt-t-gt-csru2csr
   template <typename Scalar>
-  Status Csru2csr(int m, int n, int nnz, const gpusparseMatDescr_t descrA,
-                  Scalar* csrVal, const int* csrRowPtr, int* csrColInd);
+  absl::Status Csru2csr(int m, int n, int nnz, const gpusparseMatDescr_t descrA,
+                        Scalar* csrVal, const int* csrRowPtr, int* csrColInd);
 
   // Converts from CSR to CSC format (equivalently, transpose).
   // http://docs.nvidia.com/cuda/cusparse/index.html#cusparse-csr2cscEx
   template <typename Scalar>
-  Status Csr2csc(int m, int n, int nnz, const Scalar* csrVal,
-                 const int* csrRowPtr, const int* csrColInd, Scalar* cscVal,
-                 int* cscRowInd, int* cscColPtr,
-                 const gpusparseAction_t copyValues);
+  absl::Status Csr2csc(int m, int n, int nnz, const Scalar* csrVal,
+                       const int* csrRowPtr, const int* csrColInd,
+                       Scalar* cscVal, int* cscRowInd, int* cscColPtr,
+                       const gpusparseAction_t copyValues);
 
  private:
   bool initialized_;
@@ -458,7 +589,8 @@ class GpuSparse {
   gpuStream_t gpu_stream_;
   gpusparseHandle_t* gpusparse_handle_;  // not owned.
 
-  TF_DISALLOW_COPY_AND_ASSIGN(GpuSparse);
+  GpuSparse(const GpuSparse&) = delete;
+  void operator=(const GpuSparse&) = delete;
 };
 
 // A wrapper class to ensure that a CUDA sparse matrix descriptor is initialized
@@ -486,15 +618,15 @@ class GpuSparseMatrixDescriptor {
 
   // Initializes the underlying descriptor.  Will fail on the second call if
   // called more than once.
-  Status Initialize() {
+  absl::Status Initialize() {
     DCHECK(!initialized_);
 #if GOOGLE_CUDA
     TF_RETURN_IF_GPUSPARSE_ERROR(cusparseCreateMatDescr(&descr_));
 #elif TENSORFLOW_USE_ROCM
-    TF_RETURN_IF_GPUSPARSE_ERROR(wrap::hipsparseCreateMatDescr(&descr_));
+    TF_RETURN_IF_GPUSPARSE_ERROR(se::wrap::hipsparseCreateMatDescr(&descr_));
 #endif
     initialized_ = true;
-    return Status::OK();
+    return absl::OkStatus();
   }
 
   gpusparseMatDescr_t& descr() {
@@ -513,7 +645,7 @@ class GpuSparseMatrixDescriptor {
 #if GOOGLE_CUDA
       cusparseDestroyMatDescr(descr_);
 #elif TENSORFLOW_USE_ROCM
-      wrap::hipsparseDestroyMatDescr(descr_);
+      se::wrap::hipsparseDestroyMatDescr(descr_);
 #endif
       initialized_ = false;
     }
@@ -522,7 +654,8 @@ class GpuSparseMatrixDescriptor {
   bool initialized_;
   gpusparseMatDescr_t descr_;
 
-  TF_DISALLOW_COPY_AND_ASSIGN(GpuSparseMatrixDescriptor);
+  GpuSparseMatrixDescriptor(const GpuSparseMatrixDescriptor&) = delete;
+  void operator=(const GpuSparseMatrixDescriptor&) = delete;
 };
 
 #if GOOGLE_CUDA
@@ -553,11 +686,11 @@ class GpuSparseCsrSortingConversionInfo {
 
   // Initializes the underlying info. Will fail on the second call if called
   // more than once.
-  Status Initialize() {
+  absl::Status Initialize() {
     DCHECK(!initialized_);
     TF_RETURN_IF_GPUSPARSE_ERROR(cusparseCreateCsru2csrInfo(&info_));
     initialized_ = true;
-    return Status::OK();
+    return absl::OkStatus();
   }
 
   csru2csrInfo_t& info() {
@@ -581,7 +714,9 @@ class GpuSparseCsrSortingConversionInfo {
   bool initialized_;
   csru2csrInfo_t info_;
 
-  TF_DISALLOW_COPY_AND_ASSIGN(GpuSparseCsrSortingConversionInfo);
+  GpuSparseCsrSortingConversionInfo(const GpuSparseCsrSortingConversionInfo&) =
+      delete;
+  void operator=(const GpuSparseCsrSortingConversionInfo&) = delete;
 };
 
 #endif  // GOOGLE_CUDA
@@ -590,4 +725,4 @@ class GpuSparseCsrSortingConversionInfo {
 
 #endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 
-#endif  // TENSORFLOW_CORE_KERNELS_LINALG_CUDA_SPARSE_H_
+#endif  // TENSORFLOW_CORE_UTIL_CUDA_SPARSE_H_

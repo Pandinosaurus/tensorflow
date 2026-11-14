@@ -12,8 +12,8 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
-#ifndef TENSORFLOW_LITE_EXPERIMENTAL_DELEGATES_COREML_BUILDERS_TEST_UTIL_H_
-#define TENSORFLOW_LITE_EXPERIMENTAL_DELEGATES_COREML_BUILDERS_TEST_UTIL_H_
+#ifndef TENSORFLOW_LITE_DELEGATES_COREML_BUILDERS_TEST_UTIL_H_
+#define TENSORFLOW_LITE_DELEGATES_COREML_BUILDERS_TEST_UTIL_H_
 
 #include "tensorflow/lite/delegates/coreml/coreml_delegate.h"
 #include "tensorflow/lite/kernels/test_util.h"
@@ -34,7 +34,6 @@ class SingleOpModelWithCoreMlDelegate : public tflite::SingleOpModel {
   using SingleOpModel::builder_;
 
  private:
-  tflite::Interpreter::TfLiteDelegatePtr delegate_;
   TfLiteCoreMlDelegateOptions params_ = {
       .enabled_devices = TfLiteCoreMlDelegateAllDevices,
       .min_nodes_per_partition = 1,
@@ -53,4 +52,4 @@ class SingleOpModelWithCoreMlDelegate : public tflite::SingleOpModel {
 - (void)invokeAndCheckNotDelegated;
 @end
 
-#endif  // TENSORFLOW_LITE_EXPERIMENTAL_DELEGATES_COREML_BUILDERS_TEST_UTIL_H_
+#endif  // TENSORFLOW_LITE_DELEGATES_COREML_BUILDERS_TEST_UTIL_H_

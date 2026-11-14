@@ -14,10 +14,6 @@
 # ==============================================================================
 """Signal reconstruction via overlapped addition of frames."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import ops
 from tensorflow.python.framework import tensor_util
@@ -37,6 +33,8 @@ def overlap_and_add(signal, frame_step, name=None):
   The resulting tensor has shape `[..., output_size]` where
 
       output_size = (frames - 1) * frame_step + frame_length
+
+  for `frames > 0`, and `output_size = 0` when `frames == 0`.
 
   Args:
     signal: A [..., frames, frame_length] `Tensor`. All dimensions may be
@@ -86,6 +84,25 @@ def overlap_and_add(signal, frame_step, name=None):
 
     # Compute output length.
     output_length = frame_length + frame_step * (frames - 1)
+
+    # A signal with no frames reconstructs to an empty signal.
+    static_frames = None
+    if (
+        signal.shape.dims is not None
+        and signal.shape.rank is not None
+        and signal.shape.rank >= 2
+    ):
+      static_frames = signal.shape.dims[-2].value
+
+    if static_frames == 0:
+      output_shape = full_shape([0])
+      return array_ops.reshape(signal, output_shape, name="fast_path")
+    elif static_frames is None:
+      output_length = array_ops.where_v2(
+          math_ops.greater(frames, 0),
+          output_length,
+          0,
+      )
 
     # If frame_length is equal to frame_step, there's no overlap so just
     # reshape the tensor.

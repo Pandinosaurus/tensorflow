@@ -18,15 +18,23 @@ limitations under the License.
 #include <stddef.h>
 #include <stdlib.h>
 
+#include <algorithm>
+#include <cstdint>
+#include <limits>
 #include <string>
 #include <vector>
 
+#include <gmock/gmock.h>
 #include <gtest/gtest.h>
-#include "tensorflow/lite/c/common.h"
+#include "tensorflow/lite/core/c/c_api_types.h"
+#include "tensorflow/lite/core/c/common.h"
+#include "tensorflow/lite/kernels/test_util.h"
 #include "tensorflow/lite/schema/schema_generated.h"
 
 namespace tflite {
 namespace {
+
+using testing::ElementsAreArray;
 
 TEST(ConvertVectorToTfLiteIntArray, TestWithVector) {
   std::vector<int> input = {1, 2};
@@ -95,21 +103,21 @@ TEST(CombineHashes, TestHashOutputsDifferent) {
 }
 
 TEST(GetOpNameByRegistration, ValidBuiltinCode) {
-  TfLiteRegistration registration;
+  TfLiteRegistration registration{};
   registration.builtin_code = tflite::BuiltinOperator_ADD;
   const auto op_name = GetOpNameByRegistration(registration);
   EXPECT_EQ("ADD", op_name);
 }
 
 TEST(GetOpNameByRegistration, InvalidBuiltinCode) {
-  TfLiteRegistration registration;
+  TfLiteRegistration registration{};
   registration.builtin_code = -1;
   const auto op_name = GetOpNameByRegistration(registration);
   EXPECT_EQ("", op_name);
 }
 
 TEST(GetOpNameByRegistration, CustomName) {
-  TfLiteRegistration registration;
+  TfLiteRegistration registration{};
   registration.builtin_code = tflite::BuiltinOperator_CUSTOM;
   registration.custom_name = "TestOp";
   auto op_name = GetOpNameByRegistration(registration);
@@ -128,6 +136,164 @@ TEST(ValidationSubgraph, NameIsDetected) {
   EXPECT_FALSE(IsValidationSubgraph("VALIDATIONfoo"));
   EXPECT_TRUE(IsValidationSubgraph("VALIDATION:"));
   EXPECT_TRUE(IsValidationSubgraph("VALIDATION:main"));
+}
+
+TEST(MultiplyAndCheckOverflow, Validate) {
+  size_t res = 0;
+  EXPECT_TRUE(MultiplyAndCheckOverflow(1, 2, &res) == kTfLiteOk);
+  EXPECT_FALSE(MultiplyAndCheckOverflow(static_cast<size_t>(123456789023),
+                                        1223423425, &res) == kTfLiteOk);
+}
+
+TEST(CheckedNumElements, Validate) {
+  std::vector<int> dims = {2, 3, 4};
+  size_t count = 0;
+
+  EXPECT_EQ(CheckedNumElements(dims, count), kTfLiteOk);
+  EXPECT_EQ(count, 24);
+}
+
+TEST(CheckedNumElements, RejectsNegativeDimension) {
+  std::vector<int> dims = {2, -1, 4};
+  size_t count = 0;
+
+  EXPECT_EQ(CheckedNumElements(dims, count), kTfLiteError);
+}
+
+TEST(CheckedNumElements, RejectsOverflow) {
+  std::vector<int> dims = {std::numeric_limits<int>::max(),
+                           std::numeric_limits<int>::max(),
+                           std::numeric_limits<int>::max()};
+  size_t count = 0;
+
+  EXPECT_EQ(CheckedNumElements(dims, count), kTfLiteError);
+}
+
+TEST(CheckedNumElementsToInt, Validate) {
+  std::vector<int> dims = {2, 3, 4};
+  int count = 0;
+
+  EXPECT_EQ(CheckedNumElements(dims, count), kTfLiteOk);
+  EXPECT_EQ(count, 24);
+}
+
+TEST(CheckedNumElementsToInt, RejectsOverflow) {
+  std::vector<int> dims = {std::numeric_limits<int>::max(),
+                           std::numeric_limits<int>::max()};
+  int count = 0;
+
+  EXPECT_EQ(CheckedNumElements(dims, count), kTfLiteError);
+}
+
+TEST(FourBitTest, BytesRequiredEven) {
+  TfLiteContext context;
+
+  int dims[] = {2, 3, 1, 5};
+  const int* dims_ptr = &dims[0];
+  size_t dims_size = 4;
+  size_t required_bytes_four_bit;
+  tflite::BytesRequired(kTfLiteInt4, dims_ptr, dims_size,
+                        &required_bytes_four_bit, &context);
+
+  ASSERT_EQ(required_bytes_four_bit, 15);
+}
+
+TEST(FourBitTest, BytesRequiredOdd) {
+  TfLiteContext context;
+
+  int dims[] = {5, 1, 1, 1};
+  const int* dims_ptr = &dims[0];
+  size_t dims_size = 2;
+  size_t required_bytes_four_bit;
+  tflite::BytesRequired(kTfLiteInt4, dims_ptr, dims_size,
+                        &required_bytes_four_bit, &context);
+
+  ASSERT_EQ(required_bytes_four_bit, 3);
+}
+
+void SilentReportError(TfLiteContext*, const char*, ...) {}
+
+TEST(FourBitTest, BytesRequiredSizeMaxBoundaryDoesNotWrapToZero) {
+  TfLiteContext context{};
+  context.ReportError = SilentReportError;
+
+  // Fermat prime factorization of SIZE_MAX on 64-bit (2^64 - 1) and 32-bit
+  // (2^32 - 1) platforms. Every dimension fits in a positive 32-bit signed int.
+#if SIZE_MAX == UINT64_MAX
+  constexpr int kSizeMaxDims[] = {3, 5, 17, 257, 641, 65537, 6700417};
+  // 2^64 - 2 = 2 * 7 * 7 * 73 * 127 * 337 * 92737 * 649657.
+  constexpr int kSizeMaxMinusOneDims[] = {14, 7, 73, 127, 337, 92737, 649657};
+#else
+  constexpr int kSizeMaxDims[] = {3, 5, 17, 257, 65537};
+  // 2^32 - 2 = 2 * (2^31 - 1) = 2 * 2147483647.
+  constexpr int kSizeMaxMinusOneDims[] = {2, 2147483647};
+#endif
+  constexpr size_t kNumDims = sizeof(kSizeMaxDims) / sizeof(kSizeMaxDims[0]);
+
+  for (TfLiteType type : {kTfLiteInt4, kTfLiteUInt4}) {
+    size_t required_bytes = 0;
+    ASSERT_EQ(tflite::BytesRequired(type, kSizeMaxDims, kNumDims,
+                                    &required_bytes, &context),
+              kTfLiteOk);
+    EXPECT_EQ(required_bytes, (std::numeric_limits<size_t>::max() / 2) + 1);
+  }
+
+  {
+    size_t required_bytes = 0;
+    ASSERT_EQ(tflite::BytesRequired(kTfLiteInt2, kSizeMaxDims, kNumDims,
+                                    &required_bytes, &context),
+              kTfLiteOk);
+    EXPECT_EQ(required_bytes, (std::numeric_limits<size_t>::max() / 4) + 1);
+  }
+
+  {
+    size_t required_bytes = 0;
+    constexpr size_t kNumMinusOneDims =
+        sizeof(kSizeMaxMinusOneDims) / sizeof(kSizeMaxMinusOneDims[0]);
+    ASSERT_EQ(
+        tflite::BytesRequired(kTfLiteInt2, kSizeMaxMinusOneDims,
+                              kNumMinusOneDims, &required_bytes, &context),
+        kTfLiteOk);
+    EXPECT_EQ(required_bytes,
+              ((std::numeric_limits<size_t>::max() - 1) / 4) + 1);
+  }
+}
+
+TEST(BytesRequiredTest, RejectsUnsupportedTypes) {
+  TfLiteContext context{};
+  context.ReportError = SilentReportError;
+  constexpr int kDims[] = {2, 4};
+
+  for (TfLiteType type :
+       {kTfLiteNoType, kTfLiteString, kTfLiteResource, kTfLiteVariant}) {
+    size_t required_bytes = 0;
+    EXPECT_EQ(tflite::BytesRequired(type, kDims, 2, &required_bytes, &context),
+              kTfLiteError);
+  }
+}
+
+TEST(TestMakeUniqueTensor, Valid) {
+  TensorUniquePtr t = BuildTfLiteTensor(kTfLiteInt32, {2, 3}, kTfLiteDynamic);
+  ASSERT_NE(t.get(), nullptr);
+  ASSERT_EQ(t->buffer_handle, kTfLiteNullBufferHandle);
+
+  EXPECT_THAT(t.get(), DimsAre({2, 3}));
+  EXPECT_EQ(t->bytes, 24);
+
+  EXPECT_EQ(t->type, kTfLiteInt32);
+  EXPECT_EQ(t->allocation_type, kTfLiteDynamic);
+
+  // Check memory has been properly allocated.
+  int* data = t->data.i32;
+  std::fill_n(data, 6, 0);
+  ASSERT_NE(data, nullptr);
+  ASSERT_THAT(std::vector<int>(data, data + 6),
+              ElementsAreArray({0, 0, 0, 0, 0, 0}));
+}
+
+TEST(TestMakeUniqueTensor, NullDimsReturnsNull) {
+  TensorUniquePtr t = BuildTfLiteTensor(kTfLiteInt32, nullptr, kTfLiteDynamic);
+  ASSERT_EQ(t.get(), nullptr);
 }
 
 }  // namespace

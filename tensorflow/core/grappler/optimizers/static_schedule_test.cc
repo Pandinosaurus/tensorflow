@@ -40,7 +40,7 @@ class StaticScheduleTest : public ::testing::Test {
     cpu_device.set_l1_cache_size(32 * 1024);
     cpu_device.set_l2_cache_size(256 * 1024);
     cpu_device.set_l3_cache_size(4 * 1024 * 1024);
-    std::unordered_map<string, DeviceProperties> devices;
+    std::unordered_map<std::string, DeviceProperties> devices;
     devices["/job:localhost/replica:0/task:0/cpu:0"] = cpu_device;
     return std::unique_ptr<VirtualCluster>(new VirtualCluster(devices));
   }
@@ -91,7 +91,7 @@ TEST_F(StaticScheduleTest, BasicGraph) {
   std::unique_ptr<VirtualCluster> cluster(CreateVirtualCluster());
 
   std::unordered_map<const NodeDef*, Costs::NanoSeconds> completion_times;
-  Status status =
+  absl::Status status =
       EstimateEarliestExecutionTimes(item, cluster.get(), &completion_times);
   TF_EXPECT_OK(status);
 
@@ -136,7 +136,7 @@ TEST_F(StaticScheduleTest, BasicGraphWithCtrlDependencies) {
   std::unique_ptr<VirtualCluster> cluster(CreateVirtualCluster());
 
   std::unordered_map<const NodeDef*, Costs::NanoSeconds> completion_times;
-  Status status =
+  absl::Status status =
       EstimateEarliestExecutionTimes(item, cluster.get(), &completion_times);
   TF_EXPECT_OK(status);
 
@@ -172,8 +172,8 @@ TEST_F(StaticScheduleTest, RequiredTimes) {
     execution_times[&node] = 0;
   }
   std::unordered_map<const NodeDef*, Costs::NanoSeconds> required_times;
-  Status status = EstimateRequiredTimes(item, cluster.get(), execution_times,
-                                        &required_times);
+  absl::Status status = EstimateRequiredTimes(item, cluster.get(),
+                                              execution_times, &required_times);
   TF_EXPECT_OK(status);
 
   EXPECT_EQ(item.graph.node_size(), required_times.size());

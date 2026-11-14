@@ -16,16 +16,20 @@ limitations under the License.
 #ifndef TENSORFLOW_CORE_TPU_TPU_EMBEDDING_OUTPUT_LAYOUT_UTILS_H_
 #define TENSORFLOW_CORE_TPU_TPU_EMBEDDING_OUTPUT_LAYOUT_UTILS_H_
 
+#include <vector>
+
+#include "absl/status/status.h"
+#include "xla/tpu/protobuf/tpu_embedding_configuration.pb.h"
 #include "tensorflow/core/framework/tensor_shape.pb.h"
-#include "tensorflow/core/lib/core/status.h"
+#include "tensorflow/core/platform/status.h"
 #include "tensorflow/core/protobuf/tpu/tpu_embedding_configuration.pb.h"
 
 namespace tensorflow {
 namespace tpu {
 
 // Computes the shape of the output tensors from an embedding configuration.
-Status ComputeOutputTensorShapes(
-    const TPUEmbeddingConfiguration& config,
+absl::Status ComputeOutputTensorShapes(
+    const tensorflow::tpu::TPUEmbeddingConfiguration& config,
     std::vector<tensorflow::TensorShapeProto>* shapes);
 
 }  // namespace tpu

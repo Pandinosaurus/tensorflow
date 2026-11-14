@@ -14,22 +14,30 @@ limitations under the License.
 ==============================================================================*/
 #include "tensorflow/c/experimental/ops/gen/common/view_util.h"
 
+#include <string>
+#include <vector>
+
+#include "absl/strings/str_join.h"
 #include "absl/strings/substitute.h"
+#include "tensorflow/core/platform/types.h"
 
 namespace tensorflow {
 namespace generator {
 
-string Call(const string& object, const string& method,
-            std::vector<string> arguments, const char* oper) {
+std::string Call(const std::string& object, const std::string& method,
+                 std::vector<std::string> arguments, const char* oper) {
   return absl::Substitute("$0$1$2($3)", object, oper, method,
                           absl::StrJoin(arguments, ", "));
 }
 
-string Call(const string& function, std::vector<string> arguments) {
+std::string Call(const std::string& function,
+                 std::vector<std::string> arguments) {
   return absl::Substitute("$0($1)", function, absl::StrJoin(arguments, ", "));
 }
 
-string Quoted(const string& s) { return absl::Substitute("\"$0\"", s); }
+std::string Quoted(const std::string& s) {
+  return absl::Substitute("\"$0\"", s);
+}
 
 }  // namespace generator
 }  // namespace tensorflow

@@ -14,15 +14,11 @@
 # ==============================================================================
 """Tests for monitoring."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
+import threading
 import time
 
 from tensorflow.python.eager import monitoring
 from tensorflow.python.eager import test
-from tensorflow.python.framework import errors
 from tensorflow.python.framework import test_util
 
 
@@ -44,10 +40,27 @@ class MonitoringTest(test_util.TensorFlowTestCase):
     counter2.get_cell('foo', 'bar').increase_by(5)
     self.assertEqual(counter2.get_cell('foo', 'bar').value(), 5)
 
+  def test_concurrent_get_cell(self):
+    counter = monitoring.Counter('test/concurrent_counter', 'test counter')
+    num_threads = 8
+    iterations = 1000
+    barrier = threading.Barrier(num_threads)
+
+    def worker():
+      barrier.wait()
+      for _ in range(iterations):
+        counter.get_cell().increase_by(1)
+
+    threads = [threading.Thread(target=worker) for _ in range(num_threads)]
+    for t in threads:
+      t.start()
+    for t in threads:
+      t.join()
+    self.assertEqual(counter.get_cell().value(), num_threads * iterations)
+
   def test_same_counter(self):
     counter1 = monitoring.Counter('test/same_counter', 'test counter')  # pylint: disable=unused-variable
-    with self.assertRaises(errors.AlreadyExistsError):
-      counter2 = monitoring.Counter('test/same_counter', 'test counter')  # pylint: disable=unused-variable
+    counter2 = monitoring.Counter('test/same_counter', 'test counter')  # pylint: disable=unused-variable
 
   def test_int_gauge(self):
     gauge = monitoring.IntGauge('test/gauge', 'test gauge')
@@ -109,8 +122,46 @@ class MonitoringTest(test_util.TensorFlowTestCase):
       with monitoring.MonitoredTimer(counter.get_cell('short')):
         time.sleep(0.01)
     self.assertGreater(
-        counter.get_cell('long').value(),
-        counter.get_cell('short').value())
+        counter.get_cell('long').value(), counter.get_cell('short').value()
+    )
+
+  def test_monitored_timer_tracker(self):
+    counter = monitoring.Counter('test/ctxmgr', 'test context manager', 'slot')
+    counter2 = monitoring.Counter('test/ctxmgr2', 'slot')
+    with monitoring.MonitoredTimer(counter.get_cell('long'), 'counter'):
+      time.sleep(0.01)
+      self.assertIn('counter', monitoring.MonitoredTimerSections)
+      with monitoring.MonitoredTimer(counter2.get_cell(), 'counter2'):
+        time.sleep(0.01)
+        self.assertIn('counter', monitoring.MonitoredTimerSections)
+        self.assertIn('counter2', monitoring.MonitoredTimerSections)
+        with monitoring.MonitoredTimer(counter.get_cell('long'), 'counter'):
+          time.sleep(0.01)
+      self.assertNotIn('counter2', monitoring.MonitoredTimerSections)
+    self.assertGreater(
+        counter.get_cell('long').value(), counter.get_cell('short').value()
+    )
+    self.assertGreater(counter2.get_cell().value(), 0)
+
+  def test_repetitive_monitored_timer(self):
+    counter = monitoring.Counter('test/ctxmgr', 'test context manager')
+    with monitoring.MonitoredTimer(
+        counter.get_cell(),
+        monitored_section_name='action1',
+        avoid_repetitive_counting=True,
+    ):
+      time.sleep(1)
+      with monitoring.MonitoredTimer(
+          counter.get_cell(),
+          monitored_section_name='action1',
+          avoid_repetitive_counting=True,
+      ):
+        time.sleep(1)
+
+      # The inner section is not timed.
+      self.assertEqual(counter.get_cell().value(), 0)
+
+    self.assertGreater(counter.get_cell().value(), 0)
 
   def test_function_decorator(self):
     counter = monitoring.Counter('test/funcdecorator', 'test func decorator')

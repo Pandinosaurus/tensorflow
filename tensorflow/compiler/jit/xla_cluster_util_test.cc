@@ -22,7 +22,7 @@ limitations under the License.
 #include "tensorflow/cc/ops/function_ops.h"
 #include "tensorflow/cc/ops/functional_ops.h"
 #include "tensorflow/cc/ops/standard_ops.h"
-#include "tensorflow/compiler/xla/status_macros.h"
+#include "xla/status_macros.h"
 #include "tensorflow/core/common_runtime/graph_constructor.h"
 #include "tensorflow/core/common_runtime/process_function_library_runtime.h"
 #include "tensorflow/core/framework/function_testlib.h"
@@ -48,7 +48,7 @@ TEST(CreateCycleDetectionGraph, ConnectivityThroughEnterExitRegion) {
 
   FixupSourceAndSinkEdges(root.graph());
 
-  GraphCycles cycles;
+  xla::GraphCycles cycles;
   TF_ASSERT_OK(CreateCycleDetectionGraph(root.graph(), &cycles).status());
   EXPECT_FALSE(cycles.CanContractEdge(a.node()->id(), b.node()->id()));
 }
@@ -67,7 +67,7 @@ TEST(CreateCycleDetectionGraph, ConnectivityThroughMultipleEnterExitRegions) {
 
   FixupSourceAndSinkEdges(root.graph());
 
-  GraphCycles cycles;
+  xla::GraphCycles cycles;
   TF_ASSERT_OK(CreateCycleDetectionGraph(root.graph(), &cycles).status());
   EXPECT_FALSE(cycles.CanContractEdge(a.node()->id(), b.node()->id()));
 }
@@ -89,7 +89,7 @@ TEST(CreateCycleDetectionGraph, ReachingEnterExit) {
 
   FixupSourceAndSinkEdges(root.graph());
 
-  GraphCycles cycles;
+  xla::GraphCycles cycles;
   TF_ASSERT_OK_AND_ASSIGN(bool ok,
                           CreateCycleDetectionGraph(root.graph(), &cycles));
   EXPECT_FALSE(ok);
@@ -135,7 +135,7 @@ TEST(IsSingleGpuGraph, ReturnsFalseForMultiGpuGraph) {
   EXPECT_FALSE(IsSingleGpuGraph(*root.graph()));
 }
 
-StatusOr<std::vector<string>> GetNodesRelatedToRefVarsSorted(
+absl::StatusOr<std::vector<std::string>> GetNodesRelatedToRefVarsSorted(
     const Scope& scope, FunctionLibraryDefinition* flib_def = nullptr) {
   FunctionDefLibrary flib;
   FunctionLibraryDefinition flib_def_local(OpRegistry::Global(), flib);
@@ -157,7 +157,7 @@ StatusOr<std::vector<string>> GetNodesRelatedToRefVarsSorted(
   TF_ASSIGN_OR_RETURN(absl::flat_hash_set<Node*> nodes_related_to_ref_vars,
                       GetNodesRelatedToRefVariables(*graph, lib_runtime));
 
-  std::vector<string> names;
+  std::vector<std::string> names;
   absl::c_transform(nodes_related_to_ref_vars, std::back_inserter(names),
                     [](Node* n) { return n->name(); });
   absl::c_sort(names);
@@ -239,10 +239,10 @@ TEST(NodesRelatedToRefVariables, Basic) {
 
   FunctionLibraryDefinition flib_def(OpRegistry::Global(), fdef_lib);
 
-  TF_ASSERT_OK_AND_ASSIGN(std::vector<string> names,
+  TF_ASSERT_OK_AND_ASSIGN(std::vector<std::string> names,
                           GetNodesRelatedToRefVarsSorted(root, &flib_def));
 
-  std::vector<string> expected({
+  std::vector<std::string> expected({
       "RefFloat",
       "add_ref",
       "constant_ref",
@@ -255,7 +255,7 @@ TEST(NodesRelatedToRefVariables, Basic) {
   EXPECT_EQ(names, expected);
 }
 
-Status MakeLoop(Scope s, Output init_value, absl::string_view loop_name) {
+absl::Status MakeLoop(Scope s, Output init_value, absl::string_view loop_name) {
   s = s.NewSubScope(std::string(loop_name));
   ops::internal::Enter enter(s.WithOpName("init_value"), init_value, loop_name);
   ops::Merge merge(s.WithOpName("merge"), {init_value, init_value});
@@ -276,11 +276,11 @@ TEST(NodesRelatedToRefVariables, Cycles) {
       root, ops::Const(root.WithOpName("constant"), Input::Initializer(0.0)),
       "normal_loop"));
 
-  TF_ASSERT_OK_AND_ASSIGN(std::vector<string> names,
+  TF_ASSERT_OK_AND_ASSIGN(std::vector<std::string> names,
                           GetNodesRelatedToRefVarsSorted(root));
-  std::vector<string> expected({"read_ref_var", "ref_loop/init_value",
-                                "ref_loop/merge", "ref_loop/next_itr",
-                                "variable"});
+  std::vector<std::string> expected({"read_ref_var", "ref_loop/init_value",
+                                     "ref_loop/merge", "ref_loop/next_itr",
+                                     "variable"});
 
   EXPECT_EQ(names, expected);
 }

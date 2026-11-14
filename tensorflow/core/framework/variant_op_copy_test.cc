@@ -59,28 +59,28 @@ static int* GetCopyGPUToGPUCounter() {
 
 struct StoredTensorValue {
   Tensor stored;
-  string TypeName() const { return "StoredTensorValue"; }
+  std::string TypeName() const { return "StoredTensorValue"; }
   void Encode(VariantTensorData* data) const { data->tensors_ = {stored}; }
   bool Decode(const VariantTensorData& data) {
     CHECK_EQ(1, data.tensors_.size());
     stored = data.tensors_[0];
     return true;
   }
-  static Status CopyCPUToGPU(
+  static absl::Status CopyCPUToGPU(
       const StoredTensorValue& from, StoredTensorValue* to,
-      const std::function<Status(const Tensor&, Tensor*)>& copy) {
+      const std::function<absl::Status(const Tensor&, Tensor*)>& copy) {
     ++*GetCopyCPUToGPUCounter();
     return copy(from.stored, &(to->stored));
   }
-  static Status CopyGPUToCPU(
+  static absl::Status CopyGPUToCPU(
       const StoredTensorValue& from, StoredTensorValue* to,
-      const std::function<Status(const Tensor&, Tensor*)>& copy) {
+      const std::function<absl::Status(const Tensor&, Tensor*)>& copy) {
     ++*GetCopyGPUToCPUCounter();
     return copy(from.stored, &(to->stored));
   }
-  static Status CopyGPUToGPU(
+  static absl::Status CopyGPUToGPU(
       const StoredTensorValue& from, StoredTensorValue* to,
-      const std::function<Status(const Tensor&, Tensor*)>& copy) {
+      const std::function<absl::Status(const Tensor&, Tensor*)>& copy) {
     ++*GetCopyGPUToGPUCounter();
     return copy(from.stored, &(to->stored));
   }
@@ -259,16 +259,16 @@ TEST(VariantOpCopyTest, CreateConstOnGPUFailsGracefully) {
   TF_ASSERT_OK(root.status());
   ClientSession session(root);
   std::vector<Tensor> outputs;
-  Status s = session.Run({create_const}, &outputs);
-  EXPECT_TRUE(absl::StrContains(s.error_message(),
-                                "GPU copy from non-DMA string tensor"))
+  absl::Status s = session.Run({create_const}, &outputs);
+  EXPECT_TRUE(
+      absl::StrContains(s.message(), "GPU copy from non-DMA string tensor"))
       << s.ToString();
 }
 
 TEST(VariantOpCopyTest, CreateCopyCPUToCPU) {
   Scope root = Scope::NewRootScope().WithDevice("/cpu:0");
   Tensor t_42(DT_INT32, TensorShape({}));
-  t_42.flat<int32>()(0) = 42;
+  t_42.flat<int32_t>()(0) = 42;
   Output create_op = CreateTestVariant(root, t_42);
   Output identity = ops::Identity(root, create_op);
 
@@ -285,7 +285,7 @@ TEST(VariantOpCopyTest, CreateCopyCPUToCPU) {
     EXPECT_EQ("StoredTensorValue", r1.TypeName());
     const StoredTensorValue* v1 = r1.get<StoredTensorValue>();
     EXPECT_NE(v1, nullptr);
-    EXPECT_EQ(42, v1->stored.scalar<int32>()());
+    EXPECT_EQ(42, v1->stored.scalar<int32_t>()());
   }
 }
 
@@ -319,7 +319,7 @@ TEST(VariantOpCopyTest, CreateCopyCPUToGPU) {
   Scope root = Scope::NewRootScope().WithDevice("/cpu:0");
   Scope with_gpu = root.WithDevice("/gpu:0");
   Tensor t_42(DT_INT32, TensorShape({}));
-  t_42.scalar<int32>()() = 42;
+  t_42.scalar<int32_t>()() = 42;
   Output create_op = CreateTestVariant(root, t_42);
   Output identity = ops::Identity(with_gpu, create_op);
 
@@ -346,7 +346,7 @@ TEST(VariantOpCopyTest, CreateCopyCPUToGPU) {
     EXPECT_EQ("StoredTensorValue", r1.TypeName());
     const StoredTensorValue* v1 = r1.get<StoredTensorValue>();
     EXPECT_NE(v1, nullptr);
-    EXPECT_EQ(42, v1->stored.scalar<int32>()());
+    EXPECT_EQ(42, v1->stored.scalar<int32_t>()());
   }
 }
 
@@ -364,13 +364,13 @@ TEST(VariantOpCopyTest, CreateCopyCPUToGPUStringFailsSafely) {
 
   ClientSession session(root);
   std::vector<Tensor> outputs;
-  Status err = session.Run({create_op, identity}, &outputs);
-  EXPECT_EQ(err.code(), errors::Code::INVALID_ARGUMENT);
+  absl::Status err = session.Run({create_op, identity}, &outputs);
+  EXPECT_TRUE(absl::IsInvalidArgument(err));
   EXPECT_TRUE(
-      absl::StrContains(err.error_message(),
+      absl::StrContains(err.message(),
                         "During Variant Host->Device Copy: non-DMA-copy "
                         "attempted of tensor type: string"))
-      << err.error_message();
+      << err.message();
 }
 
 // TODO(ebrevdo): Identify a way to create two virtual GPUs within a

@@ -18,6 +18,8 @@ limitations under the License.
 // op is read by operations placed on multiple devices, then the pass will
 // replicate the tf.Const op once for each device.
 
+#include <memory>
+
 #include "mlir/IR/Builders.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/IR/UseDefLists.h"  // from @llvm-project
@@ -31,17 +33,12 @@ namespace {
 
 constexpr const char *kDeviceAttr = "device";
 
+#define GEN_PASS_DEF_CONSTANTOPDEVICEASSIGNMENTPASS
+#include "tensorflow/compiler/mlir/tensorflow/transforms/tf_passes.h.inc"
+
 struct ConstantOpDeviceAssignmentPass
-    : public PassWrapper<ConstantOpDeviceAssignmentPass,
-                         OperationPass<ModuleOp>> {
-  StringRef getArgument() const final {
-    return "constant-op-device-assignment";
-  }
-
-  StringRef getDescription() const final {
-    return "Assign device for tf.Const ops.";
-  }
-
+    : public impl::ConstantOpDeviceAssignmentPassBase<
+          ConstantOpDeviceAssignmentPass> {
   void runOnOperation() override;
 };
 
@@ -91,8 +88,6 @@ std::unique_ptr<OperationPass<ModuleOp>>
 CreateConstantOpDeviceAssignmentPass() {
   return std::make_unique<ConstantOpDeviceAssignmentPass>();
 }
-
-static PassRegistration<ConstantOpDeviceAssignmentPass> pass;
 
 }  // namespace TF
 }  // namespace mlir

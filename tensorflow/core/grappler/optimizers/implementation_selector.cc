@@ -17,8 +17,10 @@ limitations under the License.
 
 #include <string>
 
+#include "absl/status/status.h"
 #include "absl/strings/match.h"
 #include "absl/strings/numbers.h"
+#include "absl/strings/str_cat.h"
 #include "absl/strings/str_split.h"
 #include "tensorflow/core/framework/node_def.pb.h"
 #include "tensorflow/core/framework/op.h"
@@ -99,7 +101,7 @@ constexpr char kDeviceIndexOp[] = "DeviceIndex";
 //    intermediate result can be different between FUNC_1 and FUNC_2.
 // 5. DTYPE of the Identity node after s_1/2/3 need to be updated if they exist.
 
-string FindForwardNode(utils::MutableNodeView* backward_node) {
+std::string FindForwardNode(utils::MutableNodeView* backward_node) {
   // For the tf function, Identity op node might be added by
   // placer_inspection_required_ops_utils for device placement. Those ops might
   // be removed by model_pruner, or stay there if the Identity op is cross
@@ -144,28 +146,39 @@ void UpdateForwardIdentityNodeDtype(utils::MutableNodeView* forward_node,
   }
 }
 
-Status UpdateNodeDef(utils::MutableNodeView* node_view, const string& funcName,
-                     const FunctionApiInfo& apiInfo) {
+absl::Status UpdateNodeDef(utils::MutableNodeView* node_view,
+                           const std::string& attr_name,
+                           const std::string& funcName,
+                           const FunctionApiInfo& apiInfo) {
   NodeDef* node_def = node_view->node();
 
   VLOG(3) << "Node def before swap is: " << node_def->DebugString();
 
   // For step 1 above.
-  node_def->mutable_attr()->find("f")->second.mutable_func()->set_name(
-      funcName);
+  auto f_attr = node_def->mutable_attr()->find(attr_name);
+  if (f_attr != node_def->mutable_attr()->end()) {
+    f_attr->second.mutable_func()->set_name(funcName);
+  } else {
+    return absl::InvalidArgumentError(absl::StrCat(
+        "Missing attribute '", attr_name, "' in node ", node_def->name()));
+  }
 
   // For step 2 above.
   auto tin = node_def->mutable_attr()->find("Tin");
-  tin->second.mutable_list()->clear_type();
-  for (const auto& tin_dtype : apiInfo.input_arg_dtypes()) {
-    tin->second.mutable_list()->add_type(tin_dtype);
+  if (tin != node_def->mutable_attr()->end()) {
+    tin->second.mutable_list()->clear_type();
+    for (const auto& tin_dtype : apiInfo.input_arg_dtypes()) {
+      tin->second.mutable_list()->add_type(tin_dtype);
+    }
   }
 
   // For step 3 above.
   auto tout = node_def->mutable_attr()->find("Tout");
-  tout->second.mutable_list()->clear_type();
-  for (const auto& tout_dtype : apiInfo.output_arg_dtypes()) {
-    tout->second.mutable_list()->add_type(tout_dtype);
+  if (tout != node_def->mutable_attr()->end()) {
+    tout->second.mutable_list()->clear_type();
+    for (const auto& tout_dtype : apiInfo.output_arg_dtypes()) {
+      tout->second.mutable_list()->add_type(tout_dtype);
+    }
   }
 
   if (apiInfo.function_type() == FunctionApiInfo::BACKWARD) {
@@ -196,22 +209,23 @@ Status UpdateNodeDef(utils::MutableNodeView* node_view, const string& funcName,
       //   input: "unified_lstm/StatefulPartitionedCall:4"
       //   # New input should be "unified_lstm/StatefulPartitionedCall:5"
       // }
-      const string last_input = FindForwardNode(node_view);
-      const std::vector<string> name_index = ::absl::StrSplit(last_input, ':');
+      const std::string last_input = FindForwardNode(node_view);
+      const std::vector<std::string> name_index =
+          ::absl::StrSplit(last_input, ':');
       if (name_index.size() != 2) {
-        return errors::InvalidArgument(
-            "Invalid format of input node name: ", last_input,
-            " Expected: {forward_node_name}:{index}");
+        return absl::InvalidArgumentError(
+            absl::StrCat("Invalid format of input node name: ", last_input,
+                         " Expected: {forward_node_name}:{index}"));
       }
       const absl::string_view node_name = name_index[0];
       int last_index;
       if (!::absl::SimpleAtoi(name_index[1], &last_index)) {
-        return errors::InvalidArgument(
+        return absl::InvalidArgumentError(absl::StrCat(
             "The index of input node is expected to be number, got: ",
-            name_index[1]);
+            name_index[1]));
       }
       for (int i = 1; i <= -diff; ++i)
-        node_def->add_input(strings::StrCat(node_name, ":", i + last_index));
+        node_def->add_input(absl::StrCat(node_name, ":", i + last_index));
     }
 
     // Add control dependencies back.
@@ -226,16 +240,16 @@ Status UpdateNodeDef(utils::MutableNodeView* node_view, const string& funcName,
   }
 
   VLOG(3) << "Node def after swap is: " << node_def->DebugString();
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-Status ImplementationSelector::LoadFunctions(const GraphDef& graph) {
-  lib_info_ = absl::make_unique<FunctionLibraryApiInfo>();
+absl::Status ImplementationSelector::LoadFunctions(const GraphDef& graph) {
+  lib_info_ = std::make_unique<FunctionLibraryApiInfo>();
   TF_RETURN_IF_ERROR(lib_info_->Init(graph.library()));
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-Status ImplementationSelector::MaybeOptimizeFunctionCall(
+absl::Status ImplementationSelector::MaybeOptimizeFunctionCall(
     utils::MutableNodeView* node_view) const {
   // There are two ways of calling functions:
   //  1. By specifying an op name as a function name, or
@@ -246,7 +260,7 @@ Status ImplementationSelector::MaybeOptimizeFunctionCall(
   //     the DTYPE of input/output.
   NodeDef* node_def = node_view->node();
 
-  std::vector<string> function_attribute_names;
+  std::vector<std::string> function_attribute_names;
   for (const auto& attr : node_def->attr()) {
     if (attr.second.has_func() &&
         lib_info_->GetApiInfo(attr.second.func().name()) != nullptr) {
@@ -257,29 +271,31 @@ Status ImplementationSelector::MaybeOptimizeFunctionCall(
   if (function_attribute_names.empty() &&
       lib_info_->GetApiInfo(node_def->op()) == nullptr) {
     // A regular op, or a function which has no interface.
-    return Status::OK();
+    return absl::OkStatus();
   }
 
   DeviceNameUtils::ParsedName parsed_name;
   if (!DeviceNameUtils::ParseFullName(node_def->device(), &parsed_name) ||
       !parsed_name.has_type) {
-    return errors::Internal("Could not parse device name:", node_def->device());
+    return absl::InternalError(
+        absl::StrCat("Could not parse device name:", node_def->device()));
   }
   VLOG(2) << "Op " << node_def->name() << " runs on " << node_def->device()
           << " = (" << parsed_name.type << ")";
 
   for (const auto& attr_name : function_attribute_names) {
-    string function_name = node_def->attr().at(attr_name).func().name();
+    std::string function_name = node_def->attr().at(attr_name).func().name();
     // Skip the function if its already optimized by function optimizer.
     if (::absl::StrContains(function_name, "_specialized_for_")) continue;
-    std::vector<string> equiv_func_names;
+    std::vector<std::string> equiv_func_names;
     TF_RETURN_IF_ERROR(lib_info_->GetEquivalentImplementations(
         function_name, &equiv_func_names));
     for (const auto& func_name : equiv_func_names) {
       const auto& func_api_info = lib_info_->GetApiInfo(func_name);
       if (func_api_info->preferred_device() == parsed_name.type) {
         VLOG(2) << "Swapping: " << function_name << " TO: " << func_name;
-        TF_RETURN_IF_ERROR(UpdateNodeDef(node_view, func_name, *func_api_info));
+        TF_RETURN_IF_ERROR(
+            UpdateNodeDef(node_view, attr_name, func_name, *func_api_info));
         break;
       }
     }
@@ -287,10 +303,10 @@ Status ImplementationSelector::MaybeOptimizeFunctionCall(
 
   if (lib_info_->GetApiInfo(node_def->op()) != nullptr &&
       !::absl::StrContains(node_def->op(), "_specialized_for_")) {
-    std::vector<string> equiv_func_names;
+    std::vector<std::string> equiv_func_names;
     TF_RETURN_IF_ERROR(lib_info_->GetEquivalentImplementations(
         node_def->op(), &equiv_func_names));
-    for (const string& func_name : equiv_func_names) {
+    for (const std::string& func_name : equiv_func_names) {
       const auto func_api_info = lib_info_->GetApiInfo(func_name);
       if (func_api_info->preferred_device() == parsed_name.type) {
         node_def->set_op(func_name);
@@ -298,16 +314,17 @@ Status ImplementationSelector::MaybeOptimizeFunctionCall(
       }
     }
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 // Finds the index of the device from the device name list.
-Status FindDeviceIndex(const utils::MutableNodeView* device_index_node,
-                       const string& device, int* index) {
+absl::Status FindDeviceIndex(const utils::MutableNodeView* device_index_node,
+                             const std::string& device, int* index) {
   DeviceNameUtils::ParsedName parsed_name;
   if (!DeviceNameUtils::ParseFullName(device, &parsed_name) ||
       !parsed_name.has_type) {
-    return errors::Internal("Could not parse device name:", device);
+    return absl::InternalError(
+        absl::StrCat("Could not parse device name:", device));
   }
   const auto& device_list =
       device_index_node->GetAttr("device_names")->list().s();
@@ -319,7 +336,7 @@ Status FindDeviceIndex(const utils::MutableNodeView* device_index_node,
     // be the final item in the case op branching list.
     *index = device_list.size();
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 // Rewrites the device_index op to a const op with value of the index.
@@ -336,8 +353,8 @@ void RewriteDeviceIndexOp(utils::MutableNodeView* device_index_node,
   VLOG(2) << "Node after rewriting:" << node->DebugString();
 }
 
-Status ImplementationSelector::SelectDeviceIndex(GraphDef* graph) const {
-  Status status;
+absl::Status ImplementationSelector::SelectDeviceIndex(GraphDef* graph) const {
+  absl::Status status;
   VLOG(2) << "graph before rewriting device index:" << graph->DebugString();
   utils::MutableGraphView graph_view(graph, &status);
   TF_RETURN_IF_ERROR(status);
@@ -360,7 +377,7 @@ Status ImplementationSelector::SelectDeviceIndex(GraphDef* graph) const {
         int index;
         // If any error is thrown out during device parsing, we simply skip
         // and do not modify the DeviceIndexNode.
-        Status status =
+        absl::Status status =
             FindDeviceIndex(node_view, fanout.node_view()->GetDevice(), &index);
         if (status.ok()) {
           RewriteDeviceIndexOp(node_view, index);
@@ -368,20 +385,21 @@ Status ImplementationSelector::SelectDeviceIndex(GraphDef* graph) const {
       }
     }
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-Status ImplementationSelector::SelectImplementation(GraphDef* graph) const {
+absl::Status ImplementationSelector::SelectImplementation(
+    GraphDef* graph) const {
   if (!graph->has_library()) {
     VLOG(2) << "Skipping graph since it does not have function def";
-    return Status::OK();
+    return absl::OkStatus();
   }
   if (lib_info_->empty()) {
     VLOG(2) << "Skipping optimization since lib_info is empty";
-    return Status::OK();
+    return absl::OkStatus();
   }
 
-  Status status;
+  absl::Status status;
   utils::MutableGraphView graph_view(graph, &status);
   TF_RETURN_IF_ERROR(status);
 
@@ -390,12 +408,12 @@ Status ImplementationSelector::SelectImplementation(GraphDef* graph) const {
     TF_RETURN_IF_ERROR(MaybeOptimizeFunctionCall(graph_view.GetNode(k)));
   }
 
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-Status ImplementationSelector::Optimize(Cluster* cluster,
-                                        const GrapplerItem& item,
-                                        GraphDef* optimized_graph) {
+absl::Status ImplementationSelector::Optimize(Cluster* cluster,
+                                              const GrapplerItem& item,
+                                              GraphDef* optimized_graph) {
   auto status = LoadFunctions(item.graph);
   // Eat up the error from function loading, since this optimizer might run
   // several times, and might try to run against functions generated by
@@ -404,7 +422,7 @@ Status ImplementationSelector::Optimize(Cluster* cluster,
   if (!status.ok()) {
     VLOG(2) << "Skipping optimization due to error while loading function "
             << "libraries: " << status;
-    return errors::Aborted("Skipped Optimization");
+    return absl::AbortedError("Skipped Optimization");
   }
 
   *optimized_graph = item.graph;

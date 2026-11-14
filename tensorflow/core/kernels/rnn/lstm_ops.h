@@ -16,7 +16,7 @@ limitations under the License.
 #ifndef TENSORFLOW_CORE_KERNELS_RNN_LSTM_OPS_H_
 #define TENSORFLOW_CORE_KERNELS_RNN_LSTM_OPS_H_
 
-#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
+#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
 #include "tensorflow/core/framework/tensor_types.h"
 #include "tensorflow/core/kernels/eigen_activations.h"
 #include "tensorflow/core/kernels/rnn/blas_gemm.h"
@@ -92,9 +92,9 @@ struct TensorZeroPadding {
     mask.device(d) = seq_len.constant(time_idx) < seq_len;
 
     // m_shape is [batch_size, 1].
-    Eigen::array<Eigen::DenseIndex, 2> m_shape({m.dimensions()[0], 1});
+    Eigen::array<Eigen::DenseIndex, 2> m_shape{m.dimensions()[0], 1};
     // broadcast_shape is [1, units].
-    Eigen::array<Eigen::DenseIndex, 2> broadcast_shape({1, m.dimensions()[1]});
+    Eigen::array<Eigen::DenseIndex, 2> broadcast_shape{1, m.dimensions()[1]};
 
     // m is shape [batch_size, units].
     m.device(d) = m * mask.reshape(m_shape).broadcast(broadcast_shape);
@@ -165,21 +165,18 @@ struct LSTMBlockCellFprop : public LSTMBlockCell {
                      const int cell_size)
       : LSTMBlockCell(batch_size, input_size, cell_size) {}
 
-  void operator()(OpKernelContext* ctx, const Device& d,
-                  const float forget_bias, const float cell_clip,
-                  bool use_peephole, typename TTypes<T>::ConstMatrix x,
-                  typename TTypes<T>::ConstMatrix cs_prev,
-                  typename TTypes<T>::ConstMatrix h_prev,
-                  typename TTypes<T>::ConstMatrix w,
-                  typename TTypes<T>::ConstVec wci,
-                  typename TTypes<T>::ConstVec wcf,
-                  typename TTypes<T>::ConstVec wco,
-                  typename TTypes<T>::ConstVec b, typename TTypes<T>::Matrix xh,
-                  typename TTypes<T>::Matrix i, typename TTypes<T>::Matrix cs,
-                  typename TTypes<T>::Matrix f, typename TTypes<T>::Matrix o,
-                  typename TTypes<T>::Matrix ci, typename TTypes<T>::Matrix co,
-                  typename TTypes<T>::Matrix gates,
-                  typename TTypes<T>::Matrix h);
+  void operator()(
+      OpKernelContext* ctx, const Device& d, float forget_bias, float cell_clip,
+      bool use_peephole, typename TTypes<T>::ConstMatrix x,
+      typename TTypes<T>::ConstMatrix cs_prev,
+      typename TTypes<T>::ConstMatrix h_prev, typename TTypes<T>::ConstMatrix w,
+      typename TTypes<T>::ConstVec wci, typename TTypes<T>::ConstVec wcf,
+      typename TTypes<T>::ConstVec wco, typename TTypes<T>::ConstVec b,
+      typename TTypes<T>::Matrix xh, typename TTypes<T>::Matrix i,
+      typename TTypes<T>::Matrix cs, typename TTypes<T>::Matrix f,
+      typename TTypes<T>::Matrix o, typename TTypes<T>::Matrix ci,
+      typename TTypes<T>::Matrix co, typename TTypes<T>::Matrix gates,
+      typename TTypes<T>::Matrix h);
 };
 
 // See lstm_ops.cc for CPUDevice implementation and lstm_ops_gpu.cu.cc for
@@ -243,8 +240,8 @@ struct BlockLSTMBprop : public LSTMBlockCell {
     // dcs[t] += tanh'(cs[t]) .* dh[t] .* o[t] + dcs[t + 1] .* f[t + 1]
     dcs.device(d) = (co.constant(T(1)) - co * co) * h_grad * o + cs_grad;
 
-    Eigen::array<Eigen::DenseIndex, 2> p_shape({1, cell_size_});
-    Eigen::array<Eigen::DenseIndex, 2> p_broadcast_shape({batch_size_, 1});
+    Eigen::array<Eigen::DenseIndex, 2> p_shape{1, cell_size_};
+    Eigen::array<Eigen::DenseIndex, 2> p_broadcast_shape{batch_size_, 1};
     if (use_peephole) {
       dcs.device(d) =
           dcs + do_ * wco.reshape(p_shape).broadcast(p_broadcast_shape);
@@ -292,12 +289,12 @@ struct BlockLSTMBprop : public LSTMBlockCell {
         ctx, d, true, false, 1.f, const_xh, const_dgates, 1.f, w_grad);
 
     // b_grad.
-    b_grad.device(d) += dgates.sum(Eigen::array<int, 1>({0}));
+    b_grad.device(d) += dgates.sum(Eigen::array<int, 1>{0});
 
     if (use_peephole) {
-      wci_grad.device(d) += (di * cs_prev).sum(Eigen::array<int, 1>({0}));
-      wcf_grad.device(d) += (df * cs_prev).sum(Eigen::array<int, 1>({0}));
-      wco_grad.device(d) += (do_ * cs).sum(Eigen::array<int, 1>({0}));
+      wci_grad.device(d) += (di * cs_prev).sum(Eigen::array<int, 1>{0});
+      wcf_grad.device(d) += (df * cs_prev).sum(Eigen::array<int, 1>{0});
+      wco_grad.device(d) += (do_ * cs).sum(Eigen::array<int, 1>{0});
     }
   }
 };

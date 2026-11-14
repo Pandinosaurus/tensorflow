@@ -33,9 +33,9 @@ class StringUpperOp : public OpKernel {
   explicit StringUpperOp(OpKernelConstruction* context) : OpKernel(context) {
     OP_REQUIRES_OK(context, context->GetAttr("encoding", &encoding_));
     OP_REQUIRES(context, encoding_.empty() || encoding_ == "utf-8",
-                errors::InvalidArgument(
+                absl::InvalidArgumentError(absl::StrCat(
                     "only utf-8 or '' (no encoding) is supported, received ",
-                    encoding_));
+                    encoding_)));
   }
 
   void Compute(OpKernelContext* ctx) override {
@@ -49,7 +49,7 @@ class StringUpperOp : public OpKernel {
     auto output = output_tensor->flat<tstring>();
     if (encoding_.empty()) {
       for (int64_t i = 0; i < input.size(); ++i) {
-        StringPiece entry(input(i));
+        absl::string_view entry(input(i));
         output(i) = absl::AsciiStrToUpper(entry);
       }
     } else {
@@ -63,7 +63,7 @@ class StringUpperOp : public OpKernel {
   }
 
  private:
-  string encoding_;
+  std::string encoding_;
 };
 
 REGISTER_KERNEL_BUILDER(Name("StringUpper").Device(DEVICE_CPU), StringUpperOp);

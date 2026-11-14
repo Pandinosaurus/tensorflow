@@ -21,8 +21,8 @@ limitations under the License.
 #include <string>
 #include <unordered_set>
 
+#include "tensorflow/core/framework/graph_debug_info.pb.h"
 #include "tensorflow/core/lib/core/status.h"
-#include "tensorflow/core/protobuf/graph_debug_info.pb.h"
 #include "tensorflow/core/protobuf/meta_graph.pb.h"
 #include "tensorflow/core/public/session.h"
 
@@ -39,7 +39,8 @@ class SavedModelBundleInterface {
 
   /// Returns a map from signature name to SignatureDef for all signatures in
   /// in the SavedModel.
-  virtual const protobuf::Map<string, SignatureDef>& GetSignatures() const = 0;
+  virtual const protobuf::Map<std::string, SignatureDef>& GetSignatures()
+      const = 0;
 };
 
 /// SavedModel representation once the SavedModel is loaded from storage.
@@ -58,7 +59,8 @@ struct SavedModelBundle : public SavedModelBundleInterface {
   SavedModelBundle() = default;
 
   Session* GetSession() const override { return session.get(); }
-  const protobuf::Map<string, SignatureDef>& GetSignatures() const override {
+  const protobuf::Map<std::string, SignatureDef>& GetSignatures()
+      const override {
     return meta_graph_def.signature_def();
   }
 
@@ -76,7 +78,7 @@ class SavedModelBundleLite : public SavedModelBundleInterface {
   SavedModelBundleLite& operator=(SavedModelBundleLite&& other) = default;
 
   SavedModelBundleLite(std::unique_ptr<Session> session,
-                       protobuf::Map<string, SignatureDef> signatures)
+                       protobuf::Map<std::string, SignatureDef> signatures)
       : session_(std::move(session)), signatures_(std::move(signatures)) {}
 
   /// A TensorFlow Session does not Close itself on destruction. To avoid
@@ -88,29 +90,31 @@ class SavedModelBundleLite : public SavedModelBundleInterface {
   }
 
   Session* GetSession() const override { return session_.get(); }
-  const protobuf::Map<string, SignatureDef>& GetSignatures() const override {
+  const protobuf::Map<std::string, SignatureDef>& GetSignatures()
+      const override {
     return signatures_;
   }
 
  private:
   std::unique_ptr<Session> session_;
-  protobuf::Map<string, SignatureDef> signatures_;
+  protobuf::Map<std::string, SignatureDef> signatures_;
 };
 
 // Restore variable and resources in the SavedModel export dir for the
 // indicated metagraph.
 // The recommended way to load a saved model is to call LoadSavedModel,
 // which provides an already initialized Metagraph, Session, and DebugInfo.
-Status RestoreSession(const RunOptions& run_options,
-                      const MetaGraphDef& meta_graph, const string& export_dir,
-                      std::unique_ptr<Session>* session);
+absl::Status RestoreSession(const RunOptions& run_options,
+                            const MetaGraphDef& meta_graph,
+                            const std::string& export_dir,
+                            std::unique_ptr<Session>* session);
 
 // Initialize a session which wraps this metagraph.
 // The recommended way to load a saved model is to call LoadSavedModel,
 // which provides an already initialized Metagraph, Session, and DebugInfo.
-Status LoadMetagraphIntoSession(const SessionOptions& session_options,
-                                const MetaGraphDef& meta_graph,
-                                std::unique_ptr<Session>* session);
+absl::Status LoadMetagraphIntoSession(const SessionOptions& session_options,
+                                      const MetaGraphDef& meta_graph,
+                                      std::unique_ptr<Session>* session);
 
 /// Loads a SavedModel from the specified export directory. The MetaGraphDef
 /// to be loaded is identified by the supplied tags, corresponding exactly to
@@ -118,10 +122,11 @@ Status LoadMetagraphIntoSession(const SessionOptions& session_options,
 /// *bundle with a session and the requested MetaGraphDef, if found.
 ///
 /// NOTE: Prefer the overload that takes a SavedModelBundleLite* in new code.
-Status LoadSavedModel(const SessionOptions& session_options,
-                      const RunOptions& run_options, const string& export_dir,
-                      const std::unordered_set<string>& tags,
-                      SavedModelBundle* const bundle);
+absl::Status LoadSavedModel(const SessionOptions& session_options,
+                            const RunOptions& run_options,
+                            const std::string& export_dir,
+                            const std::unordered_set<std::string>& tags,
+                            SavedModelBundle* bundle);
 
 /// Loads a SavedModel from the specified export directory. The MetaGraphDef
 /// to be loaded is identified by the supplied tags, corresponding exactly to
@@ -130,10 +135,11 @@ Status LoadSavedModel(const SessionOptions& session_options,
 ///
 /// This overload creates a SavedModelBundleLite, which consumes less RAM than
 /// an equivalent SavedModelBundle.
-Status LoadSavedModel(const SessionOptions& session_options,
-                      const RunOptions& run_options, const string& export_dir,
-                      const std::unordered_set<string>& tags,
-                      SavedModelBundleLite* const bundle);
+absl::Status LoadSavedModel(const SessionOptions& session_options,
+                            const RunOptions& run_options,
+                            const std::string& export_dir,
+                            const std::unordered_set<std::string>& tags,
+                            SavedModelBundleLite* bundle);
 
 /// Checks whether the provided directory could contain a SavedModel. Note that
 /// the method does not load any data by itself. If the method returns `false`,

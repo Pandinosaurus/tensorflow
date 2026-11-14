@@ -1,4 +1,20 @@
-load("//tensorflow:tensorflow.bzl", "filegroup")
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
+load("//tensorflow:tensorflow.bzl", "tf_cc_test")
+load("//tensorflow:tensorflow.default.bzl", "filegroup")
 load("//tensorflow/core/platform:build_config.bzl", "tf_proto_library")
 load(
     "//tensorflow/core/platform:rules_cc.bzl",
@@ -6,8 +22,10 @@ load(
 )
 
 package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
     default_visibility = [
         "//tensorflow/core:__subpackages__",
+        "//tensorflow/python/profiler/internal:__pkg__",
     ],
     licenses = ["notice"],
 )
@@ -24,26 +42,28 @@ cc_library(
         "//tensorflow/core/platform:macros",
         "//tensorflow/core/platform:platform_port",
         "//tensorflow/core/platform:types",
+        "@com_google_absl//absl/log:check",
+    ],
+)
+
+tf_cc_test(
+    name = "arena_test",
+    srcs = ["arena_test.cc"],
+    deps = [
+        ":arena",
+        "//tensorflow/core:test",
+        "//tensorflow/core/platform:macros",
+        "@xla//xla/tsl/platform:test_main",
     ],
 )
 
 cc_library(
     name = "bitmap",
-    srcs = ["bitmap.cc"],
     hdrs = ["bitmap.h"],
     deps = [
-        "//tensorflow/core/platform:logging",
-        "//tensorflow/core/platform:types",
+        "@xla//xla/tsl/lib/core:bitmap",
     ],
     alwayslink = 1,
-)
-
-cc_library(
-    name = "blocking_counter",
-    hdrs = ["blocking_counter.h"],
-    deps = [
-        "//tensorflow/core/platform:blocking_counter",
-    ],
 )
 
 cc_library(
@@ -52,6 +72,7 @@ cc_library(
     deps = [
         "//tensorflow/core/platform:logging",
         "//tensorflow/core/platform:types",
+        "@xla//xla/tsl/lib/core:bits",
     ],
 )
 
@@ -60,6 +81,16 @@ cc_library(
     hdrs = ["coding.h"],
     deps = [
         "//tensorflow/core/platform:coding",
+    ],
+)
+
+tf_cc_test(
+    name = "coding_test",
+    srcs = ["coding_test.cc"],
+    deps = [
+        ":coding",
+        "//tensorflow/core:test",
+        "@xla//xla/tsl/platform:test_main",
     ],
 )
 
@@ -74,9 +105,6 @@ cc_library(
 cc_library(
     name = "notification",
     hdrs = ["notification.h"],
-    deps = [
-        "//tensorflow/core/platform:notification",
-    ],
 )
 
 cc_library(
@@ -101,6 +129,21 @@ cc_library(
     ],
 )
 
+tf_cc_test(
+    name = "status_test",
+    srcs = ["status_test.cc"],
+    deps = [
+        ":errors",
+        ":status",
+        "//tensorflow/core:test",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/strings:cord",
+        "@xla//xla/tsl/platform:test_main",
+        "@xla//xla/tsl/protobuf:error_codes_proto_impl_cc",
+    ],
+)
+
 cc_library(
     name = "stringpiece",
     hdrs = ["stringpiece.h"],
@@ -114,6 +157,21 @@ cc_library(
     hdrs = ["threadpool.h"],
     deps = [
         "//tensorflow/core/platform:env",
+    ],
+)
+
+tf_cc_test(
+    name = "threadpool_test",
+    srcs = ["threadpool_test.cc"],
+    deps = [
+        ":threadpool",
+        "//tensorflow/core:framework_lite",
+        "//tensorflow/core:lib",
+        "//tensorflow/core:test",
+        "@com_google_absl//absl/log",
+        "@com_google_absl//absl/synchronization",
+        "@com_google_absl//absl/time",
+        "@xla//xla/tsl/platform:test_main",
     ],
 )
 
@@ -136,23 +194,17 @@ cc_library(
 tf_proto_library(
     name = "error_codes_proto",
     srcs = ["error_codes.proto"],
-    cc_api_version = 2,
     make_default_target_header_only = True,
     protodeps = [
-        "//tensorflow/core/protobuf:error_codes_proto_impl",
+        "@xla//xla/tsl/protobuf:error_codes_proto_impl",
     ],
-    visibility = [
-        "//tensorflow/core:__subpackages__",
-        "//tensorflow/core/protobuf:__subpackages__",
-    ],
-    exports = ["//tensorflow/core/protobuf:error_codes_proto_impl"],
+    exports = ["@xla//xla/tsl/protobuf:error_codes_proto_impl"],
 )
 
 # Export source files needed for mobile builds, which do not use granular targets.
 filegroup(
-    name = "mobile_srcs_no_runtime",
+    name = "mobile_hdrs_no_runtime",
     srcs = [
-        "blocking_counter.h",
         "coding.h",
         "errors.h",
         "refcount.h",
@@ -166,6 +218,13 @@ filegroup(
     name = "mobile_srcs_only_runtime",
     srcs = [
         "arena.cc",
+    ],
+    visibility = ["//tensorflow/core:__pkg__"],
+)
+
+filegroup(
+    name = "mobile_hdrs_only_runtime",
+    srcs = [
         "arena.h",
         "bitmap.h",
         "bits.h",
@@ -183,7 +242,6 @@ filegroup(
         "arena.h",
         "bitmap.h",
         "bits.h",
-        "blocking_counter.h",
         "coding.h",
         "errors.h",
         "notification.h",
@@ -195,21 +253,7 @@ filegroup(
         "threadpool.h",
         "threadpool_interface.h",
         "threadpool_options.h",
-    ],
-    visibility = ["//tensorflow/core:__pkg__"],
-)
-
-filegroup(
-    name = "legacy_lib_core_all_tests",
-    srcs = [
-        "arena_test.cc",
-        "bitmap_test.cc",
-        "blocking_counter_test.cc",
-        "coding_test.cc",
-        "notification_test.cc",
-        "refcount_test.cc",
-        "status_test.cc",
-        "threadpool_test.cc",
+        "@xla//xla/tsl/lib/core:legacy_lib_core_all_headers",
     ],
     visibility = ["//tensorflow/core:__pkg__"],
 )
@@ -217,7 +261,6 @@ filegroup(
 filegroup(
     name = "legacy_lib_internal_core_headers",
     srcs = [
-        "blocking_counter.h",
         "refcount.h",
     ],
     visibility = ["//tensorflow/core:__pkg__"],
@@ -228,13 +271,14 @@ filegroup(
     srcs = [
         "status.h",
     ],
-    visibility = ["//tensorflow/core:__pkg__"],
+    visibility = ["//visibility:private"],
 )
 
 filegroup(
     name = "legacy_lib_core_status_test_util_header",
     srcs = [
         "status_test_util.h",
+        "@xla//xla/tsl/lib/core:legacy_lib_core_status_test_util_header",
     ],
     visibility = ["//tensorflow/core:__pkg__"],
 )
@@ -271,6 +315,7 @@ filegroup(
         "errors.h",
         "notification.h",
         "raw_coding.h",
+        "refcount.h",
         "status.h",
         "stringpiece.h",
         "threadpool.h",

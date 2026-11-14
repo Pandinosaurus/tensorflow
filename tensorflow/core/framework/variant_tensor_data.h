@@ -17,6 +17,7 @@ limitations under the License.
 #define TENSORFLOW_CORE_FRAMEWORK_VARIANT_TENSOR_DATA_H_
 
 #include <algorithm>
+#include <type_traits>
 #include <vector>
 
 #include "tensorflow/core/framework/tensor.h"
@@ -47,19 +48,20 @@ class VariantTensorData {
   const std::string& type_name() const { return type_name_; }
   void set_type_name(const std::string& type_name) { type_name_ = type_name; }
 
-  template <typename T, bool = std::is_pod<typename std::decay<T>::type>::value>
+  template <typename T, bool = std::is_trivially_copyable_v<std::decay_t<T>> &&
+                               !std::is_pointer_v<std::decay_t<T>>>
   struct PODResolver {};
 
   // Portions of the object that are not Tensors.
   // Directly supported types include string POD types.
   template <typename T>
   void set_metadata(const T& value) {
-    SetMetadata<T>(value, PODResolver<T>());
+    SetMetadata(value, PODResolver<T>());
   }
 
   template <typename T>
   bool get_metadata(T* value) const {
-    return GetMetadata<T>(value, PODResolver<T>());
+    return GetMetadata(value, PODResolver<T>());
   }
 
   std::string& metadata_string() { return metadata_; }
@@ -78,7 +80,7 @@ class VariantTensorData {
   Tensor* add_tensor(TensorConstructorArgs&&... args);
 
   // Conversion to and from VariantTensorDataProto
-  void ToProto(VariantTensorDataProto* proto) const;
+  bool ToProto(VariantTensorDataProto* proto) const;
   // This allows optimizations via std::move.
   bool FromProto(VariantTensorDataProto proto);
   bool FromConstProto(const VariantTensorDataProto& proto);
@@ -96,16 +98,24 @@ class VariantTensorData {
   std::vector<Tensor> tensors_;
 
  private:
-  template <typename T>
   void SetMetadata(const std::string& value,
-                   PODResolver<T, false /* is_pod */>) {
+                   PODResolver<std::string, false /* is_pod */>) {
     metadata_ = value;
   }
 
-  template <typename T>
   bool GetMetadata(std::string* value,
-                   PODResolver<T, false /* is_pod */>) const {
+                   PODResolver<std::string, false /* is_pod */>) const {
     *value = metadata_;
+    return true;
+  }
+
+  // Specialize for bool, it is undefined behvaior to assign a non 0/1 value to
+  // a bool. Now we coerce a non-zero value to true.
+  bool GetMetadata(bool* value, PODResolver<bool, true /* is_pod */>) const {
+    if (metadata_.size() != sizeof(bool)) return false;
+    *value = false;
+    for (size_t i = 0; i < sizeof(bool); ++i)
+      *value = *value || (metadata_.data()[i] != 0);
     return true;
   }
 
@@ -119,6 +129,21 @@ class VariantTensorData {
     if (metadata_.size() != sizeof(T)) return false;
     std::copy_n(metadata_.data(), sizeof(T), reinterpret_cast<char*>(value));
     return true;
+  }
+
+  template <typename T>
+  void SetMetadata(const T& value, PODResolver<T, false /* is_pod */>) {
+    static_assert(
+        std::is_pointer_v<std::decay_t<T>>,
+        "Only strings and pointers are supported for non-POD SetMetadata");
+  }
+
+  template <typename T>
+  bool GetMetadata(T* value, PODResolver<T, false /* is_pod */>) const {
+    static_assert(
+        std::is_pointer_v<std::decay_t<T>>,
+        "Only strings and pointers are supported for non-POD GetMetadata");
+    return false;
   }
 };
 

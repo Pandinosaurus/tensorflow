@@ -13,10 +13,6 @@
 # limitations under the License.
 # ==============================================================================
 """Utils for getting accuracy statistics."""
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import numpy as np
 import tensorflow as tf
 
@@ -122,8 +118,10 @@ class StreamingAccuracyStats(object):
         if ground_truth_time < earliest_time:
           continue
         ground_truth_label = ground_truth[0]
-        if (ground_truth_label == found_label and
-            has_gt_matched.count(ground_truth_time) == 0):
+        if (
+            ground_truth_label == found_label
+            and ground_truth_time not in has_gt_matched
+        ):
           self._how_many_c += 1
         else:
           self._how_many_w += 1

@@ -75,18 +75,18 @@ class SmoothHingeLossUpdater : public DualLossUpdater {
 
   // Converts binary example labels from 0.0 or 1.0 to -1.0 or 1.0 respectively
   // as expected by smooth hinge loss.
-  Status ConvertLabel(float* const example_label) const final {
+  absl::Status ConvertLabel(float* const example_label) const final {
     if (*example_label == 0.0) {
       *example_label = -1;
-      return Status::OK();
+      return absl::OkStatus();
     }
     if (*example_label == 1.0) {
-      return Status::OK();
+      return absl::OkStatus();
     }
-    return errors::InvalidArgument(
-        "Only labels of 0.0 or 1.0 are supported right now. "
-        "Found example with label: ",
-        *example_label);
+    return absl::InvalidArgumentError(
+        absl::StrCat("Only labels of 0.0 or 1.0 are supported right now. "
+                     "Found example with label: ",
+                     *example_label));
   }
 
   double PrimalLossDerivative(const double wx, const double label,

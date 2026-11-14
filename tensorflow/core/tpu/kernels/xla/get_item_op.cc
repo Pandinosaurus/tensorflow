@@ -13,16 +13,20 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include <cstdint>
+#include <vector>
+
+#include "absl/status/status.h"
+
 #define EIGEN_USE_THREADS
 
-#include "tensorflow/compiler/tf2xla/shape_util.h"
-#include "tensorflow/compiler/tf2xla/type_util.h"
 #include "tensorflow/compiler/tf2xla/xla_op_kernel.h"
 #include "tensorflow/compiler/tf2xla/xla_op_registry.h"
-#include "tensorflow/compiler/xla/client/xla_builder.h"
-#include "tensorflow/core/framework/kernel_def_builder.h"
+#include "xla/hlo/builder/xla_builder.h"
 #include "tensorflow/core/framework/op_kernel.h"
-#include "tensorflow/core/framework/tensor_util.h"
+#include "tensorflow/core/framework/op_requires.h"
+#include "tensorflow/core/framework/tensor_shape.h"
+#include "tensorflow/core/platform/errors.h"
 
 namespace tensorflow {
 namespace {
@@ -37,9 +41,10 @@ class GetItemXlaOp : public XlaOpKernel {
     const TensorShape& index_shape = ctx->InputShape(1);
     OP_REQUIRES(
         ctx, TensorShapeUtils::IsVectorOrHigher(data_shape),
-        errors::InvalidArgument("data must be at least 1 dimensional."));
-    OP_REQUIRES(ctx, index_shape.dims() == 1 && index_shape.dim_size(0) == 1,
-                errors::InvalidArgument("index must be a vector of size 1."));
+        absl::InvalidArgumentError("data must be at least 1 dimensional."));
+    OP_REQUIRES(
+        ctx, index_shape.dims() == 1 && index_shape.dim_size(0) == 1,
+        absl::InvalidArgumentError("index must be a vector of size 1."));
 
     // NOTE(pbar) Use Concat to extend the indices to match cl/142279605.
     // This isn't the simplest way to emit the indices, but the code for
@@ -51,11 +56,9 @@ class GetItemXlaOp : public XlaOpKernel {
       operands.push_back(const_zero);
     }
 
-    std::vector<int64_t> dims = {0};
     std::vector<int64_t> slice_sizes = {1};
     std::vector<int64_t> out_sizes = {};
     for (int i = 1; i < data_shape.dims(); i++) {
-      dims.push_back(i);
       auto size = data_shape.dim_size(i);
       slice_sizes.push_back(size);
       out_sizes.push_back(size);
@@ -64,7 +67,7 @@ class GetItemXlaOp : public XlaOpKernel {
     // if its out-of-range.
     auto slice = xla::DynamicSlice(ctx->Input(0), operands, slice_sizes);
     // In-order collapse to remove the 1st dim.
-    auto reshape = xla::Reshape(slice, dims, out_sizes);
+    auto reshape = xla::Reshape(slice, out_sizes);
     ctx->SetOutput(0, reshape);
   }
 };

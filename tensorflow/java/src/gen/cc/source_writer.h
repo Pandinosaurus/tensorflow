@@ -16,13 +16,17 @@ limitations under the License.
 #ifndef TENSORFLOW_JAVA_SRC_GEN_CC_SOURCE_WRITER_H_
 #define TENSORFLOW_JAVA_SRC_GEN_CC_SOURCE_WRITER_H_
 
-#include <string>
-#include <stack>
 #include <list>
 #include <set>
+#include <stack>
+#include <string>
 
+#include "absl/strings/string_view.h"
+#include "xla/tsl/platform/status.h"
 #include "tensorflow/core/lib/core/stringpiece.h"
 #include "tensorflow/core/platform/env.h"
+#include "tensorflow/core/platform/file_system.h"
+#include "tensorflow/core/platform/types.h"
 #include "tensorflow/java/src/gen/cc/java_defs.h"
 
 namespace tensorflow {
@@ -61,20 +65,21 @@ class SourceWriter {
   // The data might potentially contain newline characters, therefore it will
   // be scanned to ensure that each line is indented and prefixed properly,
   // making it a bit slower than Append().
-  SourceWriter& Write(const StringPiece& str);
+  SourceWriter& Write(const absl::string_view& str);
 
   // Writes a source code snippet read from a file.
   //
   // All lines of the file at the provided path will be read and written back
   // to the output of this writer in regard of its current attributes (e.g.
   // the indentation, prefix, etc.)
-  SourceWriter& WriteFromFile(const string& fname, Env* env = Env::Default());
+  SourceWriter& WriteFromFile(const std::string& fname,
+                              Env* env = Env::Default());
 
   // Appends a piece of source code.
   //
   // It is expected that no newline character is present in the data provided,
   // otherwise Write() must be used.
-  SourceWriter& Append(const StringPiece& str);
+  SourceWriter& Append(const absl::string_view& str);
 
   // Appends a type to the current line.
   //
@@ -93,7 +98,7 @@ class SourceWriter {
   // This method appends a new opening brace to the current data and indent the
   // next lines according to Google Java Style Guide. The block can optionally
   // be preceded by an expression (e.g. Append("if(true)").BeginBlock();)
-  SourceWriter& BeginBlock(const string& expression = "");
+  SourceWriter& BeginBlock(const std::string& expression = "");
 
   // Ends the current block of source code.
   //
@@ -153,7 +158,7 @@ class SourceWriter {
                            const Javadoc* javadoc = nullptr);
 
  protected:
-  virtual void DoAppend(const StringPiece& str) = 0;
+  virtual void DoAppend(const absl::string_view& str) = 0;
 
  private:
   // A utility base class for visiting elements of a type.
@@ -180,28 +185,27 @@ class SourceWriter {
 
    private:
     std::list<const Type*> declared_types_;
-    std::set<string> generic_names_;
+    std::set<std::string> generic_names_;
   };
 
   // A utility class for collecting a list of import statements to declare.
   class TypeImporter : public TypeVisitor {
    public:
-    explicit TypeImporter(const string& current_package)
-      : current_package_(current_package) {}
+    explicit TypeImporter(const std::string& current_package)
+        : current_package_(current_package) {}
     virtual ~TypeImporter() = default;
-    const std::set<string> imports() {
-      return imports_;
-    }
+    const std::set<std::string> imports() { return imports_; }
+
    protected:
     virtual void DoVisit(const Type& type);
 
    private:
-    string current_package_;
-    std::set<string> imports_;
+    std::string current_package_;
+    std::set<std::string> imports_;
   };
 
-  string left_margin_;
-  string line_prefix_;
+  std::string left_margin_;
+  std::string line_prefix_;
   bool newline_ = true;
   std::stack<GenericNamespace*> generic_namespaces_;
 
@@ -223,7 +227,7 @@ class SourceFileWriter : public SourceWriter {
   virtual ~SourceFileWriter() = default;
 
  protected:
-  void DoAppend(const StringPiece& str) override {
+  void DoAppend(const absl::string_view& str) override {
     TF_CHECK_OK(file_->Append(str));
   }
 
@@ -234,22 +238,22 @@ class SourceFileWriter : public SourceWriter {
 // A writer that outputs source code into a string buffer.
 class SourceBufferWriter : public SourceWriter {
  public:
-  SourceBufferWriter() : owns_buffer_(true), buffer_(new string()) {}
-  explicit SourceBufferWriter(string* buffer)
+  SourceBufferWriter() : owns_buffer_(true), buffer_(new std::string()) {}
+  explicit SourceBufferWriter(std::string* buffer)
       : owns_buffer_(false), buffer_(buffer) {}
   virtual ~SourceBufferWriter() {
     if (owns_buffer_) delete buffer_;
   }
-  const string& str() { return *buffer_; }
+  const std::string& str() { return *buffer_; }
 
  protected:
-  void DoAppend(const StringPiece& str) override {
+  void DoAppend(const absl::string_view& str) override {
     buffer_->append(str.begin(), str.end());
   }
 
  private:
   bool owns_buffer_;
-  string* buffer_;
+  std::string* buffer_;
 };
 
 }  // namespace java

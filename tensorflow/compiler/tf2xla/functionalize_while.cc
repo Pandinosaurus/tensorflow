@@ -27,8 +27,8 @@ limitations under the License.
 #include "tensorflow/compiler/tf2xla/frontend_attributes_util.h"
 #include "tensorflow/compiler/tf2xla/functionalize_cond.h"
 #include "tensorflow/compiler/tf2xla/tf2xla_util.h"
-#include "tensorflow/compiler/xla/status_macros.h"
-#include "tensorflow/compiler/xla/union_find.h"
+#include "xla/status_macros.h"
+#include "xla/union_find.h"
 #include "tensorflow/core/common_runtime/function.h"
 #include "tensorflow/core/framework/graph_to_functiondef.h"
 #include "tensorflow/core/framework/node_def_builder.h"
@@ -56,10 +56,10 @@ namespace {
 // taking from the Switch node was not necessarily the first output, but _Arg
 // nodes only have one output. By adding the Switch node to `squash_src_outputs`
 // we rewrite the src_output of the corresponding edge to be 0.
-Status CopySubgraph(const Graph& graph, const WhileLoopFrame* frame,
-                    std::vector<Node*> stack,
-                    const std::vector<bool>& squash_src_outputs,
-                    std::vector<Node*>* node_map, Graph* output) {
+absl::Status CopySubgraph(const Graph& graph, const WhileLoopFrame* frame,
+                          std::vector<Node*> stack,
+                          const std::vector<bool>& squash_src_outputs,
+                          std::vector<Node*>* node_map, Graph* output) {
   VLOG(3) << "Stack: " << NodesToString(stack);
   std::vector<bool> visited(graph.num_node_ids(), false);
   while (!stack.empty()) {
@@ -79,7 +79,8 @@ Status CopySubgraph(const Graph& graph, const WhileLoopFrame* frame,
               [](const Edge* a, const Edge* b) {
                 int a_src_output = a->src_output(),
                     b_src_output = b->src_output();
-                StringPiece a_name(a->src()->name()), b_name(b->src()->name());
+                absl::string_view a_name(a->src()->name()),
+                    b_name(b->src()->name());
                 return std::tie(a_src_output, a_name) <
                        std::tie(b_src_output, b_name);
               });
@@ -87,9 +88,9 @@ Status CopySubgraph(const Graph& graph, const WhileLoopFrame* frame,
       Node* src = e->src();
       if (frame != nullptr && frame->nodes.find(src) == frame->nodes.end()) {
         // We traversed out of the loop frame, without encountering a cut node.
-        return errors::Internal("Graph traversal of loop frame ", frame->name,
-                                " escaped frame at ", src->name(),
-                                " without encountering an argument node.");
+        return absl::InternalError(absl::StrCat(
+            "Graph traversal of loop frame ", frame->name, " escaped frame at ",
+            src->name(), " without encountering an argument node."));
       }
       if ((*node_map)[src->id()] == nullptr) {
         (*node_map)[src->id()] = output->CopyNode(src);
@@ -103,24 +104,24 @@ Status CopySubgraph(const Graph& graph, const WhileLoopFrame* frame,
       output->AddEdge(src_copy, src_output, dst_copy, e->dst_input());
     }
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-StatusOr<Node*> BuildArgNode(Graph* graph, DataType type, int index) {
+absl::StatusOr<Node*> BuildArgNode(Graph* graph, DataType type, int index) {
   const char* const kArgOp = "_Arg";
   NodeDef arg_def;
   NodeDefBuilder builder(absl::StrCat(kArgOp, index), kArgOp);
   builder.Attr("T", type);
   builder.Attr("index", index);
   TF_RETURN_IF_ERROR(builder.Finalize(&arg_def));
-  return AddNodeDefToGraph(arg_def, graph);
+  return graph->AddNode(arg_def);
 }
 
 // Builds a graph for the loop condition.
-Status BuildLoopCondition(const Graph& graph, WhileLoopFrame* frame,
-                          std::unique_ptr<Graph>* cond_output) {
+absl::Status BuildLoopCondition(const Graph& graph, WhileLoopFrame* frame,
+                                std::unique_ptr<Graph>* cond_output) {
   VLOG(2) << "Building loop condition for " << frame->name;
-  *cond_output = absl::make_unique<Graph>(graph.op_registry());
+  *cond_output = std::make_unique<Graph>(graph.op_registry());
   Graph* output = cond_output->get();
 
   // Map from nodes in the original graph to the condition graph.
@@ -153,11 +154,11 @@ Status BuildLoopCondition(const Graph& graph, WhileLoopFrame* frame,
 }
 
 // Builds a graph for the loop body.
-Status BuildLoopBody(const Graph& graph, WhileLoopFrame* frame,
-                     DataTypeVector* arg_types,
-                     std::unique_ptr<Graph>* body_output) {
+absl::Status BuildLoopBody(const Graph& graph, WhileLoopFrame* frame,
+                           DataTypeVector* arg_types,
+                           std::unique_ptr<Graph>* body_output) {
   VLOG(2) << "Building loop body for " << frame->name;
-  *body_output = absl::make_unique<Graph>(graph.op_registry());
+  *body_output = std::make_unique<Graph>(graph.op_registry());
   Graph* output = body_output->get();
 
   // Map from nodes in the original graph to the body graph.
@@ -185,9 +186,9 @@ Status BuildLoopBody(const Graph& graph, WhileLoopFrame* frame,
       if (dtype == DT_RESOURCE) {
         // DT_RESOURCE arguments should always be loop-invariant in the graphs
         // generated from TF.
-        return errors::Unimplemented("Loop-varying DT_RESOURCE Enter node ",
-                                     arg.enter->name(), " is currently not",
-                                     " supported.");
+        return absl::UnimplementedError(absl::StrCat(
+            "Loop-varying DT_RESOURCE Enter node ", arg.enter->name(),
+            " is currently not", " supported."));
       }
       node_map[arg.switch_node->id()] = arg_node;
       // The Switch node has two outputs, but _Arg only has one. This tells
@@ -206,17 +207,17 @@ Status BuildLoopBody(const Graph& graph, WhileLoopFrame* frame,
   TF_RETURN_IF_ERROR(CopySubgraph(graph, frame, std::move(next_iterations),
                                   squash_src_outputs, &node_map, output));
 
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-Status FunctionalizeLoop(Graph* graph, WhileLoopFrame* frame,
-                         FunctionLibraryDefinition* library,
-                         const NodeFilter& node_filter) {
+absl::Status FunctionalizeLoop(Graph* graph, WhileLoopFrame* frame,
+                               FunctionLibraryDefinition* library,
+                               const NodeFilter& node_filter) {
   if (node_filter && !frame->should_be_functionalized) {
     VLOG(2) << "Skipping functionalization for frame " << frame->name
             << " because it has control flow nodes that are filtered out by "
                "the specified node filter.";
-    return Status::OK();
+    return absl::OkStatus();
   }
   VLOG(2) << "Frame " << frame->name << " before: "
           << DumpGraphToFile("functionalize_before", *graph, library);
@@ -227,6 +228,7 @@ Status FunctionalizeLoop(Graph* graph, WhileLoopFrame* frame,
   // maintain the invariant of a unique Enter node per argument of the final
   // loop.
   std::vector<WhileLoopArg> args;
+  args.reserve(frame->args.size());
   for (const WhileLoopArg& arg : frame->args) {
     if (arg.is_loop_invariant) {
       args.push_back(arg);
@@ -266,8 +268,8 @@ Status FunctionalizeLoop(Graph* graph, WhileLoopFrame* frame,
             });
 
   if (frame->loop_cond == nullptr) {
-    return errors::InvalidArgument("Loop ", frame->name,
-                                   " has no LoopCond node");
+    return absl::InvalidArgumentError(
+        absl::StrCat("Loop ", frame->name, " has no LoopCond node"));
   }
 
   // Find the set of Switch nodes that are successors of the LoopCond.
@@ -299,43 +301,43 @@ Status FunctionalizeLoop(Graph* graph, WhileLoopFrame* frame,
           continue;
         }
         if (enter_merge != nullptr) {
-          return errors::Internal("Enter node for loop-varying argument ",
-                                  FormatNodeForError(*arg.enter),
-                                  " has multiple successors: ",
-                                  FormatNodeForError(*enter_merge->dst()),
-                                  " and ", FormatNodeForError(*e->dst()));
+          return absl::InternalError(absl::StrCat(
+              "Enter node for loop-varying argument ",
+              FormatNodeForError(*arg.enter), " has multiple successors: ",
+              FormatNodeForError(*enter_merge->dst()), " and ",
+              FormatNodeForError(*e->dst())));
         }
         enter_merge = e;
       }
       if (enter_merge == nullptr) {
-        return errors::Internal("Enter node for loop-varying argument ",
-                                FormatNodeForError(*arg.enter),
-                                " has zero successors");
+        return absl::InternalError(absl::StrCat(
+            "Enter node for loop-varying argument ",
+            FormatNodeForError(*arg.enter), " has zero successors"));
       }
       arg.merge = enter_merge->dst();
       if (!IsMerge(arg.merge)) {
-        return errors::InvalidArgument(
+        return absl::InvalidArgumentError(absl::StrCat(
             "Successor of Enter node for loop-varying argument ",
             FormatNodeForError(*arg.merge),
-            " is not a Merge node; got: ", arg.merge->type_string());
+            " is not a Merge node; got: ", arg.merge->type_string()));
       }
 
       // Find the NextIteration from the merge. There should be two inputs to
       // the Merge and the NextIteration should be the other input.
       if (arg.merge->input_types().size() != 2) {
-        return errors::InvalidArgument(
+        return absl::InvalidArgumentError(absl::StrCat(
             "Unexpected number of inputs to Merge node for loop-varying "
             "argument ",
             FormatNodeForError(*arg.merge), "; expected 2, got ",
-            arg.merge->input_types().size());
+            arg.merge->input_types().size()));
       }
       TF_RETURN_IF_ERROR(arg.merge->input_node(1 - enter_merge->dst_input(),
                                                &arg.next_iteration));
       if (!IsNextIteration(arg.next_iteration)) {
-        return errors::InvalidArgument(
+        return absl::InvalidArgumentError(absl::StrCat(
             "Expected NextIteration node as input to Merge node; got node ",
             FormatNodeForError(*arg.next_iteration), " with kind ",
-            arg.next_iteration->type_string());
+            arg.next_iteration->type_string()));
       }
 
       // Find the Switch successor of the Merge. There should be exactly one
@@ -344,15 +346,16 @@ Status FunctionalizeLoop(Graph* graph, WhileLoopFrame* frame,
         if (edge->dst_input() == 0 && IsSwitch(edge->dst()) &&
             switches.find(edge->dst()) != switches.end()) {
           if (arg.switch_node != nullptr) {
-            return errors::InvalidArgument("Duplicate Switch successors to ",
-                                           FormatNodeForError(*arg.merge));
+            return absl::InvalidArgumentError(
+                absl::StrCat("Duplicate Switch successors to ",
+                             FormatNodeForError(*arg.merge)));
           }
           arg.switch_node = edge->dst();
         }
       }
       if (arg.switch_node == nullptr) {
-        return errors::InvalidArgument("Missing Switch successor to ",
-                                       FormatNodeForError(*arg.merge));
+        return absl::InvalidArgumentError(absl::StrCat(
+            "Missing Switch successor to ", FormatNodeForError(*arg.merge)));
       }
       // Loop over the switch node's output to:
       // - Find the Exit successor.
@@ -376,17 +379,18 @@ Status FunctionalizeLoop(Graph* graph, WhileLoopFrame* frame,
         possible_exit.pop_front();
         if (IsExit(edge->dst())) {
           if (arg.exit != nullptr) {
-            return errors::InvalidArgument(
-                "Duplicate Exit successors to ",
-                FormatNodeForError(*arg.switch_node));
+            return absl::InvalidArgumentError(
+                absl::StrCat("Duplicate Exit successors to ",
+                             FormatNodeForError(*arg.switch_node)));
           }
           arg.exit = edge->dst();
         } else {
           if (!IsIdentity(edge->dst())) {
-            return errors::Unimplemented("General graph between switch (",
-                                         FormatNodeForError(*arg.switch_node),
-                                         ") and exit node of frame ",
-                                         frame->name, " not supported yet.");
+            return absl::UnimplementedError(
+                absl::StrCat("General graph between switch (",
+                             FormatNodeForError(*arg.switch_node),
+                             ") and exit node of frame ", frame->name,
+                             " not supported yet."));
           }
           for (const Edge* out : edge->dst()->out_edges()) {
             possible_exit.push_back(out);
@@ -435,11 +439,8 @@ Status FunctionalizeLoop(Graph* graph, WhileLoopFrame* frame,
   builder.Attr("cond", cond_name);
   builder.Attr("body", body_name);
   // Add some internal attributes which need to be propagated.
-  // TODO(b/160275126): attributes shouldn't be hard-coded here
-  for (const char* attr_name :
-       {kXlaFrontendAttributesAttrName, kXlaOutsideCompilationAttrName,
-        kTpuReplicateAttrName}) {
-    string attr_val;
+  for (absl::string_view attr_name : kAttrsToPropagate) {
+    std::string attr_val;
     if (GetNodeAttr(frame->loop_cond->def(), attr_name, &attr_val).ok()) {
       builder.Attr(attr_name, attr_val);
     }
@@ -458,7 +459,7 @@ Status FunctionalizeLoop(Graph* graph, WhileLoopFrame* frame,
   }
   builder.Input(inputs);
   TF_RETURN_IF_ERROR(builder.Finalize(&while_def));
-  TF_ASSIGN_OR_RETURN(Node * while_node, AddNodeDefToGraph(while_def, graph));
+  TF_ASSIGN_OR_RETURN(Node * while_node, graph->AddNode(while_def));
 
   // Copies edges to the Enter nodes and from the Exit nodes onto the While.
   for (int i = 0, end = frame->args.size(); i < end; ++i) {
@@ -503,26 +504,27 @@ Status FunctionalizeLoop(Graph* graph, WhileLoopFrame* frame,
   VLOG(2) << "Frame " << frame->name << " after: "
           << DumpGraphToFile("functionalize_after", *graph, library);
 
-  return Status::OK();
+  return absl::OkStatus();
 }
 }  // namespace
 
-Status FunctionalizeWhileLoop(Graph* graph, FunctionLibraryDefinition* library,
-                              const NodeFilter& node_filter) {
+absl::Status FunctionalizeWhileLoop(Graph* graph,
+                                    FunctionLibraryDefinition* library,
+                                    const NodeFilter& node_filter) {
   // Note: BuildControlFlowInfo() requires that the graph's source node is
   // connected to all source nodes in the graph. Many graphs violate this
   // invariant.
   std::vector<ControlFlowInfo> cf_info;
-  std::vector<string> unreachable_nodes;
+  std::vector<std::string> unreachable_nodes;
   TF_RETURN_IF_ERROR(BuildControlFlowInfo(graph, &cf_info, &unreachable_nodes));
   if (!unreachable_nodes.empty()) {
-    return errors::InvalidArgument(
+    return absl::InvalidArgumentError(absl::StrCat(
         "The following nodes are unreachable from the source in the graph: ",
-        errors::FormatNodeNamesForError(unreachable_nodes));
+        errors::FormatNodeNamesForError(unreachable_nodes)));
   }
 
   // Builds Frames, indexed by name.
-  std::unordered_map<string, WhileLoopFrame> frames;
+  std::unordered_map<std::string, WhileLoopFrame> frames;
   TF_RETURN_IF_ERROR(
       ExtractWhileLoopFrames(cf_info, graph, &frames, node_filter));
 
@@ -567,7 +569,7 @@ Status FunctionalizeWhileLoop(Graph* graph, FunctionLibraryDefinition* library,
     }
   }
 
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 }  // namespace tensorflow

@@ -14,14 +14,19 @@
 # ==============================================================================
 """Tests for array_grad."""
 
+from tensorflow.python.eager import backprop
 from tensorflow.python.framework import constant_op
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import test_util
 from tensorflow.python.ops import array_ops
+from tensorflow.python.ops import array_ops_stack
+from tensorflow.python.ops import gen_array_ops
 from tensorflow.python.ops import gradient_checker_v2
+from tensorflow.python.ops import math_ops
 from tensorflow.python.platform import test
 
 
+@test_util.with_eager_op_as_function
 @test_util.run_all_in_graph_and_eager_modes
 class ArrayGradTest(test.TestCase):
 
@@ -99,6 +104,144 @@ class ArrayGradTest(test.TestCase):
           constant_op.constant([[0], [0]], dtype=dtypes.int32),
           axis=2,
           batch_dims=1)
+
+    self._testGrad(f, x)
+
+  def test_gather_v2_zero_bsize_grad_has_matching_shapes(self):
+    params = array_ops.zeros(shape=[0, 1, 8, 16], dtype=dtypes.float64)
+    indices = array_ops.zeros(shape=[0, 1, 3], dtype=dtypes.int32)
+
+    def f(params):
+      return array_ops.gather_v2(params, indices, axis=2, batch_dims=2)
+
+    grads = backprop.gradients_function(f)(params)
+    self.assertLen(grads, 1)
+    self.assertAllEqual(params.shape, grads[0].shape)
+
+  def test_broadcast_to(self):
+    x = constant_op.constant([1., 2., 3.], dtype=dtypes.float64)
+    y = constant_op.constant([2, 3], dtype=dtypes.int32)
+
+    def f(x):
+      return array_ops.broadcast_to(
+          x,
+          y)
+
+    self._testGrad(f, x)
+
+  def test_broadcast_to_int64(self):
+    x = constant_op.constant([1., 2., 3.], dtype=dtypes.float64)
+    y = constant_op.constant([2, 3], dtype=dtypes.int64)
+
+    def f(x):
+      return array_ops.broadcast_to(
+          x,
+          y)
+
+    self._testGrad(f, x)
+
+  def test_slice_int64(self):
+    x = constant_op.constant([1., 2., 3.], dtype=dtypes.float64)
+    begin = constant_op.constant([1], dtype=dtypes.int64)
+    size = constant_op.constant([1], dtype=dtypes.int64)
+
+    def f(x):
+      return array_ops.slice(x, begin, size)
+
+    self._testGrad(f, x)
+
+  def test_reshape_simple(self):
+    x = constant_op.constant([1., 2., 3.], dtype=dtypes.float64)
+    y = constant_op.constant([3, 1], dtype=dtypes.int64)
+
+    def f(x):
+      return array_ops.reshape(x, y)
+
+    self._testGrad(f, x)
+
+  def test_reshape_one_unknown_dim(self):
+    def f(x):
+      x_without_shape = array_ops.placeholder_with_default(x, shape=[None, 2])
+      return array_ops.reshape(x_without_shape, [3, 2])
+
+    x = constant_op.constant([[1., 2.], [3., 4.], [5., 6.]],
+                             dtype=dtypes.float64)
+    self._testGrad(f, x)
+
+  def test_reshape_two_unknown_dims(self):
+    def f(x):
+      x_without_shape = array_ops.placeholder_with_default(x,
+                                                           shape=[None, None])
+      return array_ops.reshape(x_without_shape, [6])
+
+    x = constant_op.constant([[1., 2., 3.], [4., 5., 6.]], dtype=dtypes.float64)
+    self._testGrad(f, x)
+
+  def test_reshape_one_unknown_dim_and_zero_elements(self):
+    def f(x):
+      x_without_shape = array_ops.placeholder_with_default(x, shape=[None, 0])
+      return array_ops.reshape(x_without_shape, [0])
+
+    x = constant_op.constant([], shape=[3, 0], dtype=dtypes.float64)
+    self._testGrad(f, x)
+
+  def test_matrix_diag_v2_grad_ignores_diagonal_padding(self):
+    x = constant_op.constant(0.7, dtype=dtypes.float64)
+
+    def f(x):
+      diagonal = array_ops_stack.stack([
+          array_ops_stack.stack([x * x, 7.0 * x]),
+          array_ops_stack.stack([x, 2.0 * x]),
+      ])
+      matrix = gen_array_ops.matrix_diag_v2(
+          diagonal=diagonal,
+          k=constant_op.constant([0, 1], dtype=dtypes.int32),
+          num_rows=constant_op.constant(2, dtype=dtypes.int32),
+          num_cols=constant_op.constant(2, dtype=dtypes.int32),
+          padding_value=constant_op.constant(-1.0, dtype=dtypes.float64),
+      )
+      return math_ops.reduce_sum(matrix)
+
+    self._testGrad(f, x)
+
+  def test_matrix_set_diag_v2_grad_ignores_diagonal_padding(self):
+    x = constant_op.constant(0.7, dtype=dtypes.float64)
+
+    def f(x):
+      diagonal = (
+          constant_op.constant([[1.0, 2.0], [3.0, 4.0]], dtype=dtypes.float64)
+          * x
+      )
+      matrix = gen_array_ops.matrix_set_diag_v2(
+          input=constant_op.constant(
+              [[10.0, 20.0], [30.0, 40.0]], dtype=dtypes.float64
+          ),
+          diagonal=diagonal,
+          k=constant_op.constant([0, 1], dtype=dtypes.int32),
+      )
+      return matrix * constant_op.constant(
+          [[5.0, 7.0], [11.0, 13.0]], dtype=dtypes.float64
+      )
+
+    self._testGrad(f, x)
+
+  def test_matrix_diag_part_v2_grad_uses_left_alignment(self):
+    x = constant_op.constant(0.7, dtype=dtypes.float64)
+    coeff = constant_op.constant(
+        [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]],
+        dtype=dtypes.float64,
+    )
+    weights = constant_op.constant(
+        [[100.0, 10.0, 1.0], [7.0, 5.0, 3.0]], dtype=dtypes.float64
+    )
+
+    def f(x):
+      diagonal = gen_array_ops.matrix_diag_part_v2(
+          input=coeff * x,
+          k=constant_op.constant([0, 1], dtype=dtypes.int32),
+          padding_value=constant_op.constant(0.0, dtype=dtypes.float64),
+      )
+      return diagonal * weights
 
     self._testGrad(f, x)
 

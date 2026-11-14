@@ -25,15 +25,15 @@ namespace grappler {
 // Assert, CheckNumerics, Print) from the graph.
 class DebugStripper : public GraphOptimizer {
  public:
-  DebugStripper() {}
-  ~DebugStripper() override {}
+  DebugStripper() = default;
+  ~DebugStripper() override = default;
 
-  string name() const override { return "debug_stripper"; };
+  std::string name() const override { return "debug_stripper"; };
 
   bool UsesFunctionLibrary() const override { return false; }
 
-  Status Optimize(Cluster* cluster, const GrapplerItem& item,
-                  GraphDef* output) override;
+  absl::Status Optimize(Cluster* cluster, const GrapplerItem& item,
+                        GraphDef* output) override;
 };
 
 }  // end namespace grappler

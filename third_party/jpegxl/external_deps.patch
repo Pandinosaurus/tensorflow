@@ -1,0 +1,8 @@
+diff --git a/lib/jxl_vars.bzl b/lib/jxl_vars.bzl
+index fb00f6e..a2b7bcb 100644
+--- a/lib/jxl_vars.bzl
++++ b/lib/jxl_vars.bzl
+@@ -10 +10 @@ libjxl_root_package = "libjxl"
+-libjxl_deps_brotli = ["@brotli//:brotlidec", "@brotli//:brotlienc"]
++libjxl_deps_brotli = ["@org_brotli//:brotlidec", "@org_brotli//:brotlienc"]
+

@@ -15,8 +15,11 @@ limitations under the License.
 
 // See docs in ../ops/linalg_ops.cc.
 
-#include "third_party/eigen3/Eigen/Core"
-#include "third_party/eigen3/Eigen/Eigenvalues"
+#include <cstdint>
+
+#include "absl/status/status.h"
+#include "Eigen/Core"  // from @eigen_archive
+#include "Eigen/Eigenvalues"  // from @eigen_archive
 #include "tensorflow/core/framework/kernel_def_builder.h"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/tensor_shape.h"
@@ -62,10 +65,11 @@ class SelfAdjointEigOp : public LinearAlgebraOp<Scalar> {
     Eigen::SelfAdjointEigenSolver<
         Eigen::Matrix<Scalar, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>>
         es(inputs[0]);
-    OP_REQUIRES(context, es.info() == Eigen::Success,
-                errors::InvalidArgument("Self Adjoint Eigen decomposition was"
-                                        "not successful. "
-                                        "The input might not be valid."));
+    OP_REQUIRES(
+        context, es.info() == Eigen::Success,
+        absl::InvalidArgumentError("Self Adjoint Eigen decomposition was"
+                                   "not successful. "
+                                   "The input might not be valid."));
     outputs->at(0).row(0) = es.eigenvalues().transpose();
     outputs->at(0).bottomRows(rows) = es.eigenvectors();
   }

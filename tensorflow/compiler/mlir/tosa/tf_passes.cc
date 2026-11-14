@@ -15,7 +15,7 @@ limitations under the License.
 
 #include "tensorflow/compiler/mlir/tosa/tf_passes.h"
 
-#include "mlir/Dialect/Affine/Passes.h"  // from @llvm-project
+#include "mlir/Dialect/Affine/Transforms/Passes.h"  // from @llvm-project
 #include "mlir/Dialect/Tosa/Transforms/Passes.h"  // from @llvm-project
 #include "mlir/Pass/PassRegistry.h"  // from @llvm-project
 #include "mlir/Transforms/Passes.h"  // from @llvm-project
@@ -36,8 +36,8 @@ void createTFtoTOSALegalizationPipeline(
   pm.addPass(mlir::createCanonicalizerPass());
   pm.addPass(mlir::createCSEPass());
 
-  pm.addPass(mlir::createLoopFusionPass());
-  pm.addPass(mlir::createAffineScalarReplacementPass());
+  pm.addPass(mlir::affine::createLoopFusionPass());
+  pm.addPass(mlir::affine::createAffineScalarReplacementPass());
 
   //----------------------------------------------------------------------------
   // Perform main conversion.
@@ -49,6 +49,7 @@ void createTFtoTOSALegalizationPipeline(
   //----------------------------------------------------------------------------
   // Post conversion cleanup.
   //----------------------------------------------------------------------------
+  pm.addPass(mlir::tosa::createTosaInferShapesPass());
   pm.addPass(mlir::tosa::createTosaMakeBroadcastablePass());
   // Inline the call/return basic blocks within TOSA control flow ops.
   pm.addPass(mlir::createInlinerPass());

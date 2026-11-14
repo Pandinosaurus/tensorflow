@@ -1,4 +1,4 @@
-/* Copyright 2016 The TensorFlow Authors All Rights Reserved.
+/* Copyright 2016 The TensorFlow Authors. All Rights Reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -15,7 +15,13 @@ limitations under the License.
 
 #include "tensorflow/core/profiler/internal/tfprof_timeline.h"
 
+#include <algorithm>
+#include <map>
+#include <memory>
+#include <set>
+#include <string>
 #include <utility>
+#include <vector>
 
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
@@ -39,10 +45,11 @@ std::string GetMemoryLaneName(const std::string& dev) {
 }
 }  // namespace
 
-Json::Value ChromeTraceFormatter::CreateEvent(const string& ph,
-                                              const string& category,
-                                              const string& name, int64_t pid,
-                                              int64_t tid, int64_t ts) {
+Json::Value ChromeTraceFormatter::CreateEvent(const std::string& ph,
+                                              const std::string& category,
+                                              const std::string& name,
+                                              int64_t pid, int64_t tid,
+                                              int64_t ts) {
   Json::Value event(Json::objectValue);
   event["ph"] = Json::Value(ph);
   event["cat"] = Json::Value(category);
@@ -53,7 +60,7 @@ Json::Value ChromeTraceFormatter::CreateEvent(const string& ph,
   return event;
 }
 
-void ChromeTraceFormatter::EmitPID(const string& name, int64_t pid) {
+void ChromeTraceFormatter::EmitPID(const std::string& name, int64_t pid) {
   Json::Value event(Json::objectValue);
   event["name"] = Json::Value("process_name");
   event["ph"] = Json::Value("M");
@@ -65,15 +72,16 @@ void ChromeTraceFormatter::EmitPID(const string& name, int64_t pid) {
 }
 
 void ChromeTraceFormatter::EmitRegion(int64_t ts, int64_t duration, int64_t pid,
-                                      int64_t tid, const string& category,
-                                      const string& name, Json::Value args) {
+                                      int64_t tid, const std::string& category,
+                                      const std::string& name,
+                                      Json::Value args) {
   Json::Value event = CreateEvent("X", category, name, pid, tid, ts);
   event["dur"] = Json::Int64(duration);
   event["args"] = std::move(args);
   metadata_.push_back(event);
 }
 
-void ChromeTraceFormatter::EmitFlowStart(const string& name, int64_t ts,
+void ChromeTraceFormatter::EmitFlowStart(const std::string& name, int64_t ts,
                                          int64_t pid, int64_t tid,
                                          int64_t flow_id) {
   Json::Value event = CreateEvent("s", "DataFlow", name, pid, tid, ts);
@@ -81,7 +89,7 @@ void ChromeTraceFormatter::EmitFlowStart(const string& name, int64_t ts,
   events_.push_back(event);
 }
 
-void ChromeTraceFormatter::EmitFlowEnd(const string& name, int64_t ts,
+void ChromeTraceFormatter::EmitFlowEnd(const std::string& name, int64_t ts,
                                        int64_t pid, int64_t tid,
                                        int64_t flow_id) {
   Json::Value event = CreateEvent("t", "DataFlow", name, pid, tid, ts);
@@ -90,9 +98,9 @@ void ChromeTraceFormatter::EmitFlowEnd(const string& name, int64_t ts,
 }
 
 void ChromeTraceFormatter::EmitCounter(
-    const string& category, const string& name, int64_t pid, int64_t ts,
-    const string& device, int64_t bytes,
-    const std::map<int64_t, std::vector<string>>& tensor_mem) {
+    const std::string& category, const std::string& name, int64_t pid,
+    int64_t ts, const std::string& device, int64_t bytes,
+    const std::map<int64_t, std::vector<std::string>>& tensor_mem) {
   Json::Value event = CreateEvent("C", category, "Allocated Bytes", pid, 0, ts);
   Json::Value args(Json::objectValue);
   args["Allocator Bytes in Use"] = Json::Int64(bytes);
@@ -110,7 +118,7 @@ void ChromeTraceFormatter::EmitCounter(
   }
   int count = 0;
   for (auto it = tensor_mem.rbegin(); it != tensor_mem.rend(); ++it) {
-    for (const string& t : it->second) {
+    for (const std::string& t : it->second) {
       if (bytes < it->first || count >= kMaxDisplayedMemNode) {
         break;
       }
@@ -120,13 +128,13 @@ void ChromeTraceFormatter::EmitCounter(
       bytes -= it->first;
     }
   }
-  args2[std::string("Not Displayed")] =
+  args2["Not Displayed"] =
       Json::Value(absl::StrFormat("%.2f MB", bytes / 1000000.0));
   event2["args"] = args2;
   events_.push_back(event2);
 }
 
-string ChromeTraceFormatter::Format() {
+std::string ChromeTraceFormatter::Format() {
   Json::Value trace;
   trace["traceEvents"] = Json::Value(Json::arrayValue);
   for (const Json::Value& v : metadata_) {
@@ -136,7 +144,7 @@ string ChromeTraceFormatter::Format() {
     trace["traceEvents"].append(v);
   }
   Json::FastWriter writer;
-  string trace_str = writer.write(trace);
+  std::string trace_str = writer.write(trace);
   if (trace_str.length() > 200 * 1024 * 1024) {
     absl::FPrintF(stderr,
                   "Trace file is over 200MB. Chrome might not be able to "
@@ -179,11 +187,11 @@ void Timeline::AllocateTimeNodes(GraphNode* gnode) {
     TrackNode(gnode);
     const TFGraphNode* node = gnode->node;
     for (const auto& kernel_execs : node->op_execs(step_)) {
-      const string& device = kernel_execs.first;
+      const std::string& device = kernel_execs.first;
 
       if (process_.find(device) == process_.end()) {
         int64_t pid = AllocatePID();
-        process_[device].reset(new Process(device, pid));
+        process_[device] = std::make_unique<Process>(device, pid);
         chrome_formatter_.EmitPID(GetTimeDevName(device), pid);
       }
       Process* p = process_[device].get();
@@ -194,8 +202,8 @@ void Timeline::AllocateTimeNodes(GraphNode* gnode) {
         // TODO(xpan): There might be start time duplication here.
         if (tnodes_[device].find(start_micros) == tnodes_[device].end()) {
           // TODO(xpan): Give each kernel call a unique_name.
-          tnodes_[device][start_micros].reset(
-              new TimeNode(p, gnode, start_micros, exec_micros));
+          tnodes_[device][start_micros] =
+              std::make_unique<TimeNode>(p, gnode, start_micros, exec_micros);
         }
       }
     }
@@ -289,7 +297,7 @@ void Timeline::GenerateGraphTimeline(const std::vector<GraphNode*>& gnodes) {
       if (ts - last_point < 100) continue;
       last_point = ts;
 
-      std::map<int64_t, std::vector<string>> tensor_mem;
+      std::map<int64_t, std::vector<std::string>> tensor_mem;
       for (const auto& tensor_alloc_it : dev.second.tensor_allocs) {
         const auto& tensor_alloc = tensor_alloc_it.second;
         auto it = tensor_alloc.lower_bound(ts);
@@ -325,7 +333,7 @@ void Timeline::GenerateCodeTimeline(const CodeNode* node) {
 
 void Timeline::OutputTimeline() {
   std::string outfile = absl::StrFormat("%s_%d", outfile_, step());
-  Status s =
+  absl::Status s =
       WriteStringToFile(Env::Default(), outfile, chrome_formatter_.Format());
   if (!s.ok()) {
     absl::FPrintF(stderr, "Failed to write timeline file: %s\nError: %s\n",

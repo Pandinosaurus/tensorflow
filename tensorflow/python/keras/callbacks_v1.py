@@ -32,10 +32,8 @@ from tensorflow.python.platform import tf_logging as logging
 from tensorflow.python.profiler import profiler_v2 as profiler
 from tensorflow.python.summary import summary as tf_summary
 from tensorflow.python.training import saver
-from tensorflow.python.util.tf_export import keras_export
 
 
-@keras_export(v1=['keras.callbacks.TensorBoard'])
 class TensorBoard(callbacks.TensorBoard):
   # pylint: disable=line-too-long
   """Enable visualizations for TensorBoard.
@@ -127,6 +125,12 @@ class TensorBoard(callbacks.TensorBoard):
                profile_batch=2):
     # Don't call super's init since it is an eager-only version.
     callbacks.Callback.__init__(self)
+    try:
+      from tensorboard.plugins import projector  # pylint: disable=g-import-not-at-top,unused-import
+    except ImportError as exc:
+      raise ImportError(
+          'TensorBoard callback requires tensorboard to be installed. '
+          'Please install TensorBoard via `pip install tensorboard`.') from exc
     self.log_dir = log_dir
     self.histogram_freq = histogram_freq
     if self.histogram_freq and context.executing_eagerly():
@@ -290,11 +294,7 @@ class TensorBoard(callbacks.TensorBoard):
         # If embedding_metadata is already a dictionary
         embeddings_metadata = self.embeddings_metadata
 
-      try:
-        from tensorboard.plugins import projector
-      except ImportError:
-        raise ImportError('Failed to import TensorBoard. Please make sure that '
-                          'TensorBoard integration is complete."')
+      from tensorboard.plugins import projector  # pylint: disable=g-import-not-at-top
 
       # TODO(psv): Add integration tests to test embedding visualization
       # with TensorBoard callback. We are unable to write a unit test for this

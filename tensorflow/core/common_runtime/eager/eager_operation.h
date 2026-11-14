@@ -15,6 +15,11 @@ limitations under the License.
 #ifndef TENSORFLOW_CORE_COMMON_RUNTIME_EAGER_EAGER_OPERATION_H_
 #define TENSORFLOW_CORE_COMMON_RUNTIME_EAGER_EAGER_OPERATION_H_
 
+#include <optional>
+#include <string>
+#include <variant>
+#include <vector>
+
 #include "absl/container/inlined_vector.h"
 #include "absl/types/optional.h"
 #include "absl/types/span.h"
@@ -28,6 +33,7 @@ limitations under the License.
 #include "tensorflow/core/common_runtime/eager/tensor_handle.h"
 #include "tensorflow/core/framework/cancellation.h"
 #include "tensorflow/core/framework/device_attributes.pb.h"
+#include "tensorflow/core/framework/function.h"
 #include "tensorflow/core/framework/op_def.pb.h"
 #include "tensorflow/core/util/device_name_utils.h"
 #include "tensorflow/core/util/managed_stack_trace.h"
@@ -37,7 +43,7 @@ namespace tensorflow {
 class EagerOperation : public ImmediateExecutionOperation {
  public:
   explicit EagerOperation(tensorflow::EagerContext* ctx)
-      : ImmediateExecutionOperation(kEager), ctx_(*ctx) {}
+      : ImmediateExecutionOperation(kEager), ctx_(*ctx), is_function_(false) {}
   ~EagerOperation() override {
     for (ImmediateExecutionTensorHandle* h : inputs_) {
       h->Unref();
@@ -47,13 +53,13 @@ class EagerOperation : public ImmediateExecutionOperation {
   void Release() override { delete this; }
 
   void Clear() override;
-  Status Reset(const char* op, const char* raw_device_name) override {
+  absl::Status Reset(const char* op, const char* raw_device_name) override {
     return Reset(op, raw_device_name, false, nullptr);
   }
 
-  const string& Name() const override { return attrs_.op_name(); }
+  const std::string& Name() const override { return attrs_.op_name(); }
 
-  const string& DeviceName() const override { return device_name_; }
+  const std::string& DeviceName() const override { return device_name_; }
 
   ImmediateExecutionContext* GetContext() const override { return &ctx_; }
 
@@ -67,11 +73,11 @@ class EagerOperation : public ImmediateExecutionOperation {
   // This also resets the internal device pointer, unless the given name refers
   // to a known custom device, in which case the internal device pointer is
   // updated to that device.
-  Status SetDeviceName(const char* name) override;
+  absl::Status SetDeviceName(const char* name) override;
 
   void SetDevice(VariantDevice device) {
     device_ = device;
-    device_name_ = absl::visit(
+    device_name_ = std::visit(
         [](auto* device) { return device == nullptr ? "" : device->name(); },
         device);
     DeviceNameUtils::ParseFullName(device_name_, &device_parsed_name_);
@@ -81,51 +87,57 @@ class EagerOperation : public ImmediateExecutionOperation {
     last_set_device_name_ = "\177";  // DEL (an invalid value)
   }
 
-  Status SetAttrValue(const char* attr_name, const AttrValue& value);
+  absl::Status SetAttrValue(const char* attr_name,
+                            const AttrValue& value) override;
 
-  Status AddInput(AbstractTensorHandle* input) override;
-  Status AddInputList(absl::Span<AbstractTensorHandle* const> inputs) override;
-  Status SetInput(size_t index, ImmediateExecutionTensorHandle* input) override;
+  absl::Status AddInput(AbstractTensorHandle* input) override;
+  absl::Status AddInputList(
+      absl::Span<AbstractTensorHandle* const> inputs) override;
+  absl::Status SetInput(size_t index,
+                        ImmediateExecutionTensorHandle* input) override;
   absl::Span<ImmediateExecutionTensorHandle* const> GetInputs() const override;
   bool HasCustomDeviceInput() const override {
     return custom_device_tensor_handles_count_ > 0;
   }
-  Status Execute(absl::Span<AbstractTensorHandle*> retvals,
-                 int* num_retvals) override;
+  absl::Status Execute(absl::Span<AbstractTensorHandle*> retvals,
+                       int* num_retvals) override;
   const tensorflow::OpDef* OpDef() const override { return op_def_; };
 
-  Status SetAttrString(const char* attr_name, const char* data,
-                       size_t length) override;
-  Status SetAttrInt(const char* attr_name, int64_t value) override;
-  Status SetAttrFloat(const char* attr_name, float value) override;
-  Status SetAttrBool(const char* attr_name, bool value) override;
-  Status SetAttrType(const char* attr_name, DataType value) override;
-  Status SetAttrShape(const char* attr_name, const int64_t* dims,
-                      const int num_dims) override;
-  Status SetAttrFunction(const char* attr_name,
-                         const AbstractOperation* value) override;
-  Status SetAttrFunctionName(const char* attr_name, const char* data,
+  absl::Status SetAttrString(const char* attr_name, const char* data,
                              size_t length) override;
-  Status SetAttrTensor(const char* attr_name,
-                       AbstractTensorInterface* tensor) override;
-  Status SetAttrStringList(const char* attr_name, const void* const* values,
-                           const size_t* lengths, int num_values) override;
-  Status SetAttrFloatList(const char* attr_name, const float* values,
-                          int num_values) override;
-  Status SetAttrIntList(const char* attr_name, const int64_t* values,
-                        int num_values) override;
-  Status SetAttrTypeList(const char* attr_name, const DataType* values,
-                         int num_values) override;
-  Status SetAttrBoolList(const char* attr_name, const unsigned char* values,
-                         int num_values) override;
-  Status SetAttrShapeList(const char* attr_name, const int64_t** dims,
-                          const int* num_dims, int num_values) override;
-  Status SetAttrFunctionList(
+  absl::Status SetAttrInt(const char* attr_name, int64_t value) override;
+  absl::Status SetAttrFloat(const char* attr_name, float value) override;
+  absl::Status SetAttrBool(const char* attr_name, bool value) override;
+  absl::Status SetAttrType(const char* attr_name, DataType value) override;
+  absl::Status SetAttrShape(const char* attr_name, const int64_t* dims,
+                            int num_dims) override;
+  absl::Status SetAttrFunction(const char* attr_name,
+                               const AbstractOperation* value) override;
+  absl::Status SetAttrFunctionName(const char* attr_name, const char* data,
+                                   size_t length) override;
+  absl::Status SetAttrTensor(const char* attr_name,
+                             AbstractTensorInterface* tensor) override;
+  absl::Status SetAttrStringList(const char* attr_name,
+                                 const void* const* values,
+                                 const size_t* lengths,
+                                 int num_values) override;
+  absl::Status SetAttrFloatList(const char* attr_name, const float* values,
+                                int num_values) override;
+  absl::Status SetAttrIntList(const char* attr_name, const int64_t* values,
+                              int num_values) override;
+  absl::Status SetAttrTypeList(const char* attr_name, const DataType* values,
+                               int num_values) override;
+  absl::Status SetAttrBoolList(const char* attr_name,
+                               const unsigned char* values,
+                               int num_values) override;
+  absl::Status SetAttrShapeList(const char* attr_name, const int64_t** dims,
+                                const int* num_dims, int num_values) override;
+  absl::Status SetAttrFunctionList(
       const char* attr_name,
       absl::Span<const AbstractOperation*> values) override;
 
-  Status InputLength(const char* input_name, int* length) override;
-  Status OutputLength(const char* output_name, int* length) override;
+  absl::Status InputLength(const char* input_name, int* length) override;
+  absl::Status OutputLength(const char* output_name, int* length) override;
 
   const AbstractOpAttrs* GetOpAttrs() const override;
   void AddAttrs(const AbstractOpAttrs* op_attrs) override;
@@ -134,19 +146,36 @@ class EagerOperation : public ImmediateExecutionOperation {
     stack_trace_ = stack_trace;
   }
 
-  absl::optional<ManagedStackTrace> GetStackTrace() override {
+  std::optional<ManagedStackTrace> GetStackTrace() override {
     return stack_trace_;
   }
 
-  Status Reset(const char* op, const char* device_name, bool remote,
-               EagerExecutor* executor,
-               const absl::optional<EagerRemoteFunctionParams>
-                   remote_func_params = absl::nullopt);
+  absl::Status Reset(
+      const char* op, const char* device_name, bool remote,
+      EagerExecutor* executor,
+      absl::optional<EagerFunctionParams> eager_func_params = std::nullopt);
 
   bool is_function() const { return is_function_; }
   bool colocation_exempt() const { return colocation_exempt_; }
 
   tensorflow::EagerContext& EagerContext() const { return ctx_; }
+
+  const FunctionLibraryDefinition* FuncLibDef() const {
+    if (eager_func_params_.has_value() &&
+        eager_func_params_.value().func_lib_def_override) {
+      return eager_func_params_.value().func_lib_def_override;
+    } else {
+      return ctx_.FuncLibDef();
+    }
+  }
+
+  const FunctionDef* GetFunctionDef() const {
+    if (is_function_) {
+      return FuncLibDef()->Find(attrs_.op_name());
+    } else {
+      return nullptr;
+    }
+  }
 
   AttrBuilder* MutableAttrs() { return &attrs_; }
   const AttrBuilder& Attrs() const { return attrs_; }
@@ -154,9 +183,9 @@ class EagerOperation : public ImmediateExecutionOperation {
   // TensorHandleInputs and MutableTensorHandleInputs first check that all
   // inputs are TensorHandles, i.e. that there are no custom device inputs. They
   // return a bad status otherwise.
-  Status TensorHandleInputs(
+  absl::Status TensorHandleInputs(
       const absl::InlinedVector<TensorHandle*, 4>** inputs) const;
-  Status MutableTensorHandleInputs(
+  absl::Status MutableTensorHandleInputs(
       absl::InlinedVector<TensorHandle*, 4>** inputs);
 
   const absl::InlinedVector<ImmediateExecutionTensorHandle*, 4>& Inputs()
@@ -165,6 +194,13 @@ class EagerOperation : public ImmediateExecutionOperation {
   }
 
   void UpdateInput(int i, TensorHandle* h);
+
+  // This is useful if we want the EagerOperation to point to a different
+  // function.
+  void UpdateName(const std::string& name) {
+    attrs_.set_op_name(name);
+    op_name_ = attrs_.op_name();
+  }
 
   // Like TensorHandles, EagerOperations may be placed either on a virtual
   // CustomDevice or on a physical Device.
@@ -182,16 +218,39 @@ class EagerOperation : public ImmediateExecutionOperation {
     cancellation_manager_ = cancellation_manager;
   }
 
+  // Assign step_id value only if op has valid step id.
+  // When eager_func_params.has_value() returns true, we can directly overwrite
+  // its step id according to Op's step id (if not default value). However, when
+  // eager_func_params.has_value() returns false, we need to first create a new
+  // EagerFuncParams object for it before assigning step_id; otherwise,
+  // directly assigning step_id in this case leaves eager_func_params to be
+  // in a weird state where:
+  // (1) eager_func_params.has_value() returns false, but
+  // (2) eager_func_params->step_id.has_value() returns true.
+  void SetStepId(int64_t step_id) override {
+    assert(is_function());
+    if (step_id != EagerContext::kGlobalRendezvousId) {
+      if (eager_func_params_.has_value()) {
+        eager_func_params_->step_id = step_id;
+      } else {
+        eager_func_params_ = EagerFunctionParams{
+            kInvalidOpId, /*is_component_function=*/false, step_id};
+      }
+    } else {
+      LOG(WARNING) << "SetStepId() should not receive a global rendezvous id.";
+    }
+  }
+
   EagerExecutor& Executor() { return *executor_; }
 
-  string DebugString() const;
+  std::string DebugString() const;
 
-  const absl::optional<EagerRemoteFunctionParams>& remote_func_params() const {
-    return remote_func_params_;
+  const absl::optional<EagerFunctionParams>& eager_func_params() const {
+    return eager_func_params_;
   }
 
   // Op name recorded for memory debugging purpose.
-  const char* op_name() const { return op_name_; }
+  absl::string_view op_name() const { return op_name_; }
 
   // For LLVM style RTTI.
   static bool classof(const AbstractOperation* ptr) {
@@ -201,7 +260,7 @@ class EagerOperation : public ImmediateExecutionOperation {
  private:
   void AddTensorHandle(ImmediateExecutionTensorHandle* h);
 
-  const tensorflow::OpDef* GetOpDef(Status* status);
+  const tensorflow::OpDef* GetOpDef(absl::Status* status);
 
   void ClearInferenceState() {
     op_def_ = nullptr;
@@ -209,16 +268,17 @@ class EagerOperation : public ImmediateExecutionOperation {
     inference_attrs_.clear_no_resize();
   }
 
-  Status MaybeInferSingleInputAttrs(ImmediateExecutionTensorHandle* handle);
-  Status InferInputListAttrs(int num_inputs);
+  absl::Status MaybeInferSingleInputAttrs(
+      ImmediateExecutionTensorHandle* handle);
+  absl::Status InferInputListAttrs(int num_inputs);
 
   void InferSingleTypeInputListAttrs(const OpDef::ArgDef& input_def,
-                                     const DataType dtype, int num_inputs);
+                                     DataType dtype, int num_inputs);
   void InferMixedTypeInputListAttrs(const OpDef::ArgDef& input_def,
                                     const std::vector<DataType>& dtypes);
 
   tensorflow::EagerContext& ctx_;
-  const char* op_name_ = nullptr;
+  std::string op_name_;
   AttrBuilder attrs_;
   const AttrTypeMap* attr_types_;
 
@@ -230,12 +290,12 @@ class EagerOperation : public ImmediateExecutionOperation {
   // The last device name given to SetDeviceName.
   // This is used to avoid having to re-process the same device in repeated
   // calls to SetDeviceName.
-  string last_set_device_name_;
+  std::string last_set_device_name_;
 
   // The operation's device name.
   // This contains the named passed to SetDeviceName until device_ is set,
   // at which point it contains the device_ name.
-  string device_name_;
+  std::string device_name_;
 
   // The parsed device name.
   // This will always contain the result of
@@ -248,12 +308,13 @@ class EagerOperation : public ImmediateExecutionOperation {
   // updated accordingly.
   VariantDevice device_;
 
-  absl::optional<ManagedStackTrace> stack_trace_;
+  std::optional<ManagedStackTrace> stack_trace_;
   bool is_function_;  // Conceptually const, but can't be because of Reset
   bool colocation_exempt_;
   CancellationManager* cancellation_manager_ = nullptr;  // Not owned.
   EagerExecutor* executor_;                              // Not owned.
-  absl::optional<EagerRemoteFunctionParams> remote_func_params_;
+
+  std::optional<EagerFunctionParams> eager_func_params_;
 
   // Inference information
   const tensorflow::OpDef* op_def_;  // op definition from protobuf
@@ -274,12 +335,12 @@ inline void EagerOperation::UpdateInput(int i, TensorHandle* h) {
 
 inline EagerOperation* OperationFromInterface(
     ImmediateExecutionOperation* operation) {
-  return down_cast<EagerOperation*>(operation);
+  return absl::down_cast<EagerOperation*>(operation);
 }
 
 inline const EagerOperation* OperationFromInterface(
     const ImmediateExecutionOperation* operation) {
-  return down_cast<const EagerOperation*>(operation);
+  return absl::down_cast<const EagerOperation*>(operation);
 }
 
 }  // namespace tensorflow

@@ -1,0 +1,117 @@
+/* Copyright 2019 The OpenXLA Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+==============================================================================*/
+
+#include "xla/pjrt/semaphore.h"
+
+#include <cstdint>
+#include <utility>
+
+#include "absl/log/check.h"
+#include "absl/synchronization/mutex.h"
+#include "tsl/platform/logging.h"
+
+namespace xla {
+
+Semaphore::Semaphore(int64_t capacity)
+    : value_(capacity), max_capacity_(capacity) {
+  CHECK_GE(capacity, 0);
+}
+
+void Semaphore::Acquire(int64_t amount) {
+  CHECK_GE(amount, 0);
+  absl::MutexLock lock(mu_);
+  if (value_ >= amount) {
+    value_ -= amount;
+    return;
+  }
+
+  Waiter waiter{amount};
+  if (tail_ != nullptr) {
+    tail_->next = &waiter;
+  } else {
+    head_ = &waiter;
+  }
+  tail_ = &waiter;
+
+  while (!waiter.granted) {
+    waiter.cv.Wait(&mu_);
+  }
+}
+
+bool Semaphore::TryAcquire(int64_t amount) {
+  CHECK_GE(amount, 0);
+  absl::MutexLock lock(mu_);
+  if (head_ == nullptr && value_ >= amount) {
+    value_ -= amount;
+    return true;
+  }
+  return false;
+}
+
+void Semaphore::Release(int64_t amount) {
+  CHECK_GE(amount, 0);
+  absl::MutexLock lock(mu_);
+  value_ += amount;
+  Waiter* prev = nullptr;
+  for (Waiter* w = head_; w != nullptr && value_ > 0;) {
+    Waiter* next = w->next;
+    if (w->amount <= value_) {
+      value_ -= w->amount;
+      if (prev != nullptr) {
+        prev->next = next;
+      } else {
+        head_ = next;
+      }
+      if (next == nullptr) {
+        tail_ = prev;
+      }
+      w->granted = true;
+      w->cv.Signal();
+    } else {
+      prev = w;
+    }
+    w = next;
+  }
+}
+
+Semaphore::ScopedReservation::~ScopedReservation() {
+  if (semaphore_) {
+    semaphore_->Release(amount_);
+  }
+}
+
+Semaphore::ScopedReservation::ScopedReservation(
+    ScopedReservation&& other) noexcept
+    : semaphore_(std::exchange(other.semaphore_, nullptr)),
+      amount_(std::exchange(other.amount_, 0)) {}
+
+Semaphore::ScopedReservation& Semaphore::ScopedReservation::operator=(
+    ScopedReservation&& other) noexcept {
+  if (this != &other) {
+    if (semaphore_) {
+      semaphore_->Release(amount_);
+    }
+    semaphore_ = std::exchange(other.semaphore_, nullptr);
+    amount_ = std::exchange(other.amount_, 0);
+  }
+  return *this;
+}
+
+Semaphore::ScopedReservation Semaphore::ScopedAcquire(int64_t amount) {
+  Acquire(amount);
+  return ScopedReservation(this, amount);
+}
+
+}  // namespace xla

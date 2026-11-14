@@ -15,7 +15,13 @@ limitations under the License.
 
 #include "tensorflow/core/grappler/costs/virtual_scheduler.h"
 
+#include <algorithm>
+#include <cstdint>
+#include <string>
+
+#include "absl/strings/match.h"
 #include "tensorflow/cc/ops/standard_ops.h"
+#include "tensorflow/core/framework/allocation_description.pb.h"
 #include "tensorflow/core/framework/tensor_description.pb.h"
 #include "tensorflow/core/framework/tensor_shape.pb.h"
 #include "tensorflow/core/grappler/clusters/virtual_cluster.h"
@@ -51,8 +57,8 @@ class ReadyNodeManagerTest : public ::testing::Test {
     NodeSetUp("Node6", kConv2D, kCPU0, 1000, &node6_);
   }
 
-  void NodeSetUp(const string& name, const string& op_name,
-                 const string& device_name, const uint64 time_ready,
+  void NodeSetUp(const std::string& name, const std::string& op_name,
+                 const std::string& device_name, const uint64_t time_ready,
                  NodeDef* node) {
     node->set_name(name);
     node->set_op(op_name);
@@ -398,7 +404,7 @@ TEST_F(ReadyNodeManagerTest, GetAndRemoveMultiplePriorityReadyManager) {
   TF_EXPECT_OK(manager.Init(&node_states_));
 
   // Sets up node priorities.
-  std::unordered_map<string, int> node_priority = {
+  std::unordered_map<std::string, int> node_priority = {
       {"Node1", 1}, {"Node2", 2}, {"Node3", 2}, {"Node4", 4}, {"Node5", 5}};
   TF_EXPECT_OK(manager.SetPriority(node_priority));
 
@@ -651,7 +657,7 @@ class TestVirtualScheduler : public VirtualScheduler {
       : VirtualScheduler(
             use_static_shapes, use_aggressive_shape_inference, cluster,
             ready_node_manager,
-            absl::make_unique<VirtualPlacer>(cluster->GetDevices())) {
+            std::make_unique<VirtualPlacer>(cluster->GetDevices())) {
     enable_mem_usage_tracking();
   }
 
@@ -666,7 +672,7 @@ class VirtualSchedulerTest : public ::testing::Test {
  protected:
   VirtualSchedulerTest() {
     // Initializes cluster_ and scheduler_.
-    std::unordered_map<string, DeviceProperties> devices;
+    std::unordered_map<std::string, DeviceProperties> devices;
 
     // Set some dummy CPU properties
     DeviceProperties cpu_device = GetDummyCPUDevice();
@@ -675,8 +681,8 @@ class VirtualSchedulerTest : public ::testing::Test {
     // force_cpu_type is defaulted to "Haswell"
     devices[kCPU0] = cpu_device;
     devices[kCPU1] = cpu_device;
-    cluster_ = absl::make_unique<VirtualCluster>(devices);
-    scheduler_ = absl::make_unique<TestVirtualScheduler>(
+    cluster_ = std::make_unique<VirtualCluster>(devices);
+    scheduler_ = std::make_unique<TestVirtualScheduler>(
         /*use_static_shapes=*/true,
         /*use_aggressive_shape_inference=*/true, &first_ready_manager_,
         cluster_.get());
@@ -710,7 +716,7 @@ class VirtualSchedulerTest : public ::testing::Test {
     auto c1 = ops::Conv2D(s.WithOpName("c1"), y, f, strides, "SAME");
     auto c2 = ops::Conv2D(s.WithOpName("c2"), z, f, strides, "SAME");
 
-    grappler_item_ = absl::make_unique<GrapplerItem>();
+    grappler_item_ = std::make_unique<GrapplerItem>();
     TF_CHECK_OK(s.ToGraphDef(&grappler_item_->graph));
     grappler_item_->id = "test_conv2d_graph";
     grappler_item_->fetch = {"c0", "c1"};
@@ -729,7 +735,7 @@ class VirtualSchedulerTest : public ::testing::Test {
     std::vector<int> strides = {1, 1, 1, 1};
     auto y = ops::Conv2D(s.WithOpName("y"), x, f, strides, "SAME");
 
-    grappler_item_ = absl::make_unique<GrapplerItem>();
+    grappler_item_ = std::make_unique<GrapplerItem>();
     TF_CHECK_OK(s.ToGraphDef(&grappler_item_->graph));
     grappler_item_->id = "test_conv2d_var_graph";
 
@@ -757,7 +763,7 @@ class VirtualSchedulerTest : public ::testing::Test {
     auto abcd = ops::MatMul(s.WithOpName("abcd"), abc, d);
     auto abcde = ops::MatMul(s.WithOpName("abcde"), abcd, e);
 
-    grappler_item_ = absl::make_unique<GrapplerItem>();
+    grappler_item_ = std::make_unique<GrapplerItem>();
     TF_CHECK_OK(s.ToGraphDef(&grappler_item_->graph));
     grappler_item_->id = "test_matmul_sequence_graph";
     grappler_item_->fetch = {"abcde"};
@@ -779,7 +785,7 @@ class VirtualSchedulerTest : public ::testing::Test {
     auto add = ops::AddN(s.WithOpName("add"), input_tensors);
     auto out = ops::Identity(s.WithOpName("out"), add);
 
-    grappler_item_ = absl::make_unique<GrapplerItem>();
+    grappler_item_ = std::make_unique<GrapplerItem>();
     TF_CHECK_OK(s.ToGraphDef(&grappler_item_->graph));
     grappler_item_->id = "test_addn_graph";
     grappler_item_->fetch = {"out"};
@@ -793,7 +799,7 @@ class VirtualSchedulerTest : public ::testing::Test {
     auto unnecessary = ops::Placeholder(s.WithOpName("unnecessary"), DT_FLOAT);
     auto x = ops::Placeholder(s.WithOpName("x"), DT_FLOAT);
 
-    grappler_item_ = absl::make_unique<GrapplerItem>();
+    grappler_item_ = std::make_unique<GrapplerItem>();
     TF_CHECK_OK(s.ToGraphDef(&grappler_item_->graph));
 
     grappler_item_->id = "test_extra_placeholders";
@@ -807,7 +813,8 @@ class VirtualSchedulerTest : public ::testing::Test {
   // NoOp that takes 7 NoOps as control dependency.
   void CreateGrapplerItemWithControlDependency() {
     Scope s = Scope::NewRootScope().WithDevice(kCPU0);
-    std::vector<string> input_noop_names = {"x", "y", "z", "w", "u", "v", "t"};
+    std::vector<std::string> input_noop_names = {"x", "y", "z", "w",
+                                                 "u", "v", "t"};
     std::vector<Operation> input_tensors;
     for (const auto& input : input_noop_names) {
       auto x = ops::NoOp(s.WithOpName(input));
@@ -816,7 +823,7 @@ class VirtualSchedulerTest : public ::testing::Test {
     auto out =
         ops::NoOp(s.WithControlDependencies(input_tensors).WithOpName("out"));
 
-    grappler_item_ = absl::make_unique<GrapplerItem>();
+    grappler_item_ = std::make_unique<GrapplerItem>();
     TF_CHECK_OK(s.ToGraphDef(&grappler_item_->graph));
 
     grappler_item_->id = "test_control_dependency_graph";
@@ -833,7 +840,7 @@ class VirtualSchedulerTest : public ::testing::Test {
     auto y = tensorflow::ops::Add(s.WithOpName("y"), x, x);
     Output fetch = ops::Identity(s.WithOpName("fetch"), y);
 
-    grappler_item_ = absl::make_unique<GrapplerItem>();
+    grappler_item_ = std::make_unique<GrapplerItem>();
     TF_CHECK_OK(s.ToGraphDef(&grappler_item_->graph));
 
     grappler_item_->id = "test_add_from_one_tensor";
@@ -862,7 +869,7 @@ class VirtualSchedulerTest : public ::testing::Test {
         s.WithOpName("z"), {batch_size_, width_, height_, depth_in_}, DT_FLOAT);
     auto y = ops::Add(s.WithOpName("y"), m.output, z);
 
-    grappler_item_ = absl::make_unique<GrapplerItem>();
+    grappler_item_ = std::make_unique<GrapplerItem>();
     TF_CHECK_OK(s.ToGraphDef(&grappler_item_->graph));
 
     grappler_item_->id = "test_add_merge_switch";
@@ -902,7 +909,7 @@ class VirtualSchedulerTest : public ::testing::Test {
     };
     auto z4 = ops::NoOp(s.WithControlDependencies(batch_var).WithOpName("z4"));
 
-    grappler_item_ = absl::make_unique<GrapplerItem>();
+    grappler_item_ = std::make_unique<GrapplerItem>();
     TF_CHECK_OK(s.ToGraphDef(&grappler_item_->graph));
 
     grappler_item_->id = "test_complex_dependency_graph";
@@ -916,7 +923,7 @@ class VirtualSchedulerTest : public ::testing::Test {
   }
 
   void CreateGrapplerItemWithSendRecv() {
-    const string gdef_ascii = R"EOF(
+    const std::string gdef_ascii = R"EOF(
 node {
   name: "Const"
   op: "Const"
@@ -1079,7 +1086,7 @@ versions {
 }
     )EOF";
 
-    grappler_item_ = absl::make_unique<GrapplerItem>();
+    grappler_item_ = std::make_unique<GrapplerItem>();
 
     CHECK(protobuf::TextFormat::ParseFromString(gdef_ascii,
                                                 &grappler_item_->graph));
@@ -1088,7 +1095,7 @@ versions {
   }
 
   void CreateGrapplerItemWithRecvWithoutSend() {
-    const string gdef_ascii = R"EOF(
+    const std::string gdef_ascii = R"EOF(
 node {
   name: "Recv"
   op: "_Recv"
@@ -1137,7 +1144,7 @@ versions {
 }
     )EOF";
 
-    grappler_item_ = absl::make_unique<GrapplerItem>();
+    grappler_item_ = std::make_unique<GrapplerItem>();
     CHECK(protobuf::TextFormat::ParseFromString(gdef_ascii,
                                                 &grappler_item_->graph));
     grappler_item_->id = "test_graph";
@@ -1159,7 +1166,7 @@ versions {
       with open('/tmp/graph.pbtxt', 'w') as f:
       f.write(str(tf.get_default_graph().as_graph_def()))
     */
-    const string gdef_ascii = R"EOF(
+    const std::string gdef_ascii = R"EOF(
 node {
   name: "Const"
   op: "Const"
@@ -1533,7 +1540,7 @@ versions {
 }
   )EOF";
 
-    grappler_item_ = absl::make_unique<GrapplerItem>();
+    grappler_item_ = std::make_unique<GrapplerItem>();
     CHECK(protobuf::TextFormat::ParseFromString(gdef_ascii,
                                                 &grappler_item_->graph));
     grappler_item_->id = "test_graph";
@@ -1555,7 +1562,7 @@ versions {
       with open('/tmp/graph.pbtxt', 'w') as f:
       f.write(str(tf.get_default_graph().as_graph_def()))
     */
-    const string gdef_ascii = R"EOF(
+    const std::string gdef_ascii = R"EOF(
 node {
   name: "Const"
   op: "Const"
@@ -2101,7 +2108,7 @@ versions {
   // A simple condition graph.
   void CreateGrapplerItemWithCondition() {
     // Handcrafted test graph: a/Less -> Switch -> First/Second -> Merge.
-    const string gdef_ascii = R"EOF(
+    const std::string gdef_ascii = R"EOF(
 node {
   name: "a"
   op: "Const"
@@ -2200,7 +2207,7 @@ versions {
   producer: 27
 })EOF";
 
-    grappler_item_ = absl::make_unique<GrapplerItem>();
+    grappler_item_ = std::make_unique<GrapplerItem>();
     CHECK(protobuf::TextFormat::ParseFromString(gdef_ascii,
                                                 &grappler_item_->graph));
     grappler_item_->id = "test_graph";
@@ -2241,7 +2248,7 @@ versions {
                                      .WithControlDependencies(y)
                                      .WithDevice(kCPU1));
 
-    grappler_item_ = absl::make_unique<GrapplerItem>();
+    grappler_item_ = std::make_unique<GrapplerItem>();
     TF_CHECK_OK(s.ToGraphDef(&grappler_item_->graph));
     grappler_item_->id = "test_conv2d_graph";
     grappler_item_->fetch = {"y1", "y2", "batch_mean1", "batch_var1",
@@ -2275,9 +2282,9 @@ versions {
 
   // Call this after init scheduler_. Scheduler stops after executing
   // target_node.
-  std::unordered_map<string, OpContext> RunScheduler(
-      const string& target_node) {
-    std::unordered_map<string, OpContext> ops_executed;
+  std::unordered_map<std::string, OpContext> RunScheduler(
+      const std::string& target_node) {
+    std::unordered_map<std::string, OpContext> ops_executed;
     bool more_nodes = true;
     do {
       OpContext op_context = scheduler_->GetCurrNode();
@@ -2316,9 +2323,9 @@ versions {
   }
 
   // Helper method that checks the name of nodes.
-  void ValidateNodeDefs(const std::vector<string>& expected,
+  void ValidateNodeDefs(const std::vector<std::string>& expected,
                         const std::vector<const NodeDef*>& node_defs) {
-    std::vector<string> node_names;
+    std::vector<std::string> node_names;
     std::transform(node_defs.begin(), node_defs.end(),
                    std::back_inserter(node_names),
                    [](const NodeDef* node) { return node->name(); });
@@ -2348,20 +2355,21 @@ versions {
 
   // Helper method that checks name - port pairs.
   void ValidateMemoryUsageSnapshot(
-      const std::vector<string>& expected_names, const int port_num_expected,
+      const std::vector<std::string>& expected_names,
+      const int port_num_expected,
       const std::unordered_set<std::pair<const NodeDef*, int>,
                                DeviceState::NodePairHash>& mem_usage_snapshot) {
-    std::set<std::pair<string, int>> nodes_at_peak_mem_usage;
+    std::set<std::pair<std::string, int>> nodes_at_peak_mem_usage;
     std::transform(
         mem_usage_snapshot.begin(), mem_usage_snapshot.end(),
         std::inserter(nodes_at_peak_mem_usage, nodes_at_peak_mem_usage.begin()),
         [](const std::pair<const NodeDef*, int>& node_port) {
           return std::make_pair(node_port.first->name(), node_port.second);
         });
-    std::set<std::pair<string, int>> expected;
+    std::set<std::pair<std::string, int>> expected;
     std::transform(expected_names.begin(), expected_names.end(),
                    std::inserter(expected, expected.begin()),
-                   [port_num_expected](const string& name) {
+                   [port_num_expected](const std::string& name) {
                      return std::make_pair(name, port_num_expected);
                    });
     ExpectSetEq(expected, nodes_at_peak_mem_usage);
@@ -2369,8 +2377,8 @@ versions {
 
   // Helper method for checking nodes dependency.
   void ValidateDependencyChain(
-      const std::unordered_map<string, int64_t>& start_times,
-      const std::vector<string>& nodes_in_dependency_order) {
+      const std::unordered_map<std::string, int64_t>& start_times,
+      const std::vector<std::string>& nodes_in_dependency_order) {
     int64_t prev_node_time = -1;
     for (const auto& node : nodes_in_dependency_order) {
       int64_t curr_node_time = start_times.at(node);
@@ -2388,7 +2396,7 @@ versions {
   // grappler_item_ will be initialized differently for each test case.
   std::unique_ptr<GrapplerItem> grappler_item_;
   // Node name -> its preceding nodes map for testing scheduling order.
-  std::unordered_map<string, std::vector<string>> dependency_;
+  std::unordered_map<std::string, std::vector<std::string>> dependency_;
 
   // Shared params for Conv2D related graphs:
   const int batch_size_ = 4;
@@ -2437,7 +2445,7 @@ TEST_F(VirtualSchedulerTest, SummaryCostStepStatsTest) {
   EXPECT_EQ(1, stepstats.dev_stats().size());
 
   // Create a map of op name -> start and end times (micros).
-  std::map<string, std::pair<int64_t, int64_t>> start_end_times;
+  std::map<std::string, std::pair<int64_t, int64_t>> start_end_times;
   for (const auto& device_step_stats : stepstats.dev_stats()) {
     for (const auto& stats : device_step_stats.node_stats()) {
       int64_t start = stats.all_start_micros();
@@ -2525,7 +2533,7 @@ TEST_F(VirtualSchedulerTest, MemoryUsage) {
   // out node adds 4 tensors, each with 10x10x10x10, so the peak memory usage
   // is 4 x the input tensor size while executing the out node.
   int64_t one_input_node_size = 4 * 10 * 10 * 10 * 10;
-  const std::vector<string> expected_names = {"x", "y", "z", "w", "add"};
+  const std::vector<std::string> expected_names = {"x", "y", "z", "w", "add"};
   EXPECT_EQ(expected_names.size() * one_input_node_size,
             cpu_state.max_memory_usage);
   ValidateMemoryUsageSnapshot(expected_names, 0 /* port_num_expected */,
@@ -2577,8 +2585,8 @@ TEST_F(VirtualSchedulerTest, MemoryUsageForStreamingOps) {
   const auto& cpu_state_1 = device_states->at(kCPU1);
   // All tensors are of the same size, 10 x 10 x 10 x 10.
   int64_t one_input_node_size = 4 * 10 * 10 * 10 * 10;
-  const std::vector<string> cpu_0_expected_tensors = {"x", "y"};
-  const std::vector<string> cpu_1_expected_tensors = {"x", "y", "add"};
+  const std::vector<std::string> cpu_0_expected_tensors = {"x", "y"};
+  const std::vector<std::string> cpu_1_expected_tensors = {"x", "y", "add"};
   EXPECT_EQ(cpu_0_expected_tensors.size() * one_input_node_size,
             cpu_state_0.max_memory_usage);
   EXPECT_EQ(cpu_1_expected_tensors.size() * one_input_node_size,
@@ -2607,7 +2615,7 @@ TEST_F(VirtualSchedulerTest, MemoryUsageWithExecutionCount) {
   const auto& cpu_state_0 = device_states->at(kCPU0);
   // All tensors are of the same size, 10 x 10 x 10 x 10.
   int64_t one_input_node_size = 4 * 10 * 10 * 10 * 10;
-  const std::vector<string> expected_names = {"x", "y", "z", "w", "add"};
+  const std::vector<std::string> expected_names = {"x", "y", "z", "w", "add"};
   // Max memory usage does not rely on the number of executions.
   EXPECT_EQ(expected_names.size() * one_input_node_size,
             cpu_state_0.max_memory_usage);
@@ -2645,8 +2653,8 @@ TEST_F(VirtualSchedulerTest, ControlDependency) {
   // The graph has a NoOp that takes control dependency from 7 NoOps. The peak
   // memory usage is when executing the final NoOp.
   int64_t one_input_node_size = 4;  // control dependency
-  const std::vector<string> expected_names = {"x", "y", "z", "w",
-                                              "u", "v", "t"};
+  const std::vector<std::string> expected_names = {"x", "y", "z", "w",
+                                                   "u", "v", "t"};
   EXPECT_EQ(expected_names.size() * one_input_node_size,
             cpu_state.max_memory_usage);
   ValidateMemoryUsageSnapshot(expected_names, -1 /* port_num_expected */,
@@ -2684,14 +2692,14 @@ TEST_F(VirtualSchedulerTest, ComplexDependency) {
   EXPECT_EQ(expected_size, cpu_state.memory_usage);
 
   // Nodes currently in memory: bn's port -1, 0, and 2, and x's port 0.
-  std::set<std::pair<string, int>> nodes_in_memory;
+  std::set<std::pair<std::string, int>> nodes_in_memory;
   std::transform(
       cpu_state.nodes_in_memory.begin(), cpu_state.nodes_in_memory.end(),
       std::inserter(nodes_in_memory, nodes_in_memory.begin()),
       [](const std::pair<const NodeDef*, int>& node_port) {
         return std::make_pair(node_port.first->name(), node_port.second);
       });
-  std::set<std::pair<string, int>> expected = {
+  std::set<std::pair<std::string, int>> expected = {
       std::make_pair("bn", -1),
       std::make_pair("bn", 0),
       std::make_pair("bn", 2),
@@ -2782,7 +2790,7 @@ TEST_F(VirtualSchedulerTest, WhileLoop) {
   int64_t exit_start_micro;
   int64_t exit_1_start_micro;
 
-  std::unordered_map<string, int64_t> start_times;
+  std::unordered_map<std::string, int64_t> start_times;
   for (const auto& device_step_stats : metadata.step_stats().dev_stats()) {
     for (const auto& stats : device_step_stats.node_stats()) {
       start_times[stats.node_name()] = stats.all_start_micros();
@@ -2999,23 +3007,23 @@ TEST_F(VirtualSchedulerTest, InterDeviceTransfer) {
   auto ops_executed = RunScheduler("");
 
   // Helper lambda to extract port num from _Send and _Recv op name.
-  auto get_port_num = [](const string& name) -> int {
-    if (name.find("bn_0") != string::npos) {
+  auto get_port_num = [](const std::string& name) -> int {
+    if (absl::StrContains(name, "bn_0")) {
       return 0;
-    } else if (name.find("bn_1") != string::npos) {
+    } else if (absl::StrContains(name, "bn_1")) {
       return 1;
-    } else if (name.find("bn_2") != string::npos) {
+    } else if (absl::StrContains(name, "bn_2")) {
       return 2;
-    } else if (name.find("bn_minus1") != string::npos) {
+    } else if (absl::StrContains(name, "bn_minus1")) {
       return -1;
     }
     return -999;
   };
 
   // Reorganize ops_executed for further testing.
-  std::unordered_map<string, int> op_count;
-  std::unordered_map<int, string> recv_op_names;
-  std::unordered_map<int, string> send_op_names;
+  std::unordered_map<std::string, int> op_count;
+  std::unordered_map<int, std::string> recv_op_names;
+  std::unordered_map<int, std::string> send_op_names;
   for (const auto& x : ops_executed) {
     const auto& name = x.first;
     const auto& node_info = x.second;
@@ -3037,7 +3045,8 @@ TEST_F(VirtualSchedulerTest, InterDeviceTransfer) {
   EXPECT_EQ(op_count.at(kSend), 3);
 
   // Helper lambda for extracting output Tensor size.
-  auto get_output_size = [this, ops_executed](const string& name) -> int64 {
+  auto get_output_size = [this,
+                          ops_executed](const std::string& name) -> int64_t {
     const auto& output_properties_ = ops_executed.at(name).op_info.outputs();
     std::vector<OpInfo::TensorProperties> output_properties;
     for (const auto& output_property : output_properties_) {
@@ -3077,7 +3086,7 @@ TEST_F(VirtualSchedulerTest, GraphWithSendRecvDifferentDevice) {
   // Change Recv node's device so that Send and Recv are placed on different
   // devices.
   auto& graph = grappler_item_->graph;
-  const string recv_device = kCPU1;
+  const std::string recv_device = kCPU1;
   for (int i = 0; i < graph.node_size(); i++) {
     auto* node = graph.mutable_node(i);
     if (node->name() == "Recv") {
@@ -3121,7 +3130,7 @@ TEST_F(VirtualSchedulerTest, GraphWihtOnlyRecv) {
 
 TEST_F(VirtualSchedulerTest, AddMergeSwitch) {
   // Override scheduler_ with CompositeNodeManager.
-  scheduler_ = absl::make_unique<TestVirtualScheduler>(
+  scheduler_ = std::make_unique<TestVirtualScheduler>(
       /*use_static_shapes=*/true,
       /*use_aggressive_shape_inference=*/true, &composite_node_manager_,
       cluster_.get());
@@ -3162,6 +3171,99 @@ TEST_F(VirtualSchedulerTest, AddFromOneTensor) {
   auto ops_executed = RunScheduler("");
   EXPECT_GT(ops_executed.count("y"), 0);
   EXPECT_GT(ops_executed.count("x"), 0);
+}
+
+TEST_F(VirtualSchedulerTest, TestNodeCostOutputTensorSize) {
+  // Create a schedule with more than 2 ops to be executed.
+  CreateGrapplerItemWithMatmulChain();
+  InitScheduler();
+  RunScheduler("ab");
+
+  int32_t persistent_memory_before =
+      scheduler_->GetPersistentMemoryUsage().at(kCPU0);
+
+  auto* device_states = scheduler_->GetDeviceStates();
+  int32_t memory_usage = device_states->at(kCPU0).memory_usage;
+
+  // Set temporary/persistent memory to some values for the first node cost.
+  Costs node_costs = Costs::ZeroCosts(false);
+
+  const int32_t node_one_cost = 12345;
+  const int32_t node_two_cost = 98765;
+
+  const int32_t input_size = 4 * 3200 * 3200;
+
+  node_costs.persistent_memory = node_one_cost;
+  node_costs.temporary_memory = 0;
+  node_costs.output_tensor_size_bytes = {{0, node_one_cost}};
+  node_costs.persistent_output_ports = {0};
+
+  // Mark first node executed and check device state.
+  scheduler_->MarkCurrNodeExecuted(node_costs);
+  device_states = scheduler_->GetDeviceStates();
+  const auto& cpu_state_0 = device_states->at(kCPU0);
+
+  // The expected memory usage is previous memory usage minus the size
+  // of the two inputs for the multiply operation.
+  memory_usage -= 2 * input_size;
+  EXPECT_EQ(cpu_state_0.memory_usage, memory_usage);
+
+  int64_t persistent_memory = node_one_cost + persistent_memory_before;
+  EXPECT_EQ(scheduler_->GetPersistentMemoryUsage().at(kCPU0),
+            persistent_memory);
+
+  // Set second node costs to temporary memory.
+  node_costs = Costs::ZeroCosts(false);
+  node_costs.persistent_memory = 0;
+  node_costs.temporary_memory = node_two_cost;
+  node_costs.output_tensor_size_bytes = {{0, node_two_cost}};
+
+  scheduler_->MarkCurrNodeExecuted(node_costs);
+  device_states = scheduler_->GetDeviceStates();
+  const auto& cpu_state_1 = device_states->at(kCPU0);
+
+  // Again we remove the inputs from memory usage.  The output of the previous
+  // operation is not subtracted because it is set as persistent memory.
+  memory_usage += node_two_cost - input_size;
+  EXPECT_EQ(cpu_state_1.memory_usage, memory_usage);
+  EXPECT_EQ(scheduler_->GetPersistentMemoryUsage().at(kCPU0),
+            persistent_memory);
+
+  // Finish off the schedule to test if the Summary counts persistent memory
+  // correctly.
+  bool more_nodes = true;
+  do {
+    OpContext op_context = scheduler_->GetCurrNode();
+    node_costs = SimplePredictCosts(op_context);
+    more_nodes = scheduler_->MarkCurrNodeExecuted(node_costs);
+  } while (more_nodes);
+
+  RunMetadata metadata;
+  Costs final_cost = scheduler_->Summary(&metadata);
+
+  EXPECT_EQ(final_cost.persistent_memory, persistent_memory);
+
+  // Since we adjusted the node costs, we expect the requested and allocated
+  // memory are not equal for nodes "abc" and "abcd" .
+  StepStats stepstats = metadata.step_stats();
+  for (const auto& device_step_stats : stepstats.dev_stats()) {
+    for (const auto& stats : device_step_stats.node_stats()) {
+      const auto& allocation_description =
+          stats.output().at(0).tensor_description().allocation_description();
+      if (stats.node_name() == "abc") {
+        EXPECT_NE(allocation_description.allocated_bytes(),
+                  allocation_description.requested_bytes());
+        const auto& mem_stats = stats.memory_stats();
+        EXPECT_EQ(mem_stats.persistent_memory_size(), node_one_cost);
+      } else if (stats.node_name() == "abcd") {
+        EXPECT_NE(allocation_description.allocated_bytes(),
+                  allocation_description.requested_bytes());
+      } else {
+        EXPECT_EQ(allocation_description.allocated_bytes(),
+                  allocation_description.requested_bytes());
+      }
+    }
+  }
 }
 
 }  // namespace

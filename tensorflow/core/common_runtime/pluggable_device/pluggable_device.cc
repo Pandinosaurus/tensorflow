@@ -16,46 +16,56 @@ limitations under the License.
 #include "tensorflow/core/common_runtime/pluggable_device/pluggable_device.h"
 
 #include <stdlib.h>
-#include <string.h>
 
-#include <algorithm>
+#include <cstdint>
 #include <list>
 #include <map>
+#include <memory>
+#include <optional>
+#include <string>
 #include <tuple>
+#include <utility>
 #include <vector>
 
+#include "absl/log/check.h"
+#include "absl/log/log.h"
+#include "absl/log/vlog_is_on.h"
+#include "absl/status/status.h"
+#include "absl/strings/ascii.h"
+#include "absl/strings/str_cat.h"
+#include "absl/synchronization/notification.h"
+#include "xla/stream_executor/stream_executor.h"
+#include "xla/tsl/platform/errors.h"
 #include "tensorflow/core/common_runtime/device/device_event_mgr.h"
 #include "tensorflow/core/common_runtime/device/device_id.h"
 #include "tensorflow/core/common_runtime/device/device_id_manager.h"
-#include "tensorflow/core/common_runtime/device/device_id_utils.h"
-#include "tensorflow/core/common_runtime/device_factory.h"
+#include "tensorflow/core/common_runtime/device_id_utils.h"
 #include "tensorflow/core/common_runtime/local_device.h"
 #include "tensorflow/core/common_runtime/pluggable_device/pluggable_device_context.h"
-#include "tensorflow/core/common_runtime/pluggable_device/pluggable_device_factory.h"
 #include "tensorflow/core/common_runtime/pluggable_device/pluggable_device_init.h"
 #include "tensorflow/core/common_runtime/pluggable_device/pluggable_device_process_state.h"
 #include "tensorflow/core/common_runtime/pluggable_device/pluggable_device_util.h"
 #include "tensorflow/core/framework/allocator.h"
+#include "tensorflow/core/framework/device_attributes.pb.h"
 #include "tensorflow/core/framework/device_base.h"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/tensor.h"
 #include "tensorflow/core/framework/tensor.pb.h"
 #include "tensorflow/core/framework/types.h"
+#include "tensorflow/core/framework/types.pb.h"
 #include "tensorflow/core/framework/variant_op_registry.h"
 #include "tensorflow/core/graph/types.h"
 #include "tensorflow/core/lib/core/errors.h"
 #include "tensorflow/core/lib/core/status.h"
-#include "tensorflow/core/lib/strings/numbers.h"
-#include "tensorflow/core/lib/strings/str_util.h"
 #include "tensorflow/core/lib/strings/strcat.h"
+#include "tensorflow/core/platform/env.h"
 #include "tensorflow/core/platform/logging.h"
-#include "tensorflow/core/platform/macros.h"
-#include "tensorflow/core/platform/stream_executor.h"
+#include "tensorflow/core/platform/mutex.h"
+#include "tensorflow/core/platform/notification.h"
+#include "tensorflow/core/platform/threadpool.h"
 #include "tensorflow/core/platform/types.h"
 #include "tensorflow/core/public/session_options.h"
-#include "tensorflow/core/util/device_name_utils.h"
 #include "tensorflow/core/util/env_var.h"
-#include "tensorflow/core/util/stream_executor_util.h"
 
 namespace tensorflow {
 
@@ -77,28 +87,48 @@ class PluggableDevice::StreamGroupFactory {
                                             TfDeviceId tf_device_id,
                                             int stream_group_within_device,
                                             se::StreamExecutor* executor,
-                                            const GPUOptions& options) {
+                                            int num_d2d_streams,
+                                            std::optional<int> priority) {
     mutex_lock guard(lock_);
     StreamGroup* group = &streams_[key_type(device_type, tf_device_id.value(),
                                             stream_group_within_device)];
     if (!group->compute) {
-      group->compute = new se::Stream(executor);
-      group->compute->Init();
+      auto stream_or_status = executor->CreateStream(priority);
+      if (!stream_or_status.ok()) {
+        LOG(ERROR) << "Failed to create stream for device "
+                   << tf_device_id.value()
+                   << " with status: " << stream_or_status.status();
+        return group;
+      }
+      group->compute = stream_or_status->get();
+      allocated_streams_.emplace_back(std::move(stream_or_status.value()));
       VLOG(2) << "Created stream[" << stream_group_within_device
               << "] = " << group->compute;
 
-      group->host_to_device = new se::Stream(executor);
-      group->host_to_device->Init();
+      stream_or_status = executor->CreateStream(priority);
+      if (!stream_or_status.ok()) {
+        LOG(ERROR) << "Failed to create stream for device "
+                   << tf_device_id.value()
+                   << " with status: " << stream_or_status.status();
+        return group;
+      }
+      group->host_to_device = stream_or_status->get();
+      allocated_streams_.emplace_back(std::move(stream_or_status.value()));
       VLOG(2) << "Created host_to_device_stream[" << stream_group_within_device
               << "] = " << group->host_to_device;
 
-      group->device_to_host = new se::Stream(executor);
-      group->device_to_host->Init();
+      stream_or_status = executor->CreateStream(priority);
+      if (!stream_or_status.ok()) {
+        LOG(ERROR) << "Failed to create stream for device "
+                   << tf_device_id.value()
+                   << " with status: " << stream_or_status.status();
+        return group;
+      }
+      group->device_to_host = stream_or_status->get();
+      allocated_streams_.emplace_back(std::move(stream_or_status.value()));
       VLOG(2) << "Created device_to_host_stream[" << stream_group_within_device
               << "] = " << group->device_to_host;
 
-      int num_d2d_streams =
-          options.experimental().num_dev_to_dev_copy_streams();
       if (num_d2d_streams == 0) num_d2d_streams = 1;
       if (num_d2d_streams < 1 || num_d2d_streams > 4) {
         LOG(ERROR)
@@ -107,15 +137,28 @@ class PluggableDevice::StreamGroupFactory {
         num_d2d_streams = 1;
       }
       for (int i = 0; i < num_d2d_streams; ++i) {
-        se::Stream* stream = new se::Stream(executor);
-        stream->Init();
-        group->device_to_device.push_back(stream);
+        stream_or_status = executor->CreateStream(priority);
+        if (!stream_or_status.ok()) {
+          LOG(ERROR) << "Failed to create stream for device "
+                     << tf_device_id.value()
+                     << " with status: " << stream_or_status.status();
+          return group;
+        }
+        group->device_to_device.push_back(stream_or_status->get());
+        allocated_streams_.emplace_back(std::move(stream_or_status.value()));
         VLOG(2) << "Created device_to_device_stream["
                 << stream_group_within_device
                 << "] = " << group->device_to_device.back();
       }
     }
     return group;
+  }
+
+  // Helper method for unit tests to reset the streams. Never use in production.
+  void TestOnlyReset() {
+    mutex_lock guard(lock_);
+    streams_.clear();
+    allocated_streams_.clear();
   }
 
   // Returns a reference to the StreamGroupFactory singleton. Note that this is
@@ -129,11 +172,12 @@ class PluggableDevice::StreamGroupFactory {
   mutex lock_;
   using key_type = std::tuple<std::string, int, int>;
   std::map<key_type, StreamGroup> streams_;
-
+  std::vector<std::unique_ptr<se::Stream>> allocated_streams_;
   // StreamGroupFactory cannot be created directly; Call
   // StreamGroupFactory::Global to get the global instance.
   StreamGroupFactory() = default;
-  TF_DISALLOW_COPY_AND_ASSIGN(StreamGroupFactory);
+  StreamGroupFactory(const StreamGroupFactory&) = delete;
+  void operator=(const StreamGroupFactory&) = delete;
 };
 
 PluggableDevice::PluggableDevice(
@@ -150,8 +194,9 @@ PluggableDevice::PluggableDevice(
       tf_device_id_(tf_device_id),
       platform_name_(platform_name),
       sync_every_op_(sync_every_op) {
-  if (options.config.has_gpu_options()) {
-    force_gpu_compatible_ = options.config.gpu_options().force_gpu_compatible();
+  if (options.config.has_pluggable_device_options()) {
+    force_gpu_compatible_ =
+        options.config.pluggable_device_options().force_gpu_compatible();
   }
   PluggableDeviceProcessState::singleton(device_type, platform_name)
       ->EnablePluggableDevice();
@@ -162,25 +207,34 @@ PluggableDevice::~PluggableDevice() {
   device_context_->Unref();
 }
 
-Status PluggableDevice::Init(const SessionOptions& options) {
+void PluggableDevice::TestOnlyReset() {
+  StreamGroupFactory::Global().TestOnlyReset();
+}
+
+absl::Status PluggableDevice::Init(const SessionOptions& options,
+                                   std::optional<int> stream_priority) {
   se::Platform* platform = PluggableDeviceMachineManager(platform_name_);
   auto executor_status = DeviceIdUtil::ExecutorForTfDeviceId(
       DeviceType(device_type()), platform, tf_device_id_);
   if (!executor_status.status().ok()) {
-    return errors::Internal("Failed to get StreamExecutor for device",
-                            tf_device_id_.value());
+    return absl::InternalError(absl::StrCat(
+        "Failed to get StreamExecutor for device", tf_device_id_.value()));
   }
-  executor_ = executor_status.ValueOrDie();
+  executor_ = executor_status.value();
 
-  em_ = EventMgrFactory::Singleton()->GetEventMgr(executor_,
-                                                  options.config.gpu_options());
+  em_ = EventMgrFactory::Singleton()->GetEventMgr(
+      executor_, options.config.pluggable_device_options());
 
   stream_ = StreamGroupFactory::Global().GetOrCreate(
-      device_type(), tf_device_id_, 0, executor_, options.config.gpu_options());
+      device_type(), tf_device_id_, 0, executor_,
+      options.config.pluggable_device_options()
+          .experimental()
+          .num_dev_to_dev_copy_streams(),
+      stream_priority);
   device_context_ = new PluggableDeviceContext(
       0, stream_->compute, stream_->host_to_device, stream_->device_to_host,
       stream_->device_to_device);
-  pluggable_device_info_ = new GpuDeviceInfo;
+  pluggable_device_info_ = new DeviceBase::AcceleratorDeviceInfo;
   pluggable_device_info_->stream = stream_->compute;
   pluggable_device_info_->default_context = device_context_;
   pluggable_device_info_->event_mgr = em_;
@@ -188,7 +242,7 @@ Status PluggableDevice::Init(const SessionOptions& options) {
   TF_RETURN_IF_ERROR(DeviceIdManager::TfToPlatformDeviceId(
       DeviceType(device_type()), tf_device_id_, &platform_device_id));
   pluggable_device_info_->gpu_id = platform_device_id.value();
-  set_tensorflow_gpu_device_info(pluggable_device_info_);
+  set_tensorflow_accelerator_device_info(pluggable_device_info_);
 
   // Whether and how the PluggableDevice uses its own threadpool.
   // This option is experimental. Once we confirm the best setting, we
@@ -204,7 +258,7 @@ Status PluggableDevice::Init(const SessionOptions& options) {
   // callback instead of GPU environment variables: TF_GPU_THREAD_MODE,
   // TF_GPU_THREAD_COUNT, TF_FORCE_GPU_ALLOC_GROWTH,
   // TF_ENABLE_GPU_GARBAGE_COLLECTION, and TF_GPU_HOST_MEM_LIMIT_IN_MB.
-  string device_thread_mode;
+  std::string device_thread_mode;
   TF_RETURN_IF_ERROR(ReadStringFromEnvVar("TF_GPU_THREAD_MODE", "global",
                                           &device_thread_mode));
   device_thread_mode = absl::AsciiStrToLower(device_thread_mode);
@@ -215,29 +269,29 @@ Status PluggableDevice::Init(const SessionOptions& options) {
     TF_RETURN_IF_ERROR(
         ReadInt64FromEnvVar("TF_GPU_THREAD_COUNT", 2, &device_thread_count));
     if (device_thread_mode == "gpu_private") {
-      thread_pool_.reset(new thread::ThreadPool(
+      thread_pool_ = std::make_unique<thread::ThreadPool>(
           options.env, ThreadOptions(),
-          strings::StrCat("gpu_private_", tf_device_id_.value()),
-          static_cast<int32>(device_thread_count),
+          absl::StrCat("gpu_private_", tf_device_id_.value()),
+          static_cast<int32_t>(device_thread_count),
           !options.config.experimental().disable_thread_spinning(),
-          /*allocator=*/nullptr));
+          /*allocator=*/nullptr);
       set_tensorflow_device_thread_pool(thread_pool_.get());
     } else if (device_thread_mode == "gpu_shared") {
       static thread::ThreadPool* thread_pool = new thread::ThreadPool(
           options.env, ThreadOptions(), "gpu_shared",
-          static_cast<int32>(device_thread_count),
+          static_cast<int32_t>(device_thread_count),
           !options.config.experimental().disable_thread_spinning(),
           /*allocator=*/nullptr);
       set_tensorflow_device_thread_pool(thread_pool);
     } else {
-      string error_message =
-          strings::StrCat("Invalid gpu_thread_mode: ", device_thread_mode);
+      std::string error_message =
+          absl::StrCat("Invalid gpu_thread_mode: ", device_thread_mode);
       LOG(WARNING) << error_message;
-      return errors::InvalidArgument(error_message);
+      return absl::InvalidArgumentError(error_message);
     }
   }
 
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 Allocator* PluggableDevice::GetAllocator(AllocatorAttributes attr) {
@@ -255,8 +309,8 @@ Allocator* PluggableDevice::GetAllocator(AllocatorAttributes attr) {
   }
 }
 
-string PluggableDevice::ComputeOpKernelDebugString(const OpKernel& op_kernel,
-                                                   const int stream_id) {
+std::string PluggableDevice::ComputeOpKernelDebugString(
+    const OpKernel& op_kernel, const int stream_id) {
   return strings::StrCat(op_kernel.name(), " op ", op_kernel.type_string(),
                          " on ", platform_name_, tf_device_id_.value(),
                          " stream[", stream_id, "]");
@@ -297,9 +351,11 @@ void PluggableDevice::Compute(OpKernel* op_kernel, OpKernelContext* context) {
   }
 }
 
-// Based on the semantics of Device::Sync, this call should wait for
-// all streams not just the current one.
-Status PluggableDevice::Sync() { return PluggableDeviceUtil::SyncAll(this); }
+absl::Status PluggableDevice::Sync() {
+  // PluggabeDevice tracks completion of h2d, d2h, and d2d streams using the
+  // done callbacks. This call syncs the compute stream only.
+  return PluggableDeviceUtil::Sync(this);
+}
 
 void PluggableDevice::ComputeAsync(AsyncOpKernel* op_kernel,
                                    OpKernelContext* context,
@@ -317,17 +373,18 @@ void PluggableDevice::ComputeAsync(AsyncOpKernel* op_kernel,
   op_kernel->ComputeAsync(context, std::move(done));
 }
 
-Status PluggableDevice::MaybeCopyTensorToPluggableDevice(
+absl::Status PluggableDevice::MaybeCopyTensorToPluggableDevice(
     const AllocatorAttributes& alloc_attrs, const Tensor& from, Tensor* to,
     StatusCallback done) {
   if (alloc_attrs.on_host()) {
     *to = from;
-    done(Status::OK());
-    return Status::OK();
+    done(absl::OkStatus());
+    return absl::OkStatus();
   } else {
     if (!DMAHelper::CanUseDMA(&from)) {
-      Status err = errors::Internal("PluggableDevice copy from non-DMA ",
-                                    DataTypeString(from.dtype()), " tensor");
+      absl::Status err = absl::InternalError(
+          absl::StrCat("PluggableDevice copy from non-DMA ",
+                       DataTypeString(from.dtype()), " tensor"));
       done(err);
       return err;
     }
@@ -338,14 +395,15 @@ Status PluggableDevice::MaybeCopyTensorToPluggableDevice(
     // If the tensor is not initialized, we likely ran out of memory.
     if (!copy->IsInitialized()) {
       delete copy;
-      Status err = errors::ResourceExhausted(
+      absl::Status err = absl::ResourceExhaustedError(absl::StrCat(
           "OOM when allocating tensor of shape ", from.shape().DebugString(),
-          " and type ", DataTypeString(from.dtype()));
+          " and type ", DataTypeString(from.dtype())));
       done(err);
       return err;
     }
 
-    auto wrapped_done = [to, copy, done = std::move(done)](const Status& s) {
+    auto wrapped_done = [to, copy,
+                         done = std::move(done)](const absl::Status& s) {
       if (s.ok()) {
         *to = std::move(*copy);
       }
@@ -355,11 +413,11 @@ Status PluggableDevice::MaybeCopyTensorToPluggableDevice(
 
     device_context_->CopyCPUTensorToDevice(
         &from, this, copy, std::move(wrapped_done), false /*sync_dst_compute*/);
-    return Status::OK();
+    return absl::OkStatus();
   }
 }
 
-Status PluggableDevice::MakeTensorFromProto(
+absl::Status PluggableDevice::MakeTensorFromProto(
     const TensorProto& tensor_proto, const AllocatorAttributes alloc_attrs,
     Tensor* tensor) {
   AllocatorAttributes attr;
@@ -368,8 +426,8 @@ Status PluggableDevice::MakeTensorFromProto(
   Allocator* host_alloc = GetAllocator(attr);
   Tensor parsed(tensor_proto.dtype());
   if (!parsed.FromProto(host_alloc, tensor_proto)) {
-    return errors::InvalidArgument("Cannot parse tensor from proto: ",
-                                   tensor_proto.DebugString());
+    return absl::InvalidArgumentError(absl::StrCat(
+        "Cannot parse tensor from proto: ", tensor_proto.DebugString()));
   }
 
   if (parsed.dtype() == DT_VARIANT) {
@@ -378,23 +436,23 @@ Status PluggableDevice::MakeTensorFromProto(
     Tensor copy(cpu_allocator(numa_node), DT_VARIANT, parsed.shape());
     Variant* copy_variant = copy.flat<Variant>().data();
 
-    std::list<Notification> notifications;
-    Status copy_status;
+    std::list<absl::Notification> notifications;
+    absl::Status copy_status;
     auto copier = [this, &alloc_attrs, &notifications, &copy_status](
                       const Tensor& from, Tensor* to) {
       // Copier isn't run in a multithreaded environment, so we don't
       // have to worry about the notifications list being modified in parallel.
       notifications.emplace_back();
-      Notification& n = *notifications.rbegin();
+      absl::Notification& n = *notifications.rbegin();
       return MaybeCopyTensorToPluggableDevice(
-          alloc_attrs, from, to, [&n, &copy_status](const Status& s) {
+          alloc_attrs, from, to, [&n, &copy_status](const absl::Status& s) {
             if (copy_status.ok()) {
               copy_status.Update(s);
             }
             n.Notify();
           });
     };
-    Status s;
+    absl::Status s;
     for (int64_t ix = 0; ix < parsed.NumElements(); ++ix) {
       s = VariantDeviceCopy(VariantDeviceCopyDirection::HOST_TO_DEVICE,
                             from[ix], &copy_variant[ix], copier);
@@ -411,10 +469,10 @@ Status PluggableDevice::MakeTensorFromProto(
     *tensor = std::move(copy);
     return copy_status;
   } else {
-    Notification n;
-    Status status;
+    absl::Notification n;
+    absl::Status status;
     TF_RETURN_IF_ERROR(MaybeCopyTensorToPluggableDevice(
-        alloc_attrs, parsed, tensor, [&n, &status](const Status& s) {
+        alloc_attrs, parsed, tensor, [&n, &status](const absl::Status& s) {
           status = s;
           n.Notify();
         }));

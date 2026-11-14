@@ -15,7 +15,9 @@ limitations under the License.
 #ifndef TENSORFLOW_LITE_KERNELS_INTERNAL_REFERENCE_SOFTMAX_H_
 #define TENSORFLOW_LITE_KERNELS_INTERNAL_REFERENCE_SOFTMAX_H_
 
+#include <algorithm>
 #include <limits>
+#include <type_traits>
 
 #include "fixedpoint/fixedpoint.h"
 #include "tensorflow/lite/kernels/internal/common.h"
@@ -27,9 +29,11 @@ limitations under the License.
 namespace tflite {
 namespace reference_ops {
 
+template <typename T,
+          typename std::enable_if<!std::is_integral<T>::value, int>::type = 0>
 inline void Softmax(const SoftmaxParams& params,
-                    const RuntimeShape& input_shape, const float* input_data,
-                    const RuntimeShape& output_shape, float* output_data) {
+                    const RuntimeShape& input_shape, const T* input_data,
+                    const RuntimeShape& output_shape, T* output_data) {
   const int trailing_dim = input_shape.DimensionsCount() - 1;
   const int outer_size =
       MatchingFlatSizeSkipDim(input_shape, trailing_dim, output_shape);
@@ -37,26 +41,24 @@ inline void Softmax(const SoftmaxParams& params,
       MatchingDim(input_shape, trailing_dim, output_shape, trailing_dim);
 
   for (int i = 0; i < outer_size; ++i) {
-    // Find max element value which we'll use to ensure numerical stability
-    // taking advantage of the following equality:
-    // exp(x[i])/sum(exp(x[i])) == exp(x[i]+C)/sum(exp(x[i]+C))
-    float max = std::numeric_limits<float>::lowest();
+    T max = std::numeric_limits<T>::lowest();
     for (int c = 0; c < depth; ++c) {
       max = std::max(max, input_data[i * depth + c]);
     }
 
-    // Compute sum.
     float sum = 0.f;
     for (int c = 0; c < depth; ++c) {
-      const float exp_c = std::exp((input_data[i * depth + c] - max) *
-                                   static_cast<float>(params.beta));
-      output_data[i * depth + c] = exp_c;
+      const float exp_c =
+          std::exp((static_cast<float>(input_data[i * depth + c]) -
+                    static_cast<float>(max)) *
+                   static_cast<float>(params.beta));
+      output_data[i * depth + c] = static_cast<T>(exp_c);
       sum += exp_c;
     }
 
-    // Compute result.
     for (int c = 0; c < depth; ++c) {
-      output_data[i * depth + c] = output_data[i * depth + c] / sum;
+      output_data[i * depth + c] =
+          static_cast<T>(static_cast<float>(output_data[i * depth + c]) / sum);
     }
   }
 }
@@ -114,6 +116,9 @@ inline void Softmax(const SoftmaxParams& params,
     FixedPoint0 shifted_scale = FixedPoint0::FromRaw(GetReciprocal(
         sum_of_exps.raw(), kAccumulationIntegerBits, &num_bits_over_unit));
 
+    const int exponent = num_bits_over_unit + 31 - (sizeof(OutputT) * 8);
+    TFLITE_CHECK(0 <= exponent && exponent <= 31);
+
     for (int c = 0; c < depth; ++c) {
       int32_t input_diff =
           static_cast<int32_t>(input_data[i * depth + c]) - max_in_row;
@@ -126,8 +131,7 @@ inline void Softmax(const SoftmaxParams& params,
 
         FixedPoint0 exp_in_0 = exp_on_negative_values(scaled_diff_f8);
         int32_t unsat_output = gemmlowp::RoundingDivideByPOT(
-            (shifted_scale * exp_in_0).raw(),
-            num_bits_over_unit + 31 - (sizeof(OutputT) * 8));
+            (shifted_scale * exp_in_0).raw(), exponent);
 
         const int32_t shifted_output =
             unsat_output +
@@ -159,7 +163,7 @@ inline int16_t SoftMaxCalculateExp(const SoftmaxParams& params,
       std::min(std::max(sym_scaled_diff, static_cast<int32_t>(-32768)),
                static_cast<int32_t>(32767));
   // apply the exp() LUT activation function
-  return lut_lookup(sat_sym_scaled_diff, params.exp_lut);
+  return LUTLookup(sat_sym_scaled_diff, params.exp_lut);
 }
 // Quantized softmax with int16_t input and int16_t output.
 inline void SoftmaxInt16(const SoftmaxParams& params,
@@ -208,7 +212,7 @@ inline void SoftmaxInt16(const SoftmaxParams& params,
                  static_cast<int32_t>(32767)));
     // apply 1/(1 + x) LUT activation function
     int16_t reciprocal_scale_Q015 =
-        lut_lookup(sat_sym_shifted_sum, params.one_over_one_plus_x_lut);
+        LUTLookup(sat_sym_shifted_sum, params.one_over_one_plus_x_lut);
 
     // Rescale the exp_result with reciprocal
     // range of output is [0, 32767] correspond to [0.0, 1.0]

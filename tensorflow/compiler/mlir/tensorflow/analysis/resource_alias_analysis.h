@@ -21,14 +21,21 @@ limitations under the License.
 #include <memory>
 
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringMap.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"  // from @llvm-project
+#include "mlir/IR/BuiltinOps.h"  // from @llvm-project
 #include "mlir/IR/Operation.h"  // from @llvm-project
 #include "mlir/IR/Region.h"  // from @llvm-project
+#include "mlir/IR/SymbolTable.h"  // from @llvm-project
 #include "mlir/IR/TypeUtilities.h"  // from @llvm-project
+#include "mlir/IR/Value.h"  // from @llvm-project
+#include "mlir/Support/TypeID.h"  // from @llvm-project
 #include "tensorflow/compiler/mlir/tensorflow/analysis/per_function_aggregate_analysis.h"
 #include "tensorflow/compiler/mlir/tensorflow/ir/tf_types.h"
 
@@ -42,7 +49,7 @@ class BacktrackAnalysisInfo;
 class ResourceAliasAnalysisInfo {
  public:
   // Constructs analysis info by analyzing the given function.
-  ResourceAliasAnalysisInfo(FuncOp func,
+  ResourceAliasAnalysisInfo(func::FuncOp func,
                             const BacktrackAnalysis& backtrack_analysis,
                             SymbolTableCollection& symbol_table_collection);
 
@@ -59,6 +66,21 @@ class ResourceAliasAnalysisInfo {
   // `IsUnknownResource(resource) == false`.
   llvm::SmallSetVector<Value, 8> GetResourceAliases(Value resource) const;
 
+  llvm::SmallSetVector<Value, 8> GetValuesForResourceId(int64_t id) const {
+    auto it = id_to_resource_values_.find(id);
+    if (it == id_to_resource_values_.end()) {
+      return {};  // return empty set
+    }
+    return it->getSecond();
+  }
+
+  // Returns true iff given resource is allocated by op with
+  // `UniqueResourceAllocation` trait. This can be utilized for while-loop
+  // parallelization.
+  bool IsUniqueResourceAllocationId(int64_t resource_id) const {
+    return unique_resource_allocation_ids_.contains(resource_id);
+  }
+
  private:
   // Maps resource value to unique ID and vice-versa. Returns true if the
   // mapping has changed.
@@ -70,22 +92,22 @@ class ResourceAliasAnalysisInfo {
   // Returns the set unique Values which map to `id`.
   const llvm::SmallSetVector<Value, 8>& GetUniqueIdResources(int64_t id) const;
 
-  // Propagates the resource ID's from an input operand to a result. Returns
+  // Propagates the resource IDs from an input operand to a result. Returns
   // true of the mapping has changed.
   bool PropagateInputToOutput(const Value& operand, const OpResult& result);
 
-  // Analyzes while loops to compute resourceID's for the loop results.
+  // Analyzes while loops to compute resource IDs for the loop results.
   // `body_info` is the backtrack analysis info for the loop body.
   void AnalyzeWhileLoop(Operation* while_op,
                         const BacktrackAnalysisInfo& body_info);
 
-  // Analyzes tf.Case/tf.If ops to compute resourceID's.
+  // Analyzes tf.Case/tf.If ops to compute resource IDs.
   template <class CaseOrIfOp>
   void AnalyzeFunctionalCaseOrIfOp(CaseOrIfOp case_or_if_op,
-                                   llvm::ArrayRef<FuncOp> functions,
+                                   llvm::ArrayRef<func::FuncOp> functions,
                                    const BacktrackAnalysis& backtrack_analysis);
 
-  // Analyzes tf.CaseRegion/tf.IfRegion ops to compute resourceID's.
+  // Analyzes tf.CaseRegion/tf.IfRegion ops to compute resource IDs.
   void AnalyzeRegionCaseOrIfOp(Operation* case_or_if_op,
                                const BacktrackAnalysis& backtrack_analysis);
 
@@ -100,6 +122,10 @@ class ResourceAliasAnalysisInfo {
 
   // Maps MLIR type IDs for resource types to internal resource type IDs.
   llvm::SmallDenseMap<TypeID, int64_t> type_id_to_internal_type_id_;
+
+  // Contains IDs of all resources that are allocated by ops with
+  // `UniqueResourceAllocation` trait.
+  llvm::SmallDenseSet<int64_t, 32> unique_resource_allocation_ids_;
 
  public:
   // Resource IDs have the following semantics:
@@ -124,6 +150,7 @@ class ResourceAliasAnalysisInfo {
   // `auto_control_deps.py` where it is assumed that allocated resource values
   // NEVER alias. We should align our assumptions in the future.
   static constexpr int64_t kUnknownResourceId = -1;
+  static constexpr int64_t kInvalidResourceId = -2;
   static constexpr int64_t kMaxResourceTypeId = 9999;
 };
 

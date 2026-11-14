@@ -1,0 +1,221 @@
+/* Copyright 2017 The OpenXLA Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+==============================================================================*/
+
+#ifndef XLA_TESTS_TEST_UTILS_H_
+#define XLA_TESTS_TEST_UTILS_H_
+
+#include <cstdint>
+#include <functional>
+#include <initializer_list>
+#include <memory>
+#include <optional>
+#include <random>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include "absl/container/flat_hash_map.h"
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
+#include "absl/strings/str_cat.h"
+#include "absl/types/span.h"
+#include "xla/hlo/ir/hlo_instructions.h"
+#include "xla/hlo/ir/hlo_module.h"
+#include "xla/layout_util.h"
+#include "xla/literal.h"
+#include "xla/xla_data.pb.h"
+#include "tsl/platform/protobuf.h"
+
+namespace xla {
+
+// A class which generates pseudorandom numbers of a given type within a given
+// range. Not cryptographically secure and likely not perfectly evenly
+// distributed across the range but sufficient for most tests.
+template <typename NativeT>
+class PseudorandomGenerator {
+ public:
+  explicit PseudorandomGenerator(NativeT min_value, NativeT max_value,
+                                 uint32_t seed)
+      : min_(min_value), max_(max_value), generator_(seed) {}
+
+  // Get a pseudorandom value.
+  NativeT get() {
+    std::uniform_real_distribution<> distribution;
+    return static_cast<NativeT>(min_ +
+                                (max_ - min_) * distribution(generator_));
+  }
+
+ private:
+  NativeT min_;
+  NativeT max_;
+  std::mt19937 generator_;
+};
+
+// Lambda function type to extract known zeroes bitmask for the given dimension
+// of a DynamicSlice or DynamicUpdateSlice instruction.
+using GetIndexKnownZeroesFn =
+    std::function<std::optional<uint64_t>(const HloInstruction*, int64_t)>;
+
+// Options for generating fake arguments with MakeFakeArguments and
+// MakeDataflowConstrainedArguments.
+struct FakeArgumentsOptions {
+  // Optional random number generator. Passing a generator enables generation
+  // of different random values across sequential calls by reusing the same
+  // engine.
+  std::minstd_rand0* engine = nullptr;
+
+  // If pseudo_random is true, the generated numbers will be generated
+  // deterministically in a pseudo random way unless the values are constrained
+  // to be e.g. init values as above. If pseudo_random is false, the returned
+  // values will be generated in a faster way that yields less interesting data,
+  // e.g. the values may all be just the same value.
+  //
+  // TODO(b/79942829): Make interesting argument generation fast enough that
+  // using pseudo_random does not save any noticeable amount of time so that the
+  // parameter can be removed.
+  bool pseudo_random = true;
+
+  // If use_large_range is false, the generated floating point numbers will be
+  // sampled from a small range of possible values. If use_large_range is true,
+  // the generated floating point numbers will be sampled from a uniform-log
+  // distribution of most possible floats, with a small chance to instead be
+  // sampled from a list of special floating point values (such as 0, inf,
+  // etc.).
+  bool use_large_range = false;
+
+  // If treat_gte_as_data_formatting is true, GetTupleElement instructions are
+  // treated as data formatting operations when tracking parameter constraints,
+  // allowing constraints to propagate through tuple deconstruction.
+  bool treat_gte_as_data_formatting = false;
+
+  // If max_bits_of_precision is set to a number, then floating point & integer
+  // types will be constrained to be represented in that number of bits. Setting
+  // it to 5 for integers would mean it only creates integers between -32 and
+  // 32.
+  std::optional<int64_t> max_bits_of_precision = std::nullopt;
+
+  // If `generate_aligned_ds_indices` is true, the generated indices will be
+  // aligned to the given alignment.
+  bool generate_aligned_ds_indices = false;
+
+  // If `get_index_known_zeroes` is set, the generated indices will have the
+  // given number of zeroes in the given dimension.
+  GetIndexKnownZeroesFn get_index_known_zeroes = nullptr;
+
+  // Restricts generated values for specific parameters to a custom [min, max]
+  // range, while still respecting all graph constraints.
+  //
+  // Keyed by parameter index (e.g. 0 for param 0). For tuple parameters,
+  // each element gets its own sequential index (e.g. if param 1 is a 2-tuple,
+  // its elements are indices 1 and 2).
+  //
+  // Returns an error if the requested range conflicts with what the graph needs
+  // (e.g. requesting negative numbers for an input fed into sqrt).
+  //
+  // Note: Currently supported only in MakeDataflowConstrainedArguments.
+  absl::flat_hash_map<int64_t, std::pair<double, double>> parameter_ranges;
+
+  // If true, caches generated floating-point and narrow (<= 8-bit) integral
+  // static array literals of at least `min_cached_argument_bytes` (and at least
+  // 16,384 elements) in a bounded process-wide LRU memory cache (and on disk as
+  // `.xlatensor` files when the `XLA_ARGUMENT_CACHE_DIR` environment variable
+  // is set). Predicates, wider (>= 16-bit) integer index/control tensors,
+  // structurally constrained index/sort arrays, and smaller per-layer tensors
+  // (such as MoE router gates or scale vectors below
+  // `min_cached_argument_bytes`) remain uncached so per-parameter routing,
+  // mask, and offset semantics are preserved.
+  bool cache_arguments = false;
+
+  // Minimum normalized host byte size for an array literal to be eligible for
+  // caching when `cache_arguments` is true (clamped to at least 64 KiB).
+  // Raising this threshold in large multi-layer models keeps small per-layer
+  // weight matrices (such as MoE router gates) independent across layers while
+  // still caching bulk FFN/attention weights.
+  int64_t min_cached_argument_bytes = 64 * 1024;
+
+  // Maximum number of distinct random variants generated per unique normalized
+  // array shape and constraint profile when `cache_arguments` is true. Keeping
+  // two variants avoids algebraic cancellation in binary ops on identical
+  // parameter shapes (e.g. `subtract(p0, p1)`) while bounding generation work
+  // in deep models with many identically shaped layer weights.
+  int max_cached_variants_per_shape = 2;
+};
+
+// Generates a vector of arguments containing fake data. The number, shape and
+// layout of the arguments is appropriate for given HLO module.
+//
+// A best-effort attempt is made to generate the data in a way which produce
+// stable computation results across platforms. Specifically:
+//
+//  (1) Init values of reductions should be the identity of the reduction
+//  computation.
+//
+//  (2) Indices of dynamic slices and update slices should be in bounds.
+//
+//  (3) Keys of key/value sorts should contain no duplicates.
+//
+// These constraints are best-effort only.
+// Note: `parameter_ranges` in `options` is not supported and returns an
+// Unimplemented error if provided.
+absl::StatusOr<std::vector<Literal>> MakeFakeArguments(
+    const HloModule* module, const FakeArgumentsOptions& options = {});
+
+// Generates a vector of arguments containing fake data using reverse constraint
+// propagation. The constraint propagator seeds initial constraints based on HLO
+// op semantics (e.g., `sqrt(x)` implies `x >= 0`) and then propagates these
+// constraints backward through the graph. This allows generating test inputs
+// that are more likely to be valid for the graph.
+// Note: `max_bits_of_precision` in `options` is not supported and returns an
+// Unimplemented error if provided.
+absl::StatusOr<std::vector<Literal>> MakeDataflowConstrainedArguments(
+    const HloModule* module, const FakeArgumentsOptions& options = {});
+
+// Clears the in-memory and tracked on-disk fake argument cache and resets
+// capacity limits to their defaults. Intended for unit tests.
+void ClearFakeArgumentCacheForTest();
+
+// Overrides the maximum in-memory and on-disk capacity limits (in bytes) of the
+// fake argument cache. Intended for unit tests exercising LRU eviction.
+void SetFakeArgumentCacheLimitsForTest(int64_t max_in_memory_bytes,
+                                       int64_t max_disk_bytes);
+
+// Check that a given module satisfies various constraints before trying to
+// execute it.
+absl::Status VerifyHloModule(HloModule* module, bool layout_sensitive,
+                             bool allow_mixed_precision);
+
+// Creates a dot op with operands 'lhs' and 'rhs' that contracts dimension 1 of
+// the LHS with dimension 0 of the RHS with no batch dimensions.
+// Both LHS and the RHS must be of rank 2.
+std::unique_ptr<HloDotInstruction> CreateCanonicalDot(const Shape& shape,
+                                                      HloInstruction* lhs,
+                                                      HloInstruction* rhs);
+
+template <typename MessageType>
+absl::StatusOr<MessageType> ParseTextProto(const std::string& text_proto) {
+  tsl::protobuf::TextFormat::Parser parser;
+  MessageType parsed_proto;
+  tsl::protobuf::io::ArrayInputStream input_stream(
+      text_proto.data(), static_cast<int32_t>(text_proto.size()));
+  if (!parser.Parse(&input_stream, &parsed_proto)) {
+    return absl::InvalidArgumentError(
+        absl::StrCat("Could not parse text proto: ", text_proto));
+  }
+  return parsed_proto;
+}
+
+}  // namespace xla
+
+#endif  // XLA_TESTS_TEST_UTILS_H_

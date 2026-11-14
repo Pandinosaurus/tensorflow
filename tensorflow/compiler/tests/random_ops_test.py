@@ -14,10 +14,6 @@
 # ==============================================================================
 """Tests for random-number generation ops in the XLA JIT compiler."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import math
 
 from absl.testing import parameterized
@@ -216,6 +212,29 @@ class RandomOpsTest(xla_test.XLATestCase, parameterized.TestCase):
         self._checkTruncatedNormalIsInRange(
             x, a=a, b=b, mu=mu, sigma=sigma, count=count, stat_test=True)
 
+  def testParameterizedTruncatedNormalBatched(self):
+    # TODO(b/112289993): Make this test work with dtype np.float64.
+    for dtype in self._random_types() & {np.float32}:
+      with self.session():
+        with self.test_scope():
+          count = 10000000
+          a = -100.
+          b = 100.
+          mu0 = 0.
+          mu1 = 1.
+          sigma = .1
+          x = random_ops.parameterized_truncated_normal(
+              shape=[2, count],
+              dtype=dtype,
+              means=[mu0, mu1],
+              stddevs=sigma,
+              minvals=[a],
+              maxvals=[b])
+        self._checkTruncatedNormalIsInRange(
+            x[0], a=a, b=b, mu=mu0, sigma=sigma, count=count, stat_test=True)
+        self._checkTruncatedNormalIsInRange(
+            x[1], a=a, b=b, mu=mu1, sigma=sigma, count=count, stat_test=True)
+
   def testParameterizedTruncatedNormalIsInRangeCenter(self):
     count = 10000000
     self._implParameterizedTruncatedNormalIsInRange(
@@ -227,7 +246,7 @@ class RandomOpsTest(xla_test.XLATestCase, parameterized.TestCase):
     self._implParameterizedTruncatedNormalIsInRange(
         a=-10, b=-4, mu=0, sigma=1, count=count, stat_test=False)
     self._implParameterizedTruncatedNormalIsInRange(
-        a=-np.infty, b=-4, mu=0, sigma=1, count=count, stat_test=False)
+        a=-np.inf, b=-4, mu=0, sigma=1, count=count, stat_test=False)
 
   def testParameterizedTruncatedNormalIsInRangeRight(self):
     count = 10000000
@@ -235,7 +254,7 @@ class RandomOpsTest(xla_test.XLATestCase, parameterized.TestCase):
     self._implParameterizedTruncatedNormalIsInRange(
         a=4, b=10, mu=0, sigma=1, count=count, stat_test=False)
     self._implParameterizedTruncatedNormalIsInRange(
-        a=4, b=np.infty, mu=0, sigma=1, count=count, stat_test=False)
+        a=4, b=np.inf, mu=0, sigma=1, count=count, stat_test=False)
 
   def testShuffle1d(self):
     with self.session():
@@ -259,6 +278,12 @@ class RandomOpsTest(xla_test.XLATestCase, parameterized.TestCase):
       # have all the values.
       self.assertAllEqual(len(result.flatten()), len(expected))
       self.assertAllEqual(set(result.flatten()), set(expected))
+
+  def testRandomShuffleInputRank0(self):
+    with self.session():
+      with self.test_scope():
+        shuffle = random_ops.random_shuffle(value=1e20)
+      self.evaluate(shuffle)
 
 
 if __name__ == '__main__':

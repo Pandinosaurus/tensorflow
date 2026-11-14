@@ -24,24 +24,24 @@ namespace {
 
 // Verifies that `shapes_and_types` is a valid list handle and has the right
 // dtype.
-Status VerifyHandleData(
+absl::Status VerifyHandleData(
     shape_inference::InferenceContext* c,
     const std::vector<shape_inference::ShapeAndType>& shapes_and_types,
     DataType element_dtype) {
   if (shapes_and_types.size() != 1) {
-    return errors::InvalidArgument(
-        "Invalid handle_data for input list. Expected length of "
-        "shape_and_types: ",
-        1, " Saw: ", shapes_and_types.size());
+    return absl::InvalidArgumentError(
+        absl::StrCat("Invalid handle_data for input list. Expected length of "
+                     "shape_and_types: ",
+                     1, " Saw: ", shapes_and_types.size()));
   }
   const shape_inference::ShapeAndType& list_shape_type = shapes_and_types[0];
   if (list_shape_type.dtype != element_dtype) {
-    return errors::InvalidArgument("Expected list with element dtype ",
-                                   DataTypeString(element_dtype),
-                                   " but got list with element dtype ",
-                                   DataTypeString(list_shape_type.dtype));
+    return absl::InvalidArgumentError(absl::StrCat(
+        "Expected list with element dtype ", DataTypeString(element_dtype),
+        " but got list with element dtype ",
+        DataTypeString(list_shape_type.dtype)));
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 bool IsValidTensorListHandleData(
@@ -61,7 +61,8 @@ REGISTER_OP("EmptyTensorList")
     .Output("handle: variant")
     .Attr("element_dtype: type")
     .Attr("shape_type: {int32, int64}")
-    .SetTypeConstructor(full_type::Unary(TFT_ARRAY, "element_dtype"))
+    .SetTypeConstructor(full_type::UnaryTensorContainer(TFT_ARRAY,
+                                                        "element_dtype"))
     .SetShapeFn([](shape_inference::InferenceContext* c) {
       c->set_output(0, c->Scalar());
       DataType element_dtype;
@@ -73,7 +74,7 @@ REGISTER_OP("EmptyTensorList")
       c->set_output_handle_shapes_and_types(
           0, std::vector<shape_inference::ShapeAndType>{
                  {element_shape, element_dtype, ret_types.args(0)}});
-      return Status::OK();
+      return absl::OkStatus();
     });
 
 REGISTER_OP("TensorListPushBack")
@@ -81,7 +82,8 @@ REGISTER_OP("TensorListPushBack")
     .Input("tensor: element_dtype")
     .Output("output_handle: variant")
     .Attr("element_dtype: type")
-    .SetTypeConstructor(full_type::Unary(TFT_ARRAY, "element_dtype"))
+    .SetTypeConstructor(full_type::UnaryTensorContainer(TFT_ARRAY,
+                                                        "element_dtype"))
     .SetShapeFn([](shape_inference::InferenceContext* c) {
       c->set_output(0, c->Scalar());
       DataType element_dtype;
@@ -90,18 +92,18 @@ REGISTER_OP("TensorListPushBack")
 
       auto* handle_data = c->input_handle_shapes_and_types(0);
       if (handle_data != nullptr && handle_data->size() > 1) {
-        return errors::InvalidArgument(
+        return absl::InvalidArgumentError(
             "Trying to push to list with wrong variant data.");
       }
       if (IsValidTensorListHandleData(handle_data)) {
         const shape_inference::ShapeAndType& list_shape_type =
             (*handle_data)[0];
         if (list_shape_type.dtype != element_dtype) {
-          return errors::InvalidArgument(
+          return absl::InvalidArgumentError(absl::StrCat(
               "Trying to push to list with wrong element dtype. List has type ",
               DataTypeString(list_shape_type.dtype),
               " but trying to push element with type ",
-              DataTypeString(element_dtype));
+              DataTypeString(element_dtype)));
         }
         shape_inference::ShapeHandle ignored;
         TF_RETURN_IF_ERROR(
@@ -112,7 +114,7 @@ REGISTER_OP("TensorListPushBack")
       c->set_output_handle_shapes_and_types(
           0, std::vector<shape_inference::ShapeAndType>{
                  {element_shape, element_dtype, ret_types.args(0)}});
-      return Status::OK();
+      return absl::OkStatus();
     });
 
 REGISTER_OP("TensorListPushBackBatch")
@@ -121,7 +123,8 @@ REGISTER_OP("TensorListPushBackBatch")
     .Output("output_handles: variant")
     .Attr("element_dtype: type")
     // TODO(mdan): Also support for inferring from an input type as well.
-    .SetTypeConstructor(full_type::Unary(TFT_ARRAY, "element_dtype"))
+    .SetTypeConstructor(full_type::UnaryTensorContainer(TFT_ARRAY,
+                                                        "element_dtype"))
     .SetShapeFn([](shape_inference::InferenceContext* c) {
       shape_inference::ShapeHandle input_handles;
       TF_RETURN_IF_ERROR(c->WithRank(c->input(0), 1, &input_handles));
@@ -140,18 +143,18 @@ REGISTER_OP("TensorListPushBackBatch")
 
       auto* handle_data = c->input_handle_shapes_and_types(0);
       if (handle_data != nullptr && handle_data->size() > 1) {
-        return errors::InvalidArgument(
+        return absl::InvalidArgumentError(
             "Trying to push to list with wrong variant data.");
       }
       if (IsValidTensorListHandleData(handle_data)) {
         const shape_inference::ShapeAndType& list_shape_type =
             (*handle_data)[0];
         if (list_shape_type.dtype != element_dtype) {
-          return errors::InvalidArgument(
+          return absl::InvalidArgumentError(absl::StrCat(
               "Trying to push to list with wrong element dtype. List has type ",
               DataTypeString(list_shape_type.dtype),
               " but trying to push element with type ",
-              DataTypeString(element_dtype));
+              DataTypeString(element_dtype)));
         }
         shape_inference::ShapeHandle ignored;
         TF_RETURN_IF_ERROR(
@@ -162,7 +165,7 @@ REGISTER_OP("TensorListPushBackBatch")
       c->set_output_handle_shapes_and_types(
           0, std::vector<shape_inference::ShapeAndType>{
                  {element_shape, element_dtype, ret_types.args(0)}});
-      return Status::OK();
+      return absl::OkStatus();
     });
 
 REGISTER_OP("TensorListLength")
@@ -182,22 +185,22 @@ REGISTER_OP("TensorListPopBack")
       shape_inference::ShapeHandle tensor_shape = c->UnknownShape();
       auto* handle_data = c->input_handle_shapes_and_types(0);
       if (handle_data != nullptr && handle_data->size() > 1) {
-        return errors::InvalidArgument(
+        return absl::InvalidArgumentError(
             "Trying to read from list with invalid variant data.");
       }
       if (IsValidTensorListHandleData(handle_data)) {
         const shape_inference::ShapeAndType& list_shape_type =
             (*handle_data)[0];
         if (list_shape_type.type.type_id() != TFT_ARRAY) {
-          return errors::InvalidArgument("Input argument must be a list.");
+          return absl::InvalidArgumentError("Input argument must be a list.");
         }
         if (list_shape_type.dtype != element_dtype) {
-          return errors::InvalidArgument(
+          return absl::InvalidArgumentError(absl::StrCat(
               "Trying to read from list with wrong element dtype. List has "
               "type ",
               DataTypeString(list_shape_type.dtype),
               " but trying to push element with type ",
-              DataTypeString(element_dtype));
+              DataTypeString(element_dtype)));
         }
         shape_inference::ShapeHandle ignored;
         TF_RETURN_IF_ERROR(
@@ -207,7 +210,7 @@ REGISTER_OP("TensorListPopBack")
       }
       c->set_output(1, tensor_shape);
       c->set_output(0, c->Scalar());
-      return Status::OK();
+      return absl::OkStatus();
     });
 
 REGISTER_OP("TensorListStack")
@@ -222,18 +225,18 @@ REGISTER_OP("TensorListStack")
       shape_inference::ShapeHandle element_shape = c->UnknownShape();
       auto* handle_data = c->input_handle_shapes_and_types(0);
       if (handle_data != nullptr && handle_data->size() > 1) {
-        return errors::InvalidArgument(
+        return absl::InvalidArgumentError(
             "Trying to read from list with wrong variant data.");
       }
       if (IsValidTensorListHandleData(handle_data)) {
         const shape_inference::ShapeAndType& list_shape_type =
             (*handle_data)[0];
         if (list_shape_type.dtype != element_dtype) {
-          return errors::InvalidArgument(
+          return absl::InvalidArgumentError(absl::StrCat(
               "Trying to read from list with wrong element dtype. List has "
               "type ",
               DataTypeString(list_shape_type.dtype), " but expected type ",
-              DataTypeString(element_dtype));
+              DataTypeString(element_dtype)));
         }
         shape_inference::ShapeHandle ignored;
         TF_RETURN_IF_ERROR(
@@ -256,27 +259,27 @@ REGISTER_OP("TensorListStack")
       shape_inference::ShapeHandle result;
       TF_RETURN_IF_ERROR(c->Concatenate(num_elements, element_shape, &result));
       c->set_output(0, result);
-      return Status::OK();
+      return absl::OkStatus();
     });
 
-Status TensorListConcatShapeInference(
+absl::Status TensorListConcatShapeInference(
     shape_inference::InferenceContext* c,
     shape_inference::ShapeHandle element_shape) {
   DataType element_dtype;
   TF_RETURN_IF_ERROR(c->GetAttr("element_dtype", &element_dtype));
   auto* handle_data = c->input_handle_shapes_and_types(0);
   if (handle_data != nullptr && handle_data->size() > 1) {
-    return errors::InvalidArgument(
+    return absl::InvalidArgumentError(
         "Trying to read from list with wrong variant data.");
   }
   if (IsValidTensorListHandleData(handle_data)) {
     const shape_inference::ShapeAndType& list_shape_type = (*handle_data)[0];
     if (list_shape_type.dtype != element_dtype) {
-      return errors::InvalidArgument(
+      return absl::InvalidArgumentError(absl::StrCat(
           "Trying to read from list with wrong element dtype. List has "
           "type ",
           DataTypeString(list_shape_type.dtype), " but expected type ",
-          DataTypeString(element_dtype));
+          DataTypeString(element_dtype)));
     }
     shape_inference::ShapeHandle merged;
     TF_RETURN_IF_ERROR(c->Merge(element_shape, list_shape_type.shape, &merged));
@@ -292,7 +295,7 @@ Status TensorListConcatShapeInference(
     c->set_output(0, c->UnknownShape());
   }
   c->set_output(1, c->MakeShape({c->UnknownDim()}));
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 REGISTER_OP("TensorListConcat")
@@ -332,7 +335,8 @@ REGISTER_OP("TensorListSplit")
     .Output("output_handle: variant")
     .Attr("element_dtype: type")
     .Attr("shape_type: {int32, int64}")
-    .SetTypeConstructor(full_type::Unary(TFT_ARRAY, "element_dtype"))
+    .SetTypeConstructor(full_type::UnaryTensorContainer(TFT_ARRAY,
+                                                        "element_dtype"))
     .SetShapeFn([](shape_inference::InferenceContext* c) {
       c->set_output(0, c->Scalar());
       DataType element_dtype;
@@ -359,7 +363,7 @@ REGISTER_OP("TensorListSplit")
       c->set_output_handle_shapes_and_types(
           0, std::vector<shape_inference::ShapeAndType>{
                  {element_shape, element_dtype, ret_types.args(0)}});
-      return Status::OK();
+      return absl::OkStatus();
     });
 
 REGISTER_OP("TensorListFromTensor")
@@ -368,7 +372,9 @@ REGISTER_OP("TensorListFromTensor")
     .Output("output_handle: variant")
     .Attr("element_dtype: type")
     .Attr("shape_type: {int32, int64}")
-    .SetTypeConstructor(full_type::Unary(TFT_ARRAY, "element_dtype"))
+    .SetTypeConstructor(full_type::UnaryTensorContainer(TFT_ARRAY,
+                                                        "element_dtype"))
+    .SetForwardTypeFn(full_type::UnaryContainerCreate(TFT_ARRAY, 0))
     .SetShapeFn([](shape_inference::InferenceContext* c) {
       c->set_output(0, c->Scalar());
       DataType element_dtype;
@@ -386,7 +392,7 @@ REGISTER_OP("TensorListFromTensor")
       c->set_output_handle_shapes_and_types(
           0, std::vector<shape_inference::ShapeAndType>{
                  {element_shape, element_dtype, ret_types.args(0)}});
-      return Status::OK();
+      return absl::OkStatus();
     });
 
 REGISTER_OP("TensorListElementShape")
@@ -400,14 +406,14 @@ REGISTER_OP("TensorListElementShape")
       // unknown dims).
       if (!IsValidTensorListHandleData(handle_data)) {
         c->set_output(0, c->UnknownShape());
-        return Status::OK();
+        return absl::OkStatus();
       }
       if (c->RankKnown((*handle_data)[0].shape)) {
         c->set_output(0, c->Vector(c->Rank((*handle_data)[0].shape)));
       } else {
         c->set_output(0, c->UnknownShape());
       }
-      return Status::OK();
+      return absl::OkStatus();
     });
 
 REGISTER_OP("TensorListReserve")
@@ -416,7 +422,8 @@ REGISTER_OP("TensorListReserve")
     .Output("handle: variant")
     .Attr("element_dtype: type")
     .Attr("shape_type: {int32, int64}")
-    .SetTypeConstructor(full_type::Unary(TFT_ARRAY, "element_dtype"))
+    .SetTypeConstructor(full_type::UnaryTensorContainer(TFT_ARRAY,
+                                                        "element_dtype"))
     .SetShapeFn([](shape_inference::InferenceContext* c) {
       c->set_output(0, c->Scalar());
       shape_inference::ShapeHandle element_shape;
@@ -428,15 +435,16 @@ REGISTER_OP("TensorListReserve")
       c->set_output_handle_shapes_and_types(
           0, std::vector<shape_inference::ShapeAndType>{
                  {element_shape, element_dtype, ret_types.args(0)}});
-      return Status::OK();
+      return absl::OkStatus();
     });
 
 REGISTER_OP("TensorListGetItem")
     .Input("input_handle: variant")
     .Input("index: int32")
-    .Input("element_shape: int32")
+    .Input("element_shape: Tshape")
     .Output("item: element_dtype")
     .Attr("element_dtype: type")
+    .Attr("Tshape: {int32, int64} = DT_INT32")
     .SetShapeFn([](shape_inference::InferenceContext* c) {
       DataType element_dtype;
       TF_RETURN_IF_ERROR(c->GetAttr("element_dtype", &element_dtype));
@@ -447,10 +455,11 @@ REGISTER_OP("TensorListGetItem")
             (*handle_data)[0];
         element_shape = list_shape_type.shape;
         if (list_shape_type.dtype != element_dtype) {
-          return errors::InvalidArgument("Expected list with element dtype ",
-                                         DataTypeString(element_dtype),
-                                         " but got list with element dtype ",
-                                         DataTypeString(list_shape_type.dtype));
+          return absl::InvalidArgumentError(
+              absl::StrCat("Expected list with element dtype ",
+                           DataTypeString(element_dtype),
+                           " but got list with element dtype ",
+                           DataTypeString(list_shape_type.dtype)));
         }
       }
       shape_inference::ShapeHandle element_shape_input = c->UnknownShape();
@@ -459,7 +468,7 @@ REGISTER_OP("TensorListGetItem")
       TF_RETURN_IF_ERROR(
           c->Merge(element_shape, element_shape_input, &element_shape));
       c->set_output(0, element_shape);
-      return Status::OK();
+      return absl::OkStatus();
     });
 
 REGISTER_OP("TensorListResize")
@@ -476,7 +485,7 @@ REGISTER_OP("TensorListResize")
       if (IsValidTensorListHandleData(handle_data)) {
         c->set_output_handle_shapes_and_types(0, *handle_data);
       }
-      return Status::OK();
+      return absl::OkStatus();
     });
 
 REGISTER_OP("TensorListSetItem")
@@ -485,7 +494,13 @@ REGISTER_OP("TensorListSetItem")
     .Input("item: element_dtype")
     .Output("output_handle: variant")
     .Attr("element_dtype: type")
-    .SetTypeConstructor(full_type::Unary(TFT_ARRAY, "element_dtype"))
+    .Attr("resize_if_index_out_of_bounds: bool = false")
+    .SetTypeConstructor(full_type::UnaryTensorContainer(TFT_ARRAY,
+                                                        "element_dtype"))
+    .SetForwardTypeFn(full_type::UnaryContainerAdd(TFT_ARRAY,
+                                                   /*container_idx=*/0,
+                                                   /*element_idx=*/2,
+                                                   /*homogeneous=*/true))
     .SetShapeFn([](shape_inference::InferenceContext* c) {
       DataType element_dtype;
       TF_RETURN_IF_ERROR(c->GetAttr("element_dtype", &element_dtype));
@@ -504,7 +519,7 @@ REGISTER_OP("TensorListSetItem")
             0, std::vector<shape_inference::ShapeAndType>{
                    {c->UnknownShape(), element_dtype, ret_types.args(0)}});
       }
-      return Status::OK();
+      return absl::OkStatus();
     });
 
 REGISTER_OP("TensorListGather")
@@ -523,10 +538,11 @@ REGISTER_OP("TensorListGather")
             (*handle_data)[0];
         element_shape = list_shape_type.shape;
         if (list_shape_type.dtype != element_dtype) {
-          return errors::InvalidArgument("Expected list with element dtype ",
-                                         DataTypeString(element_dtype),
-                                         " but got list with element dtype ",
-                                         DataTypeString(list_shape_type.dtype));
+          return absl::InvalidArgumentError(
+              absl::StrCat("Expected list with element dtype ",
+                           DataTypeString(element_dtype),
+                           " but got list with element dtype ",
+                           DataTypeString(list_shape_type.dtype)));
         }
       }
       shape_inference::ShapeHandle element_shape_input = c->UnknownShape();
@@ -537,7 +553,7 @@ REGISTER_OP("TensorListGather")
       shape_inference::ShapeHandle out;
       TF_RETURN_IF_ERROR(c->Concatenate(c->input(1), element_shape, &out));
       c->set_output(0, out);
-      return Status::OK();
+      return absl::OkStatus();
     });
 
 REGISTER_OP("TensorListScatter")
@@ -547,7 +563,8 @@ REGISTER_OP("TensorListScatter")
     .Output("output_handle: variant")
     .Attr("element_dtype: type")
     .Attr("shape_type: {int32, int64}")
-    .SetTypeConstructor(full_type::Unary(TFT_ARRAY, "element_dtype"))
+    .SetTypeConstructor(full_type::UnaryTensorContainer(TFT_ARRAY,
+                                                        "element_dtype"))
     .SetShapeFn([](shape_inference::InferenceContext* c) {
       DataType element_dtype;
       TF_RETURN_IF_ERROR(c->GetAttr("element_dtype", &element_dtype));
@@ -559,7 +576,7 @@ REGISTER_OP("TensorListScatter")
           0, std::vector<shape_inference::ShapeAndType>{
                  {element_shape, element_dtype, ret_types.args(0)}});
       c->set_output(0, c->Scalar());
-      return Status::OK();
+      return absl::OkStatus();
     });
 
 REGISTER_OP("TensorListScatterV2")
@@ -570,7 +587,8 @@ REGISTER_OP("TensorListScatterV2")
     .Output("output_handle: variant")
     .Attr("element_dtype: type")
     .Attr("shape_type: {int32, int64}")
-    .SetTypeConstructor(full_type::Unary(TFT_ARRAY, "element_dtype"))
+    .SetTypeConstructor(full_type::UnaryTensorContainer(TFT_ARRAY,
+                                                        "element_dtype"))
     .SetShapeFn([](shape_inference::InferenceContext* c) {
       DataType element_dtype;
       TF_RETURN_IF_ERROR(c->GetAttr("element_dtype", &element_dtype));
@@ -582,7 +600,7 @@ REGISTER_OP("TensorListScatterV2")
           0, std::vector<shape_inference::ShapeAndType>{
                  {element_shape, element_dtype, ret_types.args(0)}});
       c->set_output(0, c->Scalar());
-      return Status::OK();
+      return absl::OkStatus();
     });
 
 REGISTER_OP("TensorListScatterIntoExistingList")
@@ -591,7 +609,8 @@ REGISTER_OP("TensorListScatterIntoExistingList")
     .Input("indices: int32")
     .Output("output_handle: variant")
     .Attr("element_dtype: type")
-    .SetTypeConstructor(full_type::Unary(TFT_ARRAY, "element_dtype"))
+    .SetTypeConstructor(full_type::UnaryTensorContainer(TFT_ARRAY,
+                                                        "element_dtype"))
     .SetShapeFn([](shape_inference::InferenceContext* c) {
       shape_inference::ShapeHandle ignored;
       // Check that tensor is at least a vector.
@@ -613,7 +632,7 @@ REGISTER_OP("TensorListScatterIntoExistingList")
           0, std::vector<shape_inference::ShapeAndType>{
                  {element_shape, element_dtype, ret_types.args(0)}});
       c->set_output(0, c->Scalar());
-      return Status::OK();
+      return absl::OkStatus();
     });
 
 REGISTER_OP("TensorListConcatLists")
@@ -621,7 +640,8 @@ REGISTER_OP("TensorListConcatLists")
     .Input("input_b: variant")
     .Attr("element_dtype: type")
     .Output("output: variant")
-    .SetTypeConstructor(full_type::Unary(TFT_ARRAY, "element_dtype"))
+    .SetTypeConstructor(full_type::UnaryTensorContainer(TFT_ARRAY,
+                                                        "element_dtype"))
     .SetShapeFn([](shape_inference::InferenceContext* c) {
       auto input_a = c->input(0);
       auto input_b = c->input(1);
@@ -639,27 +659,29 @@ REGISTER_OP("TensorListConcatLists")
         const FullTypeDef& ret_types = c->ret_types();
         c->set_output_handle_shapes_and_types(
             0, {{c->UnknownShape(), element_dtype, ret_types.args(0)}});
-        return Status::OK();
+        return absl::OkStatus();
       }
       shape_inference::ShapeAndType list_shape_type_a =
           handle_data_a_nonempty ? handle_data_a->at(0) : handle_data_b->at(0);
       const shape_inference::ShapeAndType& list_shape_type_b =
           handle_data_b_nonempty ? handle_data_b->at(0) : handle_data_a->at(0);
       if (list_shape_type_a.dtype != element_dtype) {
-        return errors::InvalidArgument("input_a.type != element_dtype: ",
-                                       DataTypeString(list_shape_type_a.dtype),
-                                       " vs. ", DataTypeString(element_dtype));
+        return absl::InvalidArgumentError(
+            absl::StrCat("input_a.type != element_dtype: ",
+                         DataTypeString(list_shape_type_a.dtype), " vs. ",
+                         DataTypeString(element_dtype)));
       }
       if (list_shape_type_b.dtype != element_dtype) {
-        return errors::InvalidArgument("input_b.type != element_dtype: ",
-                                       DataTypeString(list_shape_type_b.dtype),
-                                       " vs. ", DataTypeString(element_dtype));
+        return absl::InvalidArgumentError(
+            absl::StrCat("input_b.type != element_dtype: ",
+                         DataTypeString(list_shape_type_b.dtype), " vs. ",
+                         DataTypeString(element_dtype)));
       }
       TF_RETURN_IF_ERROR(c->Merge(list_shape_type_a.shape,
                                   list_shape_type_b.shape,
                                   &list_shape_type_a.shape));
       c->set_output_handle_shapes_and_types(0, {list_shape_type_a});
-      return Status::OK();
+      return absl::OkStatus();
     });
 
 }  // namespace

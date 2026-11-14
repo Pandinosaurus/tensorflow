@@ -13,23 +13,29 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include <cstdint>
 #include <vector>
 
+#include "absl/log/check.h"
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
 #include "absl/types/span.h"
 #include "tensorflow/compiler/tf2xla/type_util.h"
 #include "tensorflow/compiler/tf2xla/xla_op_kernel.h"
 #include "tensorflow/compiler/tf2xla/xla_op_registry.h"
-#include "tensorflow/compiler/xla/client/lib/constants.h"
-#include "tensorflow/compiler/xla/client/xla_builder.h"
-#include "tensorflow/compiler/xla/xla_data.pb.h"
+#include "xla/hlo/builder/lib/constants.h"
+#include "xla/hlo/builder/xla_builder.h"
+#include "xla/tsl/platform/errors.h"
+#include "xla/xla_data.pb.h"
 #include "tensorflow/core/framework/op_kernel.h"
+#include "tensorflow/core/framework/op_requires.h"
 #include "tensorflow/core/framework/tensor_shape.h"
 #include "tensorflow/core/framework/types.h"
 #include "tensorflow/core/framework/types.pb.h"
 #include "tensorflow/core/platform/errors.h"
 #include "tensorflow/core/platform/status.h"
-#include "tensorflow/core/platform/statusor.h"
+#include "tensorflow/core/platform/types.h"
 
 namespace tensorflow {
 namespace {
@@ -38,10 +44,11 @@ constexpr absl::string_view kNumSplitsAttrName = "num_splits";
 constexpr absl::string_view kNumConcatsAttrName = "num_concats";
 
 template <bool Split>
-Status GetAndValidateAttributes(OpKernelConstruction* ctx,
-                                std::vector<int64>& num_partitions,
-                                int& num_slices, std::vector<int64>& paddings,
-                                bool& has_paddings) {
+absl::Status GetAndValidateAttributes(OpKernelConstruction* ctx,
+                                      std::vector<int64_t>& num_partitions,
+                                      int& num_slices,
+                                      std::vector<int64_t>& paddings,
+                                      bool& has_paddings) {
   absl::string_view num_partitions_attr_name =
       Split ? kNumSplitsAttrName : kNumConcatsAttrName;
   TF_RETURN_IF_ERROR(ctx->GetAttr(num_partitions_attr_name, &num_partitions));
@@ -91,15 +98,15 @@ Status GetAndValidateAttributes(OpKernelConstruction* ctx,
     paddings.assign(expected_rank, 0);
   }
 
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-std::vector<int64> GetSliceIndices(absl::Span<const int64> num_partitions,
-                                   absl::Span<const int64> slice_shape,
-                                   const int index) {
+std::vector<int64_t> GetSliceIndices(absl::Span<const int64_t> num_partitions,
+                                     absl::Span<const int64_t> slice_shape,
+                                     const int index) {
   DCHECK_EQ(num_partitions.size(), slice_shape.size());
 
-  std::vector<int64> slice_indices(num_partitions.size());
+  std::vector<int64_t> slice_indices(num_partitions.size());
 
   if (num_partitions.empty()) {
     return slice_indices;
@@ -135,9 +142,9 @@ class XlaSplitNDBaseOp : public XlaOpKernel {
   }
 
  protected:
-  Status CompileInternal(XlaOpKernelContext* ctx, const xla::XlaOp input,
-                         const TensorShape& input_shape,
-                         const DataType input_dtype) {
+  absl::Status CompileInternal(XlaOpKernelContext* ctx, const xla::XlaOp input,
+                               const TensorShape& input_shape,
+                               const DataType input_dtype) {
     xla::PrimitiveType type;
     TF_RETURN_IF_ERROR(DataTypeToPrimitiveType(input_dtype, &type));
 
@@ -174,27 +181,27 @@ class XlaSplitNDBaseOp : public XlaOpKernel {
           xla::Pad(input,
                    xla::ConstantR0WithType(ctx->builder(), type, /*value=*/0),
                    padding_config));
-      return Status::OK();
+      return absl::OkStatus();
     } else if (num_slices_ == 1) {
       ctx->SetOutput(/*index=*/0, input);
-      return Status::OK();
+      return absl::OkStatus();
     }
 
     // Slice shape with optional padding.
-    std::vector<int64> slice_shape(rank);
+    std::vector<int64_t> slice_shape(rank);
     for (int dim = 0; dim < rank; ++dim) {
       slice_shape[dim] =
           (input_shape.dim_size(dim) + paddings_[dim]) / num_splits_[dim];
     }
 
-    const std::vector<int64> slice_strides(rank, 1);
+    const std::vector<int64_t> slice_strides(rank, 1);
 
     for (int i = 0; i < num_slices_; ++i) {
       int num_complete_pad_dims = 0;
       int num_partial_pad_dims = 0;
-      std::vector<int64> slice_start_indices =
+      std::vector<int64_t> slice_start_indices =
           GetSliceIndices(num_splits_, slice_shape, i);
-      std::vector<int64> slice_limit_indices(slice_shape.size());
+      std::vector<int64_t> slice_limit_indices(slice_shape.size());
       xla::PaddingConfig slice_padding_config;
       for (int dim = 0; dim < rank; ++dim) {
         auto* padding_dim = slice_padding_config.add_dimensions();
@@ -206,7 +213,7 @@ class XlaSplitNDBaseOp : public XlaOpKernel {
       // Calculate paddings necessary for slice instead of padding input and
       // slicing subsequently to reduce temporary memory allocation.
       for (int dim = 0; dim < rank; ++dim) {
-        const int64 dim_size = input_shape.dim_size(dim);
+        const int64_t dim_size = input_shape.dim_size(dim);
         if (slice_start_indices[dim] >= dim_size) {
           // Complete padding.
           slice_start_indices[dim] = dim_size;
@@ -242,13 +249,13 @@ class XlaSplitNDBaseOp : public XlaOpKernel {
                                      slice_limit_indices, slice_strides));
       }
     }
-    return Status::OK();
+    return absl::OkStatus();
   }
 
  private:
-  std::vector<int64> num_splits_;
+  std::vector<int64_t> num_splits_;
   int num_slices_ = 1;
-  std::vector<int64> paddings_;
+  std::vector<int64_t> paddings_;
   bool has_paddings_ = false;
 };
 
@@ -309,13 +316,13 @@ class XlaConcatNDBaseOp : public XlaOpKernel {
   }
 
  protected:
-  StatusOr<xla::XlaOp> CompileInternal(XlaOpKernelContext* ctx) {
+  absl::StatusOr<xla::XlaOp> CompileInternal(XlaOpKernelContext* ctx) {
     xla::PrimitiveType type;
     TF_RETURN_IF_ERROR(DataTypeToPrimitiveType(dtype_, &type));
 
     std::vector<xla::XlaOp> input_handles;
     std::vector<TensorShape> input_shapes;
-    std::vector<int64> output_shape;
+    std::vector<int64_t> output_shape;
     TF_RETURN_IF_ERROR(GetInputsAndOutputShape(ctx, input_handles, input_shapes,
                                                output_shape));
 
@@ -323,9 +330,9 @@ class XlaConcatNDBaseOp : public XlaOpKernel {
 
     if (num_slices_ == 1 && has_paddings_) {
       return xla::Slice(input_handles[0],
-                        /*start_indices=*/std::vector<int64>(rank, 0),
+                        /*start_indices=*/std::vector<int64_t>(rank, 0),
                         /*limit_indices=*/output_shape,
-                        /*strides=*/std::vector<int64>(rank, 1));
+                        /*strides=*/std::vector<int64_t>(rank, 1));
     } else if (num_slices_ == 1) {
       return input_handles[0];
     }
@@ -334,16 +341,16 @@ class XlaConcatNDBaseOp : public XlaOpKernel {
     xla::XlaOp output = xla::Broadcast(
         xla::ConstantR0WithType(ctx->builder(), type, /*value=*/0),
         output_shape);
-    const std::vector<int64> input_slice_start_indices(rank, 0);
-    const std::vector<int64> slice_strides(rank, 1);
+    const std::vector<int64_t> input_slice_start_indices(rank, 0);
+    const std::vector<int64_t> slice_strides(rank, 1);
 
     for (int i = 0; i < num_slices_; ++i) {
-      std::vector<int64> slice_start_indices =
+      std::vector<int64_t> slice_start_indices =
           GetSliceIndices(num_concats_, slice_shape, i);
 
       int num_complete_pad_dims = 0;
       int num_partial_pad_dims = 0;
-      std::vector<int64> slice_limit_indices(rank);
+      std::vector<int64_t> slice_limit_indices(rank);
 
       // Calculate paddings necessary to strip from slice.
       for (int dim = 0; dim < rank; ++dim) {
@@ -369,7 +376,7 @@ class XlaConcatNDBaseOp : public XlaOpKernel {
 
       xla::XlaOp input_slice = input_handles[i];
       if (num_complete_pad_dims > 0 || num_partial_pad_dims > 0) {
-        std::vector<int64> input_slice_limit_indices(rank);
+        std::vector<int64_t> input_slice_limit_indices(rank);
         for (int dim = 0; dim < rank; ++dim) {
           input_slice_limit_indices[dim] =
               slice_limit_indices[dim] - slice_start_indices[dim];
@@ -380,9 +387,9 @@ class XlaConcatNDBaseOp : public XlaOpKernel {
 
       std::vector<xla::XlaOp> update_slice_start_indices;
       update_slice_start_indices.reserve(rank);
-      for (int64 start_index : slice_start_indices) {
+      for (int64_t start_index : slice_start_indices) {
         update_slice_start_indices.push_back(
-            xla::ConstantR0<int32>(ctx->builder(), start_index));
+            xla::ConstantR0<int32_t>(ctx->builder(), start_index));
       }
       output = xla::DynamicUpdateSlice(output, input_slice,
                                        update_slice_start_indices);
@@ -394,10 +401,10 @@ class XlaConcatNDBaseOp : public XlaOpKernel {
   DataType dtype_;
 
  private:
-  Status GetInputsAndOutputShape(XlaOpKernelContext* ctx,
-                                 std::vector<xla::XlaOp>& input_handles,
-                                 std::vector<TensorShape>& input_shapes,
-                                 std::vector<int64>& output_shape) {
+  absl::Status GetInputsAndOutputShape(XlaOpKernelContext* ctx,
+                                       std::vector<xla::XlaOp>& input_handles,
+                                       std::vector<TensorShape>& input_shapes,
+                                       std::vector<int64_t>& output_shape) {
     TF_RETURN_IF_ERROR(ctx->InputList("inputs", &input_handles, &input_shapes));
 
     const TensorShape& slice_shape = input_shapes[0];
@@ -426,12 +433,12 @@ class XlaConcatNDBaseOp : public XlaOpKernel {
       output_shape.push_back(max_dim_size - paddings_[dim]);
     }
 
-    return Status::OK();
+    return absl::OkStatus();
   }
 
-  std::vector<int64> num_concats_;
+  std::vector<int64_t> num_concats_;
   int num_slices_ = 1;
-  std::vector<int64> paddings_;
+  std::vector<int64_t> paddings_;
   bool has_paddings_ = false;
 };
 
@@ -442,7 +449,7 @@ class XlaConcatNDOp : public XlaConcatNDBaseOp {
   void Compile(XlaOpKernelContext* ctx) override {
     auto output_or = this->CompileInternal(ctx);
     OP_REQUIRES_OK(ctx, output_or.status());
-    ctx->SetOutput(/*index=*/0, output_or.ValueOrDie());
+    ctx->SetOutput(/*index=*/0, output_or.value());
   }
 };
 
@@ -456,8 +463,8 @@ class AssignVariableXlaConcatNDOp : public XlaConcatNDBaseOp {
   void Compile(XlaOpKernelContext* ctx) override {
     auto output_or = this->CompileInternal(ctx);
     OP_REQUIRES_OK(ctx, output_or.status());
-    OP_REQUIRES_OK(ctx, ctx->AssignVariable("resource", dtype_,
-                                            output_or.ConsumeValueOrDie()));
+    OP_REQUIRES_OK(ctx,
+                   ctx->AssignVariable("resource", dtype_, output_or.value()));
   }
 };
 

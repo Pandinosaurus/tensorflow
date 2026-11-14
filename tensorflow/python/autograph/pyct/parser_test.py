@@ -14,11 +14,8 @@
 # ==============================================================================
 """Tests for parser module."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import re
+import sys
 import textwrap
 
 import gast
@@ -296,7 +293,11 @@ string""")
     """
 
     f = self._eval_code(parser.dedent_block(code), 'f')
-    self.assertEqual(f.__doc__, '\n      Docstring.\n      ')
+    if sys.version_info >= (3, 13):
+      self.assertEqual(f.__doc__.strip(), 'Docstring.')
+    else:
+      self.assertEqual(f.__doc__, '\n      Docstring.\n      ')
+
     self.assertEqual(f(), '\n  1\n    2\n      3')
 
   def test_dedent_block_multiline_expression(self):

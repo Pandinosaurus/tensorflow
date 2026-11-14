@@ -2,71 +2,79 @@ path: "tensorflow.losses"
 tf_module {
   member {
     name: "BinaryCrossentropy"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
+  }
+  member {
+    name: "BinaryFocalCrossentropy"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "CategoricalCrossentropy"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
+  }
+  member {
+    name: "CategoricalFocalCrossentropy"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "CategoricalHinge"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "CosineSimilarity"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "Hinge"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "Huber"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "KLDivergence"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "LogCosh"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "Loss"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "MeanAbsoluteError"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "MeanAbsolutePercentageError"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "MeanSquaredError"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "MeanSquaredLogarithmicError"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "Poisson"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "Reduction"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "SparseCategoricalCrossentropy"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "SquaredHinge"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member_method {
     name: "KLD"
@@ -93,8 +101,16 @@ tf_module {
     argspec: "args=[\'y_true\', \'y_pred\', \'from_logits\', \'label_smoothing\', \'axis\'], varargs=None, keywords=None, defaults=[\'False\', \'0.0\', \'-1\'], "
   }
   member_method {
+    name: "binary_focal_crossentropy"
+    argspec: "args=[\'y_true\', \'y_pred\', \'apply_class_balancing\', \'alpha\', \'gamma\', \'from_logits\', \'label_smoothing\', \'axis\'], varargs=None, keywords=None, defaults=[\'False\', \'0.25\', \'2.0\', \'False\', \'0.0\', \'-1\'], "
+  }
+  member_method {
     name: "categorical_crossentropy"
     argspec: "args=[\'y_true\', \'y_pred\', \'from_logits\', \'label_smoothing\', \'axis\'], varargs=None, keywords=None, defaults=[\'False\', \'0.0\', \'-1\'], "
+  }
+  member_method {
+    name: "categorical_focal_crossentropy"
+    argspec: "args=[\'y_true\', \'y_pred\', \'alpha\', \'gamma\', \'from_logits\', \'label_smoothing\', \'axis\'], varargs=None, keywords=None, defaults=[\'0.25\', \'2.0\', \'False\', \'0.0\', \'-1\'], "
   }
   member_method {
     name: "categorical_hinge"
@@ -106,7 +122,7 @@ tf_module {
   }
   member_method {
     name: "deserialize"
-    argspec: "args=[\'name\', \'custom_objects\'], varargs=None, keywords=None, defaults=[\'None\'], "
+    argspec: "args=[\'name\', \'custom_objects\', \'use_legacy_format\'], varargs=None, keywords=None, defaults=[\'None\', \'False\'], "
   }
   member_method {
     name: "get"
@@ -178,11 +194,11 @@ tf_module {
   }
   member_method {
     name: "serialize"
-    argspec: "args=[\'loss\'], varargs=None, keywords=None, defaults=None"
+    argspec: "args=[\'loss\', \'use_legacy_format\'], varargs=None, keywords=None, defaults=[\'False\'], "
   }
   member_method {
     name: "sparse_categorical_crossentropy"
-    argspec: "args=[\'y_true\', \'y_pred\', \'from_logits\', \'axis\'], varargs=None, keywords=None, defaults=[\'False\', \'-1\'], "
+    argspec: "args=[\'y_true\', \'y_pred\', \'from_logits\', \'axis\', \'ignore_class\'], varargs=None, keywords=None, defaults=[\'False\', \'-1\', \'None\'], "
   }
   member_method {
     name: "squared_hinge"

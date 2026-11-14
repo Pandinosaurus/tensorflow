@@ -38,30 +38,30 @@ class CaseBuilder {
  public:
   // Create a CaseBuilder to create the lowered form of `case` with branch
   // functions identified by `branch_fn_names` in the `graph`.
-  CaseBuilder(Node* case_op, const std::vector<string>& branch_fn_names,
+  CaseBuilder(Node* case_op, const std::vector<std::string>& branch_fn_names,
               bool keep_node_fetchable, Graph* graph);
 
   // Constructs the basic conditional control flow using switch and merge nodes.
-  Status CreatePivotNodes();
+  absl::Status CreatePivotNodes();
 
   // Adds the inputs from the if node to the merge nodes of the lowered if.
-  Status AddInputs();
+  absl::Status AddInputs();
 
   // Adds the outputs from the if node to the merge nodes of the lowered if.
   // Note: no inputs can be added once outputs are added as the then and else
   // nodes are finalized while adding outputs.
-  Status AddOutputs();
+  absl::Status AddOutputs();
 
   // Builds an identity node with the same outputs as Case.
-  Status BuildLoweredCaseOutput();
+  absl::Status BuildLoweredCaseOutput();
 
  private:
   // Returns unique name containing the name of the Case op being rewritten
   // (name_), infix and a suffix to ensure it is unique within the graph.
-  string NewName(const string& infix);
+  std::string NewName(const std::string& infix);
 
   // Adds input to both the then and else nodes from src:src_output.
-  Status AddInput(Node* src, int src_output);
+  absl::Status AddInput(Node* src, int src_output);
 
   // The merged outputs of the then and else nodes.
   std::vector<NodeOut> outputs_;
@@ -88,7 +88,7 @@ class CaseBuilder {
   // for the side effects.
   Node* branch_executed_node_;
   Graph* graph_;
-  string name_;
+  std::string name_;
   bool keep_node_fetchable_;
 
   NodeDebugInfo debug_info_;
@@ -96,7 +96,7 @@ class CaseBuilder {
 };
 
 CaseBuilder::CaseBuilder(Node* case_op,
-                         const std::vector<string>& branch_fn_names,
+                         const std::vector<std::string>& branch_fn_names,
                          bool keep_node_fetchable, Graph* graph)
     : case_op_(case_op),
       num_branches_(branch_fn_names.size()),
@@ -106,7 +106,7 @@ CaseBuilder::CaseBuilder(Node* case_op,
       debug_info_(*case_op_) {
   branch_call_builders_.reserve(num_branches_);
   for (int b = 0; b < num_branches_; b++) {
-    branch_call_builders_.emplace_back(NewName(strings::StrCat("branch", b)),
+    branch_call_builders_.emplace_back(NewName(absl::StrCat("branch", b)),
                                        branch_fn_names[b], graph->op_registry(),
                                        &debug_info_);
     branch_call_builders_[b].Device(case_op_->requested_device());
@@ -115,7 +115,7 @@ CaseBuilder::CaseBuilder(Node* case_op,
   TF_CHECK_OK(case_op_->input_tensor(0, &branch_index_));
 }
 
-Status CaseBuilder::CreatePivotNodes() {
+absl::Status CaseBuilder::CreatePivotNodes() {
   // Construct the basic case body (consisting of feeding in the val to
   // create pivot nodes).
   Node* branch_index;
@@ -129,21 +129,21 @@ Status CaseBuilder::CreatePivotNodes() {
   control_predecessor_ = branch_index;
   pivots_.resize(num_branches_, nullptr);
   for (int b = 0; b < num_branches_; b++) {
-    TF_RETURN_IF_ERROR(NodeBuilder(NewName(strings::StrCat("pivot_", b)),
+    TF_RETURN_IF_ERROR(NodeBuilder(NewName(absl::StrCat("pivot_", b)),
                                    "Identity", graph_->op_registry(),
                                    &debug_info_)
                            .Input(branch_index, b)
                            .Device(case_op_->requested_device())
                            .Finalize(graph_, &pivots_[b]));
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-string CaseBuilder::NewName(const string& infix) {
-  return graph_->NewName(strings::StrCat(name_, "/", infix));
+std::string CaseBuilder::NewName(const std::string& infix) {
+  return graph_->NewName(absl::StrCat(name_, "/", infix));
 }
 
-Status CaseBuilder::AddInput(Node* src, int src_output) {
+absl::Status CaseBuilder::AddInput(Node* src, int src_output) {
   Node* input;
   NodeDebugInfo debug_info(*src);
   // Colocate the Switch node with the `src` node.
@@ -166,10 +166,10 @@ Status CaseBuilder::AddInput(Node* src, int src_output) {
   for (int b = 0; b < num_branches_; b++) {
     branch_call_builders_[b].Input(input, b);
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-Status CaseBuilder::AddInputs() {
+absl::Status CaseBuilder::AddInputs() {
   // Add input data edges.
   std::vector<const Edge*> edges;
   TF_RETURN_IF_ERROR(case_op_->input_edges(&edges));
@@ -184,10 +184,10 @@ Status CaseBuilder::AddInputs() {
       graph_->AddControlEdge(e->src(), control_predecessor_);
     }
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-Status CaseBuilder::AddOutputs() {
+absl::Status CaseBuilder::AddOutputs() {
   // Construct the call nodes for each branch.
   call_nodes_.resize(num_branches_, nullptr);
   for (int b = 0; b < num_branches_; b++) {
@@ -247,10 +247,10 @@ Status CaseBuilder::AddOutputs() {
       graph_->AddEdge(merges[e->src_output()], 0, e->dst(), e->dst_input());
     }
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-Status CaseBuilder::BuildLoweredCaseOutput() {
+absl::Status CaseBuilder::BuildLoweredCaseOutput() {
   // If outputs are empty, it means that we might have only output control
   // edges (already connected to the `branch_executed_node`). Furthermore it's
   // illegal to have an IdentityN with empty inputs.
@@ -267,16 +267,16 @@ Status CaseBuilder::BuildLoweredCaseOutput() {
 
 }  // namespace
 
-Status RewriteCaseNode(Node* n, Graph* g, bool keep_node_fetchable) {
+absl::Status RewriteCaseNode(Node* n, Graph* g, bool keep_node_fetchable) {
   VLOG(2) << "Lower Case node (keep_node_fetchable=" << keep_node_fetchable
           << "): " << SummarizeNode(*n);
   const AttrValue* branches_attr = n->attrs().Find("branches");
   if (branches_attr == nullptr) {
-    return errors::InvalidArgument("branch functions missing");
+    return absl::InvalidArgumentError("branch functions missing");
   }
 
   int num_branches = branches_attr->list().func_size();
-  std::vector<string> branch_fn_names;
+  std::vector<std::string> branch_fn_names;
   branch_fn_names.reserve(num_branches);
   for (int b = 0; b < num_branches; b++) {
     branch_fn_names.emplace_back(branches_attr->list().func(b).name());
@@ -287,7 +287,7 @@ Status RewriteCaseNode(Node* n, Graph* g, bool keep_node_fetchable) {
   TF_RETURN_IF_ERROR(cb.AddOutputs());
   g->RemoveNode(n);
 
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 }  // namespace tensorflow

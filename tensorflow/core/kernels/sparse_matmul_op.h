@@ -16,12 +16,12 @@ limitations under the License.
 #ifndef TENSORFLOW_CORE_KERNELS_SPARSE_MATMUL_OP_H_
 #define TENSORFLOW_CORE_KERNELS_SPARSE_MATMUL_OP_H_
 
-#include "third_party/eigen3/Eigen/Core"
+#include "Eigen/Core"  // from @eigen_archive
 #include "tensorflow/core/platform/byte_order.h"
 #include "tensorflow/core/platform/types.h"
 
 #if defined(PLATFORM_WINDOWS)
-#include "tensorflow/core/platform/windows/intrinsics_port.h"
+#include "xla/tsl/platform/windows/intrinsics_port.h"
 #endif
 
 namespace Eigen {
@@ -31,11 +31,11 @@ namespace internal {
 // in the lower 16-bits of input
 template <typename Packet>
 EIGEN_DEVICE_FUNC inline Packet pexpand_bf16_l(const Packet& from) {
-  tensorflow::uint32 tmp;
+  uint32_t tmp;
 #if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
   tmp = (reinterpret_cast<const tensorflow::uint32&>(from)) & 0xffff0000;
 #else
-  tmp = (reinterpret_cast<const tensorflow::uint32&>(from) << 16) & 0xffff0000;
+  tmp = (reinterpret_cast<const uint32_t&>(from) << 16) & 0xffff0000;
 #endif
   return reinterpret_cast<const float&>(tmp);
 }
@@ -44,16 +44,50 @@ EIGEN_DEVICE_FUNC inline Packet pexpand_bf16_l(const Packet& from) {
 // in the upper 16-bits of input
 template <typename Packet>
 EIGEN_DEVICE_FUNC inline Packet pexpand_bf16_u(const Packet& from) {
-  tensorflow::uint32 tmp;
+  uint32_t tmp;
 #if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
   tmp = (reinterpret_cast<const tensorflow::uint32&>(from) << 16) & 0xffff0000;
 #else
-  tmp = (reinterpret_cast<const tensorflow::uint32&>(from)) & 0xffff0000;
+  tmp = (reinterpret_cast<const uint32_t&>(from)) & 0xffff0000;
 #endif
   return reinterpret_cast<const float&>(tmp);
 }
 
 // Specialization non-scalar version on non-sse.
+// SVE vector implementation for PacketXf
+#if defined(__ARM_FEATURE_SVE) && defined(EIGEN_ARM64_USE_SVE)
+template <typename Packet>
+EIGEN_DEVICE_FUNC inline PacketXf pexpand_bf16_l(const PacketXf& from) {
+  svbool_t pg = svptrue_b32();
+
+  // Reinterpret float32 as uint16 (so we can unpack half words)
+  svuint16_t from_u16 = svreinterpret_u16_f32(from);
+
+  // Unpack lower 16-bit halves to 32-bit ints, shift into float32 format
+  svuint32_t unpacked_lo = svunpklo_u32(from_u16);
+  svuint32_t widened =
+      svlsl_n_u32_x(pg, unpacked_lo, 16);  // shift left to match float layout
+
+  return svreinterpret_f32_u32(widened);
+}
+
+// Expand the upper BF16s (i.e., second 16-bit half of each 32-bit float)
+template <typename Packet>
+EIGEN_DEVICE_FUNC inline PacketXf pexpand_bf16_u(const PacketXf& from) {
+  svbool_t pg = svptrue_b32();
+
+  // Reinterpret float32 as uint16 (so we can unpack half words)
+  svuint16_t from_u16 = svreinterpret_u16_f32(from);
+
+  // Unpack upper 16-bit halves to 32-bit ints, shift into float32 format
+  svuint32_t unpacked_hi = svunpkhi_u32(from_u16);
+  svuint32_t widened =
+      svlsl_n_u32_x(pg, unpacked_hi, 16);  // shift left to match float layout
+
+  return svreinterpret_f32_u32(widened);
+}
+#endif
+
 // Enable vectorization on z13 and higher
 #if defined(EIGEN_VECTORIZE_ALTIVEC) || defined(EIGEN_VECTORIZE_VSX) || \
     defined(EIGEN_VECTORIZE_NEON) || defined(EIGEN_VECTORIZE_ZVECTOR)
@@ -152,6 +186,40 @@ EIGEN_STRONG_INLINE Packet4f pload2bf16<Packet4f>(const float* from) {
   p[2] = (ir[0] << 16) & 0xffff0000;
   p[3] = ir[0] & 0xffff0000;
   return ploadu<Packet4f>(reinterpret_cast<float*>(p));
+}
+#endif
+
+#if defined(EIGEN_VECTORIZE_NEON)
+// Return a packet with the first value of the input Packet replicated
+template <>
+EIGEN_STRONG_INLINE Packet4f pbroadcast_first<Packet4f>(const Packet4f& a) {
+  return pset1<Packet4f>(pfirst(a));
+}
+template <>
+EIGEN_STRONG_INLINE Packet2f pbroadcast_first<Packet2f>(const Packet2f& a) {
+  return pset1<Packet2f>(pfirst(a));
+}
+
+// Return a packet with the second value of the input Packet replicated
+template <>
+EIGEN_STRONG_INLINE Packet4f pbroadcast_second<Packet4f>(const Packet4f& a) {
+  return pset1<Packet4f>(vgetq_lane_f32(a, 1));
+}
+template <>
+EIGEN_STRONG_INLINE Packet2f pbroadcast_second<Packet2f>(const Packet2f& a) {
+  return pset1<Packet2f>(vget_lane_f32(a, 1));
+}
+
+// Return a packet with the third value of the input Packet replicated
+template <>
+EIGEN_STRONG_INLINE Packet4f pbroadcast_third<Packet4f>(const Packet4f& a) {
+  return pset1<Packet4f>(vgetq_lane_f32(a, 2));
+}
+
+// Return a packet with the fourth value of the input Packet replicated
+template <>
+EIGEN_STRONG_INLINE Packet4f pbroadcast_fourth<Packet4f>(const Packet4f& a) {
+  return pset1<Packet4f>(vgetq_lane_f32(a, 3));
 }
 #endif
 

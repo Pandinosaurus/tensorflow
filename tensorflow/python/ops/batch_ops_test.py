@@ -14,17 +14,15 @@
 # ==============================================================================
 
 """Tests for the currently experimental in-graph batch ops."""
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import threading
 import time
 import numpy as np
 
 from tensorflow.core.protobuf import config_pb2
 from tensorflow.python.eager import context
+from tensorflow.python.framework import constant_op
 from tensorflow.python.framework import dtypes
+from tensorflow.python.framework import errors
 from tensorflow.python.framework import function
 from tensorflow.python.framework import ops
 from tensorflow.python.framework import test_util
@@ -34,6 +32,7 @@ from tensorflow.python.ops import batch_ops
 from tensorflow.python.ops import gen_batch_ops
 from tensorflow.python.ops import gen_functional_ops
 from tensorflow.python.ops import math_ops
+from tensorflow.python.ops import random_ops
 from tensorflow.python.ops import resource_variable_ops
 from tensorflow.python.ops import script_ops
 from tensorflow.python.ops import variables
@@ -236,6 +235,84 @@ class BatchOpsTest(test.TestCase):
       worker_thread.join()
       self.assertEqual(thread_results[0], [2])
       self.assertEqual(main_results[0], [3])
+
+  def testUnbatchInvalidIdArg(self):
+    """Tests that unbatch work together."""
+    if context.executing_eagerly():
+      batched_tensor = constant_op.constant(
+          value=np.random.random(size=(3, 3, 1)), dtype=dtypes.float64)
+      batched_index = constant_op.constant(
+          value=np.random.randint(0, 100, size=(3, 3)), dtype=dtypes.int64
+      )
+      arg_id = constant_op.constant(
+          value=np.random.randint(0, 100, size=(3, 3, 1)), dtype=dtypes.int64)
+
+      with self.assertRaisesRegex(errors.InvalidArgumentError,
+                                  "Input id should be scalar;"):
+        batch_ops.unbatch(
+            batched_tensor=batched_tensor,
+            batch_index=batched_index,
+            id=arg_id,
+            timeout_micros=50,
+            container="",
+            shared_name="",
+        )
+
+  def testUnbatchInvalidIndexRank(self):
+    # Regression test for GitHub issue 104846: a batch_index tensor that is
+    # not a rank-2 matrix used to crash the process with a fatal CHECK
+    # failure instead of raising InvalidArgumentError.
+    if context.executing_eagerly():
+      for bad_index in (
+          constant_op.constant([0], dtype=dtypes.int64),
+          constant_op.constant(0, dtype=dtypes.int64),
+      ):
+        with self.assertRaisesRegex(
+            errors.InvalidArgumentError,
+            r"Expected a matrix of shape \[batch_size, 3\]",
+        ):
+          batch_ops.unbatch(
+              batched_tensor=constant_op.constant([1], dtype=dtypes.int32),
+              batch_index=bad_index,
+              id=constant_op.constant(0, dtype=dtypes.int64),
+              timeout_micros=0,
+              container="",
+              shared_name="",
+          )
+
+  def testUnbatchInvalidDataRank(self):
+    # A scalar data tensor used to reach a dimension access with undefined
+    # behavior and crash the process on a downstream consistency check.
+    if context.executing_eagerly():
+      with self.assertRaisesRegex(
+          errors.InvalidArgumentError, "Expected at least a vector"
+      ):
+        batch_ops.unbatch(
+            batched_tensor=constant_op.constant(5.0),
+            batch_index=constant_op.constant([[0, 1, 0]], dtype=dtypes.int64),
+            id=constant_op.constant(0, dtype=dtypes.int64),
+            timeout_micros=0,
+            container="",
+            shared_name="",
+        )
+
+  def testUnbatchGradInvalidIndexRank(self):
+    # A batch_index that is not a rank-2 matrix was rejected only by way of
+    # an out-of-range dimension access whose result happened to fail a later
+    # size comparison. Validate the rank explicitly instead.
+    if context.executing_eagerly():
+      with self.assertRaisesRegex(
+          errors.InvalidArgumentError,
+          r"Expected a matrix of shape \[batch_size, 3\]",
+      ):
+        gen_batch_ops.unbatch_grad(
+            original_input=constant_op.constant([1.0, 2.0]),
+            batch_index=constant_op.constant(7, dtype=dtypes.int64),
+            grad=constant_op.constant([1.0, 2.0]),
+            id=constant_op.constant(0, dtype=dtypes.int64),
+            container="",
+            shared_name="",
+        )
 
   def testBatchDecoratedWithCapturedInput(self):
     """Tests that the batch_function decorator works."""
@@ -560,6 +637,343 @@ class BatchOpsTest(test.TestCase):
       worker_thread.join()
       # The thread's call should hit the timeout, and thus get 0 results.
       self.assertEqual(len(thread_results), 0)
+
+  def testUnbatchGradInvalidId(self):
+    with self.assertRaisesRegex(
+        (errors.InvalidArgumentError, ValueError),
+        r"Shape must be rank 0|Expected `id` to be scalar",
+    ):
+      self.evaluate(
+          gen_batch_ops.unbatch_grad(
+              original_input=constant_op.constant([1]),
+              batch_index=constant_op.constant([
+                  [0, 0, 0],
+              ], dtype=dtypes.int64),
+              grad=constant_op.constant([
+                  1,
+              ]),
+              id=constant_op.constant([
+                  1,
+                  1,
+              ], dtype=dtypes.int64)))
+
+  def testUnbatchGradScalarGradient(self):
+    grad = constant_op.constant(1, dtype=dtypes.int32)
+    if not context.executing_eagerly():
+      grad = array_ops.placeholder_with_default(grad, shape=None)
+    for input_shape in ([0], [0, 0], [2, 0], [1]):
+      with self.subTest(input_shape=input_shape):
+        with self.assertRaisesRegex(
+            errors.InvalidArgumentError, "`grad` to have rank at least 1"
+        ):
+          self.evaluate(
+              gen_batch_ops.unbatch_grad(
+                  original_input=constant_op.constant(
+                      1, shape=input_shape, dtype=dtypes.int32
+                  ),
+                  batch_index=constant_op.constant(
+                      [[0, 0, 1]], dtype=dtypes.int64
+                  ),
+                  grad=grad,
+                  id=constant_op.constant(0, dtype=dtypes.int64),
+                  shared_name="unbatch_grad_scalar_gradient",
+              )
+          )
+
+  def testUnbatchGradScalarGradientShape(self):
+    if context.executing_eagerly():
+      return
+    with self.assertRaisesRegex(ValueError, "Shape must be at least rank 1"):
+      gen_batch_ops.unbatch_grad(
+          original_input=constant_op.constant([1.0]),
+          batch_index=constant_op.constant([[0, 0, 1]], dtype=dtypes.int64),
+          grad=constant_op.constant(1.0),
+          id=constant_op.constant(0, dtype=dtypes.int64),
+      )
+
+  def testUnbatchGradInvalidStaticShapes(self):
+    if context.executing_eagerly():
+      return
+    for index_shape, id_shape, message in (
+        ([], [], "Shape must be rank 2"),
+        ([0, 5], [], "Dimension must be 3"),
+        ([0, 3], [1], "Shape must be rank 0"),
+    ):
+      with self.subTest(index_shape=index_shape, id_shape=id_shape):
+        with self.assertRaisesRegex(ValueError, message):
+          gen_batch_ops.unbatch_grad(
+              original_input=constant_op.constant([], dtype=dtypes.float32),
+              batch_index=constant_op.constant(
+                  0, shape=index_shape, dtype=dtypes.int64
+              ),
+              grad=constant_op.constant([], dtype=dtypes.float32),
+              id=constant_op.constant(0, shape=id_shape, dtype=dtypes.int64),
+          )
+
+  def testUnbatchGradInvalidDynamicShapes(self):
+    for input_shape in ([0], [2, 0], [1]):
+      for index, arg_id, message in (
+          (np.array(0, dtype=np.int64), np.int64(0), "Expected a matrix"),
+          (np.empty((0, 5), dtype=np.int64), np.int64(0), "Wrong shape"),
+          (np.empty((0, 3), dtype=np.int64), [0], "`id` to be scalar"),
+      ):
+        with self.subTest(input_shape=input_shape, index=index, arg_id=arg_id):
+          batch_index = constant_op.constant(index, dtype=dtypes.int64)
+          batch_id = constant_op.constant(arg_id, dtype=dtypes.int64)
+          if not context.executing_eagerly():
+            batch_index = array_ops.placeholder_with_default(
+                batch_index, shape=None
+            )
+            batch_id = array_ops.placeholder_with_default(batch_id, shape=None)
+          with self.assertRaisesRegex(errors.InvalidArgumentError, message):
+            self.evaluate(
+                gen_batch_ops.unbatch_grad(
+                    original_input=constant_op.constant(0.0, shape=input_shape),
+                    batch_index=batch_index,
+                    grad=constant_op.constant([1.0]),
+                    id=batch_id,
+                )
+            )
+
+  def testUnbatchGradEmptyOriginalInput(self):
+    for batch_id, grad_shape in enumerate(
+        ([0], [2], [2, 0], [2, 3], [2, 3, 4])
+    ):
+      with self.subTest(grad_shape=grad_shape):
+        result = self.evaluate(
+            gen_batch_ops.unbatch_grad(
+                original_input=constant_op.constant([], shape=[0, 0]),
+                batch_index=constant_op.constant(
+                    [], shape=[0, 3], dtype=dtypes.int64
+                ),
+                grad=constant_op.constant(1.0, shape=grad_shape),
+                id=constant_op.constant(batch_id, dtype=dtypes.int64),
+                shared_name="unbatch_grad_empty_original_input",
+            )
+        )
+        self.assertAllEqual(result.shape, [0] + grad_shape[1:])
+
+  def testUnbatchGradValidAfterScalarGradient(self):
+    def unbatch_grad(grad):
+      grad = constant_op.constant(grad)
+      if not context.executing_eagerly():
+        grad = array_ops.placeholder_with_default(grad, shape=None)
+      return gen_batch_ops.unbatch_grad(
+          original_input=constant_op.constant([1.0]),
+          batch_index=constant_op.constant([[0, 0, 1]], dtype=dtypes.int64),
+          grad=grad,
+          id=constant_op.constant(0, dtype=dtypes.int64),
+          shared_name="unbatch_grad_after_scalar_gradient",
+      )
+
+    with self.assertRaisesRegex(
+        errors.InvalidArgumentError, "`grad` to have rank at least 1"
+    ):
+      self.evaluate(unbatch_grad(1.0))
+    self.assertAllEqual(self.evaluate(unbatch_grad([2.0])), [2.0])
+
+  def testUnbatchGradValidAfterInvalidIndex(self):
+    for batch_id, (index, message) in enumerate((
+        (np.array(0, dtype=np.int64), "Expected a matrix"),
+        (np.empty((0, 5), dtype=np.int64), "Wrong shape"),
+        (np.empty((0, 3), dtype=np.int64), "batch_index is empty"),
+    )):
+
+      def unbatch_grad(batch_index):
+        batch_index = constant_op.constant(batch_index, dtype=dtypes.int64)
+        if not context.executing_eagerly():
+          batch_index = array_ops.placeholder_with_default(
+              batch_index, shape=None
+          )
+        return gen_batch_ops.unbatch_grad(
+            original_input=constant_op.constant([1.0]),
+            batch_index=batch_index,
+            grad=constant_op.constant([2.0]),
+            id=constant_op.constant(batch_id, dtype=dtypes.int64),
+            shared_name="unbatch_grad_after_invalid_index",
+        )
+
+      with self.subTest(batch_id=batch_id):
+        with self.assertRaisesRegex(errors.InvalidArgumentError, message):
+          self.evaluate(unbatch_grad(index))
+        self.assertAllEqual(
+            self.evaluate(unbatch_grad([[batch_id, 0, 1]])), [2.0]
+        )
+
+  def testUnbatchGradInvalidBatchId(self):
+    with self.assertRaisesRegex(
+        (errors.InvalidArgumentError, ValueError),
+        r"Dimension must be 3|Expected 1st dimension size to be 3",
+    ):
+      self.evaluate(
+          gen_batch_ops.unbatch_grad(
+              original_input=constant_op.constant([1]),
+              batch_index=constant_op.constant(
+                  [
+                      [0, 0],
+                  ],
+                  dtype=dtypes.int64,
+              ),
+              grad=constant_op.constant([
+                  1,
+              ]),
+              id=constant_op.constant(1, dtype=dtypes.int64),
+          )
+      )
+
+  def testUnbatchGradInvalidArgs(self):
+    original_input = random_ops.random_uniform(
+        shape=(3, 1), dtype=dtypes.float64, maxval=None)
+    batch_index = random_ops.random_uniform(
+        shape=(3, 1), dtype=dtypes.int64, maxval=65536)
+    grad = random_ops.random_uniform(
+        shape=(3, 1), dtype=dtypes.float64, maxval=None)
+    batch_id = random_ops.random_uniform(
+        shape=(3, 1), dtype=dtypes.int64, maxval=65536)
+    with self.assertRaisesRegex(
+        (errors.InvalidArgumentError, ValueError),
+        r"Shape must be rank 0|Expected `id` to be scalar|"
+        r"Dimension must be 3|Expected 1st dimension size to be 3",
+    ):
+      self.evaluate(
+          gen_batch_ops.unbatch_grad(
+              original_input=original_input,
+              batch_index=batch_index,
+              grad=grad,
+              id=batch_id,
+              container="",
+              shared_name="",
+              name=""))
+
+  def testUnbatchInvalidSliceBounds(self):
+    # Regression test for GitHub issue 65633: invalid slice bounds or
+    # cumulative sizes in batch_index caused fatal CHECK failures.
+    # Inverted slice range (end < start)
+    with self.assertRaisesRegex(
+        errors.InvalidArgumentError, "Expected 0 <= start <= end"
+    ):
+      self.evaluate(
+          batch_ops.unbatch(
+              batched_tensor=constant_op.constant(
+                  [[1, 2], [3, 4]], dtype=dtypes.int32
+              ),
+              batch_index=constant_op.constant([[0, 2, 1]], dtype=dtypes.int64),
+              id=constant_op.constant(0, dtype=dtypes.int64),
+              timeout_micros=0,
+              container="",
+              shared_name="",
+          )
+      )
+
+    # Negative start index
+    with self.assertRaisesRegex(
+        errors.InvalidArgumentError, "Expected 0 <= start <= end"
+    ):
+      self.evaluate(
+          batch_ops.unbatch(
+              batched_tensor=constant_op.constant(
+                  [[1, 2], [3, 4]], dtype=dtypes.int32
+              ),
+              batch_index=constant_op.constant(
+                  [[0, -1, 1]], dtype=dtypes.int64
+              ),
+              id=constant_op.constant(0, dtype=dtypes.int64),
+              timeout_micros=0,
+              container="",
+              shared_name="",
+          )
+      )
+
+    # End index exceeds dim0
+    with self.assertRaisesRegex(
+        errors.InvalidArgumentError, "exceeds dimension 0 size"
+    ):
+      self.evaluate(
+          batch_ops.unbatch(
+              batched_tensor=constant_op.constant(
+                  [[1, 2], [3, 4]], dtype=dtypes.int32
+              ),
+              batch_index=constant_op.constant([[0, 1, 5]], dtype=dtypes.int64),
+              id=constant_op.constant(0, dtype=dtypes.int64),
+              timeout_micros=0,
+              container="",
+              shared_name="",
+          )
+      )
+
+    # Cumulative split sizes exceed dim0 (overlapping rows)
+    with self.assertRaisesRegex(
+        errors.InvalidArgumentError, "Sum of split sizes must not exceed"
+    ):
+      self.evaluate(
+          batch_ops.unbatch(
+              batched_tensor=constant_op.constant(
+                  [[1], [2], [3]], dtype=dtypes.int32
+              ),
+              batch_index=constant_op.constant(
+                  [[0, 0, 2], [1, 1, 3]], dtype=dtypes.int64
+              ),
+              id=constant_op.constant(0, dtype=dtypes.int64),
+              timeout_micros=0,
+              container="",
+              shared_name="",
+          )
+      )
+
+  def testUnbatchSplitSizesOverflow(self):
+    # Two valid rows whose sizes sum past INT64_MAX on a zero-element input.
+    int64_max = np.iinfo(np.int64).max
+    shape = constant_op.constant([int64_max, 0], dtype=dtypes.int64)
+    with self.assertRaisesRegex(
+        errors.InvalidArgumentError, "Sum of split sizes must not exceed"
+    ):
+      self.evaluate(
+          batch_ops.unbatch(
+              batched_tensor=array_ops.zeros(shape, dtypes.int32),
+              batch_index=constant_op.constant(
+                  [[0, 0, int64_max], [1, 0, 1]], dtype=dtypes.int64
+              ),
+              id=constant_op.constant(0, dtype=dtypes.int64),
+              timeout_micros=0,
+              container="",
+              shared_name="",
+          )
+      )
+
+  def testUnbatchShapeInference(self):
+    # Shape functions run only when the op is added to a graph.
+    with ops.Graph().as_default():
+      with self.assertRaisesRegex(ValueError, "Shape must be at least rank 1"):
+        gen_batch_ops.unbatch(
+            batched_tensor=constant_op.constant(1.0),
+            batch_index=constant_op.constant([[0, 0, 1]], dtype=dtypes.int64),
+            id=constant_op.constant(0, dtype=dtypes.int64),
+            timeout_micros=0,
+        )
+
+      with self.assertRaisesRegex(ValueError, "Shape must be rank 2"):
+        gen_batch_ops.unbatch(
+            batched_tensor=constant_op.constant([1.0, 2.0]),
+            batch_index=constant_op.constant([0, 0, 1], dtype=dtypes.int64),
+            id=constant_op.constant(0, dtype=dtypes.int64),
+            timeout_micros=0,
+        )
+
+      with self.assertRaisesRegex(ValueError, "Dimension must be 3"):
+        gen_batch_ops.unbatch(
+            batched_tensor=constant_op.constant([1.0, 2.0]),
+            batch_index=constant_op.constant([[0, 1]], dtype=dtypes.int64),
+            id=constant_op.constant(0, dtype=dtypes.int64),
+            timeout_micros=0,
+        )
+
+      with self.assertRaisesRegex(ValueError, "Shape must be rank 0"):
+        gen_batch_ops.unbatch(
+            batched_tensor=constant_op.constant([1.0, 2.0]),
+            batch_index=constant_op.constant([[0, 0, 1]], dtype=dtypes.int64),
+            id=constant_op.constant([0], dtype=dtypes.int64),
+            timeout_micros=0,
+        )
 
 
 if __name__ == "__main__":

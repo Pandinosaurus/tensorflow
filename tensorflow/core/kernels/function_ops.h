@@ -16,6 +16,7 @@ limitations under the License.
 #ifndef TENSORFLOW_CORE_KERNELS_FUNCTION_OPS_H_
 #define TENSORFLOW_CORE_KERNELS_FUNCTION_OPS_H_
 
+#include "tensorflow/core/framework/full_type_util.h"
 #include "tensorflow/core/framework/function.h"
 #include "tensorflow/core/framework/op_kernel.h"
 
@@ -38,7 +39,8 @@ class ArgOp : public OpKernel {
   int index_;
   DataType dtype_;
 
-  TF_DISALLOW_COPY_AND_ASSIGN(ArgOp);
+  ArgOp(const ArgOp&) = delete;
+  void operator=(const ArgOp&) = delete;
 };
 
 class RetvalOp : public OpKernel {
@@ -53,30 +55,37 @@ class RetvalOp : public OpKernel {
   int index_;
   DataType dtype_;
 
-  TF_DISALLOW_COPY_AND_ASSIGN(RetvalOp);
+  RetvalOp(const RetvalOp&) = delete;
+  void operator=(const RetvalOp&) = delete;
 };
 
 class RemoteCallOp : public AsyncOpKernel {
  public:
   explicit RemoteCallOp(OpKernelConstruction* ctx);
 
-  ~RemoteCallOp() override {}
+  ~RemoteCallOp() override = default;
 
   void ComputeAsync(OpKernelContext* ctx, DoneCallback done) override;
 
-  string TraceString(const OpKernelContext& ctx, bool verbose) const override;
+  std::string TraceString(const OpKernelContext& ctx,
+                          bool verbose) const override;
 
  private:
   NameAttrList func_;
   DataTypeVector input_dtypes_;
   DataTypeVector output_dtypes_;
+  // Note that in the future if all RemoteCall ops have full type
+  // information, the kernel will not need access to the "Tout" Attr and
+  // return_type_ will replace output_dtypes_.
+  FullTypeDef return_type_;
 
   mutex mu_;
-  typedef std::pair<string, FunctionLibraryRuntime*> FunctionTarget;
+  typedef std::pair<std::string, FunctionLibraryRuntime*> FunctionTarget;
   std::map<FunctionTarget, FunctionLibraryRuntime::Handle> handle_cache_
       TF_GUARDED_BY(mu_);
 
-  TF_DISALLOW_COPY_AND_ASSIGN(RemoteCallOp);
+  RemoteCallOp(const RemoteCallOp&) = delete;
+  void operator=(const RemoteCallOp&) = delete;
 };
 
 }  // namespace tensorflow

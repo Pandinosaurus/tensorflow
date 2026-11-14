@@ -23,9 +23,9 @@ limitations under the License.
 
 namespace tensorflow {
 
-Status BackEdgeHelper::Remove(Graph* graph) {
+absl::Status BackEdgeHelper::Remove(Graph* graph) {
   if (graph_ != nullptr) {
-    return errors::Internal("BackEdgeHelper duplicate call to Remove.");
+    return absl::InternalError("BackEdgeHelper duplicate call to Remove.");
   }
   graph_ = graph;
   for (Node* n : graph_->nodes()) {
@@ -41,7 +41,7 @@ Status BackEdgeHelper::Remove(Graph* graph) {
   for (const BackEdge& be : back_edges_) {
     graph_->RemoveEdge(be.edge);
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 const std::vector<BackEdgeHelper::BackEdge>& BackEdgeHelper::RemovedEdges()
@@ -49,18 +49,18 @@ const std::vector<BackEdgeHelper::BackEdge>& BackEdgeHelper::RemovedEdges()
   return back_edges_;
 }
 
-Status BackEdgeHelper::Replace() {
+absl::Status BackEdgeHelper::Replace() {
   if (graph_ == nullptr) {
-    return errors::Internal("BackEdgeHelper Replace called before Remove.");
+    return absl::InternalError("BackEdgeHelper Replace called before Remove.");
   }
   if (replaced_) {
-    return errors::Internal("BackEdgeHelper Replace called more than once.");
+    return absl::InternalError("BackEdgeHelper Replace called more than once.");
   }
   replaced_ = true;
   for (const BackEdge& be : back_edges_) {
     graph_->AddEdge(be.src, be.src_output, be.dst, be.dst_input);
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 }  // namespace tensorflow

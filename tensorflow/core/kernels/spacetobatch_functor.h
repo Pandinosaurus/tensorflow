@@ -18,7 +18,7 @@ limitations under the License.
 
 #include <type_traits>
 
-#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
+#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
 #include "tensorflow/core/framework/bounds_check.h"
 #include "tensorflow/core/framework/tensor.h"
 #include "tensorflow/core/framework/tensor_types.h"
@@ -60,14 +60,14 @@ void SubtleMustCopyFlatHelper(const Tensor& t, OutputType* output) {
 }
 
 // Copies flat contents of `t` to std::vector-like `*output`, which is resized
-// as needed.  `OutputType` may be either `std::vector<int64>` or
-// `gtl::InlinedVector<int64>`.
+// as needed.  `OutputType` may be either `std::vector<int64_t>` or
+// `gtl::InlinedVector<int64_t>`.
 //
 // Precondition: t.dtype() must be either DT_INT32 or DT_INT64.
 template <typename OutputType>
 void SubtleMustCopyFlat(const Tensor& t, OutputType* output) {
   if (t.dtype() == DT_INT32) {
-    SubtleMustCopyFlatHelper<int32, OutputType>(t, output);
+    SubtleMustCopyFlatHelper<int32_t, OutputType>(t, output);
   } else {
     SubtleMustCopyFlatHelper<int64_t, OutputType>(t, output);
   }
@@ -84,8 +84,8 @@ namespace functor {
 // true, then this performs the inverse batch-to-space conversion.
 template <typename Device, typename T, int NUM_BLOCK_DIMS, bool B2S = false>
 struct SpaceToBatchFunctor {
-  using InputT = typename std::conditional<B2S, T, const T>::type;
-  using OutputT = typename std::conditional<B2S, const T, T>::type;
+  using InputT = std::conditional_t<B2S, T, const T>;
+  using OutputT = std::conditional_t<B2S, const T, T>;
   // Implements the space to batch conversion.
   //
   // space_tensor: input tensor of space-to-batch operation.  If B2S = false,
@@ -100,7 +100,7 @@ struct SpaceToBatchFunctor {
   //     then this is the input to the conversion.
   //
   // The caller must ensure that the dimensions of the tensors are correct.
-  Status operator()(
+  absl::Status operator()(
       const Device& d,
       typename TTypes<InputT, NUM_BLOCK_DIMS + 2>::Tensor space_tensor,
       const int64_t block_shape[NUM_BLOCK_DIMS],

@@ -48,7 +48,7 @@ TEST(KernelDefBuilderTest, TypeConstraint) {
 
   def = KernelDefBuilder("C")
             .Device(DEVICE_GPU)
-            .TypeConstraint<int32>("U")
+            .TypeConstraint<int32_t>("U")
             .TypeConstraint<bool>("V")
             .Build();
 
@@ -94,8 +94,8 @@ TEST(KernelDefBuilderTest, Int64Constraint) {
   def = KernelDefBuilder("C")
             .Device(DEVICE_GPU)
             .AttrConstraint("U",
-                            gtl::ArraySlice<int64_t>{int64_t{5}, int64_t{17}})
-            .AttrConstraint("V", string("proto"))
+                            absl::Span<const int64_t>{int64_t{5}, int64_t{17}})
+            .AttrConstraint("V", std::string("proto"))
             .Build();
 
   protobuf::TextFormat::ParseFromString(
@@ -135,8 +135,8 @@ TEST(KernelDefBuilderTest, StringConstraint) {
 
   def = KernelDefBuilder("C")
             .Device(DEVICE_GPU)
-            .AttrConstraint("U", gtl::ArraySlice<const char*>{"boo", "ya"})
-            .AttrConstraint("V", string("proto"))
+            .AttrConstraint("U", absl::Span<const char* const>{"boo", "ya"})
+            .AttrConstraint("V", std::string("proto"))
             .Build();
 
   protobuf::TextFormat::ParseFromString(

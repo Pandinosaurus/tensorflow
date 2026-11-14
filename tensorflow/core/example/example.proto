@@ -1,3 +1,18 @@
+// Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+// ==============================================================================
+
 // Protocol messages for describing input data Examples for machine learning
 // model training or inference.
 syntax = "proto3";
@@ -12,7 +27,6 @@ option java_multiple_files = true;
 option java_package = "org.tensorflow.example";
 option go_package = "github.com/tensorflow/tensorflow/tensorflow/go/core/example/example_protos_go_proto";
 
-// LINT.IfChange
 // An Example is a mostly-normalized data format for storing data for
 // training and inference.  It contains a key-value store (features); where
 // each key (string) maps to a Feature message (which is oneof packed BytesList,
@@ -22,10 +36,8 @@ option go_package = "github.com/tensorflow/tensorflow/tensorflow/go/core/example
 // read and write this format.  That is, the Example is mostly *not* a
 // self-describing format.  In TensorFlow, Examples are read in row-major
 // format, so any configuration that describes data with rank-2 or above
-// should keep this in mind.  For example, to store an M x N matrix of Bytes,
-// the BytesList must contain M*N bytes, with M rows of N contiguous values
-// each.  That is, the BytesList value must store the matrix as:
-//     .... row 0 .... .... row 1 .... // ...........  // ... row M-1 ....
+// should keep this in mind. If you flatten a matrix into a FloatList it should
+// be stored as [ row 0 ... row 1 ... row M-1 ]
 //
 // An Example for a movie recommendation application:
 //   features {
@@ -302,5 +314,3 @@ message SequenceExample {
   Features context = 1;
   FeatureLists feature_lists = 2;
 }
-// LINT.ThenChange(
-//     https://www.tensorflow.org/code/tensorflow/python/training/training.py)

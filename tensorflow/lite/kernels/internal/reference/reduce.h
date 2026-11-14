@@ -15,12 +15,20 @@ limitations under the License.
 #ifndef TENSORFLOW_LITE_KERNELS_INTERNAL_REFERENCE_REDUCE_H_
 #define TENSORFLOW_LITE_KERNELS_INTERNAL_REFERENCE_REDUCE_H_
 
+#include <stddef.h>
+
+#include <algorithm>
+#include <functional>
+#include <limits>
+
+#include "absl/types/span.h"
 #include "ruy/profiler/instrumentation.h"  // from @ruy
 #include "tensorflow/lite/kernels/internal/common.h"
 #include "tensorflow/lite/kernels/internal/cppmath.h"
 #include "tensorflow/lite/kernels/internal/max.h"
 #include "tensorflow/lite/kernels/internal/min.h"
 #include "tensorflow/lite/kernels/internal/quantization_util.h"
+#include "tensorflow/lite/kernels/internal/reduce_common.h"
 #include "tensorflow/lite/kernels/internal/types.h"
 
 // Check if the reduction at index is the first one along the dimensions given
@@ -146,7 +154,7 @@ inline bool ReduceSumImpl(const In* input_data, const int* input_dims,
                           Out* output_data) {
   auto reducer = [](const Out current, const In in) -> Out {
     const Out actual_in = static_cast<Out>(in);
-    return current + actual_in;
+    return AddTensorValuesWithExpectedOverflow<Out>(current, actual_in);
   };
   return Reduce<In, Out>(input_data, input_dims, output_dims, input_num_dims,
                          output_num_dims, axis, num_axis, input_iter, reducer,
@@ -156,15 +164,14 @@ inline bool ReduceSumImpl(const In* input_data, const int* input_dims,
 template <typename T>
 inline bool InitTensorDataForReduce(const int* dims, const int num_dims,
                                     const T init_value, T* data) {
-  size_t num_elements = 1;
-  for (int idx = 0; idx < num_dims; ++idx) {
-    size_t current = static_cast<size_t>(dims[idx]);
-    // Overflow prevention.
-    if (current > 0 &&
-        num_elements > std::numeric_limits<size_t>::max() / current) {
-      return false;
-    }
-    num_elements *= current;
+  if (num_dims < 0 || (dims == nullptr && num_dims != 0)) {
+    return false;
+  }
+  size_t num_elements = 0;
+  if (!reduce_utils::CheckedElementCount(
+          absl::MakeConstSpan(dims, static_cast<size_t>(num_dims)),
+          num_elements)) {
+    return false;
   }
   for (size_t idx = 0; idx < num_elements; ++idx) {
     data[idx] = init_value;
@@ -219,14 +226,15 @@ inline bool Mean(const T* input_data, const int* input_dims,
                  int* temp_index, int* resolved_axis, U* temp_sum) {
   ruy::profiler::ScopeLabel label("Mean");
   // Reset output data.
-  size_t num_outputs = 1;
-  for (int idx = 0; idx < output_num_dims; ++idx) {
-    size_t current = static_cast<size_t>(output_dims[idx]);
-    // Overflow prevention.
-    if (num_outputs > std::numeric_limits<size_t>::max() / current) {
-      return false;
-    }
-    num_outputs *= current;
+  if (output_num_dims < 0 || (output_dims == nullptr && output_num_dims != 0)) {
+    return false;
+  }
+  size_t num_outputs = 0;
+  if (!reduce_utils::CheckedElementCount(
+          absl::MakeConstSpan(output_dims,
+                              static_cast<size_t>(output_num_dims)),
+          num_outputs)) {
+    return false;
   }
   for (size_t idx = 0; idx < num_outputs; ++idx) {
     output_data[idx] = T();
@@ -247,14 +255,17 @@ inline bool Mean(const T* input_data, const int* input_dims,
   }
 
   // Calculate mean by dividing output_data by num of aggregated element.
-  size_t num_elements_in_axis = 1;
-  for (int idx = 0; idx < num_resolved_axis; ++idx) {
-    size_t current = static_cast<size_t>(input_dims[resolved_axis[idx]]);
-    // Overflow prevention.
-    if (current > (std::numeric_limits<size_t>::max() / num_elements_in_axis)) {
-      return false;
-    }
-    num_elements_in_axis *= current;
+  if (input_num_dims < 0 || (input_dims == nullptr && input_num_dims != 0) ||
+      (resolved_axis == nullptr && num_resolved_axis != 0)) {
+    return false;
+  }
+  size_t num_elements_in_axis = 0;
+  if (!reduce_utils::CheckedReducedElementCount(
+          absl::MakeConstSpan(input_dims, static_cast<size_t>(input_num_dims)),
+          absl::MakeConstSpan(resolved_axis,
+                              static_cast<size_t>(num_resolved_axis)),
+          num_elements_in_axis)) {
+    return false;
   }
 
   if (num_elements_in_axis > 0) {
@@ -266,11 +277,11 @@ inline bool Mean(const T* input_data, const int* input_dims,
   return true;
 }
 
-template <typename T>
 inline void Mean(const tflite::MeanParams& op_params,
                  const RuntimeShape& unextended_input_shape,
-                 const T* input_data,
-                 const RuntimeShape& unextended_output_shape, T* output_data) {
+                 const float* input_data,
+                 const RuntimeShape& unextended_output_shape,
+                 float* output_data) {
   ruy::profiler::ScopeLabel label("Mean4D");
 
   // Current implementation only supports dimension equals 4 and simultaneous
@@ -310,78 +321,21 @@ inline void Mean(const tflite::MeanParams& op_params,
   }
 }
 
-inline void Mean(const tflite::MeanParams& op_params,
-                 const RuntimeShape& unextended_input_shape,
-                 const uint8_t* input_data, int32_t input_zero_point,
-                 float input_scale, const RuntimeShape& unextended_output_shape,
-                 uint8_t* output_data, int32_t output_zero_point,
-                 float output_scale) {
-  ruy::profiler::ScopeLabel label("Mean4D/Uint8");
-
-  // Current implementation only supports dimension equals 4 and simultaneous
-  // reduction over width and height.
-  TFLITE_CHECK_EQ(unextended_input_shape.DimensionsCount(), 4);
-  TFLITE_CHECK_LE(unextended_output_shape.DimensionsCount(), 4);
-  const RuntimeShape input_shape =
-      RuntimeShape::ExtendedShape(4, unextended_input_shape);
-  const RuntimeShape output_shape =
-      RuntimeShape::ExtendedShape(4, unextended_output_shape);
-  const int output_batch = output_shape.Dims(0);
-  const int output_height = output_shape.Dims(1);
-  const int output_width = output_shape.Dims(2);
-  const int output_depth = output_shape.Dims(3);
-  const int input_height = input_shape.Dims(1);
-  const int input_width = input_shape.Dims(2);
-  const float num_elements_in_axis = input_width * input_height;
-
-  TFLITE_CHECK_EQ(op_params.axis_count, 2);
-  TFLITE_CHECK((op_params.axis[0] == 1 && op_params.axis[1] == 2) ||
-               (op_params.axis[0] == 2 && op_params.axis[1] == 1));
-  TFLITE_CHECK_EQ(output_height, 1);
-  TFLITE_CHECK_EQ(output_width, 1);
-
-  constexpr int32_t kMinValue = std::numeric_limits<uint8_t>::min();
-  constexpr int32_t kMaxValue = std::numeric_limits<uint8_t>::max();
-
-  float temp = input_zero_point * input_scale / output_scale;
-  temp = temp > 0 ? temp + 0.5f : temp - 0.5f;
-  int32_t bias = output_zero_point - static_cast<int32_t>(temp);
-  double real_scale =
-      static_cast<double>(input_scale / (num_elements_in_axis * output_scale));
-
-  int32_t multiplier;
-  int shift;
-  QuantizeMultiplier(real_scale, &multiplier, &shift);
-  for (int out_b = 0; out_b < output_batch; ++out_b) {
-    for (int out_d = 0; out_d < output_depth; ++out_d) {
-      int32_t acc = 0;
-      for (int in_h = 0; in_h < input_height; ++in_h) {
-        for (int in_w = 0; in_w < input_width; ++in_w) {
-          acc += input_data[Offset(input_shape, out_b, in_h, in_w, out_d)];
-        }
-      }
-      acc = MultiplyByQuantizedMultiplier(acc, multiplier, shift);
-      acc += bias;
-      acc = std::min(std::max(acc, kMinValue), kMaxValue);
-      output_data[Offset(output_shape, out_b, 0, 0, out_d)] =
-          static_cast<uint8_t>(acc);
-    }
-  }
-}
-
 // Computes the mean of elements across dimensions given in axis.
 // It does so in two stages, first calculates the sum of elements along the axis
 // then divides it by the number of element in axis for quantized values.
 template <typename T, typename U>
 inline bool QuantizedMeanOrSum(const T* input_data, int32_t input_zero_point,
-                               float input_scale, const int* input_dims,
-                               const int input_num_dims, T* output_data,
-                               int32_t output_zero_point, float output_scale,
+                               const int* input_dims, const int input_num_dims,
+                               T* output_data, int32_t output_multiplier,
+                               int output_shift, int32_t output_zero_point,
                                const int* output_dims,
                                const int output_num_dims, const int* axis,
                                const int num_axis_dimensions, bool keep_dims,
                                int* temp_index, int* resolved_axis, U* temp_sum,
                                bool compute_sum) {
+  const int32_t kMinValue = std::numeric_limits<T>::min();
+  const int32_t kMaxValue = std::numeric_limits<T>::max();
   const bool uint8_case = std::is_same<T, uint8_t>::value;
   const bool int16_case = std::is_same<T, int16_t>::value;
   if (uint8_case) {
@@ -392,14 +346,15 @@ inline bool QuantizedMeanOrSum(const T* input_data, int32_t input_zero_point,
     ruy::profiler::ScopeLabel label(compute_sum ? "Sum/Int8" : "Mean/Int8");
   }
   // Reset output data.
-  size_t num_outputs = 1;
-  for (int idx = 0; idx < output_num_dims; ++idx) {
-    size_t current = static_cast<size_t>(output_dims[idx]);
-    // Overflow prevention.
-    if (num_outputs > std::numeric_limits<size_t>::max() / current) {
-      return false;
-    }
-    num_outputs *= current;
+  if (output_num_dims < 0 || (output_dims == nullptr && output_num_dims != 0)) {
+    return false;
+  }
+  size_t num_outputs = 0;
+  if (!reduce_utils::CheckedElementCount(
+          absl::MakeConstSpan(output_dims,
+                              static_cast<size_t>(output_num_dims)),
+          num_outputs)) {
+    return false;
   }
   for (size_t idx = 0; idx < num_outputs; ++idx) {
     output_data[idx] = T();
@@ -428,42 +383,66 @@ inline bool QuantizedMeanOrSum(const T* input_data, int32_t input_zero_point,
   }
 
   // Calculate mean by dividing output_data by num of aggregated element.
-  size_t num_elements_in_axis = 1;
-  for (int idx = 0; idx < num_resolved_axis; ++idx) {
-    size_t current = static_cast<size_t>(input_dims[resolved_axis[idx]]);
-    // Overflow prevention.
-    if (current > (std::numeric_limits<size_t>::max() / num_elements_in_axis)) {
-      return false;
-    }
-    num_elements_in_axis *= current;
+  if (input_num_dims < 0 || (input_dims == nullptr && input_num_dims != 0) ||
+      (resolved_axis == nullptr && num_resolved_axis != 0)) {
+    return false;
+  }
+  int64_t num_elements_in_axis = 0;
+  if (!reduce_utils::CheckedReducedElementCount(
+          absl::MakeConstSpan(input_dims, static_cast<size_t>(input_num_dims)),
+          absl::MakeConstSpan(resolved_axis,
+                              static_cast<size_t>(num_resolved_axis)),
+          num_elements_in_axis)) {
+    return false;
   }
 
-  if (num_elements_in_axis > 0) {
-    const float scale = input_scale / output_scale;
-    if (compute_sum) {
-      // TODO(b/116341117): Eliminate float and do this completely in 8bit.
-      const float bias = -input_zero_point * scale * num_elements_in_axis;
-      for (size_t idx = 0; idx < num_outputs; ++idx) {
-        const U value =
-            static_cast<U>(TfLiteRound(temp_sum[idx] * scale + bias)) +
-            output_zero_point;
-        output_data[idx] = static_cast<T>(value);
-      }
-    } else {
-      const float bias = -input_zero_point * scale;
-      for (size_t idx = 0; idx < num_outputs; ++idx) {
-        float float_mean = static_cast<float>(temp_sum[idx]) /
-                           static_cast<float>(num_elements_in_axis);
-        float result = TfLiteMin(
-            TfLiteRound(float_mean * scale + bias) + output_zero_point,
-            static_cast<float>(std::numeric_limits<T>::max()));
-        result = TfLiteMax(result,
-                           static_cast<float>(std::numeric_limits<T>::min()));
-        output_data[idx] = static_cast<T>(result);
-      }
-    }
+  if (num_elements_in_axis == 0) {
+    return true;
+  }
+
+  // Readapt output rescaling when calculating the mean to integrate a
+  // 1/num_elements_in_axis multiplier.
+  if (!compute_sum) {
+    TFLITE_DCHECK_GE(num_elements_in_axis, 0);
+    int shift =
+        63 - CountLeadingZeros(static_cast<uint64_t>(num_elements_in_axis));
+    // To avoid any overflow risk 'shift' should be <= 32 and to satisfy
+    // 'MultiplyByQuantizedMultiplier' pre-conditions 'output_shift - shift'
+    // should be >= -31. Clamp the value at the price of some precision loss.
+    shift = std::min(shift, 32);
+    shift = std::min(shift, 31 + output_shift);
+    output_multiplier = static_cast<int32_t>(
+        (static_cast<int64_t>(output_multiplier) << shift) /
+        num_elements_in_axis);
+    output_shift = output_shift - shift;
+  }
+
+  for (size_t idx = 0; idx < num_outputs; ++idx) {
+    const U shifted_sum =
+        static_cast<U>(temp_sum[idx] - input_zero_point * num_elements_in_axis);
+    int32_t output = MultiplyByQuantizedMultiplier(
+                         shifted_sum, output_multiplier, output_shift) +
+                     output_zero_point;
+    output = std::min(std::max(output, kMinValue), kMaxValue);
+    output_data[idx] = static_cast<T>(output);
   }
   return true;
+}
+
+template <typename T, typename U>
+inline bool QuantizedMeanOrSumExtraArgs(
+    const T* input_data, int32_t input_zero_point, float input_scale,
+    const int* input_dims, const int input_num_dims, T* output_data,
+    float output_scale, int32_t output_multiplier, int output_shift,
+    int32_t output_zero_point, const int* output_dims,
+    const int output_num_dims, const int* axis, const int num_axis_dimensions,
+    bool keep_dims, int* temp_index, int* resolved_axis, U* temp_sum,
+    bool compute_sum) {
+  return QuantizedMeanOrSum<T, U>(
+      input_data, input_zero_point, input_dims, input_num_dims, output_data,
+      output_multiplier, output_shift, output_zero_point, output_dims,
+      output_num_dims, axis, num_axis_dimensions, keep_dims, temp_index,
+      resolved_axis, temp_sum, compute_sum);
 }
 
 template <typename T>

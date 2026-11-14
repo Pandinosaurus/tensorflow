@@ -19,10 +19,10 @@ limitations under the License.
 #define EIGEN_USE_GPU
 #endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 
+#include "absl/base/prefetch.h"
 #include "tensorflow/core/framework/bounds_check.h"
 #include "tensorflow/core/framework/register_types.h"
 #include "tensorflow/core/kernels/cwise_ops_common.h"
-#include "tensorflow/core/platform/prefetch.h"
 
 namespace tensorflow {
 
@@ -64,38 +64,38 @@ class SelectOp : public OpKernel {
   void ComputeBroadcasting(OpKernelContext* ctx, const Tensor* cond,
                            const Tensor* then, const Tensor* else_) {
     // Preliminary validation of sizes.
-    OP_REQUIRES(
-        ctx, TensorShapeUtils::IsVector(cond->shape()),
-        errors::InvalidArgument("'cond' must be a vector, but saw shape: ",
-                                cond->shape().DebugString()));
-    OP_REQUIRES(
-        ctx,
-        FastBoundsCheck(cond->NumElements(),
-                        std::numeric_limits<Eigen::DenseIndex>::max()),
-        errors::InvalidArgument("cond vector larger than ",
-                                std::numeric_limits<Eigen::DenseIndex>::max()));
-    OP_REQUIRES(
-        ctx,
-        FastBoundsCheck(then->flat_outer_dims<T>().dimension(1),
-                        std::numeric_limits<Eigen::DenseIndex>::max()),
-        errors::InvalidArgument("flat outer dims dim 1 size >= ",
-                                std::numeric_limits<Eigen::DenseIndex>::max()));
+    OP_REQUIRES(ctx, TensorShapeUtils::IsVector(cond->shape()),
+                absl::InvalidArgumentError(
+                    absl::StrCat("'cond' must be a vector, but saw shape: ",
+                                 cond->shape().DebugString())));
+    OP_REQUIRES(ctx,
+                FastBoundsCheck(cond->NumElements(),
+                                std::numeric_limits<Eigen::DenseIndex>::max()),
+                absl::InvalidArgumentError(absl::StrCat(
+                    "cond vector larger than ",
+                    std::numeric_limits<Eigen::DenseIndex>::max())));
+    OP_REQUIRES(ctx,
+                FastBoundsCheck(then->flat_outer_dims<T>().dimension(1),
+                                std::numeric_limits<Eigen::DenseIndex>::max()),
+                absl::InvalidArgumentError(absl::StrCat(
+                    "flat outer dims dim 1 size >= ",
+                    std::numeric_limits<Eigen::DenseIndex>::max())));
 
     OP_REQUIRES(ctx, TensorShapeUtils::IsVectorOrHigher(then->shape()),
-                errors::InvalidArgument(
+                absl::InvalidArgumentError(absl::StrCat(
                     "'then' must be at least a vector, but saw shape: ",
-                    then->shape().DebugString()));
+                    then->shape().DebugString())));
     OP_REQUIRES(
         ctx, then->shape().dim_size(0) == cond->NumElements(),
-        errors::InvalidArgument(
+        absl::InvalidArgumentError(absl::StrCat(
             "Number of batches of 'then' must match size of 'cond', but saw: ",
-            then->shape().dim_size(0), " vs. ", cond->NumElements()));
+            then->shape().dim_size(0), " vs. ", cond->NumElements())));
     OP_REQUIRES(
         ctx, then->shape().IsSameSize(else_->shape()),
-        errors::InvalidArgument(
+        absl::InvalidArgumentError(absl::StrCat(
             "'then' and 'else' must have the same size.  but received: ",
             then->shape().DebugString(), " vs. ",
-            else_->shape().DebugString()));
+            else_->shape().DebugString())));
 
     Tensor* output = nullptr;
     OP_REQUIRES_OK(ctx, ctx->forward_input_or_allocate_output(
@@ -125,17 +125,18 @@ class SelectOp : public OpKernel {
                      const Tensor* then, const Tensor* else_) {
     OP_REQUIRES(
         ctx, then->shape().IsSameSize(else_->shape()),
-        errors::InvalidArgument(
+        absl::InvalidArgumentError(absl::StrCat(
             "'then' and 'else' must have the same size.  but received: ",
             then->shape().DebugString(), " vs. ",
-            else_->shape().DebugString()));
+            else_->shape().DebugString())));
 
     functor::SelectScalarHandler<Device, T> handler;
     handler(ctx, cond, then, else_);
   }
 
  private:
-  TF_DISALLOW_COPY_AND_ASSIGN(SelectOp);
+  SelectOp(const SelectOp&) = delete;
+  void operator=(const SelectOp&) = delete;
 };
 template <typename Device, typename T>
 class SelectV2Op : public OpKernel {
@@ -153,10 +154,10 @@ class SelectV2Op : public OpKernel {
                         else_->shape().dim_sizes()},
                        false);
     OP_REQUIRES(ctx, bcast.IsValid(),
-                errors::InvalidArgument(
+                absl::InvalidArgumentError(absl::StrCat(
                     "condition ", cond->shape().DebugString(), ", then ",
                     then->shape().DebugString(), ", and else ",
-                    else_->shape().DebugString(), " must be broadcastable"));
+                    else_->shape().DebugString(), " must be broadcastable")));
 
     // Broadcast `cond`, `then` and `else` to combined shape,
     // in order to obtain the reshape.
@@ -166,21 +167,21 @@ class SelectV2Op : public OpKernel {
     OP_REQUIRES(
         ctx,
         cond_bcast.IsValid() && then_bcast.IsValid() && else_bcast.IsValid(),
-        errors::InvalidArgument("condition ", cond->shape().DebugString(),
-                                ", then ", then->shape().DebugString(),
-                                ", and else ", else_->shape().DebugString(),
-                                " must be broadcastable"));
+        absl::InvalidArgumentError(absl::StrCat(
+            "condition ", cond->shape().DebugString(), ", then ",
+            then->shape().DebugString(), ", and else ",
+            else_->shape().DebugString(), " must be broadcastable")));
 
     // Combined shape should be the final shape.
-    OP_REQUIRES(
-        ctx,
-        cond_bcast.output_shape() == bcast.output_shape() &&
-            then_bcast.output_shape() == bcast.output_shape() &&
-            else_bcast.output_shape() == bcast.output_shape(),
-        errors::InvalidArgument("condition ", cond->shape().DebugString(),
-                                ", then ", then->shape().DebugString(),
-                                ", and else ", else_->shape().DebugString(),
-                                " must be broadcastable to the same shape"));
+    OP_REQUIRES(ctx,
+                cond_bcast.output_shape() == bcast.output_shape() &&
+                    then_bcast.output_shape() == bcast.output_shape() &&
+                    else_bcast.output_shape() == bcast.output_shape(),
+                absl::InvalidArgumentError(
+                    absl::StrCat("condition ", cond->shape().DebugString(),
+                                 ", then ", then->shape().DebugString(),
+                                 ", and else ", else_->shape().DebugString(),
+                                 " must be broadcastable to the same shape")));
 
     Tensor* output = nullptr;
     const TensorShape output_shape = BCast::ToShape(bcast.output_shape());
@@ -231,15 +232,16 @@ class SelectV2Op : public OpKernel {
         HANDLE_DIM(8);
         break;
       default:
-        ctx->SetStatus(errors::Unimplemented(
+        ctx->SetStatus(absl::UnimplementedError(absl::StrCat(
             "Broadcast between ", ctx->input(0).shape().DebugString(), " and ",
-            ctx->input(1).shape().DebugString(), " is not supported yet."));
+            ctx->input(1).shape().DebugString(), " is not supported yet.")));
         break;
     }
   }
 
  private:
-  TF_DISALLOW_COPY_AND_ASSIGN(SelectV2Op);
+  SelectV2Op(const SelectV2Op&) = delete;
+  void operator=(const SelectV2Op&) = delete;
 };
 
 #define REGISTER_SELECT(type)                                        \
@@ -287,13 +289,20 @@ REGISTER_SELECT_GPU(bool);
 REGISTER_SELECT_GPU(Eigen::half);
 REGISTER_SELECT_GPU(float);
 REGISTER_SELECT_GPU(double);
-REGISTER_SELECT_GPU(int32);
+REGISTER_SELECT_GPU(int32_t);
 REGISTER_SELECT_GPU(int64_t);
 REGISTER_SELECT_GPU(complex64);
 REGISTER_SELECT_GPU(complex128);
 
 #undef REGISTER_SELECT_GPU
 #endif
+
+REGISTER_KERNEL_BUILDER(
+    Name("Select").Device(DEVICE_GPU).TypeConstraint<bfloat16>("T"),
+    SelectOp<GPUDevice, bfloat16>);
+REGISTER_KERNEL_BUILDER(
+    Name("SelectV2").Device(DEVICE_GPU).TypeConstraint<bfloat16>("T"),
+    SelectV2Op<GPUDevice, bfloat16>);
 
 #endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 
@@ -358,15 +367,10 @@ struct BatchSelectFunctorBase {
     const Eigen::DenseIndex batch = cond_vec.size();
     const Eigen::DenseIndex all_but_batch = then_flat_outer_dims.dimension(1);
 
-#if !defined(EIGEN_HAS_INDEX_LIST)
-    Eigen::array<Eigen::DenseIndex, 2> broadcast_dims{{1, all_but_batch}};
-    Eigen::Tensor<Eigen::DenseIndex, 2>::Dimensions reshape_dims{{batch, 1}};
-#else
     Eigen::IndexList<Eigen::type2index<1>, Eigen::DenseIndex> broadcast_dims;
     broadcast_dims.set(1, all_but_batch);
     Eigen::IndexList<Eigen::DenseIndex, Eigen::type2index<1> > reshape_dims;
     reshape_dims.set(0, batch);
-#endif
 
     Assign(d, output_flat_outer_dims,
            cond_vec.reshape(reshape_dims)
@@ -393,12 +397,11 @@ struct BatchSelectFunctor<CPUDevice, T> {
     auto work = [batch_size, output, c, t, e](int64_t start, int64_t end) {
       for (size_t i = start; i < end; ++i) {
         size_t offset = i * batch_size;
-        port::prefetch<port::PREFETCH_HINT_NTA>(
+        absl::PrefetchToLocalCacheNta(
             reinterpret_cast<const void*>(&t[offset + batch_size]));
-        port::prefetch<port::PREFETCH_HINT_NTA>(
+        absl::PrefetchToLocalCacheNta(
             reinterpret_cast<const void*>(&e[offset + batch_size]));
-        port::prefetch<port::PREFETCH_HINT_NTA>(
-            reinterpret_cast<const void*>(&c[i + 1]));
+        absl::PrefetchToLocalCacheNta(reinterpret_cast<const void*>(&c[i + 1]));
         if (c[i]) {
           for (size_t j = 0; j < batch_size; ++j) {
             output[offset + j] = t[offset + j];

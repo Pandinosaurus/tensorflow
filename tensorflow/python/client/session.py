@@ -14,15 +14,10 @@
 # ==============================================================================
 """A client interface for TensorFlow."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import collections
 import functools
 import re
 import threading
-import warnings
 
 import numpy as np
 import wrapt
@@ -35,15 +30,21 @@ from tensorflow.python.eager import monitoring
 from tensorflow.python.framework import device
 from tensorflow.python.framework import error_interpolation
 from tensorflow.python.framework import errors
+from tensorflow.python.framework import indexed_slices
 from tensorflow.python.framework import ops
 from tensorflow.python.framework import sparse_tensor
+from tensorflow.python.framework import stack
+from tensorflow.python.framework import tensor
 from tensorflow.python.ops import session_ops
 from tensorflow.python.platform import tf_logging as logging
 from tensorflow.python.training.experimental import mixed_precision_global_state
 from tensorflow.python.util import compat
+from tensorflow.python.util import deprecation
 from tensorflow.python.util import nest
+from tensorflow.python.util import numpy_compat
 from tensorflow.python.util.compat import collections_abc
 from tensorflow.python.util.tf_export import tf_export
+
 
 _python_session_create_counter = monitoring.Counter(
     '/tensorflow/api/python/session_create_counter',
@@ -77,7 +78,7 @@ class SessionInterface(object):
 
 
 def _get_indexed_slices_value_from_fetches(fetched_vals):
-  return ops.IndexedSlicesValue(
+  return indexed_slices.IndexedSlicesValue(
       fetched_vals[0], fetched_vals[1],
       fetched_vals[2] if len(fetched_vals) == 3 else None)
 
@@ -123,7 +124,7 @@ _REGISTERED_EXPANSIONS = [
      lambda feed: [feed.indices, feed.values, feed.dense_shape]),
     # IndexedSlices are fetched as IndexedSlicesValues. They can be fed
     # IndexedSlicesValues or normal tuples.
-    (ops.IndexedSlices,
+    (indexed_slices.IndexedSlices,
      lambda fetch: ([fetch.values, fetch.indices] if fetch.dense_shape is None
                     else [fetch.values, fetch.indices, fetch.dense_shape
                          ], _get_indexed_slices_value_from_fetches),
@@ -140,14 +141,19 @@ _REGISTERED_EXPANSIONS = [
 
 def _convert_to_numpy_obj(numpy_dtype, obj):
   """Explicitly convert obj based on numpy type except for string type."""
-  return numpy_dtype(obj) if numpy_dtype is not object else str(obj)
+  return (
+      numpy_dtype(np.array(obj).astype(numpy_dtype))
+      if numpy_dtype is not object
+      else str(obj)
+  )
 
 
 def register_session_run_conversion_functions(
     tensor_type,
     fetch_function,
     feed_function=None,
-    feed_function_for_partial_run=None):
+    feed_function_for_partial_run=None,
+):
   """Register fetch and feed conversion functions for `tf.Session.run()`.
 
   This function registers a triple of conversion functions for fetching and/or
@@ -502,7 +508,7 @@ class _FetchHandler(object):
         self._fetches.append(fetch)
         self._ops.append(False)
       # Remember the fetch if it is for a tensor handle.
-      if (isinstance(fetch, ops.Tensor) and
+      if (isinstance(fetch, tensor.Tensor) and
           (fetch.op.type == 'GetSessionHandle' or
            fetch.op.type == 'GetSessionHandleV2')):
         self._fetch_handles[fetch.ref()] = fetch.op.inputs[0].dtype
@@ -692,6 +698,13 @@ class BaseSession(SessionInterface):
       raise TypeError('Argument `config` must be a tf.ConfigProto, but got '
                       f'"{type(config).__name__}"')
 
+    if config.intra_op_parallelism_threads < 0:
+      raise ValueError(
+          'Argument `config.intra_op_parallelism_threads` must be >= 0, '
+          f'but got {config.intra_op_parallelism_threads}. '
+          'Use 0 to let the system pick an appropriate value.'
+      )
+
     if (mixed_precision_global_state.is_mixed_precision_graph_rewrite_enabled()
         and config.graph_options.rewrite_options.auto_mixed_precision !=
         rewriter_config_pb2.RewriterConfig.OFF):
@@ -711,7 +724,8 @@ class BaseSession(SessionInterface):
     opts = tf_session.TF_NewSessionOptions(target=self._target, config=config)
     try:
       # pylint: disable=protected-access
-      self._session = tf_session.TF_NewSessionRef(self._graph._c_graph, opts)
+      with self._graph._c_graph.get() as c_graph:
+        self._session = tf_session.TF_NewSessionRef(c_graph, opts)
       # pylint: enable=protected-access
     finally:
       tf_session.TF_DeleteSessionOptions(opts)
@@ -856,7 +870,7 @@ class BaseSession(SessionInterface):
     Returns:
       A context manager using this session as the default session.
     """
-    return ops.default_session(self)
+    return stack.default_session(self)
 
   def run(self, fetches, feed_dict=None, options=None, run_metadata=None):
     """Runs operations and evaluates tensors in `fetches`.
@@ -932,7 +946,33 @@ class BaseSession(SessionInterface):
 
     The optional `options` argument expects a [`RunOptions`] proto. The options
     allow controlling the behavior of this particular step (e.g. turning tracing
-    on).
+    on, setting step execution timeouts, or enabling detailed OOM allocation
+    reporting via `report_tensor_allocations_upon_oom`).
+
+    For example, to report detailed tensor allocation information if an
+    out-of-memory
+    (OOM) error occurs during execution (note: this option is supported in
+    Graph mode / `tf.compat.v1.Session` and not in Eager mode):
+
+    ```python
+    run_options = tf.compat.v1.RunOptions(
+        report_tensor_allocations_upon_oom=True)
+    output = session.run(fetches, feed_dict=feed_dict, options=run_options)
+    ```
+
+    To enable execution tracing and set a step execution timeout:
+
+    ```python
+    run_options = tf.compat.v1.RunOptions(
+        trace_level=tf.compat.v1.RunOptions.FULL_TRACE,
+        timeout_in_ms=5000)
+    run_metadata = tf.compat.v1.RunMetadata()
+    output = session.run(
+        fetches,
+        feed_dict=feed_dict,
+        options=run_options,
+        run_metadata=run_metadata)
+    ```
 
     The optional `run_metadata` argument expects a [`RunMetadata`] proto. When
     appropriate, the non-Tensor output of this step will be collected there. For
@@ -979,8 +1019,18 @@ class BaseSession(SessionInterface):
         tf_session.TF_DeleteBuffer(options_ptr)
     return result
 
+  @deprecation.deprecated(
+      '2023-06-01',
+      'This function is deprecated and we do not expect adding new'
+      'functionality to it. Please do not have your code depending'
+      'on this function.',
+  )
   def partial_run(self, handle, fetches, feed_dict=None):
     """Continues the execution with more feeds and fetches.
+
+    NOTE: This function is deprecated and we do not expect adding new
+    functionality to it. Please do not have your code depending on this
+    function.
 
     This is EXPERIMENTAL and subject to change.
 
@@ -1026,8 +1076,18 @@ class BaseSession(SessionInterface):
     # TODO(touts): Support feeding and fetching the same tensor.
     return self._run(handle, fetches, feed_dict, None, None)
 
+  @deprecation.deprecated(
+      '2023-06-01',
+      'This function is deprecated and we do not expect adding new'
+      'functionality to it. Please do not have your code depending'
+      'on this function.',
+  )
   def partial_run_setup(self, fetches, feeds=None):
     """Sets up a graph with feeds and fetches for partial run.
+
+    NOTE: This function is deprecated and we do not expect adding new
+    functionality to it. Please do not have your code depending on this
+    function.
 
     This is EXPERIMENTAL and subject to change.
 
@@ -1137,7 +1197,7 @@ class BaseSession(SessionInterface):
             raise TypeError(
                 f'Cannot interpret feed_dict key as Tensor: {e.args[0]}')
 
-          if isinstance(subfeed_val, ops.Tensor):
+          if isinstance(subfeed_val, tensor.Tensor):
             raise TypeError(
                 'The value of a feed cannot be a tf.Tensor object. Acceptable '
                 'feed values include Python scalars, strings, lists, numpy '
@@ -1160,7 +1220,7 @@ class BaseSession(SessionInterface):
             np_val = subfeed_val.to_numpy_array()
             feed_handles[subfeed_t.ref()] = subfeed_val
           else:
-            np_val = np.asarray(subfeed_val, dtype=subfeed_dtype)
+            np_val = numpy_compat.np_asarray(subfeed_val, subfeed_dtype)
 
           if (not is_tensor_handle_feed and
               not subfeed_t.get_shape().is_compatible_with(np_val.shape)):
@@ -1301,7 +1361,7 @@ class BaseSession(SessionInterface):
         self._call_tf_sessionrun(None, {}, [], target_list, None)
 
       return _single_operation_run
-    elif isinstance(fetches, ops.Tensor):
+    elif isinstance(fetches, tensor.Tensor):
       # Special case for fetching a single tensor, because the
       # function can return the result of `TF_Run()` directly.
       assert len(fetch_list) == 1
@@ -1390,7 +1450,7 @@ class BaseSession(SessionInterface):
           node_def = op.node_def
         except KeyError:
           pass
-      message = error_interpolation.interpolate(message, self._graph)
+      message = error_interpolation.interpolate_graph(message, self._graph)
       if 'only supports NHWC tensor format' in message:
         message += ('\nA possible workaround: Try disabling Grappler optimizer'
                     '\nby modifying the config for creating the session eg.'
@@ -1399,8 +1459,17 @@ class BaseSession(SessionInterface):
       raise type(e)(node_def, op, message)  # pylint: disable=no-value-for-parameter
 
   def _extend_graph(self):
+    self._assert_session_available()
     with self._graph._session_run_lock():  # pylint: disable=protected-access
       tf_session.ExtendSession(self._session)
+
+  def _assert_session_available(self):
+    if self._session is None:
+      raise RuntimeError(
+          'Session is not available. The internal session '
+          'handle is None. This may indicate the session has '
+          'been closed or corrupted.'
+      )
 
   # The threshold to run garbage collection to delete dead tensors.
   _DEAD_HANDLES_THRESHOLD = 10
@@ -1453,11 +1522,13 @@ class BaseSession(SessionInterface):
 
   def _call_tf_sessionrun(self, options, feed_dict, fetch_list, target_list,
                           run_metadata):
+    self._assert_session_available()
     return tf_session.TF_SessionRun_wrapper(self._session, options, feed_dict,
                                             fetch_list, target_list,
                                             run_metadata)
 
   def _call_tf_sessionprun(self, handle, feed_dict, fetch_list):
+    self._assert_session_available()
     return tf_session.TF_SessionPRun_wrapper(self._session, handle, feed_dict,
                                              fetch_list)
 
@@ -1608,7 +1679,7 @@ class Session(BaseSession):
     self._default_graph_context_manager = None
     self._default_session_context_manager = None
 
-  def __enter__(self):
+  def __enter__(self) -> 'Session':
     if self._default_graph_context_manager is None:
       self._default_graph_context_manager = self.graph.as_default()
     else:
@@ -1768,10 +1839,14 @@ class InteractiveSession(BaseSession):
     super(InteractiveSession, self).__init__(target, graph, config)
     with InteractiveSession._count_lock:
       if InteractiveSession._active_session_count > 0:
-        warnings.warn('An interactive session is already active. This can '
-                      'cause out-of-memory errors in some cases. You must '
-                      'explicitly call `InteractiveSession.close()` to release '
-                      'resources held by the other session(s).')
+        logging.error(
+            'An interactive session is already active. This can cause'
+            ' out-of-memory errors or some other unexpected errors (due to'
+            ' the unpredictable timing of garbage collection) in some cases.'
+            ' You must explicitly call `InteractiveSession.close()` to release'
+            ' resources held by the other session(s). Please use `tf.Session()`'
+            ' if you intend to productionize.'
+        )
       InteractiveSession._active_session_count += 1
     # NOTE(mrry): We do not use `Session._closed` here because it has unhelpful
     # semantics (in particular, it is not set to true if `Session.close()` is

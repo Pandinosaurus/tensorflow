@@ -31,7 +31,7 @@ typedef Eigen::GpuDevice GPUDevice;
 namespace functor {
 
 template <>
-struct DenseUpdate<CPUDevice, string, ASSIGN> {
+struct DenseUpdate<CPUDevice, std::string, ASSIGN> {
   void operator()(const CPUDevice& d, typename TTypes<tstring>::Flat params,
                   typename TTypes<tstring>::ConstFlat update) {
     if (params.dimension(0) == 1) {
@@ -47,17 +47,16 @@ struct DenseUpdate<CPUDevice, string, ASSIGN> {
     } else {
       auto work = [&params, &update](int64_t start, int64_t end) {
         for (int i = start; i < end; ++i) {
-          params.data()[i].resize(update.data()[i].size());
-          memmove(const_cast<char*>(params.data()[i].data()),
-                  update.data()[i].data(), update.data()[i].size());
+          params(i).resize(update(i).size());
+          memmove(const_cast<char*>(params(i).data()), update(i).data(),
+                  update(i).size());
         }
       };
       int64_t estimated_string_size;
       if (update.size() > 0) {
         // first element of the tensor seems as good a guess as any of the sizes
         // of the strings contained within...
-        estimated_string_size =
-            std::max(update.data()[0].size(), sizeof(tstring));
+        estimated_string_size = std::max(update(0).size(), sizeof(tstring));
       } else {
         estimated_string_size = sizeof(tstring);
       }
@@ -99,7 +98,7 @@ struct DenseUpdate<CPUDevice, string, ASSIGN> {
             " using device: ", context->device()->name());                    \
     }                                                                         \
     *to = tensor;                                                             \
-    return Status::OK();                                                      \
+    return OkStatus();                                                        \
   }
 
 INSTANTIATE_GET_VARIANT_COPY_FN(CPUDevice, TF_CALL_ALL_TYPES, CPU_DENSE_COPY);

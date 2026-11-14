@@ -16,13 +16,19 @@ limitations under the License.
 #ifndef TENSORFLOW_CORE_GRAPPLER_CLUSTERS_VIRTUAL_CLUSTER_H_
 #define TENSORFLOW_CORE_GRAPPLER_CLUSTERS_VIRTUAL_CLUSTER_H_
 
+#include <memory>
 #include <unordered_map>
+#include <utility>
+#include <vector>
 
+#include "absl/status/status.h"
 #include "tensorflow/core/common_runtime/device_set.h"
 #include "tensorflow/core/grappler/clusters/cluster.h"
 #include "tensorflow/core/grappler/costs/analytical_cost_estimator.h"
 #include "tensorflow/core/grappler/costs/op_level_cost_estimator.h"
 #include "tensorflow/core/grappler/costs/virtual_scheduler.h"
+#include "tensorflow/core/platform/mutex.h"
+#include "tensorflow/core/protobuf/config.pb.h"
 #include "tensorflow/core/protobuf/device_properties.pb.h"
 
 namespace tensorflow {
@@ -34,25 +40,28 @@ namespace grappler {
 class VirtualCluster : public Cluster {
  public:
   explicit VirtualCluster(
-      const std::unordered_map<string, DeviceProperties>& devices);
-  VirtualCluster(const std::unordered_map<string, DeviceProperties>& devices,
-                 std::unique_ptr<OpLevelCostEstimator> node_estimator,
-                 std::unique_ptr<ReadyNodeManager> node_manager);
+      const std::unordered_map<std::string, DeviceProperties>& devices);
+  VirtualCluster(
+      const std::unordered_map<std::string, DeviceProperties>& devices,
+      std::unique_ptr<OpLevelCostEstimator> node_estimator,
+      std::unique_ptr<ReadyNodeManager> node_manager);
   explicit VirtualCluster(const DeviceSet* device_set);
 
   ~VirtualCluster() override;
 
-  string type() const override { return "virtual"; }
+  std::string type() const override { return "virtual"; }
 
-  Status Provision() override;
-  Status Initialize(const GrapplerItem& item) override;
-  Status Run(const GraphDef& graph,
-             const std::vector<std::pair<string, Tensor>>& feed,
-             const std::vector<string>& fetch, RunMetadata* metadata) override;
-  Status Run(const GrapplerItem& item, RunMetadata* metadata) override;
+  absl::Status Provision() override;
+  absl::Status Initialize(const GrapplerItem& item) override;
+  absl::Status Run(const GraphDef& graph,
+                   const std::vector<std::pair<std::string, Tensor>>& feed,
+                   const std::vector<std::string>& fetch,
+                   RunMetadata* metadata) override;
+  absl::Status Run(const GrapplerItem& item, RunMetadata* metadata) override;
   const DeviceSet* GetDeviceSet() const override { return device_set_; }
 
  private:
+  mutable mutex run_mu_;
   std::unique_ptr<AnalyticalCostEstimator> estimator_;
   const DeviceSet* device_set_ = nullptr;
 };

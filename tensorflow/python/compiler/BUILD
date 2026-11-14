@@ -1,9 +1,25 @@
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
 # Description:
 # Python APIs for various Tensorflow backends.
 
-load("//tensorflow:tensorflow.bzl", "if_windows")
+load("@xla//third_party/rules_python/python:py_library.bzl", "py_library")
 
 package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
     default_visibility = ["//visibility:public"],
     licenses = ["notice"],
 )
@@ -11,12 +27,5 @@ package(
 py_library(
     name = "compiler",
     srcs = ["__init__.py"],
-    srcs_version = "PY3",
-    deps = if_windows(
-        ["//tensorflow/python/compiler/tensorrt:trt_convert_windows"],
-        otherwise = ["//tensorflow/python/compiler/tensorrt:init_py"],
-    ) + [
-        "//tensorflow/python/compiler/mlir",
-        "//tensorflow/python/compiler/xla:compiler_py",
-    ],
+    strict_deps = True,
 )

@@ -15,10 +15,14 @@ limitations under the License.
 
 // See docs in ../ops/nn_ops.cc.
 
+#include <cstdint>
+
+#include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
 #define EIGEN_USE_THREADS
 
 #include "tensorflow/core/kernels/batch_norm_op.h"
-#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
+#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
 #include "tensorflow/core/framework/numeric_op.h"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/register_types.h"
@@ -48,25 +52,38 @@ class BatchNormOp : public OpKernel {
     const Tensor& beta = context->input(3);
     const Tensor& gamma = context->input(4);
 
-    OP_REQUIRES(context, input.dims() == 4,
-                errors::InvalidArgument("input must be 4-dimensional",
-                                        input.shape().DebugString()));
+    OP_REQUIRES(
+        context, input.dims() == 4,
+        absl::InvalidArgumentError(absl::StrCat("input must be 4-dimensional",
+                                                input.shape().DebugString())));
     OP_REQUIRES(context, mean.dims() == 1,
-                errors::InvalidArgument("mean must be 1-dimensional",
-                                        mean.shape().DebugString()));
+                absl::InvalidArgumentError(absl::StrCat(
+                    "mean must be 1-dimensional", mean.shape().DebugString())));
     OP_REQUIRES(context, var.dims() == 1,
-                errors::InvalidArgument("var must be 1-dimensional",
-                                        var.shape().DebugString()));
+                absl::InvalidArgumentError(absl::StrCat(
+                    "var must be 1-dimensional", var.shape().DebugString())));
     OP_REQUIRES(context, beta.dims() == 1,
-                errors::InvalidArgument("beta must be 1-dimensional",
-                                        beta.shape().DebugString()));
-    OP_REQUIRES(context, gamma.dims() == 1,
-                errors::InvalidArgument("gamma must be 1-dimensional",
-                                        gamma.shape().DebugString()));
+                absl::InvalidArgumentError(absl::StrCat(
+                    "beta must be 1-dimensional", beta.shape().DebugString())));
+    OP_REQUIRES(
+        context, gamma.dims() == 1,
+        absl::InvalidArgumentError(absl::StrCat("gamma must be 1-dimensional",
+                                                gamma.shape().DebugString())));
+
+    const int64_t depth = input.dim_size(3);
+    OP_REQUIRES(
+        context,
+        mean.NumElements() == depth && var.NumElements() == depth &&
+            beta.NumElements() == depth && gamma.NumElements() == depth,
+        absl::InvalidArgumentError(absl::StrCat(
+            "mean, variance, beta, and gamma must each have ", depth,
+            " elements, got ", mean.NumElements(), ", ", var.NumElements(),
+            ", ", beta.NumElements(), ", and ", gamma.NumElements())));
 
     Tensor* output = nullptr;
     OP_REQUIRES_OK(context,
                    context->allocate_output(0, input.shape(), &output));
+    if (input.NumElements() == 0) return;
 
     functor::BatchNorm<Device, T>()(
         context->eigen_device<Device>(), input.tensor<T, 4>(), mean.vec<T>(),
@@ -98,21 +115,38 @@ class BatchNormGradOp : public OpKernel {
     const Tensor& gamma = context->input(3);
     const Tensor& out_backprop = context->input(4);
 
-    OP_REQUIRES(context, input.dims() == 4,
-                errors::InvalidArgument("input must be 4-dimensional",
-                                        input.shape().DebugString()));
+    OP_REQUIRES(
+        context, input.dims() == 4,
+        absl::InvalidArgumentError(absl::StrCat("input must be 4-dimensional",
+                                                input.shape().DebugString())));
     OP_REQUIRES(context, mean.dims() == 1,
-                errors::InvalidArgument("mean must be 1-dimensional",
-                                        mean.shape().DebugString()));
+                absl::InvalidArgumentError(absl::StrCat(
+                    "mean must be 1-dimensional", mean.shape().DebugString())));
     OP_REQUIRES(context, var.dims() == 1,
-                errors::InvalidArgument("var must be 1-dimensional",
-                                        var.shape().DebugString()));
-    OP_REQUIRES(context, gamma.dims() == 1,
-                errors::InvalidArgument("gamma must be 1-dimensional",
-                                        gamma.shape().DebugString()));
+                absl::InvalidArgumentError(absl::StrCat(
+                    "var must be 1-dimensional", var.shape().DebugString())));
+    OP_REQUIRES(
+        context, gamma.dims() == 1,
+        absl::InvalidArgumentError(absl::StrCat("gamma must be 1-dimensional",
+                                                gamma.shape().DebugString())));
     OP_REQUIRES(context, out_backprop.dims() == 4,
-                errors::InvalidArgument("out_backprop must be 4-dimensional",
-                                        out_backprop.shape().DebugString()));
+                absl::InvalidArgumentError(
+                    absl::StrCat("out_backprop must be 4-dimensional",
+                                 out_backprop.shape().DebugString())));
+    OP_REQUIRES(context, out_backprop.shape() == input.shape(),
+                absl::InvalidArgumentError(absl::StrCat(
+                    "out_backprop must have the same shape as input, got ",
+                    out_backprop.shape().DebugString(), " and ",
+                    input.shape().DebugString())));
+
+    const int64_t depth = input.dim_size(3);
+    OP_REQUIRES(context,
+                mean.NumElements() == depth && var.NumElements() == depth &&
+                    gamma.NumElements() == depth,
+                absl::InvalidArgumentError(absl::StrCat(
+                    "mean, variance, and gamma must each have ", depth,
+                    " elements, got ", mean.NumElements(), ", ",
+                    var.NumElements(), ", and ", gamma.NumElements())));
 
     Tensor* dx = nullptr;
     OP_REQUIRES_OK(context, context->forward_input_or_allocate_output(
@@ -132,6 +166,7 @@ class BatchNormGradOp : public OpKernel {
     }
     Tensor* dg = nullptr;
     OP_REQUIRES_OK(context, context->allocate_output(4, gamma.shape(), &dg));
+    if (depth == 0) return;
 
     // Scratch buffer of [depth] dimension, aka the 4th dimension of input,
     // which is dim_size(3), for calculating various combinations of

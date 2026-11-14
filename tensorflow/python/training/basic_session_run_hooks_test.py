@@ -15,10 +15,6 @@
 # ==============================================================================
 """Tests for basic_session_run_hooks."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import os.path
 import shutil
 import tempfile
@@ -817,8 +813,6 @@ class CheckpointSaverHookTest(test.TestCase):
         self.assertEmpty(gfile.Glob(os.path.join(self.model_dir, '*.meta')))
 
 
-
-
 class CheckpointSaverHookMultiStepTest(test.TestCase):
 
   def setUp(self):
@@ -1199,6 +1193,18 @@ class SummarySaverHookTest(test.TestCase):
       basic_session_run_hooks.SummarySaverHook(
           save_secs=None, save_steps=None, summary_writer=self.summary_writer)
 
+  def test_raise_when_output_dir_and_summary_writer_both_none(self):
+    with self.assertRaisesRegex(
+        ValueError,
+        'At least one of output_dir or summary_writer must be provided.',
+    ):
+      basic_session_run_hooks.SummarySaverHook(
+          save_steps=10,
+          summary_op=self.summary_op,
+          output_dir=None,
+          summary_writer=None,
+      )
+
   def test_save_steps(self):
     hook = basic_session_run_hooks.SummarySaverHook(
         save_steps=8,
@@ -1351,7 +1357,7 @@ class GlobalStepWaiterHookTest(test.TestCase):
       with session_lib.Session() as sess:
         # Mock out calls to time.sleep() to update the global step.
 
-        class Context(object):
+        class Context:
           counter = 0
 
         def mock_sleep_side_effect(seconds):

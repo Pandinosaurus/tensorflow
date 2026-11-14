@@ -20,7 +20,7 @@ limitations under the License.
 #include <string>
 
 #include "flatbuffers/flexbuffers.h"  // from @flatbuffers
-#include "tensorflow/lite/c/common.h"
+#include "tensorflow/lite/core/c/common.h"
 #include "tensorflow/lite/kernels/internal/compatibility.h"
 #include "tensorflow/lite/kernels/internal/tensor.h"
 #include "tensorflow/lite/kernels/internal/tensor_ctypes.h"
@@ -315,11 +315,11 @@ TfLiteStatus GenericPrepare(TfLiteContext* context, TfLiteNode* node) {
 
   // Matching GetWindowedOutputSize in TensorFlow.
   int out_width, out_height, out_depth;
-  params.padding_values = ComputePadding3DValues(
+  TF_LITE_ENSURE_STATUS(ComputePadding3DValuesChecked(
       params.stride_height, params.stride_width, params.stride_depth, 1, 1, 1,
       height, width, depth, params.filter_height, params.filter_width,
       params.filter_depth, params.padding_type, &out_height, &out_width,
-      &out_depth);
+      &out_depth, &params.padding_values));
 
   if (input->type == kTfLiteInt8) {
     TF_LITE_ENSURE_NEAR(context, input->params.scale, output->params.scale,

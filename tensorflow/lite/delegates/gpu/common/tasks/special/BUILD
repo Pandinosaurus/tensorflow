@@ -1,4 +1,24 @@
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_cc//cc:cc_test.bzl", "cc_test")
+load("//tensorflow/lite/delegates/gpu:build_defs.bzl", "gtest_main_no_heapcheck_deps")
+
 package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:LICENSE"],
     default_visibility = ["//visibility:public"],
     licenses = ["notice"],
 )
@@ -8,37 +28,55 @@ cc_library(
     srcs = ["conv_pointwise.cc"],
     hdrs = ["conv_pointwise.h"],
     deps = [
-        "//tensorflow/lite/delegates/gpu/common:data_type",
         "//tensorflow/lite/delegates/gpu/common:model",
         "//tensorflow/lite/delegates/gpu/common:operations",
-        "//tensorflow/lite/delegates/gpu/common:status",
-        "//tensorflow/lite/delegates/gpu/common:types",
         "//tensorflow/lite/delegates/gpu/common:util",
         "//tensorflow/lite/delegates/gpu/common/selectors:subgraph",
-        "//tensorflow/lite/delegates/gpu/common/task:gpu_operation",
-        "//tensorflow/lite/delegates/gpu/common/task:texture2d_desc",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:status_macros",
         "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/types:any",
     ],
 )
 
-cc_library(
-    name = "depthwise_conv_plus_1x1_conv",
-    srcs = ["depthwise_conv_plus_1x1_conv.cc"],
-    hdrs = ["depthwise_conv_plus_1x1_conv.h"],
+cc_test(
+    name = "conv_pointwise_test",
+    srcs = ["conv_pointwise_test.cc"],
+    tags = [
+        "noasan",
+        "nomsan",
+        "notsan",
+        "requires-gpu-sm90",
+    ],
+    # TODO(b/279977471) Once b/279347631 is resolved, check for heap again
     deps = [
-        "//tensorflow/lite/delegates/gpu/common:data_type",
-        "//tensorflow/lite/delegates/gpu/common:operations",
+        ":conv_pointwise",
+        "//tensorflow/lite/delegates/gpu/cl/kernels:cl_test",
+        "//tensorflow/lite/delegates/gpu/common:precision",
         "//tensorflow/lite/delegates/gpu/common:shape",
-        "//tensorflow/lite/delegates/gpu/common:status",
         "//tensorflow/lite/delegates/gpu/common:tensor",
         "//tensorflow/lite/delegates/gpu/common:types",
-        "//tensorflow/lite/delegates/gpu/common:util",
-        "//tensorflow/lite/delegates/gpu/common/task:buffer_desc",
-        "//tensorflow/lite/delegates/gpu/common/task:gpu_object_desc",
         "//tensorflow/lite/delegates/gpu/common/task:gpu_operation",
-        "//tensorflow/lite/delegates/gpu/common/task:work_group_picking",
-        "//tensorflow/lite/delegates/gpu/common/tasks:relu",
-        "@com_google_absl//absl/strings",
+        "//tensorflow/lite/delegates/gpu/common/task:testing_util",
+    ] + gtest_main_no_heapcheck_deps(),
+)
+
+cc_library(
+    name = "dw7x7_conv2to6_concat_conv8to8",
+    srcs = ["dw7x7_conv2to6_concat_conv8to8.cc"],
+    hdrs = ["dw7x7_conv2to6_concat_conv8to8.h"],
+    deps = [
+        "//tensorflow/lite/delegates/gpu/common:data_type",
+        "//tensorflow/lite/delegates/gpu/common:flops_util",
+        "//tensorflow/lite/delegates/gpu/common:model",
+        "//tensorflow/lite/delegates/gpu/common:operations",
+        "//tensorflow/lite/delegates/gpu/common:precision",
+        "//tensorflow/lite/delegates/gpu/common:status",
+        "//tensorflow/lite/delegates/gpu/common:tensor",
+        "//tensorflow/lite/delegates/gpu/common/selectors:subgraph",
+        "//tensorflow/lite/delegates/gpu/common/task:qcom_thin_filter_desc",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/types:any",
     ],
 )
 
@@ -48,15 +86,37 @@ cc_library(
     hdrs = ["fc_fc_add.h"],
     deps = [
         "//tensorflow/lite/delegates/gpu/common:data_type",
+        "//tensorflow/lite/delegates/gpu/common:model",
         "//tensorflow/lite/delegates/gpu/common:operations",
         "//tensorflow/lite/delegates/gpu/common:shape",
         "//tensorflow/lite/delegates/gpu/common:tensor",
         "//tensorflow/lite/delegates/gpu/common:types",
         "//tensorflow/lite/delegates/gpu/common:util",
+        "//tensorflow/lite/delegates/gpu/common/selectors:subgraph",
         "//tensorflow/lite/delegates/gpu/common/task:buffer_desc",
         "//tensorflow/lite/delegates/gpu/common/task:gpu_operation",
-        "//tensorflow/lite/delegates/gpu/common/task:tensor_linear_desc",
-        "//tensorflow/lite/delegates/gpu/common/task:texture2d_desc",
-        "@com_google_absl//absl/memory",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/types:any",
+    ],
+)
+
+cc_library(
+    name = "thin_pointwise_fuser",
+    srcs = ["thin_pointwise_fuser.cc"],
+    hdrs = ["thin_pointwise_fuser.h"],
+    deps = [
+        "//tensorflow/lite/delegates/gpu/common:flops_util",
+        "//tensorflow/lite/delegates/gpu/common:model",
+        "//tensorflow/lite/delegates/gpu/common:precision",
+        "//tensorflow/lite/delegates/gpu/common:util",
+        "//tensorflow/lite/delegates/gpu/common/selectors:subgraph",
+        "//tensorflow/lite/delegates/gpu/common/task:tensor_desc",
+        "//tensorflow/lite/delegates/gpu/common/task:util",
+        "//tensorflow/lite/delegates/gpu/common/tasks:elementwise",
+        "//tensorflow/lite/delegates/gpu/common/tasks:prelu",
+        "//tensorflow/lite/delegates/gpu/common/tasks:relu",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/types:any",
     ],
 )

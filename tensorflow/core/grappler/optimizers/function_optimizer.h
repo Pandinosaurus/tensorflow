@@ -31,12 +31,12 @@ class FunctionOptimizer : public GraphOptimizer {
       : opt_level_(opt_level), lower_control_flow_(lower_control_flow) {}
   ~FunctionOptimizer() override = default;
 
-  string name() const override { return "function_optimizer"; };
+  std::string name() const override { return "function_optimizer"; };
 
   bool UsesFunctionLibrary() const override { return true; }
 
-  Status Optimize(Cluster* cluster, const GrapplerItem& item,
-                  GraphDef* optimized_graph) override;
+  absl::Status Optimize(Cluster* cluster, const GrapplerItem& item,
+                        GraphDef* optimized_graph) override;
 
  private:
   friend class FunctionOptimizerTest;
@@ -46,8 +46,8 @@ class FunctionOptimizer : public GraphOptimizer {
   // `optimized_graph`. Function call nodes inlined or specialized, and
   // instantiated function body or specialized function call nodes will be added
   // to the `optimized_graph`.
-  Status RunFunctionOptimizerPass(const GrapplerItem& item,
-                                  GraphDef* optimized_graph) const;
+  absl::Status RunFunctionOptimizerPass(const GrapplerItem& item,
+                                        GraphDef* optimized_graph) const;
 
   RewriterConfig::Toggle opt_level_;
   bool lower_control_flow_;

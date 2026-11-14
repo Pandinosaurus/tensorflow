@@ -1,36 +1,28 @@
 path: "tensorflow.tpu.experimental"
 tf_module {
   member {
-    name: "AdagradParameters"
-    mtype: "<type \'type\'>"
-  }
-  member {
-    name: "AdamParameters"
-    mtype: "<type \'type\'>"
-  }
-  member {
     name: "DeviceAssignment"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
-    name: "FtrlParameters"
-    mtype: "<type \'type\'>"
+    name: "DeviceOrderMode"
+    mtype: "<class \'enum.EnumType\'>"
   }
   member {
-    name: "StochasticGradientDescentParameters"
-    mtype: "<type \'type\'>"
+    name: "HardwareFeature"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "TPUSystemMetadata"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "Topology"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "embedding"
-    mtype: "<type \'module\'>"
+    mtype: "<class \'module\'>"
   }
   member_method {
     name: "embedding_column"

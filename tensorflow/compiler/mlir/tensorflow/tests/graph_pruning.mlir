@@ -1,9 +1,23 @@
+// Copyright 2026 Google Inc. All Rights Reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+// ==============================================================================
 // RUN: tf-opt %s -split-input-file -tf-executor-graph-pruning | FileCheck %s
 
 // Two islands chained by data-flow contributing to the graph return are
 // preserved.
 // CHECK-LABEL: func @chained_islands(
-func @chained_islands(%arg0 : i32) -> i32 {
+func.func @chained_islands(%arg0 : i32) -> i32 {
 // CHECK: island
 // CHECK: island
   %0 = tf_executor.graph {
@@ -15,12 +29,12 @@ func @chained_islands(%arg0 : i32) -> i32 {
     }
     tf_executor.fetch %2#0 : i32
   }
-  return %0 : i32
+  func.return %0 : i32
 }
 
 // Check that an unused island that doesn't contribute to the fetch is removed.
 // CHECK-LABEL: func @dead_island(
-func @dead_island(%arg0 : i32) -> i32 {
+func.func @dead_island(%arg0 : i32) -> i32 {
 // CHECK: tf_executor.island
 // CHECK-NOT: tf_executor.island
   %0 = tf_executor.graph {
@@ -35,14 +49,14 @@ func @dead_island(%arg0 : i32) -> i32 {
     }
     tf_executor.fetch %1#0 : i32
   }
-  return %0 : i32
+  func.return %0 : i32
 }
 
 
 // Check that NextIteration.sink node isn't deleted when the source is still
 // used, even though it does not have any result.
 // CHECK-LABEL: func @nextiteration_sink_preserved(
-func @nextiteration_sink_preserved(%arg0 : i32) -> i32 {
+func.func @nextiteration_sink_preserved(%arg0 : i32) -> i32 {
 // CHECK: tf_executor.NextIteration.Source
 // CHECK: tf_executor.NextIteration.Sink
   %0 = tf_executor.graph {
@@ -50,13 +64,13 @@ func @nextiteration_sink_preserved(%arg0 : i32) -> i32 {
     tf_executor.NextIteration.Sink[%1#1] %1#0 : i32
     tf_executor.fetch %1#0 : i32
   }
-  return %0 : i32
+  func.return %0 : i32
 }
 
 // Check that NextIteration.sink node is deleted when the source does not have
 // any user other than the sink.
 // CHECK-LABEL: func @nextiteration_deleted(
-func @nextiteration_deleted(%arg0 : i32) -> i32 {
+func.func @nextiteration_deleted(%arg0 : i32) -> i32 {
 // CHECK-NOT: tf_executor.NextIteration.Source
 // CHECK-NOT: tf_executor.NextIteration.Sink
   %0 = tf_executor.graph {
@@ -65,13 +79,13 @@ func @nextiteration_deleted(%arg0 : i32) -> i32 {
     tf_executor.NextIteration.Sink[%1#1] %1#0 : i32
     tf_executor.fetch %arg0 : i32
   }
-  return %0 : i32
+  func.return %0 : i32
 }
 
 // Check that NextIteration.source/sink ops and associated ops are deleted when
 // associated loop is unreachable.
 // CHECK-LABEL: func @unreachable_loop
-func @unreachable_loop(%arg0 : i32) {
+func.func @unreachable_loop(%arg0 : i32) {
 // CHECK:      tf_executor.graph
 // CHECK-NEXT:   tf_executor.fetch
   tf_executor.graph {
@@ -90,13 +104,13 @@ func @unreachable_loop(%arg0 : i32) {
     tf_executor.NextIteration.Sink [%0#1] %11#0 : tensor<*xi32> {T = "tfdtype$DT_INT32"}
     tf_executor.fetch %arg0 : i32
   }
-  return
+  func.return
 }
 
 // Check that NextIteration.sink and associated ops are not deleted when
 // associated loop is reachable.
 // CHECK-LABEL: func @reachable_loop
-func @reachable_loop() {
+func.func @reachable_loop() {
 // CHECK: tf_executor.NextIteration.Source
 // CHECK: "tf.Const"
 // CHECK: tf_executor.Enter
@@ -127,12 +141,12 @@ func @reachable_loop() {
     tf_executor.NextIteration.Sink [%0#1] %11#0 : tensor<*xi32> {T = "tfdtype$DT_INT32"}
     tf_executor.fetch %8#0 : tensor<*xi32>
   }
-  return
+  func.return
 }
 
 // Check that ops leading to a fetch via a control are not removed.
 // CHECK-LABEL: func @control_fetch
-func @control_fetch(%arg0 : i32) {
+func.func @control_fetch(%arg0 : i32) {
 // CHECK: tf_executor.island
 // CHECK: tf_executor.island
 // CHECK: tf_executor.island
@@ -149,7 +163,7 @@ func @control_fetch(%arg0 : i32) {
     }
     tf_executor.fetch %2 : !tf_executor.control
   }
-  return
+  func.return
 }
 
 // -----
@@ -158,7 +172,7 @@ func @control_fetch(%arg0 : i32) {
 // "tf.entry_function" attribute defined is ignored by the pruning pass: this
 // could be a V1 graph imported without feed/fetch/target nodes.
 // CHECK-LABEL: func @main(
-func @main() {
+func.func @main() {
 // CHECK: tf_executor.island
   tf_executor.graph {
     %0 = tf_executor.island {
@@ -166,7 +180,7 @@ func @main() {
     }
     tf_executor.fetch
   }
-  return
+  func.return
 }
 
 // -----
@@ -175,7 +189,7 @@ func @main() {
 // "tf.entry_function" attribute defined with no feed/fetch/target nodes is
 // pruned.
 // CHECK-LABEL: func @main(
-func @main() attributes {tf.entry_function = {control_outputs = "", inputs = "", outputs = ""}} {
+func.func @main() attributes {tf.entry_function = {control_outputs = "", inputs = "", outputs = ""}} {
 // CHECK-NOT: tf_executor.island
   tf_executor.graph {
     %0 = tf_executor.island {
@@ -183,5 +197,24 @@ func @main() attributes {tf.entry_function = {control_outputs = "", inputs = "",
     }
     tf_executor.fetch
   }
-  return
+  func.return
 }
+
+// -----
+
+// Check that an op with must-execute effect is not pruned, even if it is
+// unreachable.
+func.func @must_execute_op() -> () {
+// CHECK: tf_executor.graph
+// CHECK: tf_executor.island
+// CHECK: tf._InternalTestMustExecuteTrait_
+  tf_executor.graph {
+    %1 = tf_executor.island {
+      "tf._InternalTestMustExecuteTrait_"() : () -> ()
+      tf_executor.yield
+    }
+    tf_executor.fetch
+  }
+  func.return
+}
+

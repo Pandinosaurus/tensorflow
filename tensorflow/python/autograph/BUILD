@@ -1,34 +1,41 @@
-load("//tensorflow:tensorflow.bzl", "py_strict_library")
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
+load("@xla//third_party/rules_python/python:py_library.bzl", "py_library")
 
 package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
     licenses = ["notice"],
 )
 
-filegroup(
-    name = "all_files",
-    srcs = glob(
-        ["**/*"],
-        exclude = [
-            "**/METADATA",
-            "**/OWNERS",
-        ],
-    ),
-    visibility = ["//tensorflow:__subpackages__"],
-)
-
-py_strict_library(
+py_library(
     name = "autograph",
     srcs = [
         "__init__.py",
     ],
-    srcs_version = "PY3",
+    strict_deps = True,
     visibility = ["//visibility:public"],
     deps = [
-        "//tensorflow/python:util",
-        "//tensorflow/python/autograph/core",
-        "//tensorflow/python/autograph/impl",
-        "//tensorflow/python/autograph/lang",
-        "//tensorflow/python/autograph/operators",
-        "//tensorflow/python/autograph/utils",
+        "//tensorflow/python/autograph/core:converter",
+        "//tensorflow/python/autograph/impl:api",
+        "//tensorflow/python/autograph/lang:directives",
+        "//tensorflow/python/autograph/lang:special_functions",
+        "//tensorflow/python/autograph/operators:__init__",
+        "//tensorflow/python/autograph/pyct/common_transformers",
+        "//tensorflow/python/autograph/utils:__init__",
+        "//tensorflow/python/autograph/utils:ag_logging",
+        "//tensorflow/python/util:all_util",
     ],
 )

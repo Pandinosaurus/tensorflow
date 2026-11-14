@@ -53,7 +53,8 @@ class ConditionalAccumulator
   //   name:  A name to use for the ConditionalAccumulator.
   //   reduction_type: The reduction type, i.e., MEAN or SUM
   ConditionalAccumulator(const DataType& dtype, const PartialTensorShape& shape,
-                         const string& name, const string& reduction_type)
+                         const std::string& name,
+                         const std::string& reduction_type)
       : TypedConditionalAccumulatorBase<const Tensor>(dtype, shape, name,
                                                       reduction_type) {}
   ~ConditionalAccumulator() override{};
@@ -65,14 +66,14 @@ class ConditionalAccumulator
 
   functor::SetZeroFunctor<Device, T> set_zero_functor_;
 
-  Status ValidateShape(const Tensor* tensor)
+  absl::Status ValidateShape(const Tensor* tensor)
       TF_EXCLUSIVE_LOCKS_REQUIRED(this->mu_) {
     // Must be compatible with accumulated gradient if available
     if (counter_ > 0) {
       if (!accum_grad_.shape().IsSameSize(tensor->shape())) {
-        return errors::InvalidArgument("Shape mismatch: expected ",
-                                       accum_grad_.shape().DebugString(),
-                                       ", got ", tensor->shape().DebugString());
+        return absl::InvalidArgumentError(absl::StrCat(
+            "Shape mismatch: expected ", accum_grad_.shape().DebugString(),
+            ", got ", tensor->shape().DebugString()));
       }
     }
     // Must also be compatible with given shape
@@ -81,7 +82,7 @@ class ConditionalAccumulator
                                      shape_.DebugString(), ", got ",
                                      tensor->shape().DebugString());
     }
-    return Status::OK();
+    return absl::OkStatus();
   }
 
   void AllocateAndAssignToAccumGradFunction(OpKernelContext* ctx,
@@ -127,7 +128,8 @@ class ConditionalAccumulator
     // do nothing
   }
 
-  TF_DISALLOW_COPY_AND_ASSIGN(ConditionalAccumulator);
+  ConditionalAccumulator(const ConditionalAccumulator&) = delete;
+  void operator=(const ConditionalAccumulator&) = delete;
 };
 
 }  // namespace tensorflow

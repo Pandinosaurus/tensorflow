@@ -1,0 +1,75 @@
+/* Copyright 2019 The OpenXLA Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+==============================================================================*/
+
+#ifndef XLA_SERVICE_GPU_TARGET_UTIL_H_
+#define XLA_SERVICE_GPU_TARGET_UTIL_H_
+
+#include <string>
+
+#include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/Module.h"
+#include "llvm/TargetParser/Triple.h"
+#include "xla/xla_data.pb.h"
+
+namespace xla {
+namespace gpu {
+
+// Enumeration to get target specific device math function.
+enum class TargetDeviceFunctionID {
+  kAtan2 = 0,
+  kAtan,
+  kCbrt,
+  kCos,
+  kExp,
+  kExp2,
+  kExpm1,
+  kFmod,
+  kHypot,
+  kLog,
+  kLog1p,
+  kLog2,
+  kPow,
+  kRsqrt,
+  kSin,
+  kSqrt,
+  kTan,
+  kTanh,
+  kErf,
+  kAcosh,
+  kAcos,
+  kSinh,
+  kAsin,
+  kAsinh,
+  kCosh,
+  kAtanh,
+  kRint,
+};
+
+// Annotate the kernel as GPU kernel according to the GPU target.
+void AnnotateFunctionAsGpuKernel(llvm::Module* module, llvm::Function* func,
+                                 llvm::IRBuilderBase* b);
+
+// 'output_type' is the type of the math op corresponding to 'func_id' for which
+// we want to obtain the device function name.
+std::string ObtainDeviceFunctionName(TargetDeviceFunctionID func_id,
+                                     PrimitiveType output_type,
+                                     llvm::Triple target_triple);
+
+bool HasF16Implementation(TargetDeviceFunctionID func_id,
+                          llvm::Triple target_triple);
+}  // namespace gpu
+}  // namespace xla
+
+#endif  // XLA_SERVICE_GPU_TARGET_UTIL_H_

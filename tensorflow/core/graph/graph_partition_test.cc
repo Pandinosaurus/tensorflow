@@ -15,9 +15,15 @@ limitations under the License.
 
 #include "tensorflow/core/graph/graph_partition.h"
 
+#include <memory>
+#include <string>
 #include <unordered_map>
 #include <utility>
 
+#include <gmock/gmock.h>
+#include <gtest/gtest.h>
+#include "absl/strings/match.h"
+#include "absl/strings/str_cat.h"
 #include "tensorflow/cc/ops/array_ops.h"
 #include "tensorflow/cc/ops/const_op.h"
 #include "tensorflow/cc/ops/control_flow_ops.h"
@@ -32,6 +38,7 @@ limitations under the License.
 #include "tensorflow/core/framework/op.h"
 #include "tensorflow/core/framework/versions.pb.h"
 #include "tensorflow/core/graph/graph.h"
+#include "tensorflow/core/graph/graph_debug_info_builder.h"
 #include "tensorflow/core/graph/graph_def_builder.h"
 #include "tensorflow/core/kernels/ops_util.h"
 #include "tensorflow/core/lib/core/status_test_util.h"
@@ -45,7 +52,7 @@ limitations under the License.
 namespace tensorflow {
 
 // from graph_partition.cc
-extern Status TopologicalSortNodesWithTimePriority(
+extern absl::Status TopologicalSortNodesWithTimePriority(
     const GraphDef* gdef,
     std::vector<std::pair<const NodeDef*, int64_t>>* nodes,
     std::unordered_map<const NodeDef*, int64_t>* node_to_start_time_out);
@@ -58,24 +65,27 @@ using ops::Const;
 using ops::Identity;
 using ops::LoopCond;
 using ops::NextIteration;
+using ::testing::Ne;
 
 const char gpu_device[] = "/job:a/replica:0/task:0/device:GPU:0";
 
-string SplitByDevice(const Node* node) { return node->assigned_device_name(); }
+std::string SplitByDevice(const Node* node) {
+  return node->assigned_device_name();
+}
 
-string DeviceName(const Node* node) {
+std::string DeviceName(const Node* node) {
   char first = node->name()[0];
   if (first == 'G') {
     return gpu_device;
   } else {
-    const string cpu_prefix = "/job:a/replica:0/task:0/cpu:";
+    const std::string cpu_prefix = "/job:a/replica:0/task:0/cpu:";
     int index = first - 'A';
-    return strings::StrCat(cpu_prefix, index);
+    return absl::StrCat(cpu_prefix, index);
   }
 }
 
 void Partition(const GraphDef& graph_def,
-               std::unordered_map<string, GraphDef>* partitions) {
+               std::unordered_map<std::string, GraphDef>* partitions) {
   Graph g(OpRegistry::Global());
   GraphConstructorOptions opts;
   TF_CHECK_OK(ConvertGraphDefToGraph(opts, graph_def, &g));
@@ -83,19 +93,21 @@ void Partition(const GraphDef& graph_def,
   // Assigns devices to each node. Uses 1st letter of the node name as the
   // device index if no device is specified.
   for (Node* node : g.nodes()) {
-    string device_name = !node->requested_device().empty()
-                             ? node->requested_device()
-                             : DeviceName(node);
+    std::string device_name = !node->requested_device().empty()
+                                  ? node->requested_device()
+                                  : DeviceName(node);
     node->set_assigned_device_name(device_name);
   }
 
   PartitionOptions popts;
   popts.node_to_loc = SplitByDevice;
-  popts.new_name = [&g](const string& prefix) { return g.NewName(prefix); };
-  popts.get_incarnation = [](const string& name) {
+  popts.new_name = [&g](const std::string& prefix) {
+    return g.NewName(prefix);
+  };
+  popts.get_incarnation = [](const std::string& name) {
     return (name[0] - 'A') + 100;
   };
-  Status s = Partition(popts, &g, partitions);
+  absl::Status s = Partition(popts, &g, partitions);
   CHECK(s.ok()) << s;
 
   // Check versions.
@@ -109,7 +121,7 @@ void Partition(const GraphDef& graph_def,
 }
 
 void CheckLoopConstruction(const GraphDef& graph_def) {
-  std::unordered_map<string, GraphDef> partitions;
+  std::unordered_map<std::string, GraphDef> partitions;
   Partition(graph_def, &partitions);
   for (const auto& kv : partitions) {
     const GraphDef& gdef = kv.second;
@@ -121,7 +133,7 @@ void CheckLoopConstruction(const GraphDef& graph_def) {
       // _recvs must have a control input
       if (ndef.op() == "_Recv") {
         bool has_control = false;
-        for (const string& input_name : ndef.input()) {
+        for (const std::string& input_name : ndef.input()) {
           if (absl::StartsWith(input_name, "^")) {
             has_control = true;
             break;
@@ -164,10 +176,10 @@ REGISTER_OP("Combine")
     .Output("o: float")
     .SetShapeFn(shape_inference::UnknownShape);
 
-Output ConstructOp(const Scope& scope, const string& op_type,
-                   const gtl::ArraySlice<Input>& inputs) {
+Output ConstructOp(const Scope& scope, const std::string& op_type,
+                   const absl::Span<const Input> inputs) {
   if (!scope.ok()) return Output();
-  const string unique_name = scope.GetUniqueNameForOp(op_type);
+  const std::string unique_name = scope.GetUniqueNameForOp(op_type);
   auto builder =
       NodeBuilder(unique_name, op_type, scope.graph()->op_registry());
   for (auto const& input : inputs) {
@@ -194,6 +206,18 @@ Output Combine(const Scope& scope, Input a, Input b) {
   return ConstructOp(scope, "Combine", {std::move(a), std::move(b)});
 }
 
+std::string FormatStackTrace(const GraphDebugInfo::StackTrace& stack_trace,
+                             const GraphDebugInfo& debug_info) {
+  std::string result;
+  for (const GraphDebugInfo::FileLineCol& file_line_col :
+       stack_trace.file_line_cols()) {
+    const std::string& file = debug_info.files(file_line_col.file_index());
+    absl::StrAppend(&result, file_line_col.func(), "@", file, ":",
+                    file_line_col.line(), ".", file_line_col.col(), "\n");
+  }
+  return result;
+}
+
 class GraphPartitionTest : public ::testing::Test {
  protected:
   GraphPartitionTest()
@@ -203,28 +227,28 @@ class GraphPartitionTest : public ::testing::Test {
         scope_b_(Scope::NewRootScope().ExitOnError().WithDevice(
             "/job:a/replica:0/task:0/cpu:1")) {}
 
-  const GraphDef& ToGraphDef() {
-    TF_EXPECT_OK(in_.ToGraphDef(&in_graph_def_));
+  const GraphDef& ToGraphDef(bool include_debug_info = false) {
+    TF_EXPECT_OK(in_.ToGraphDef(&in_graph_def_, include_debug_info));
     return in_graph_def_;
   }
 
   void ExpectMatchA() {
     GraphDef graph_def;
     TF_EXPECT_OK(scope_a_.ToGraphDef(&graph_def));
-    string a = "/job:a/replica:0/task:0/cpu:0";
+    std::string a = "/job:a/replica:0/task:0/cpu:0";
     TF_EXPECT_GRAPH_EQ(graph_def, partitions_[a]);
   }
 
   void ExpectMatchB() {
     GraphDef graph_def;
     TF_EXPECT_OK(scope_b_.ToGraphDef(&graph_def));
-    string b = "/job:a/replica:0/task:0/cpu:1";
+    std::string b = "/job:a/replica:0/task:0/cpu:1";
     TF_EXPECT_GRAPH_EQ(graph_def, partitions_[b]);
   }
 
   void ExpectFunctions(const FunctionDefLibrary& library,
-                       const std::set<string>& expected_names) {
-    std::set<string> actual_names;
+                       const std::set<std::string>& expected_names) {
+    std::set<std::string> actual_names;
     for (const FunctionDef& fdef : library.function()) {
       actual_names.insert(fdef.signature().name());
     }
@@ -235,7 +259,7 @@ class GraphPartitionTest : public ::testing::Test {
   GraphDef in_graph_def_;
   Scope scope_a_;
   Scope scope_b_;
-  std::unordered_map<string, GraphDef> partitions_;
+  std::unordered_map<std::string, GraphDef> partitions_;
 };
 
 TEST_F(GraphPartitionTest, SingleDevice) {
@@ -258,8 +282,8 @@ TEST_F(GraphPartitionTest, CrossDeviceData) {
   Partition(ToGraphDef(), &partitions_);
   EXPECT_EQ(2, partitions_.size());
 
-  string a = "/job:a/replica:0/task:0/cpu:0";
-  string b = "/job:a/replica:0/task:0/cpu:1";
+  std::string a = "/job:a/replica:0/task:0/cpu:0";
+  std::string b = "/job:a/replica:0/task:0/cpu:1";
   a1 = FloatInput(scope_a_.WithOpName("A1"));
   _Send(scope_a_.WithOpName("A1/_0"), a1, "edge_1_A1", a, 82, b);
   ExpectMatchA();
@@ -279,10 +303,11 @@ TEST_F(GraphPartitionTest, CrossDeviceControl) {
   Partition(ToGraphDef(), &partitions_);
   EXPECT_EQ(2, partitions_.size());
 
-  string a = "/job:a/replica:0/task:0/cpu:0";
-  string b = "/job:a/replica:0/task:0/cpu:1";
+  std::string a = "/job:a/replica:0/task:0/cpu:0";
+  std::string b = "/job:a/replica:0/task:0/cpu:1";
   a1 = FloatInput(scope_a_.WithOpName("A1"));
-  auto c = Const(scope_a_.WithOpName("A1/_0").WithControlDependencies(a1), {});
+  auto c =
+      Const(scope_a_.WithOpName("A1/ctrl/_0").WithControlDependencies(a1), {});
   _Send(scope_a_.WithOpName("A1/_1"), c, "edge_3_A1", a, 82, b);
   ExpectMatchA();
 
@@ -303,8 +328,8 @@ TEST_F(GraphPartitionTest, CrossDeviceData_MultiUse) {
   Partition(ToGraphDef(), &partitions_);
   EXPECT_EQ(2, partitions_.size());
 
-  string a = "/job:a/replica:0/task:0/cpu:0";
-  string b = "/job:a/replica:0/task:0/cpu:1";
+  std::string a = "/job:a/replica:0/task:0/cpu:0";
+  std::string b = "/job:a/replica:0/task:0/cpu:1";
   a1 = FloatInput(scope_a_.WithOpName("A1"));
   _Send(scope_a_.WithOpName("A1/_0"), a1, "edge_1_A1", a, 82, b);
   ExpectMatchA();
@@ -326,10 +351,11 @@ TEST_F(GraphPartitionTest, CrossDeviceControl_MultiUse) {
   Partition(ToGraphDef(), &partitions_);
   EXPECT_EQ(2, partitions_.size());
 
-  string a = "/job:a/replica:0/task:0/cpu:0";
-  string b = "/job:a/replica:0/task:0/cpu:1";
+  std::string a = "/job:a/replica:0/task:0/cpu:0";
+  std::string b = "/job:a/replica:0/task:0/cpu:1";
   a1 = FloatInput(scope_a_.WithOpName("A1"));
-  auto c = Const(scope_a_.WithOpName("A1/_0").WithControlDependencies(a1), {});
+  auto c =
+      Const(scope_a_.WithOpName("A1/ctrl/_0").WithControlDependencies(a1), {});
   _Send(scope_a_.WithOpName("A1/_1"), c, "edge_3_A1", a, 82, b);
   ExpectMatchA();
 
@@ -351,11 +377,12 @@ TEST_F(GraphPartitionTest, CrossDevice_DataControl) {
   Partition(ToGraphDef(), &partitions_);
   EXPECT_EQ(2, partitions_.size());
 
-  string a = "/job:a/replica:0/task:0/cpu:0";
-  string b = "/job:a/replica:0/task:0/cpu:1";
+  std::string a = "/job:a/replica:0/task:0/cpu:0";
+  std::string b = "/job:a/replica:0/task:0/cpu:1";
   a1 = FloatInput(scope_a_.WithOpName("A1"));
   _Send(scope_a_.WithOpName("A1/_0"), a1, "edge_1_A1", a, 82, b);
-  auto c = Const(scope_a_.WithOpName("A1/_2").WithControlDependencies(a1), {});
+  auto c =
+      Const(scope_a_.WithOpName("A1/ctrl/_2").WithControlDependencies(a1), {});
   // NOTE: Send 0 A1/_1 -> A1/_2 is not necessarily needed. We could
   // use A1/_0 -> A1/_4 as the control as a minor optimization.
   _Send(scope_a_.WithOpName("A1/_3"), c, "edge_3_A1", a, 82, b);
@@ -395,7 +422,7 @@ TEST_F(GraphPartitionTest, CrossDeviceLoopSimple1) {
   auto b1 = Identity(in_.WithOpName("B1"), a3);
   NextIteration(in_.WithOpName("B5"), b1);
 
-  std::unordered_map<string, GraphDef> partitions;
+  std::unordered_map<std::string, GraphDef> partitions;
   Partition(ToGraphDef(), &partitions);
   for (const auto& kv : partitions) {
     const GraphDef& gdef = kv.second;
@@ -443,20 +470,48 @@ TEST_F(GraphPartitionTest, PartitionIncompleteGraph) {
       )EOF",
       &ndef);
   ASSERT_TRUE(parsed);
-  Status status;
+  absl::Status status;
   g.AddNode(ndef, &status);
   TF_ASSERT_OK(status);
 
   PartitionOptions popts;
   popts.node_to_loc = SplitByDevice;
-  popts.new_name = [&g](const string& prefix) { return g.NewName(prefix); };
-  popts.get_incarnation = [](const string&) { return 1; };
+  popts.new_name = [&g](const std::string& prefix) {
+    return g.NewName(prefix);
+  };
+  popts.get_incarnation = [](const std::string&) { return 1; };
 
-  std::unordered_map<string, GraphDef> partitions;
+  std::unordered_map<std::string, GraphDef> partitions;
   status = Partition(popts, &g, &partitions);
   // Partitioning should fail, but not crash like it did before the
   // changes that accompanied the addition of this test.
   EXPECT_EQ(error::INVALID_ARGUMENT, status.code()) << status;
+}
+
+TEST_F(GraphPartitionTest, LoopCondOutsideWhileLoop) {
+  auto a1 = BoolInput(in_.WithOpName("A1"));
+  LoopCond(in_.WithOpName("A2"), a1);
+
+  Graph g(OpRegistry::Global());
+  TF_ASSERT_OK(
+      ConvertGraphDefToGraph(GraphConstructorOptions(), ToGraphDef(), &g));
+  for (Node* node : g.nodes()) {
+    node->set_assigned_device_name(DeviceName(node));
+  }
+
+  PartitionOptions popts;
+  popts.node_to_loc = SplitByDevice;
+  popts.new_name = [&g](const std::string& prefix) {
+    return g.NewName(prefix);
+  };
+  popts.get_incarnation = [](const std::string&) { return 1; };
+
+  std::unordered_map<std::string, GraphDef> partitions;
+  absl::Status status = Partition(popts, &g, &partitions);
+  EXPECT_EQ(error::INVALID_ARGUMENT, status.code()) << status;
+  EXPECT_TRUE(
+      absl::StrContains(status.message(), "must be inside a while loop frame"))
+      << status;
 }
 
 TEST_F(GraphPartitionTest, Functions) {
@@ -465,7 +520,6 @@ TEST_F(GraphPartitionTest, Functions) {
   *fdef_lib.add_function() = test::function::XTimesFour();
   TF_ASSERT_OK(in_.graph()->AddFunctionLibrary(fdef_lib));
 
-  using namespace ::tensorflow::ops;  // NOLINT(build/namespaces)
   auto a1 = FloatInput(in_.WithOpName("A1"));
   auto b1 = FloatInput(in_.WithOpName("B1"));
   ConstructOp(in_.WithOpName("A2"), "XTimesTwo", {a1});
@@ -477,8 +531,8 @@ TEST_F(GraphPartitionTest, Functions) {
   EXPECT_EQ(2, partitions_.size());
 
   // Test that partition graphs inherit function library from original graph.
-  string a = "/job:a/replica:0/task:0/cpu:0";
-  string b = "/job:a/replica:0/task:0/cpu:1";
+  std::string a = "/job:a/replica:0/task:0/cpu:0";
+  std::string b = "/job:a/replica:0/task:0/cpu:1";
 
   // Node "A2" is placed in part `a`, and uses only "XTimesTwo".
   ExpectFunctions(partitions_[a].library(), {"XTimesTwo"});
@@ -489,14 +543,32 @@ TEST_F(GraphPartitionTest, Functions) {
 
 TEST_F(GraphPartitionTest, SetIncarnation) {
   GraphDef gdef;
-  const char* const kSendRecvAttrs = R"proto(
-  attr { key: 'T' value { type: DT_FLOAT  }  }
-  attr { key: 'client_terminated' value {  b: false } }
-  attr { key: 'recv_device' value { s: 'B' } }
-  attr { key: 'send_device' value { s: 'A' } }
-  attr { key: 'send_device_incarnation' value { i: 0 }  }
-  attr { key: 'tensor_name' value { s: 'test' } }
-)proto";
+  const char* const kSendRecvAttrs = R"pb(
+    attr {
+      key: 'T'
+      value { type: DT_FLOAT }
+    }
+    attr {
+      key: 'client_terminated'
+      value { b: false }
+    }
+    attr {
+      key: 'recv_device'
+      value { s: 'B' }
+    }
+    attr {
+      key: 'send_device'
+      value { s: 'A' }
+    }
+    attr {
+      key: 'send_device_incarnation'
+      value { i: 0 }
+    }
+    attr {
+      key: 'tensor_name'
+      value { s: 'test' }
+    }
+  )pb";
   CHECK(protobuf::TextFormat::ParseFromString(
       strings::StrCat(
           "node { name: 'A/Pi' op: 'Const' ",
@@ -523,6 +595,68 @@ TEST_F(GraphPartitionTest, SetIncarnation) {
   }
 }
 
+TEST_F(GraphPartitionTest, GraphDebugInfo) {
+  GraphDef graph_def;
+  Output a1 = FloatInput(in_.WithOpName("A1"));
+  Output b1 = FloatInput(in_.WithOpName("B1"));
+  Combine(in_.WithOpName("B2"), a1, b1);
+
+  Node *a1_node = nullptr, *b1_node = nullptr, *b2_node = nullptr;
+  for (Node* node : in_.graph()->op_nodes()) {
+    if (node->name() == "A1") {
+      a1_node = node;
+    } else if (node->name() == "B1") {
+      b1_node = node;
+    } else if (node->name() == "B2") {
+      b2_node = node;
+    }
+  }
+  EXPECT_NE(a1_node, nullptr);
+  EXPECT_NE(b1_node, nullptr);
+  EXPECT_NE(b2_node, nullptr);
+
+  std::vector<StackFrame> a1_stack_trace{{"main.cc", 20, "x"},
+                                         {"alpha.cc", 30, "a1"}};
+  std::vector<StackFrame> b1_stack_trace{{"window.cc", 21, "y"},
+                                         {"beta.cc", 35, "b1"}};
+  std::vector<StackFrame> b2_stack_trace{{"cache.cc", 22, "bar"},
+                                         {"beta.cc", 39, "b2"}};
+  a1_node->SetStackTrace(std::make_shared<FrozenStackTrace>(a1_stack_trace));
+  b1_node->SetStackTrace(std::make_shared<FrozenStackTrace>(b1_stack_trace));
+  b2_node->SetStackTrace(std::make_shared<FrozenStackTrace>(b2_stack_trace));
+
+  TF_EXPECT_OK(in_.ToGraphDef(&graph_def, /*include_debug_info=*/true));
+
+  // `Partition()` uses the first letter of the op name ('A' or 'B') to choose a
+  // device for each node. It calls the function under test, also named
+  // `Partition()`, to do the actual partitioning.
+  Partition(ToGraphDef(/*include_debug_info=*/true), &partitions_);
+  EXPECT_EQ(2, partitions_.size());
+
+  // Expect each partitioned graph to contain the stack traces for its nodes.
+  // A stack trace for A1 should be in the A partition (".../cpu:0").
+  std::string a = "/job:a/replica:0/task:0/cpu:0";
+  const GraphDebugInfo& a_debug_info = partitions_[a].debug_info();
+  StackTracesMap traces = LoadTracesFromDebugInfo(a_debug_info);
+  const auto& a_it = traces.find("A1");
+  EXPECT_THAT(a_it, Ne(traces.end()));
+  EXPECT_THAT(a_it->second->ToString({}),
+              ::testing::ContainsRegex("alpha.cc.*30"));
+
+  // Stack traces for B1 and B2 should be in the B partition (".../cpu:1").
+  std::string b = "/job:a/replica:0/task:0/cpu:1";
+  const GraphDebugInfo& b_debug_info = partitions_[b].debug_info();
+  traces = LoadTracesFromDebugInfo(b_debug_info);
+  const auto& b1_it = traces.find("B1");
+  const auto& b2_it = traces.find("B2");
+  EXPECT_THAT(b1_it, Ne(traces.end()));
+  EXPECT_THAT(b2_it, Ne(traces.end()));
+  EXPECT_THAT(b1_it->second->ToString({}),
+              ::testing::ContainsRegex("beta.cc.*35"));
+  EXPECT_THAT(b2_it->second->ToString({}),
+              ::testing::ContainsRegex("beta.cc.*39"));
+}
+
 TEST(TopologicalSortNodesWithTimePriorityTest, NoDependencies) {
   // Create placeholders, shuffle them so the order in the graph is not strictly
   // increasing.
@@ -533,8 +667,7 @@ TEST(TopologicalSortNodesWithTimePriorityTest, NoDependencies) {
   }
   std::vector<ops::Placeholder> placeholders;
   for (int i : indexes) {
-    placeholders.emplace_back(root.WithOpName(strings::StrCat("p", i)),
-                              DT_FLOAT);
+    placeholders.emplace_back(root.WithOpName(absl::StrCat("p", i)), DT_FLOAT);
     placeholders.back().node()->AddAttr("_start_time", i + 1);
   }
 
@@ -547,7 +680,7 @@ TEST(TopologicalSortNodesWithTimePriorityTest, NoDependencies) {
       TopologicalSortNodesWithTimePriority(&gdef, &nodes, &node_to_start_time));
   ASSERT_EQ(nodes.size(), 20);
   for (int i = 0; i < nodes.size(); ++i) {
-    EXPECT_EQ(strings::StrCat("p", i), nodes[i].first->name());
+    EXPECT_EQ(absl::StrCat("p", i), nodes[i].first->name());
     EXPECT_EQ(i + 1, nodes[i].second);
   }
 }
@@ -561,7 +694,7 @@ TEST(TopologicalSortNodesWithTimePriority, Dependencies) {
   const int num_leaves = 20;
   for (int i = 0; i < num_leaves; ++i) {
     indexes.push_back((i + 2001) % num_leaves);
-    placeholders_in_order.emplace_back(root.WithOpName(strings::StrCat("p", i)),
+    placeholders_in_order.emplace_back(root.WithOpName(absl::StrCat("p", i)),
                                        DT_FLOAT);
     placeholders_in_order.back().node()->AddAttr("_start_time", i + 1);
   }
@@ -575,7 +708,7 @@ TEST(TopologicalSortNodesWithTimePriority, Dependencies) {
   // placeholder runs last).
   std::vector<ops::Square> squares;
   for (int i : indexes) {
-    squares.emplace_back(root.WithOpName(strings::StrCat("s", i)),
+    squares.emplace_back(root.WithOpName(absl::StrCat("s", i)),
                          placeholders[i]);
     squares.back().node()->AddAttr("_start_time", 50 - (i + 1));
   }
@@ -583,8 +716,8 @@ TEST(TopologicalSortNodesWithTimePriority, Dependencies) {
   // Create addn to sum all squares.
   std::vector<Input> inputs;
   for (const auto& s : squares) inputs.push_back(s);
-  ops::AddN addn = ops::AddN(root.WithOpName("addn"),
-                             tensorflow::gtl::ArraySlice<Input>(inputs));
+  ops::AddN addn =
+      ops::AddN(root.WithOpName("addn"), absl::Span<const Input>(inputs));
   // Start times is actually listed earlier than the nodes it depends on.
   // But because of dependency ordering, it is last in the list.
   addn.node()->AddAttr("_start_time", 1);
@@ -599,7 +732,7 @@ TEST(TopologicalSortNodesWithTimePriority, Dependencies) {
   ASSERT_EQ(1 + squares.size() + placeholders.size(), nodes.size());
   for (int i = 0; i < placeholders.size(); ++i) {
     const NodeDef* node = nodes[i].first;
-    EXPECT_EQ(strings::StrCat("p", i), node->name());
+    EXPECT_EQ(absl::StrCat("p", i), node->name());
     EXPECT_EQ(i + 1, nodes[i].second);
     EXPECT_EQ(i + 1, node_to_start_time[node]);
   }
@@ -607,7 +740,7 @@ TEST(TopologicalSortNodesWithTimePriority, Dependencies) {
     int node_index = placeholders.size() + i;
     int square_index = num_leaves - 1 - i;
     const NodeDef* node = nodes[node_index].first;
-    EXPECT_EQ(strings::StrCat("s", square_index), node->name());
+    EXPECT_EQ(absl::StrCat("s", square_index), node->name());
     EXPECT_EQ(50 - (square_index + 1), nodes[node_index].second);
     EXPECT_EQ(50 - (square_index + 1), node_to_start_time[node]);
   }
@@ -627,7 +760,7 @@ TEST(TopologicalSortNodesWithTimePriority, WhileLoop) {
   const int num_leaves = 20;
   for (int i = 0; i < num_leaves; ++i) {
     indexes.push_back((i + 2001) % num_leaves);
-    placeholders_in_order.emplace_back(root.WithOpName(strings::StrCat("p", i)),
+    placeholders_in_order.emplace_back(root.WithOpName(absl::StrCat("p", i)),
                                        DT_FLOAT);
     placeholders_in_order.back().node()->AddAttr("_start_time", i + 1);
   }
@@ -641,10 +774,10 @@ TEST(TopologicalSortNodesWithTimePriority, WhileLoop) {
   std::vector<Exit> while_exits;
   const int nodes_per_loop = 8;
   for (int i : indexes) {
-    Scope scope = root.NewSubScope(strings::StrCat("while", i));
+    Scope scope = root.NewSubScope(absl::StrCat("while", i));
     auto dummy = Placeholder(scope, DT_FLOAT);
 
-    Enter enter(scope, placeholders[i], strings::StrCat("frame", i));
+    Enter enter(scope, placeholders[i], absl::StrCat("frame", i));
     Merge merge(scope, std::initializer_list<Input>{enter, dummy});
     auto cv = Const(scope.WithControlDependencies({merge.output}), false);
     LoopCond loop_cond(scope, cv);
@@ -671,8 +804,7 @@ TEST(TopologicalSortNodesWithTimePriority, WhileLoop) {
   std::vector<Square> squares;
   squares.reserve(indexes.size());
   for (int i : indexes) {
-    squares.emplace_back(root.WithOpName(strings::StrCat("s", i)),
-                         while_exits[i]);
+    squares.emplace_back(root.WithOpName(absl::StrCat("s", i)), while_exits[i]);
     squares.back().node()->AddAttr("_start_time", 500 - (i + 1));
   }
 
@@ -689,20 +821,20 @@ TEST(TopologicalSortNodesWithTimePriority, WhileLoop) {
   int node_index = 0;
   for (int i = 0; i < placeholders.size(); ++i, ++node_index) {
     const NodeDef* node = nodes[i].first;
-    EXPECT_EQ(strings::StrCat("p", i), node->name());
+    EXPECT_EQ(absl::StrCat("p", i), node->name());
     EXPECT_EQ(i + 1, nodes[i].second);
     EXPECT_EQ(i + 1, node_to_start_time[node]);
   }
   for (int i = 0; i < while_exits.size(); ++i, node_index += nodes_per_loop) {
     const NodeDef* node = nodes[node_index].first;
-    EXPECT_EQ(strings::StrCat("while", i, "/Enter"), node->name());
+    EXPECT_EQ(absl::StrCat("while", i, "/Enter"), node->name());
     EXPECT_EQ(100 + i * 10, nodes[node_index].second);
     EXPECT_EQ(100 + i * 10, node_to_start_time[node]);
   }
   for (int i = 0; i < squares.size(); ++i, ++node_index) {
     int square_index = num_leaves - 1 - i;
     const NodeDef* node = nodes[node_index].first;
-    EXPECT_EQ(strings::StrCat("s", square_index), node->name());
+    EXPECT_EQ(absl::StrCat("s", square_index), node->name());
     EXPECT_EQ(500 - (square_index + 1), nodes[node_index].second);
     EXPECT_EQ(500 - (square_index + 1), node_to_start_time[node]);
   }

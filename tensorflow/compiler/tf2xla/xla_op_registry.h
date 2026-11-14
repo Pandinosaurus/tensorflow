@@ -22,16 +22,26 @@ limitations under the License.
 #include <unordered_map>
 #include <vector>
 
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
+#include "absl/strings/string_view.h"
+#include "absl/types/span.h"
 #include "tensorflow/core/common_runtime/device_factory.h"
 #include "tensorflow/core/common_runtime/local_device.h"
 #include "tensorflow/core/framework/device_base.h"
+#include "tensorflow/core/framework/kernel_def.pb.h"
+#include "tensorflow/core/framework/node_def.pb.h"
+#include "tensorflow/core/framework/op_def.pb.h"
+#include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/tensor.h"
 #include "tensorflow/core/framework/types.pb.h"
 #include "tensorflow/core/lib/core/status.h"
 #include "tensorflow/core/platform/mem.h"
 #include "tensorflow/core/platform/mutex.h"
 #include "tensorflow/core/platform/thread_annotations.h"
+#include "tensorflow/core/platform/types.h"
 #include "tensorflow/core/public/session_options.h"
+#include "tsl/platform/errors.h"
 
 namespace tensorflow {
 
@@ -45,6 +55,8 @@ extern const char* const DEVICE_GPU_XLA_JIT;  // "GPU_XLA_JIT"
 extern const char* const DEVICE_XLA_CPU;
 extern const char* const DEVICE_XLA_GPU;
 
+// Do not include DT_FLOAT8_* as float or numeric types since they are only
+// supported in a very limited set of ops.
 constexpr std::array<DataType, 4> kFloatTypes = {
     {DT_HALF, DT_FLOAT, DT_DOUBLE, DT_BFLOAT16}};
 constexpr std::array<DataType, 6> kFloatAndComplexTypes = {
@@ -54,15 +66,59 @@ constexpr std::array<DataType, 14> kNumericTypes = {
      DT_INT64, DT_HALF, DT_FLOAT, DT_DOUBLE, DT_COMPLEX64, DT_COMPLEX128,
      DT_BFLOAT16}};
 
-constexpr std::array<DataType, 18> kCpuAllTypes = {
-    {DT_UINT8, DT_QUINT8, DT_UINT16, DT_UINT32, DT_UINT64, DT_INT8, DT_QINT8,
-     DT_INT16, DT_INT32, DT_QINT32, DT_INT64, DT_HALF, DT_FLOAT, DT_DOUBLE,
-     DT_COMPLEX64, DT_COMPLEX128, DT_BOOL, DT_BFLOAT16}};
+constexpr std::array<DataType, 26> kCpuAllTypes = {{DT_UINT8,
+                                                    DT_QUINT8,
+                                                    DT_UINT16,
+                                                    DT_UINT32,
+                                                    DT_UINT64,
+                                                    DT_INT8,
+                                                    DT_QINT8,
+                                                    DT_INT16,
+                                                    DT_INT32,
+                                                    DT_QINT32,
+                                                    DT_INT64,
+                                                    DT_HALF,
+                                                    DT_FLOAT,
+                                                    DT_DOUBLE,
+                                                    DT_COMPLEX64,
+                                                    DT_COMPLEX128,
+                                                    DT_BOOL,
+                                                    DT_BFLOAT16,
+                                                    DT_FLOAT8_E5M2,
+                                                    DT_FLOAT8_E4M3FN,
+                                                    DT_FLOAT8_E4M3FNUZ,
+                                                    DT_FLOAT8_E4M3B11FNUZ,
+                                                    DT_FLOAT8_E5M2FNUZ,
+                                                    DT_FLOAT8_E8M0FNU,
+                                                    DT_INT4,
+                                                    DT_UINT4}};
 
-constexpr std::array<DataType, 18> kGpuAllTypes = {
-    {DT_UINT8, DT_QUINT8, DT_UINT16, DT_UINT32, DT_UINT64, DT_INT8, DT_QINT8,
-     DT_INT16, DT_INT32, DT_QINT32, DT_INT64, DT_HALF, DT_FLOAT, DT_DOUBLE,
-     DT_COMPLEX64, DT_COMPLEX128, DT_BOOL, DT_BFLOAT16}};
+constexpr std::array<DataType, 26> kGpuAllTypes = {{DT_UINT8,
+                                                    DT_QUINT8,
+                                                    DT_UINT16,
+                                                    DT_UINT32,
+                                                    DT_UINT64,
+                                                    DT_INT8,
+                                                    DT_QINT8,
+                                                    DT_INT16,
+                                                    DT_INT32,
+                                                    DT_QINT32,
+                                                    DT_INT64,
+                                                    DT_HALF,
+                                                    DT_FLOAT,
+                                                    DT_DOUBLE,
+                                                    DT_COMPLEX64,
+                                                    DT_COMPLEX128,
+                                                    DT_BOOL,
+                                                    DT_BFLOAT16,
+                                                    DT_FLOAT8_E5M2,
+                                                    DT_FLOAT8_E4M3FN,
+                                                    DT_FLOAT8_E4M3FNUZ,
+                                                    DT_FLOAT8_E4M3B11FNUZ,
+                                                    DT_FLOAT8_E5M2FNUZ,
+                                                    DT_FLOAT8_E8M0FNU,
+                                                    DT_INT4,
+                                                    DT_UINT4}};
 
 // Class that manages registrations of operators and devices for the XLA JIT.
 // Not thread-safe.
@@ -86,7 +142,7 @@ class XlaOpRegistry {
   // Describes how to compile operators assigned to a device.
   struct DeviceRegistration {
     // The name of the an XLA compilation device to use to compile code.
-    string compilation_device_name;
+    std::string compilation_device_name;
 
     // When should we autocluster operators assigned to this device?
     AutoclusteringPolicy autoclustering_policy;
@@ -137,25 +193,25 @@ class XlaOpRegistry {
   // `backend_op_filter` should return true if the op should be registered on
   // the device; it may optionally modify the KernelDef.
   typedef bool (*BackendOpFilter)(KernelDef* kdef);
-  static void RegisterBackend(const string& compilation_device_name,
+  static void RegisterBackend(const std::string& compilation_device_name,
                               absl::Span<const DataType> supported_types,
                               BackendOpFilter op_filter);
 
   // Returns the names of the registered backends.
-  static std::vector<string> BackendNames();
+  static std::vector<std::string> BackendNames();
 
   // Returns true iff a backend with the given name is registered.
-  static bool IsBackendRegistered(const string& name);
+  static bool IsBackendRegistered(const std::string& name);
 
   // Registers `device_name` for XLA compilation, using information from
   // `registration`.
   // Does nothing if a registration for `device_name` already exists.
-  static void RegisterCompilationDevice(const string& device_name,
+  static void RegisterCompilationDevice(const std::string& device_name,
                                         const DeviceRegistration& registration);
 
   // Returns whether the device name is for the JIT device used exclusively for
   // TF2XLA conversion.
-  static bool IsCompilationDevice(const string& device_name);
+  static bool IsCompilationDevice(const std::string& device_name);
 
   // Returns the JIT device name associated with 'device_name', setting
   // 'jit_device_name', 'requires_jit', and 'enabled_jit_by_default', if they
@@ -163,7 +219,7 @@ class XlaOpRegistry {
   // JIT device is registered.
   // '*enable_jit_by_default' is set to true if we should try to JIT using this
   // device when the JIT is enabled via the Session OptimizerOptions.
-  static bool GetCompilationDevice(const string& device_name,
+  static bool GetCompilationDevice(const std::string& device_name,
                                    const DeviceRegistration** registration);
 
   // Registers all JIT kernels on JIT devices, if not already registered.
@@ -174,30 +230,37 @@ class XlaOpRegistry {
   // 'compilation_device_name'.  Does not include kernels registered as
   // CompilationOnly, iff include_compilation_only_kernels=false.
   static std::vector<const KernelDef*> DeviceKernels(
-      const string& compilation_device_name,
+      const std::string& compilation_device_name,
       bool include_compilation_only_kernels);
 
   // Returns all operations for which there are XLA kernels on any device.
-  static std::vector<string> GetAllRegisteredOps();
+  static std::vector<std::string> GetAllRegisteredOps();
 
   // Returns (via `result`) the indices of inputs to `node_def` that must be
   // compile-time constants. Returns an empty vector if the op is not
   // registered.
   //
   // `result` is sorted.
-  static Status CompileTimeConstantInputs(const NodeDef& node_def,
-                                          const OpDef& op_def,
-                                          std::vector<int>* result) {
+  static absl::Status CompileTimeConstantInputs(const NodeDef& node_def,
+                                                const OpDef& op_def,
+                                                std::vector<int>* result) {
     return CompileTimeConstantInputs(node_def, /*op_kernel=*/nullptr, &op_def,
                                      result);
+  }
+
+  static absl::StatusOr<std::vector<int>> CompileTimeConstantInputs(
+      const NodeDef& node_def, const OpDef& op_def) {
+    std::vector<int> out;
+    TF_RETURN_IF_ERROR(CompileTimeConstantInputs(node_def, op_def, &out));
+    return out;
   }
 
   // Returns (via `result`) the indices of inputs to `op_kernel` that must be
   // compile-time constants.
   //
   // `result` is sorted.
-  static Status CompileTimeConstantInputs(const OpKernel& op_kernel,
-                                          std::vector<int>* result) {
+  static absl::Status CompileTimeConstantInputs(const OpKernel& op_kernel,
+                                                std::vector<int>* result) {
     return CompileTimeConstantInputs(op_kernel.def(), /*op_kernel=*/&op_kernel,
                                      /*op_def=*/nullptr, result);
   }
@@ -205,11 +268,11 @@ class XlaOpRegistry {
   // Return names of arguments for a given op which are supposed to be
   // constants.
   static const std::unordered_set<std::string>*
-  CompileTimeConstantInputArgNames(const string& op);
+  CompileTimeConstantInputArgNames(const std::string& op);
 
   // Returns true if `op` is a "metadata" op, one that only looks at the shapes
   // of its operands and not their values.
-  static bool IsMetadataOp(const string& op);
+  static bool IsMetadataOp(const std::string& op);
 
  private:
   friend class XlaBackendRegistrar;
@@ -238,15 +301,15 @@ class XlaOpRegistry {
   };
 
   // Map from compilation device names to a description of the backend.
-  std::unordered_map<string, Backend> backends_ TF_GUARDED_BY(mutex_);
+  std::unordered_map<std::string, Backend> backends_ TF_GUARDED_BY(mutex_);
 
   // Map from Tensorflow device names to the corresponding JIT device metadata.
-  std::unordered_map<string, DeviceRegistration> compilation_devices_
+  std::unordered_map<std::string, DeviceRegistration> compilation_devices_
       TF_GUARDED_BY(mutex_);
 
   // A description of a Tensorflow operator that can be compiled to XLA.
   struct OpRegistration {
-    string name;
+    std::string name;
 
     // Should this operator be registered only on compilation devices, without a
     // dummy kernel registered on the corresponding XLA device?
@@ -265,15 +328,15 @@ class XlaOpRegistry {
     bool allow_string_type = false;
 
     // Mapping from attribute name to a list of supported types.
-    std::unordered_map<string, std::set<DataType>> type_constraints;
+    std::unordered_map<std::string, std::set<DataType>> type_constraints;
 
     // An optional allowlist of devices. If there is no allowlist, all devices
     // are permitted.
     bool has_device_allowlist = false;
-    std::unordered_set<string> device_allowlist;
+    std::unordered_set<std::string> device_allowlist;
 
     // Names of arguments that must be compile-time constants.
-    std::unordered_set<string> compile_time_constant_inputs;
+    std::unordered_set<std::string> compile_time_constant_inputs;
 
     // True if this is a "metadata" op, one that only looks at the shapes of its
     // operands and not their values.
@@ -292,16 +355,16 @@ class XlaOpRegistry {
   // their allowlists must not intersect.
   static bool IsCompatible(const OpRegistration& x, const OpRegistration& y);
 
-  static Status CompileTimeConstantInputs(const NodeDef& node_def,
-                                          const OpKernel* op_kernel,
-                                          const OpDef* op_def,
-                                          std::vector<int>* result);
+  static absl::Status CompileTimeConstantInputs(const NodeDef& node_def,
+                                                const OpKernel* op_kernel,
+                                                const OpDef* op_def,
+                                                std::vector<int>* result);
 
   // Map from operator name to OpRegistrations, populated by REGISTER_XLA_OP.
   // Registrations present under the same key must satisfy IsCompatible above,
   // and this is checked during registration.
-  std::unordered_map<string, std::vector<std::unique_ptr<OpRegistration>>> ops_
-      TF_GUARDED_BY(mutex_);
+  std::unordered_map<std::string, std::vector<std::unique_ptr<OpRegistration>>>
+      ops_ TF_GUARDED_BY(mutex_);
 
   // Have we already registered the JIT kernels on the JIT devices?
   bool jit_kernels_registered_ = false;
@@ -322,6 +385,12 @@ class XlaOpRegistry {
 
 #define REGISTER_XLA_OP(NAME, OP) \
   REGISTER_XLA_OP_UNIQ_HELPER(__COUNTER__, NAME, OP)
+
+#define REGISTER_XLA_CONV_OP(BUILDER, OP)                                      \
+  REGISTER_XLA_OP(BUILDER.TypeConstraint("T", GetXlaConvTypesForNonGpu()), OP) \
+  REGISTER_XLA_OP(BUILDER.TypeConstraint("T", GetXlaConvTypesForGpu())         \
+                      .Device(DEVICE_GPU_XLA_JIT),                             \
+                  OP)
 
 class XlaOpRegistrationBuilder {
  public:

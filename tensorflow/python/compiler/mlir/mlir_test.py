@@ -14,9 +14,6 @@
 # =============================================================================
 """Tests for python.compiler.mlir."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
 from tensorflow.python.compiler.mlir import mlir
 from tensorflow.python.eager import def_function
 from tensorflow.python.framework import dtypes
@@ -129,7 +126,7 @@ class MLIRConcreteFunctionImportTest(test.TestCase):
         tensor_spec.TensorSpec(None, dtypes.float32))
     mlir_module = mlir.convert_function(concrete_function, show_debug_info=True)
     self.assertRegex(mlir_module, r'func @.*sqr.*\(')
-    self.assertRegex(mlir_module, r'callsite\(".*mlir_test.py":')
+    self.assertRegex(mlir_module, r'loc\(".*mlir_test.py":.*:1\)')
 
   @test_util.run_v2_only
   def testImportWithCall(self):

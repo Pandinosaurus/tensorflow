@@ -21,6 +21,7 @@ limitations under the License.
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/op_requires.h"
 #include "tensorflow/core/framework/shape_inference.h"
+#include "tensorflow/core/platform/byte_order.h"
 
 namespace tensorflow {
 
@@ -45,24 +46,26 @@ class DecodePaddedRawOp : public OpKernel {
     int fixed_length;
     const auto& length_input = context->input(1);
     OP_REQUIRES(context, TensorShapeUtils::IsScalar(length_input.shape()),
-                errors::InvalidArgument("k must be scalar, got shape ",
-                                        length_input.shape().DebugString()));
-    fixed_length = length_input.scalar<int32>()();
+                absl::InvalidArgumentError(
+                    absl::StrCat("k must be scalar, got shape ",
+                                 length_input.shape().DebugString())));
+    fixed_length = length_input.scalar<int32_t>()();
 
     OP_REQUIRES(
         context, fixed_length % sizeof(T) == 0,
-        errors::InvalidArgument(
+        absl::InvalidArgumentError(absl::StrCat(
             "fixed_length (", fixed_length,
-            ") must be a multiple of the size of out_type (", sizeof(T), ")"));
+            ") must be a multiple of the size of out_type (", sizeof(T), ")")));
 
-    OP_REQUIRES(context, fixed_length > 0,
-                errors::InvalidArgument("fixed_length (", fixed_length,
-                                        ") must be greater than zero."));
+    OP_REQUIRES(
+        context, fixed_length > 0,
+        absl::InvalidArgumentError(absl::StrCat(
+            "fixed_length (", fixed_length, ") must be greater than zero.")));
 
     int width = fixed_length / sizeof(T);
 
     TensorShape out_shape = input.shape();
-    out_shape.AddDim(width);
+    OP_REQUIRES_OK(context, out_shape.AddDimWithStatus(width));
     Tensor* output_tensor = nullptr;
     OP_REQUIRES_OK(
         context, context->allocate_output("output", out_shape, &output_tensor));
@@ -84,7 +87,7 @@ class DecodePaddedRawOp : public OpKernel {
     // can copy the memory directly.
     if (!convert_data_endianness_ || sizeof(T) == 1) {
       for (int64_t i = 0; i < flat_in.size(); ++i) {
-        const auto to_copy =
+        const size_t to_copy =
             std::min(flat_in(i).size(), static_cast<size_t>(fixed_length));
         memcpy(out_data, flat_in(i).data(), to_copy);
         // Note: increase out_data by width since it's already of type T* so
@@ -101,10 +104,25 @@ class DecodePaddedRawOp : public OpKernel {
         char* out_data_bytes = reinterpret_cast<char*>(out_data);
         const char* p_in = in_data_bytes;
         char* p_out = out_data_bytes;
-        for (; p_in < in_data_bytes + fixed_length;
+
+        // Only reverse up to the end of flat_in(i).  There is also an edge-case
+        // where the input has fewer bytes than required for the final element,
+        // in which case we need to extend the input bytes with zeros prior to
+        // converting endianness.  There are internal workloads that seem to
+        // rely on this zero-padding behavior.
+        const size_t to_copy =
+            std::min(flat_in(i).size(), static_cast<size_t>(fixed_length));
+        for (; p_in + sizeof(T) <= in_data_bytes + to_copy;
              p_in += sizeof(T), p_out += sizeof(T)) {
           std::reverse_copy(p_in, p_in + sizeof(T), p_out);
         }
+        // Final element - reverse with appended zeros if required.
+        const ptrdiff_t trailing = (in_data_bytes + to_copy) - p_in;
+        if (trailing > 0) {
+          const size_t offset = sizeof(T) - trailing;
+          std::reverse_copy(p_in, p_in + trailing, p_out + offset);
+        }
+
         // Note: increase out_data by width since it's already of type T* so
         // each shift amount is implicitly multiplied by sizeof(T) according to
         // pointer arithmetic rules.
@@ -130,11 +148,11 @@ class DecodePaddedRawOp : public OpKernel {
 
 REGISTER(float);
 REGISTER(double);
-REGISTER(int32);
-REGISTER(uint16);
-REGISTER(uint8);
-REGISTER(int16);
-REGISTER(int8);
+REGISTER(int32_t);
+REGISTER(uint16_t);
+REGISTER(uint8_t);
+REGISTER(int16_t);
+REGISTER(int8_t);
 REGISTER(int64_t);
 REGISTER(bfloat16);
 

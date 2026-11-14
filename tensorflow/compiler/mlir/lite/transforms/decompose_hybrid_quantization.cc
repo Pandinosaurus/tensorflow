@@ -24,39 +24,33 @@ limitations under the License.
 // dense operations. Decomposition allows TFLite to be compiled to these
 // dialects, such as TOSA.
 
-#include "mlir/Dialect/Quant/QuantTypes.h"  // from @llvm-project
+#include <memory>
+#include <utility>
+
+#include "mlir/Dialect/Quant/IR/QuantTypes.h"  // from @llvm-project
 #include "mlir/IR/BuiltinAttributes.h"  // from @llvm-project
+#include "mlir/IR/BuiltinOps.h"  // from @llvm-project
 #include "mlir/IR/BuiltinTypes.h"  // from @llvm-project
 #include "mlir/Pass/Pass.h"  // from @llvm-project
+#include "mlir/Support/LLVM.h"  // from @llvm-project
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"  // from @llvm-project
 #include "tensorflow/compiler/mlir/lite/ir/tfl_ops.h"
+#include "tensorflow/compiler/mlir/lite/transforms/passes.h"
 
 namespace mlir {
 namespace TFL {
 
 namespace {
 
+#define GEN_PASS_DEF_DECOMPOSEHYBRIDQUANTIZATIONPASS
+#include "tensorflow/compiler/mlir/lite/transforms/passes.h.inc"
+
 class DecomposeHybridQuantizationPass
-    : public PassWrapper<DecomposeHybridQuantizationPass, FunctionPass> {
+    : public impl::DecomposeHybridQuantizationPassBase<
+          DecomposeHybridQuantizationPass> {
  public:
-  DecomposeHybridQuantizationPass() = default;
-  DecomposeHybridQuantizationPass(const DecomposeHybridQuantizationPass &) {}
-
-  StringRef getArgument() const override {
-    return "tfl-decompose-hybrid-quantization";
-  }
-
-  StringRef getDescription() const override {
-    return "Decomposes (with explicit quantize/dequantize ops) selected math "
-           "operations which exist in the model with hybrid quantization "
-           "(some arguments/results left in floating point).";
-  }
-
-  void runOnFunction() override;
-
-  void getDependentDialects(DialectRegistry &registry) const override {
-    registry.insert<TFL::TensorFlowLiteDialect>();
-  }
+  explicit DecomposeHybridQuantizationPass() = default;
+  void runOnOperation() override;
 };
 
 template <typename SrcOp>
@@ -68,22 +62,29 @@ class DequantizeConverter : public OpRewritePattern<SrcOp> {
                                 PatternRewriter &rewriter) const final {
     Operation *op = srcop.getOperation();
     bool allTypesFp = true;
-    bool allTypesQuantized = true;
+    bool allTypesQuantizedOrInt = true;
     for (auto operand : op->getOperands()) {
-      ShapedType type = operand.getType().template dyn_cast<ShapedType>();
+      ShapedType type = mlir::dyn_cast<ShapedType>(operand.getType());
       if (!type) continue;
-      allTypesFp &= !type.getElementType().isa<quant::QuantizedType>();
-      allTypesQuantized &= type.getElementType().isa<quant::QuantizedType>();
+      allTypesFp &= !mlir::isa<quant::QuantizedType>(type.getElementType());
+      allTypesQuantizedOrInt &=
+          (mlir::isa<quant::QuantizedType>(type.getElementType()) ||
+           mlir::isa<IntegerType>(type.getElementType()));
     }
 
     for (auto result : op->getResults()) {
-      ShapedType type = result.getType().template cast<ShapedType>();
-      allTypesFp &= !type.getElementType().isa<quant::QuantizedType>();
-      allTypesQuantized &= type.getElementType().isa<quant::QuantizedType>();
+      ShapedType type = mlir::cast<ShapedType>(result.getType());
+      allTypesFp &= !mlir::isa<quant::QuantizedType>(type.getElementType());
+      allTypesQuantizedOrInt &=
+          (mlir::isa<quant::QuantizedType>(type.getElementType()) ||
+           mlir::isa<IntegerType>(type.getElementType()));
     }
 
     // If all quantized or floating point then types are consistent.
-    if (allTypesFp || allTypesQuantized) return failure();
+    // Int is valid in combination with both quantized and floating point.
+    // This occurs when doing qi16 convolution, as bias is passed as a
+    // non-quantized int64
+    if (allTypesFp || allTypesQuantizedOrInt) return failure();
 
     Location loc = op->getLoc();
     SmallVector<Value> newOperands;
@@ -92,7 +93,7 @@ class DequantizeConverter : public OpRewritePattern<SrcOp> {
       if (QuantizedType::getQuantizedElementType(operand.getType())) {
         auto newTy = QuantizedType::castToExpressedType(operand.getType());
         newOperands.push_back(
-            rewriter.create<TFL::DequantizeOp>(loc, newTy, operand));
+            TFL::DequantizeOp::create(rewriter, loc, newTy, operand));
         continue;
       }
 
@@ -108,9 +109,8 @@ class DequantizeConverter : public OpRewritePattern<SrcOp> {
       newResultTys.push_back(resultTy);
     }
 
-    auto newResults = rewriter
-                          .create<SrcOp>(loc, newResultTys, newOperands,
-                                         op->getAttrDictionary().getValue())
+    auto newResults = SrcOp::create(rewriter, loc, newResultTys, newOperands,
+                                    op->getAttrDictionary().getValue())
                           .getOperation()
                           ->getResults();
 
@@ -119,8 +119,8 @@ class DequantizeConverter : public OpRewritePattern<SrcOp> {
       Value result = newResults[i];
       Type resultTy = op->getOpResult(i).getType();
       if (QuantizedType::getQuantizedElementType(resultTy)) {
-        replaceResults.push_back(rewriter.create<TFL::QuantizeOp>(
-            loc, resultTy, result, TypeAttr::get(resultTy)));
+        replaceResults.push_back(TFL::QuantizeOp::create(
+            rewriter, loc, resultTy, result, TypeAttr::get(resultTy)));
         continue;
       }
 
@@ -133,25 +133,24 @@ class DequantizeConverter : public OpRewritePattern<SrcOp> {
   }
 };
 
-void DecomposeHybridQuantizationPass::runOnFunction() {
-  OwningRewritePatternList patterns(&getContext());
+void DecomposeHybridQuantizationPass::runOnOperation() {
+  RewritePatternSet patterns(&getContext());
   auto *ctx = &getContext();
-  auto func = getFunction();
-  patterns.insert<DequantizeConverter<TFL::Conv2DOp>,
-                  DequantizeConverter<TFL::Conv3DOp>,
-                  DequantizeConverter<TFL::DepthwiseConv2DOp>,
-                  DequantizeConverter<TFL::FullyConnectedOp>,
-                  DequantizeConverter<TFL::TransposeConvOp>>(ctx);
-  (void)applyPatternsAndFoldGreedily(func, std::move(patterns));
+  auto func = getOperation();
+  patterns.add<DequantizeConverter<TFL::Conv2DOp>,
+               DequantizeConverter<TFL::Conv3DOp>,
+               DequantizeConverter<TFL::DepthwiseConv2DOp>,
+               DequantizeConverter<TFL::FullyConnectedOp>,
+               DequantizeConverter<TFL::TransposeConvOp>>(ctx);
+  (void)applyPatternsGreedily(func, std::move(patterns));
 }
 
 }  // namespace
 
-std::unique_ptr<OperationPass<FuncOp>> CreateDecomposeHybridQuantizationPass() {
+std::unique_ptr<OperationPass<func::FuncOp>>
+CreateDecomposeHybridQuantizationPass() {
   return std::make_unique<DecomposeHybridQuantizationPass>();
 }
-
-static PassRegistration<DecomposeHybridQuantizationPass> pass;
 
 }  // namespace TFL
 }  // namespace mlir

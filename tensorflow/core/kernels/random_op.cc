@@ -51,8 +51,9 @@ typedef Eigen::GpuDevice GPUDevice;
 
 namespace {
 
-static Status AllocateOutputWithShape(OpKernelContext* ctx, const Tensor& shape,
-                                      int index, Tensor** output) {
+static absl::Status AllocateOutputWithShape(OpKernelContext* ctx,
+                                            const Tensor& shape, int index,
+                                            Tensor** output) {
   TensorShape tensor_shape;
   TF_RETURN_IF_ERROR(tensor::MakeShape(shape, &tensor_shape));
   return ctx->allocate_output(index, tensor_shape, output);
@@ -96,12 +97,14 @@ class RandomUniformIntOp : public OpKernel {
     const Tensor& shape = ctx->input(0);
     const Tensor& minval = ctx->input(1);
     const Tensor& maxval = ctx->input(2);
-    OP_REQUIRES(ctx, TensorShapeUtils::IsScalar(minval.shape()),
-                errors::InvalidArgument("minval must be 0-D, got shape ",
-                                        minval.shape().DebugString()));
-    OP_REQUIRES(ctx, TensorShapeUtils::IsScalar(maxval.shape()),
-                errors::InvalidArgument("maxval must be 0-D, got shape ",
-                                        maxval.shape().DebugString()));
+    OP_REQUIRES(
+        ctx, TensorShapeUtils::IsScalar(minval.shape()),
+        absl::InvalidArgumentError(absl::StrCat(
+            "minval must be 0-D, got shape ", minval.shape().DebugString())));
+    OP_REQUIRES(
+        ctx, TensorShapeUtils::IsScalar(maxval.shape()),
+        absl::InvalidArgumentError(absl::StrCat(
+            "maxval must be 0-D, got shape ", maxval.shape().DebugString())));
 
     // Allocate output, and exit early if possible
     Tensor* output;
@@ -151,12 +154,12 @@ class RandomGammaOp : public OpKernel {
                 TensorShapeUtils::IsVector(shape_t.shape()) &&
                     (shape_t.dtype() == DataType::DT_INT32 ||
                      shape_t.dtype() == DataType::DT_INT64),
-                errors::InvalidArgument(
+                absl::InvalidArgumentError(absl::StrCat(
                     "shape must be a vector of {int32,int64}, got shape: ",
-                    shape_t.DebugString()));
+                    shape_t.DebugString())));
     TensorShape samples_shape;
     if (shape_t.dtype() == DataType::DT_INT32) {
-      auto vec = shape_t.flat<int32>();
+      auto vec = shape_t.flat<int32_t>();
       OP_REQUIRES_OK(ctx, TensorShapeUtils::MakeShape(vec.data(), vec.size(),
                                                       &samples_shape));
     } else if (shape_t.dtype() == DataType::DT_INT64) {
@@ -166,7 +169,7 @@ class RandomGammaOp : public OpKernel {
     }
     const int64_t samples_per_alpha = samples_shape.num_elements();
 
-    samples_shape.AppendShape(alpha_t.shape());
+    OP_REQUIRES_OK(ctx, samples_shape.AppendShapeWithStatus(alpha_t.shape()));
     // Allocate output samples.
     Tensor* samples_t = nullptr;
     OP_REQUIRES_OK(ctx, ctx->allocate_output(0, samples_shape, &samples_t));
@@ -191,9 +194,9 @@ class RandomGammaOp : public OpKernel {
     const auto alpha_flat = alpha_t.flat<T>().data();
     const int64_t num_alphas = alpha_t.NumElements();
     OP_REQUIRES(ctx, num_alphas > 0,
-                errors::InvalidArgument(
+                absl::InvalidArgumentError(absl::StrCat(
                     "Input alpha should have non-zero element count, got: ",
-                    num_alphas));
+                    num_alphas)));
     auto samples_flat = samples_t->flat<T>().data();
     PhiloxRandom rng = generator_.ReserveRandomOutputs(
         samples_per_alpha * num_alphas, kReservedSamplesPerOutput);
@@ -321,7 +324,8 @@ class RandomGammaOp : public OpKernel {
  private:
   GuardedPhiloxRandom generator_;
 
-  TF_DISALLOW_COPY_AND_ASSIGN(RandomGammaOp);
+  RandomGammaOp(const RandomGammaOp&) = delete;
+  void operator=(const RandomGammaOp&) = delete;
 };
 
 }  // namespace
@@ -441,6 +445,7 @@ TF_CALL_uint64(REGISTER_FULL_INT);
                           RandomUniformIntOp<GPUDevice, IntType>);
 
 TF_CALL_half(REGISTER);
+TF_CALL_bfloat16(REGISTER);
 TF_CALL_float(REGISTER);
 TF_CALL_double(REGISTER);
 TF_CALL_int32(REGISTER_INT);

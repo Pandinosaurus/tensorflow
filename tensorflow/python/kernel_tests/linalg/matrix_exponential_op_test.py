@@ -1,0 +1,417 @@
+# Copyright 2017 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+"""Tests for tensorflow.ops.linalg.linalg_impl.matrix_exponential."""
+
+import itertools
+
+import numpy as np
+
+from tensorflow.python.client import session
+from tensorflow.python.eager import backprop
+from tensorflow.python.eager import def_function
+from tensorflow.python.eager import forwardprop
+from tensorflow.python.framework import constant_op
+from tensorflow.python.framework import dtypes
+from tensorflow.python.framework import ops
+from tensorflow.python.framework import test_util
+from tensorflow.python.ops import array_ops
+from tensorflow.python.ops import array_ops_stack
+from tensorflow.python.ops import control_flow_ops
+from tensorflow.python.ops import math_ops
+from tensorflow.python.ops import random_ops
+from tensorflow.python.ops import variables
+from tensorflow.python.ops.linalg import linalg_impl
+from tensorflow.python.platform import benchmark
+from tensorflow.python.platform import test
+
+
+def np_expm(x):  # pylint: disable=invalid-name
+  """Slow but accurate Taylor series matrix exponential."""
+  y = np.zeros(x.shape, dtype=x.dtype)
+  xn = np.eye(x.shape[0], dtype=x.dtype)
+  for n in range(40):
+    if n > 0:
+      xn /= float(n)
+    y += xn
+    xn = np.dot(xn, x)
+  return y
+
+
+# Half precision dtypes are accumulated in float32 by `matrix_exponential`.
+_HALF_TYPES = (np.float16, dtypes.bfloat16.as_numpy_dtype)
+
+
+@test_util.run_all_without_tensor_float_32("Avoid TF32-based matmuls.")
+class ExponentialOpTest(test.TestCase):
+
+  def _verifyExponential(self, x, np_type):
+    inp = x.astype(np_type)
+    # Accumulating the Taylor series in 16-bit would itself be inaccurate, so
+    # half precision inputs are compared against a float64 reference.
+    ref_type = np.float64 if np_type in _HALF_TYPES else np_type
+    with test_util.use_gpu():
+      tf_ans = linalg_impl.matrix_exponential(inp)
+      if x.size == 0:
+        np_ans = np.empty(x.shape, dtype=ref_type)
+      else:
+        if x.ndim > 2:
+          np_ans = np.zeros(inp.shape, dtype=ref_type)
+          for i in itertools.product(*[range(x) for x in inp.shape[:-2]]):
+            np_ans[i] = np_expm(inp[i].astype(ref_type))
+        else:
+          np_ans = np_expm(inp.astype(ref_type))
+      out = self.evaluate(tf_ans)
+      tol = 1e-2 if np_type in _HALF_TYPES else 1e-3
+      self.assertAllClose(np_ans, out, rtol=tol, atol=tol)
+
+  def _verifyExponentialReal(self, x):
+    for np_type in [
+        np.float16,
+        dtypes.bfloat16.as_numpy_dtype,
+        np.float32,
+        np.float64,
+    ]:
+      self._verifyExponential(x, np_type)
+
+  def _verifyExponentialComplex(self, x):
+    for np_type in [np.complex64, np.complex128]:
+      self._verifyExponential(x, np_type)
+
+  def _makeBatch(self, matrix1, matrix2):
+    matrix_batch = np.concatenate(
+        [np.expand_dims(matrix1, 0),
+         np.expand_dims(matrix2, 0)])
+    matrix_batch = np.tile(matrix_batch, [2, 3, 1, 1])
+    return matrix_batch
+
+  def testNonsymmetricReal(self):
+    # 2x2 matrices
+    matrix1 = np.array([[1., 2.], [3., 4.]])
+    matrix2 = np.array([[1., 3.], [3., 5.]])
+    self._verifyExponentialReal(matrix1)
+    self._verifyExponentialReal(matrix2)
+    # A multidimensional batch of 2x2 matrices
+    self._verifyExponentialReal(self._makeBatch(matrix1, matrix2))
+
+  @test_util.run_deprecated_v1
+  def testNonsymmetricComplex(self):
+    matrix1 = np.array([[1., 2.], [3., 4.]])
+    matrix2 = np.array([[1., 3.], [3., 5.]])
+    matrix1 = matrix1.astype(np.complex64)
+    matrix1 += 1j * matrix1
+    matrix2 = matrix2.astype(np.complex64)
+    matrix2 += 1j * matrix2
+    self._verifyExponentialComplex(matrix1)
+    self._verifyExponentialComplex(matrix2)
+    # Complex batch
+    self._verifyExponentialComplex(self._makeBatch(matrix1, matrix2))
+
+  def testSymmetricPositiveDefiniteReal(self):
+    # 2x2 matrices
+    matrix1 = np.array([[2., 1.], [1., 2.]])
+    matrix2 = np.array([[3., -1.], [-1., 3.]])
+    self._verifyExponentialReal(matrix1)
+    self._verifyExponentialReal(matrix2)
+    # A multidimensional batch of 2x2 matrices
+    self._verifyExponentialReal(self._makeBatch(matrix1, matrix2))
+
+  def testSymmetricPositiveDefiniteComplex(self):
+    matrix1 = np.array([[2., 1.], [1., 2.]])
+    matrix2 = np.array([[3., -1.], [-1., 3.]])
+    matrix1 = matrix1.astype(np.complex64)
+    matrix1 += 1j * matrix1
+    matrix2 = matrix2.astype(np.complex64)
+    matrix2 += 1j * matrix2
+    self._verifyExponentialComplex(matrix1)
+    self._verifyExponentialComplex(matrix2)
+    # Complex batch
+    self._verifyExponentialComplex(self._makeBatch(matrix1, matrix2))
+
+  @test_util.run_deprecated_v1
+  def testNonSquareMatrix(self):
+    # When the exponential of a non-square matrix is attempted we should return
+    # an error
+    with self.assertRaises(ValueError):
+      linalg_impl.matrix_exponential(np.array([[1., 2., 3.], [3., 4., 5.]]))
+
+  @test_util.run_deprecated_v1
+  def testWrongDimensions(self):
+    # The input to the exponential should be at least a 2-dimensional tensor.
+    tensor3 = constant_op.constant([1., 2.])
+    with self.assertRaises(ValueError):
+      linalg_impl.matrix_exponential(tensor3)
+
+  def testInfinite(self):
+    # Check that the op does not loop forever on infinite inputs. (b/158433036)
+    in_tensor = [[np.inf, 1.], [1., 1.]]
+    result = self.evaluate(linalg_impl.matrix_exponential(in_tensor))
+    self.assertTrue(np.all(np.isnan(result)))
+
+  def testEmpty(self):
+    self._verifyExponentialReal(np.empty([0, 2, 2]))
+    self._verifyExponentialReal(np.empty([2, 0, 0]))
+
+  @test_util.run_deprecated_v1
+  def testDynamic(self):
+    with self.session() as sess:
+      inp = array_ops.placeholder(ops.dtypes.float32)
+      expm = linalg_impl.matrix_exponential(inp)
+      matrix = np.array([[1., 2.], [3., 4.]])
+      sess.run(expm, feed_dict={inp: matrix})
+
+  @test_util.run_deprecated_v1
+  def testConcurrentExecutesWithoutError(self):
+    with self.session():
+      matrix1 = random_ops.random_normal([5, 5], seed=42)
+      matrix2 = random_ops.random_normal([5, 5], seed=42)
+      expm1 = linalg_impl.matrix_exponential(matrix1)
+      expm2 = linalg_impl.matrix_exponential(matrix2)
+      expm = self.evaluate([expm1, expm2])
+      self.assertAllEqual(expm[0], expm[1])
+
+  @test_util.run_v2_only
+  def testSecondDerivativeNestedForwardAccumulator(self):
+    # Regression test for Issue #127224.
+    def target(t):
+      one = constant_op.constant(1.0, dtype=t.dtype)
+      a = array_ops_stack.stack([
+          array_ops_stack.stack([t, one]),
+          array_ops_stack.stack([-one, t]),
+      ])
+      return math_ops.reduce_sum(linalg_impl.matrix_exponential(a))
+
+    def forward_ad(fn):
+      def jvp(x):
+        with forwardprop.ForwardAccumulator(x, array_ops.ones_like(x)) as acc:
+          y = fn(x)
+        return acc.jvp(y)
+
+      return jvp
+
+    for dtype in [ops.dtypes.float32, ops.dtypes.float64]:
+      x = constant_op.constant(0.7, dtype=dtype)
+      expected = 2.0 * np.exp(0.7) * np.cos(1.0)
+
+      if dtype == ops.dtypes.float64:
+        atol_1st = 1e-12
+        rtol_1st = 1e-12
+        # Nested ForwardAccumulator (forward-over-forward) diverges from the
+        # analytical value by ~9% here, independent of dtype: matrix_exponential
+        # chains matmuls three levels deep (matrix_4 = matrix_2 * matrix_2,
+        # matrix_6 = matrix_4 * matrix_2, ...), and TF's forward-over-forward
+        # differentiation is inaccurate past two chained matmul levels
+        # regardless of precision, so this isn't something this PR's
+        # coefficient normalization can improve further.
+        atol_2nd = 0.25
+        rtol_2nd = 1e-1
+        atol_hess = 1e-12
+        rtol_hess = 1e-12
+      else:
+        atol_1st = 1e-3
+        rtol_1st = 1e-3
+        atol_2nd = 0.25
+        rtol_2nd = 1e-1
+        atol_hess = 1e-4
+        rtol_hess = 1e-4
+
+      # 1st order forward-mode JVP
+      actual_1st = forward_ad(target)(x)
+      self.assertAllClose(
+          expected, self.evaluate(actual_1st), rtol=rtol_1st, atol=atol_1st
+      )
+
+      # 2nd order nested forward-mode JVP
+      actual_2nd = forward_ad(forward_ad(target))(x)
+      self.assertAllClose(
+          expected, self.evaluate(actual_2nd), rtol=rtol_2nd, atol=atol_2nd
+      )
+
+      # 2nd order reverse-mode Hessian
+      with backprop.GradientTape() as t2:
+        t2.watch(x)
+        with backprop.GradientTape() as t1:
+          t1.watch(x)
+          y = target(x)
+        g1 = t1.gradient(y, x)
+      g2 = t2.gradient(g1, x)
+      self.assertAllClose(
+          expected, self.evaluate(g2), rtol=rtol_hess, atol=atol_hess
+      )
+
+  @test_util.run_v2_only
+  def testGradientJitCompile(self):
+    # Regression test for Issue #77693.
+    if not test.is_built_with_xla():
+      self.skipTest("Test only applicable when running with XLA support")
+
+    def compute_grad(x):
+      with backprop.GradientTape() as tape:
+        tape.watch(x)
+        y = linalg_impl.matrix_exponential(x)
+      return y, tape.gradient(y, x)
+
+    jit_grad_fn = def_function.function(compute_grad, jit_compile=True)
+
+    @def_function.function(jit_compile=True)
+    def jit_dynamic_grad_fn():
+      x = random_ops.random_normal([2, 2], seed=42, dtype=dtypes.float32)
+      with backprop.GradientTape() as tape:
+        tape.watch(x)
+        y = linalg_impl.matrix_exponential(x)
+      return y, tape.gradient(y, x)
+
+    dyn_y, dyn_g = jit_dynamic_grad_fn()
+    self.assertEqual(dyn_y.shape, (2, 2))
+    self.assertEqual(dyn_g.shape, (2, 2))
+
+    for dtype in [dtypes.float32, dtypes.float64]:
+      # Inputs triggering squarings == 0 and squarings > 0
+      test_matrices = [
+          constant_op.constant([[0.4, 1.5], [0.6, 0.1]], dtype=dtype),
+          constant_op.constant([[10.0, 2.0], [3.0, 8.0]], dtype=dtype),
+          constant_op.constant([[-0.0, 0.0], [0.0, -0.0]], dtype=dtype),
+      ]
+      for x in test_matrices:
+        eager_y, eager_g = compute_grad(x)
+        jit_y, jit_g = jit_grad_fn(x)
+        self.assertAllClose(eager_y, jit_y, rtol=1e-4, atol=1e-4)
+        self.assertAllClose(eager_g, jit_g, rtol=1e-4, atol=1e-4)
+
+      # Empty tensors (N=0)
+      for empty_shape in [(0, 0), (0, 2, 2)]:
+        x_empty = constant_op.constant([], shape=empty_shape, dtype=dtype)
+        jit_y, jit_g = jit_grad_fn(x_empty)
+        self.assertAllEqual(jit_y.shape, empty_shape)
+        self.assertAllEqual(jit_g.shape, empty_shape)
+        self.assertAllEqual(jit_y, array_ops.zeros(empty_shape, dtype=dtype))
+        self.assertAllEqual(jit_g, array_ops.zeros(empty_shape, dtype=dtype))
+
+      # Non-finite inputs: NaN, +inf, -inf
+      for non_finite_val in [float("nan"), float("inf"), float("-inf")]:
+        x_nf = constant_op.constant(
+            [[non_finite_val, 0.0], [0.0, 1.0]], dtype=dtype
+        )
+        eager_y, eager_g = compute_grad(x_nf)
+        jit_y, jit_g = jit_grad_fn(x_nf)
+        self.assertAllEqual(math_ops.is_nan(jit_y), math_ops.is_nan(eager_y))
+        self.assertIsNone(eager_g)
+        # The If gradient feeds zeros into Pade matmuls on non-finite
+        # intermediates (0 * inf = NaN), so only the shape is stable.
+        self.assertEqual(jit_g.shape, (2, 2))
+
+    # Unsupported dtypes
+    with self.assertRaisesRegex(ValueError, "does not support matrices"):
+      linalg_impl.matrix_exponential(
+          constant_op.constant([[1, 0], [0, 1]], dtype=dtypes.int32)
+      )
+
+
+class MatrixExponentialBenchmark(test.Benchmark):
+
+  shapes = [
+      (4, 4),
+      (10, 10),
+      (16, 16),
+      (101, 101),
+      (256, 256),
+      (1000, 1000),
+      (1024, 1024),
+      (2048, 2048),
+      (513, 4, 4),
+      (513, 16, 16),
+      (513, 256, 256),
+  ]
+
+  def _GenerateMatrix(self, shape):
+    batch_shape = shape[:-2]
+    shape = shape[-2:]
+    assert shape[0] == shape[1]
+    n = shape[0]
+    matrix = np.ones(shape).astype(np.float32) / (2.0 * n) + np.diag(
+        np.ones(n).astype(np.float32))
+    return variables.Variable(np.tile(matrix, batch_shape + (1, 1)))
+
+  def benchmarkMatrixExponentialOp(self):
+    for shape in self.shapes:
+      with ops.Graph().as_default(), \
+          session.Session(config=benchmark.benchmark_config()) as sess, \
+          ops.device("/cpu:0"):
+        matrix = self._GenerateMatrix(shape)
+        expm = linalg_impl.matrix_exponential(matrix)
+        self.evaluate(variables.global_variables_initializer())
+        self.run_op_benchmark(
+            sess,
+            control_flow_ops.group(expm),
+            min_iters=25,
+            name="matrix_exponential_cpu_{shape}".format(shape=shape))
+
+      if test.is_gpu_available(True):
+        with ops.Graph().as_default(), \
+            session.Session(config=benchmark.benchmark_config()) as sess, \
+            ops.device("/gpu:0"):
+          matrix = self._GenerateMatrix(shape)
+          expm = linalg_impl.matrix_exponential(matrix)
+          self.evaluate(variables.global_variables_initializer())
+          self.run_op_benchmark(
+              sess,
+              control_flow_ops.group(expm),
+              min_iters=25,
+              name="matrix_exponential_gpu_{shape}".format(shape=shape))
+
+
+def _TestRandomSmall(dtype, batch_dims, size):
+
+  def Test(self):
+    np.random.seed(42)
+    shape = batch_dims + (size, size)
+    matrix = np.random.uniform(low=-1.0, high=1.0, size=shape).astype(dtype)
+    self._verifyExponentialReal(matrix)
+
+  return Test
+
+
+def _TestL1Norms(dtype, shape, scale):
+
+  def Test(self):
+    np.random.seed(42)
+    matrix = np.random.uniform(
+        low=-1.0, high=1.0, size=np.prod(shape)).reshape(shape).astype(dtype)
+    l1_norm = np.max(np.sum(np.abs(matrix), axis=matrix.ndim - 2))
+    matrix /= l1_norm
+    self._verifyExponentialReal(scale * matrix)
+
+  return Test
+
+
+if __name__ == "__main__":
+  for dtype_ in [np.float32, np.float64, np.complex64, np.complex128]:
+    for batch_ in [(), (2,), (2, 2)]:
+      for size_ in [4, 7]:
+        name = "%s_%d_%d" % (dtype_.__name__, len(batch_), size_)
+        setattr(ExponentialOpTest, "testL1Norms_" + name,
+                _TestRandomSmall(dtype_, batch_, size_))
+
+  for shape_ in [(3, 3), (2, 3, 3)]:
+    for dtype_ in [np.float32, np.complex64]:
+      for scale_ in [0.1, 1.5, 5.0, 20.0]:
+        name = "%s_%d_%d" % (dtype_.__name__, len(shape_), int(scale_ * 10))
+        setattr(ExponentialOpTest, "testL1Norms_" + name,
+                _TestL1Norms(dtype_, shape_, scale_))
+    for dtype_ in [np.float64, np.complex128]:
+      for scale_ in [0.01, 0.2, 0.5, 1.5, 6.0, 25.0]:
+        name = "%s_%d_%d" % (dtype_.__name__, len(shape_), int(scale_ * 100))
+        setattr(ExponentialOpTest, "testL1Norms_" + name,
+                _TestL1Norms(dtype_, shape_, scale_))
+  test.main()

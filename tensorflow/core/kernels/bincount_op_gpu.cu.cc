@@ -17,6 +17,13 @@ limitations under the License.
 
 #define EIGEN_USE_GPU
 
+#include <cstddef>
+#include <cstdint>
+#include <limits>
+#include <type_traits>
+
+#include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/register_types.h"
 #include "tensorflow/core/framework/tensor.h"
@@ -36,24 +43,31 @@ namespace functor {
 
 template <typename Tidx, typename T>
 struct BincountFunctor<GPUDevice, Tidx, T, false> {
-  static Status Compute(OpKernelContext* context,
-                        const typename TTypes<Tidx, 1>::ConstTensor& arr,
-                        const typename TTypes<T, 1>::ConstTensor& weights,
-                        typename TTypes<T, 1>::Tensor& output,
-                        const Tidx num_bins) {
+  static absl::Status Compute(OpKernelContext* context,
+                              const typename TTypes<Tidx, 1>::ConstTensor& arr,
+                              const typename TTypes<T, 1>::ConstTensor& weights,
+                              typename TTypes<T, 1>::Tensor& output,
+                              const Tidx num_bins) {
     if (weights.size() != 0) {
-      return errors::InvalidArgument(
-          "Weights should not be passed as it should be "
-          "handled by unsorted_segment_sum");
+      return absl::UnimplementedError(
+          "Weights are not yet supported by the GPU implementation of Bincount."
+          " Please use unsorted_segment_sum instead or put Bincount inside"
+          " tf.function(jit_compile=True).");
     }
     if (output.size() == 0) {
-      return Status::OK();
+      return absl::OkStatus();
+    }
+    if (arr.size() > std::numeric_limits<int>::max()) {
+      return absl::InvalidArgumentError(absl::StrCat(
+          "Bincount on GPU supports at most ", std::numeric_limits<int>::max(),
+          " input values, got ", arr.size()));
     }
     if (tensorflow::OpDeterminismRequired()) {
-      // TODO(reedwm): Is this really nondeterministic? There is no
-      // documentation in DeviceHistogram::HistogramEven on whether it is
-      // deterministic or not.
-      return errors::Unimplemented(
+      // TODO(reedwm): Is this really nondeterministic?
+      // DeviceHistogram::HistogramEven is called, and it is unclear
+      // if it is deterministic on floating-point inputs.
+      // See https://github.com/NVIDIA/cub/issues/471#issuecomment-1194682443.
+      return absl::UnimplementedError(
           "Determinism is not yet supported in GPU implementation of "
           "Bincount.");
     }
@@ -84,12 +98,35 @@ struct BincountFunctor<GPUDevice, Tidx, T, false> {
           "Could not launch HistogramEven to get temp storage: ",
           GpuGetErrorString(err), ".");
     }
+#if GOOGLE_CUDA
+    if (output.size() > 256) {
+      const size_t bytes_per_block =
+          static_cast<size_t>(output.size()) * sizeof(T);
+      const size_t num_privatized_blocks = temp_storage_bytes / bytes_per_block;
+      if (num_privatized_blocks > 1 &&
+          num_privatized_blocks - 1 >
+              static_cast<size_t>(std::numeric_limits<int>::max()) /
+                  static_cast<size_t>(output.size())) {
+        return absl::InvalidArgumentError(absl::StrCat(
+            "Bincount size (", output.size(), ") and input length (",
+            arr.size(), ") exceed 32-bit GPU histogram indexing limits"));
+      }
+    }
+#endif  // GOOGLE_CUDA
+    if (temp_storage_bytes >
+        static_cast<size_t>(std::numeric_limits<int64_t>::max())) {
+      return absl::InvalidArgumentError(absl::StrCat("Temporary storage size (",
+                                                     temp_storage_bytes,
+                                                     ") overflows int64_t"));
+    }
+    TensorShape temp_shape;
+    TF_RETURN_IF_ERROR(TensorShape::BuildTensorShape(
+        {static_cast<int64_t>(temp_storage_bytes)}, &temp_shape));
     Tensor temp_storage;
-    TF_RETURN_IF_ERROR(context->allocate_temp(
-        DataTypeToEnum<int8>::value,
-        TensorShape({static_cast<int64>(temp_storage_bytes)}), &temp_storage));
+    TF_RETURN_IF_ERROR(context->allocate_temp(DataTypeToEnum<int8_t>::value,
+                                              temp_shape, &temp_storage));
 
-    void* d_temp_storage = temp_storage.flat<int8>().data();
+    void* d_temp_storage = temp_storage.flat<int8_t>().data();
     // The second HistogramEven is to actual run with d_temp_storage
     // allocated with temp_storage_bytes.
     err = gpuprim::DeviceHistogram::HistogramEven(
@@ -106,7 +143,7 @@ struct BincountFunctor<GPUDevice, Tidx, T, false> {
       return errors::Internal(
           "Could not launch HistogramEven: ", GpuGetErrorString(err), ".");
     }
-    return Status::OK();
+    return absl::OkStatus();
   }
 };
 
@@ -115,7 +152,8 @@ __global__ void BincountReduceKernel(const Tidx* in, T* out, const int nthreads,
                                      const Tidx num_bins) {
   GPU_1D_KERNEL_LOOP(index, nthreads) {
     Tidx bin = ldg(in + index);
-    if (bin < num_bins) {
+    if (static_cast<std::make_unsigned_t<Tidx>>(bin) <
+        static_cast<std::make_unsigned_t<Tidx>>(num_bins)) {
       out[bin] = T(1);
     }
   }
@@ -123,12 +161,20 @@ __global__ void BincountReduceKernel(const Tidx* in, T* out, const int nthreads,
 
 template <typename Tidx, typename T>
 struct BincountFunctor<GPUDevice, Tidx, T, true> {
-  static Status Compute(OpKernelContext* context,
-                        const typename TTypes<Tidx, 1>::ConstTensor& arr,
-                        const typename TTypes<T, 1>::ConstTensor& weights,
-                        typename TTypes<T, 1>::Tensor& output,
-                        const Tidx num_bins) {
-    const int nthreads = arr.dimension(0);
+  static absl::Status Compute(OpKernelContext* context,
+                              const typename TTypes<Tidx, 1>::ConstTensor& arr,
+                              const typename TTypes<T, 1>::ConstTensor& weights,
+                              typename TTypes<T, 1>::Tensor& output,
+                              const Tidx num_bins) {
+    if (output.size() == 0 || arr.size() == 0) {
+      return absl::OkStatus();
+    }
+    if (arr.size() > std::numeric_limits<int>::max()) {
+      return absl::InvalidArgumentError(absl::StrCat(
+          "Bincount on GPU supports at most ", std::numeric_limits<int>::max(),
+          " input values, got ", arr.size()));
+    }
+    const int nthreads = static_cast<int>(arr.dimension(0));
 
     auto d = context->eigen_gpu_device();
     GpuLaunchConfig config = GetGpuLaunchConfig(nthreads, d);
@@ -146,9 +192,12 @@ __global__ void BincountColReduceKernel(const Tidx* in, const T* weights,
   const int nthreads = num_rows * num_cols;
   GPU_1D_KERNEL_LOOP(index, nthreads) {
     Tidx bin = ldg(in + index);
-    if (bin < num_bins) {
+    if (static_cast<std::make_unsigned_t<Tidx>>(bin) <
+        static_cast<std::make_unsigned_t<Tidx>>(num_bins)) {
       int row = index / num_cols;
-      int offset = row * num_bins + bin;
+      int64_t offset =
+          static_cast<int64_t>(row) * static_cast<int64_t>(num_bins) +
+          static_cast<int64_t>(bin);
       if (binary_count) {
         out[offset] = T(1);
       } else {
@@ -176,7 +225,8 @@ __global__ void BincountColReduceSharedKernel(const Tidx* in, const T* weights,
   const int nthreads = num_rows * num_cols;
   GPU_1D_KERNEL_LOOP(index, nthreads) {
     Tidx bin = ldg(in + index);
-    if (bin < num_bins) {
+    if (static_cast<std::make_unsigned_t<Tidx>>(bin) <
+        static_cast<std::make_unsigned_t<Tidx>>(num_bins)) {
       int row = index / num_cols;
       int offset = row * num_bins + bin;
       if (binary_count) {
@@ -203,20 +253,28 @@ __global__ void BincountColReduceSharedKernel(const Tidx* in, const T* weights,
 
 template <typename Tidx, typename T, bool binary_count>
 struct BincountReduceFunctor<GPUDevice, Tidx, T, binary_count> {
-  static Status Compute(OpKernelContext* context,
-                        const typename TTypes<Tidx, 2>::ConstTensor& in,
-                        const typename TTypes<T, 2>::ConstTensor& weights,
-                        typename TTypes<T, 2>::Tensor& out,
-                        const Tidx num_bins) {
-    const int num_rows = in.dimension(0);
-    const int num_cols = in.dimension(1);
+  static absl::Status Compute(OpKernelContext* context,
+                              const typename TTypes<Tidx, 2>::ConstTensor& in,
+                              const typename TTypes<T, 2>::ConstTensor& weights,
+                              typename TTypes<T, 2>::Tensor& out,
+                              const Tidx num_bins) {
+    if (out.size() == 0 || in.size() == 0) {
+      return absl::OkStatus();
+    }
+    if (in.size() > std::numeric_limits<int>::max()) {
+      return absl::InvalidArgumentError(absl::StrCat(
+          "Bincount on GPU supports at most ", std::numeric_limits<int>::max(),
+          " input values, got ", in.size()));
+    }
+    const int num_rows = static_cast<int>(in.dimension(0));
+    const int num_cols = static_cast<int>(in.dimension(1));
 
     auto d = context->eigen_gpu_device();
-    GpuLaunchConfig config = GetGpuLaunchConfig(num_rows * num_cols, d);
+    GpuLaunchConfig config = GetGpuLaunchConfig(static_cast<int>(in.size()), d);
 
     // Use half of maximum shared memory, approximately 6 * 1024 inputs.
-    int smem_max = d.sharedMemPerBlock() / 2;
-    int smem_usage = out.size() * sizeof(T);
+    const size_t smem_max = static_cast<size_t>(d.sharedMemPerBlock()) / 2;
+    const size_t smem_usage = static_cast<size_t>(out.size()) * sizeof(T);
     if (smem_usage < smem_max) {
       return GpuLaunchKernel(
           BincountColReduceSharedKernel<Tidx, T, binary_count>,

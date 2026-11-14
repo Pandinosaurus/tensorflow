@@ -13,8 +13,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#ifndef TENSORFLOW_GRAPH_EDGESET_H_
-#define TENSORFLOW_GRAPH_EDGESET_H_
+#ifndef TENSORFLOW_CORE_GRAPH_EDGESET_H_
+#define TENSORFLOW_CORE_GRAPH_EDGESET_H_
 
 #include <stddef.h>
 
@@ -82,11 +82,12 @@ class EdgeSet {
 #ifdef NDEBUG
   void RegisterMutation() {}
 #else
-  uint32 mutations_ = 0;
+  uint32_t mutations_ = 0;
   void RegisterMutation() { mutations_++; }
 #endif
 
-  TF_DISALLOW_COPY_AND_ASSIGN(EdgeSet);
+  EdgeSet(const EdgeSet&) = delete;
+  void operator=(const EdgeSet&) = delete;
 };
 
 class EdgeSet::const_iterator {
@@ -97,7 +98,7 @@ class EdgeSet::const_iterator {
   typedef typename EdgeSet::difference_type difference_type;
   typedef std::forward_iterator_tag iterator_category;
 
-  const_iterator() {}
+  const_iterator() = default;
 
   const_iterator& operator++();
   const_iterator operator++(int /*unused*/);
@@ -118,15 +119,15 @@ class EdgeSet::const_iterator {
   inline void Init(const EdgeSet* e) {}
   inline void CheckNoMutations() const {}
 #else
-  inline void Init(const EdgeSet* e) {
+  void Init(const EdgeSet* e) {
     owner_ = e;
     init_mutations_ = e->mutations_;
   }
-  inline void CheckNoMutations() const {
+  void CheckNoMutations() const {
     CHECK_EQ(init_mutations_, owner_->mutations_);
   }
   const EdgeSet* owner_ = nullptr;
-  uint32 init_mutations_ = 0;
+  uint32_t init_mutations_ = 0;
 #endif
 };
 
@@ -242,4 +243,4 @@ inline bool EdgeSet::const_iterator::operator==(
 
 }  // namespace tensorflow
 
-#endif  // TENSORFLOW_GRAPH_EDGESET_H_
+#endif  // TENSORFLOW_CORE_GRAPH_EDGESET_H_

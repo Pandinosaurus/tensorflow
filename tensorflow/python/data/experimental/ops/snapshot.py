@@ -13,10 +13,6 @@
 # limitations under the License.
 # ==============================================================================
 """Dataset snapshot and related functionality."""
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 from tensorflow.python.data.ops import dataset_ops
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import ops
@@ -100,8 +96,7 @@ class _LegacySnapshotDataset(dataset_ops.UnaryUnchangedStructureDataset):
     super(_LegacySnapshotDataset, self).__init__(input_dataset, variant_tensor)
 
 
-@deprecation.deprecated(
-    None, "Use `tf.data.experimental.snapshot(...)` instead.")
+@deprecation.deprecated(None, "Use `tf.data.Dataset.snapshot(...)` instead.")
 def legacy_snapshot(path,
                     compression=None,
                     reader_path_prefix=None,
@@ -222,7 +217,7 @@ def snapshot(path, compression="AUTO", reader_func=None, shard_func=None):
   ```python
   dataset = ...
   dataset = dataset.enumerate()
-  dataset = dataset.apply(tf.data.experimental.snapshot("/path/to/snapshot/dir",
+  dataset = dataset.apply(tf.data.Dataset.snapshot("/path/to/snapshot/dir",
       shard_func=lambda x, y: x % NUM_SHARDS, ...))
   dataset = dataset.map(lambda x, y: y)
   ```
@@ -246,7 +241,7 @@ def snapshot(path, compression="AUTO", reader_func=None, shard_func=None):
     # read datasets in parallel and interleave their elements
     return datasets.interleave(lambda x: x, num_parallel_calls=AUTOTUNE)
 
-  dataset = dataset.apply(tf.data.experimental.snapshot("/path/to/snapshot/dir",
+  dataset = dataset.apply(tf.data.Dataset.snapshot("/path/to/snapshot/dir",
       reader_func=user_reader_func))
   ```
 

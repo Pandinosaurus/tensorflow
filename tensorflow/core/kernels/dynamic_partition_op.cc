@@ -16,6 +16,9 @@ limitations under the License.
 // See docs in ../ops/data_flow_ops.cc.
 
 #include <vector>
+
+#include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
 #include "tensorflow/core/framework/bounds_check.h"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/register_types.h"
@@ -47,21 +50,21 @@ class DynamicPartitionOp_Shared : public OpKernel {
     OP_REQUIRES(
         c,
         TensorShapeUtils::StartsWith((*data)->shape(), (*partitions)->shape()),
-        errors::InvalidArgument(
+        absl::InvalidArgumentError(absl::StrCat(
             "data.shape must start with partitions.shape, ",
             "got data.shape = ", (*data)->shape().DebugString(),
-            ", partitions.shape = ", (*partitions)->shape().DebugString()));
+            ", partitions.shape = ", (*partitions)->shape().DebugString())));
 
     // Count how many occurrences of each partition id we have in partitions
-    gtl::InlinedVector<int, 32> partition_count(num_partitions_);
-    auto e_partitions = (*partitions)->flat<int32>();
+    absl::InlinedVector<int, 32UL> partition_count(num_partitions_);
+    auto e_partitions = (*partitions)->flat<int32_t>();
     const int64_t N = e_partitions.dimension(0);
     for (int64_t i = 0; i < N; i++) {
       const int32_t p = internal::SubtleMustCopy(e_partitions(i));
       OP_REQUIRES(c, FastBoundsCheck(p, num_partitions_),
-                  errors::InvalidArgument(
+                  absl::InvalidArgumentError(absl::StrCat(
                       "partitions", SliceDebugString((*partitions)->shape(), i),
-                      " = ", p, " is not in [0, ", num_partitions_, ")"));
+                      " = ", p, " is not in [0, ", num_partitions_, ")")));
       partition_count[p]++;
     }
 
@@ -69,9 +72,9 @@ class DynamicPartitionOp_Shared : public OpKernel {
     OP_REQUIRES_OK(c, c->output_list("outputs", Tout));
     for (int p = 0; p < num_partitions_; p++) {
       TensorShape shape;
-      shape.AddDim(partition_count[p]);
+      OP_REQUIRES_OK(c, shape.AddDimWithStatus(partition_count[p]));
       for (int i = (*partitions)->dims(); i < (*data)->dims(); i++) {
-        shape.AddDim((*data)->dim_size(i));
+        OP_REQUIRES_OK(c, shape.AddDimWithStatus((*data)->dim_size(i)));
       }
       Tensor* out;
       OP_REQUIRES_OK(c, Tout->allocate(p, shape, &out));
@@ -95,9 +98,9 @@ class DynamicPartitionOp : public DynamicPartitionOp_Shared {
     if (!c->status().ok()) return;
     if (num_partitions_ == 0 || data->NumElements() == 0) return;
 
-    auto e_partitions = partitions->flat<int32>();
+    auto e_partitions = partitions->flat<int32_t>();
     const int64_t N = e_partitions.dimension(0);
-    gtl::InlinedVector<int, 32> output_index(num_partitions_);
+    absl::InlinedVector<int, 32UL> output_index(num_partitions_);
 
     if (partitions->dims() == data->dims()) {
       // Walk through data and copy the data to the appropriate output tensor
@@ -111,14 +114,14 @@ class DynamicPartitionOp : public DynamicPartitionOp_Shared {
       }
       for (int64_t i = 0; i < N; i++) {
         const int32_t p = internal::SubtleMustCopy(e_partitions(i));
-        OP_REQUIRES(
-            c, FastBoundsCheck(p, num_partitions_),
-            errors::InvalidArgument("indices[", i, "] is out of range"));
+        OP_REQUIRES(c, FastBoundsCheck(p, num_partitions_),
+                    absl::InvalidArgumentError(
+                        absl::StrCat("indices[", i, "] is out of range")));
         auto oi = output_index[p];
         OP_REQUIRES(c, FastBoundsCheck(oi, out_vec[p].size()),
-                    errors::InvalidArgument(
+                    absl::InvalidArgumentError(absl::StrCat(
                         "out_vec[", p, "] size: ", out_vec[p].size(),
-                        " is not LTE output_index[", p, "] : ", oi));
+                        " is not LTE output_index[", p, "] : ", oi)));
         out_vec[p](oi) = data_flat(i);
         output_index[p]++;
       }
@@ -139,15 +142,16 @@ class DynamicPartitionOp : public DynamicPartitionOp_Shared {
       for (int64_t i = 0; i < N; i++) {
         // outputs[p][output_index[p]++] = data[i]
         const int32_t p = internal::SubtleMustCopy(e_partitions(i));
-        OP_REQUIRES(
-            c, FastBoundsCheck(p, num_partitions_),
-            errors::InvalidArgument("indices[", i,
-                                    "] has been asynchronously overwritten and "
-                                    "is no longer in range!"));
+        OP_REQUIRES(c, FastBoundsCheck(p, num_partitions_),
+                    absl::InvalidArgumentError(absl::StrCat(
+                        "indices[", i,
+                        "] has been asynchronously overwritten and "
+                        "is no longer in range!")));
         auto oi = output_index[p];
-        OP_REQUIRES(c, FastBoundsCheck(oi, out_flat[p].dimension(0)),
-                    errors::InvalidArgument("Size of output_index: ", oi,
-                                            " is no longer in range."));
+        OP_REQUIRES(
+            c, FastBoundsCheck(oi, out_flat[p].dimension(0)),
+            absl::InvalidArgumentError(absl::StrCat(
+                "Size of output_index: ", oi, " is no longer in range.")));
         Eigen::DSizes<Eigen::DenseIndex, 2> out_indices(oi, 0);
         Eigen::DSizes<Eigen::DenseIndex, 2> data_indices(i, 0);
         out_flat[p].slice(out_indices, sizes) =

@@ -12,16 +12,21 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
+#include <cstdint>
+#include <memory>
 #include <string>
+#include <vector>
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
+#include "absl/log/log.h"
 #include "tensorflow/core/platform/logging.h"
-#include "tensorflow/lite/c/common.h"
+#include "tensorflow/lite/core/c/common.h"
+#include "tensorflow/lite/core/interpreter_builder.h"
 #include "tensorflow/lite/create_op_resolver.h"
 #include "tensorflow/lite/interpreter.h"
-#include "tensorflow/lite/model.h"
 #include "tensorflow/lite/model_builder.h"
+#include "tensorflow/lite/mutable_op_resolver.h"
 
 namespace tflite {
 bool RunWithRandomInputs(const std::string& filename) {

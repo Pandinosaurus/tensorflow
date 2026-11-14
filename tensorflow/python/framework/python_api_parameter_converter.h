@@ -12,8 +12,8 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
-#ifndef TENSORFLOW_PYTHON_UTIL_PYTHON_API_PARAMETER_CONVERTER_H_
-#define TENSORFLOW_PYTHON_UTIL_PYTHON_API_PARAMETER_CONVERTER_H_
+#ifndef TENSORFLOW_PYTHON_FRAMEWORK_PYTHON_API_PARAMETER_CONVERTER_H_
+#define TENSORFLOW_PYTHON_FRAMEWORK_PYTHON_API_PARAMETER_CONVERTER_H_
 
 #include <Python.h>
 
@@ -21,6 +21,7 @@ limitations under the License.
 #include <string>
 #include <vector>
 
+#include "absl/base/attributes.h"
 #include "absl/types/span.h"
 #include "tensorflow/core/framework/op_def.pb.h"
 #include "tensorflow/core/framework/types.pb.h"
@@ -51,8 +52,7 @@ namespace tensorflow {
 // decremented, and any objects added to `params` are new references.
 //
 // Returns true on success, or sets an exception and returns false on error.
-ABSL_MUST_USE_RESULT
-bool ConvertPythonAPIParameters(
+[[nodiscard]] TF_EXPORT bool ConvertPythonAPIParameters(
     const PythonAPIInfo& api_info,
     const PythonTensorConverter& tensor_converter, absl::Span<PyObject*> params,
     PythonAPIInfo::InferredAttributes* inferred_attrs);
@@ -65,10 +65,11 @@ bool ConvertPythonAPIParameters(
 // decremented, and any objects added to `params` are new references.
 //
 // Returns true on success, or sets an exception and returns false on error.
-ABSL_MUST_USE_RESULT
-bool CopyPythonAPITensorLists(const PythonAPIInfo& api_info,
-                              absl::Span<PyObject*> params);
+[[nodiscard]] TF_EXPORT bool CopyPythonAPITensorLists(
+    const PythonAPIInfo& api_info, absl::Span<PyObject*> params);
+
+TF_EXPORT int GetPythonAPIMaxIndex(const PythonAPIInfo& api_info);
 
 }  // namespace tensorflow
 
-#endif  // TENSORFLOW_PYTHON_UTIL_PYTHON_API_PARAMETER_CONVERTER_H_
+#endif  // TENSORFLOW_PYTHON_FRAMEWORK_PYTHON_API_PARAMETER_CONVERTER_H_

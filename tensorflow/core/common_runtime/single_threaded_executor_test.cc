@@ -14,33 +14,43 @@ limitations under the License.
 ==============================================================================*/
 
 #include <algorithm>
+#include <cstdint>
 #include <functional>
-#include <string>
+#include <memory>
+#include <random>
 #include <utility>
+#include <vector>
 
-#include "tensorflow/core/common_runtime/device.h"
-#include "tensorflow/core/common_runtime/device_factory.h"
+#include "absl/base/casts.h"
+#include "absl/log/check.h"
+#include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
+#include "xla/tsl/lib/core/status_test_util.h"
+#include "xla/tsl/platform/errors.h"
+#include "xla/tsl/platform/status.h"
+#include "xla/tsl/platform/test_benchmark.h"
 #include "tensorflow/core/common_runtime/executor.h"
 #include "tensorflow/core/common_runtime/executor_factory.h"
-#include "tensorflow/core/common_runtime/graph_constructor.h"
 #include "tensorflow/core/common_runtime/kernel_benchmark_testlib.h"
-#include "tensorflow/core/common_runtime/process_util.h"
+#include "tensorflow/core/framework/device_factory.h"
+#include "tensorflow/core/framework/function.h"
+#include "tensorflow/core/framework/node_properties.h"
 #include "tensorflow/core/framework/op.h"
 #include "tensorflow/core/framework/op_kernel.h"
+#include "tensorflow/core/framework/op_requires.h"
 #include "tensorflow/core/framework/rendezvous.h"
+#include "tensorflow/core/framework/tensor.h"
+#include "tensorflow/core/framework/tensor_shape.h"
+#include "tensorflow/core/framework/types.h"
 #include "tensorflow/core/framework/versions.pb.h"
 #include "tensorflow/core/graph/algorithm.h"
 #include "tensorflow/core/graph/graph.h"
 #include "tensorflow/core/graph/node_builder.h"
 #include "tensorflow/core/graph/testlib.h"
-#include "tensorflow/core/lib/core/status_test_util.h"
+#include "tensorflow/core/lib/random/philox_random.h"
 #include "tensorflow/core/lib/random/simple_philox.h"
-#include "tensorflow/core/lib/strings/strcat.h"
-#include "tensorflow/core/platform/errors.h"
-#include "tensorflow/core/platform/logging.h"
 #include "tensorflow/core/platform/test.h"
-#include "tensorflow/core/platform/test_benchmark.h"
-#include "tensorflow/core/platform/tracing.h"
+#include "tensorflow/core/platform/threadpool_interface.h"
 #include "tensorflow/core/public/session_options.h"
 
 namespace tensorflow {
@@ -57,14 +67,18 @@ class MockOp : public OpKernel {
 
   void Compute(OpKernelContext* ctx) override {
     OP_REQUIRES(ctx, compute_ != nullptr,
-                errors::FailedPrecondition("Compute() is not set"));
+                absl::FailedPreconditionError("Compute() is not set"));
     compute_(ctx);
   }
 
  private:
   std::function<void(OpKernelContext* ctx)> compute_;
 };
-REGISTER_OP("Mock").Input("x: float").Output("y: float").SetIsStateful();
+REGISTER_OP("Mock")
+    .Input("x: float")
+    .Output("y: float")
+    .Output("empty_output: string")
+    .SetIsStateful();
 REGISTER_KERNEL_BUILDER(Name("Mock").Device(DEVICE_CPU), MockOp);
 
 class ExecutorTest : public ::testing::Test {
@@ -92,9 +106,9 @@ class ExecutorTest : public ::testing::Test {
           TF_RETURN_IF_ERROR(CreateNonCachedKernel(device_.get(), nullptr,
                                                    props, version, kernel));
           if ((*kernel)->type_string_view() == "Mock") {
-            down_cast<MockOp*>(*kernel)->SetCompute(mock_fn);
+            absl::down_cast<MockOp*>(*kernel)->SetCompute(mock_fn);
           }
-          return Status::OK();
+          return absl::OkStatus();
         };
     params.delete_kernel = [](OpKernel* kernel) {
       DeleteNonCachedKernel(kernel);
@@ -105,14 +119,14 @@ class ExecutorTest : public ::testing::Test {
     rendez_ = NewLocalRendezvous();
   }
 
-  Status Run(Rendezvous* rendez) {
+  absl::Status Run(Rendezvous* rendez) {
     Executor::Args args;
     args.rendezvous = rendez;
     args.runner = runner_;
     return exec_->Run(args);
   }
 
-  Status Run(CallFrameInterface* call_frame) {
+  absl::Status Run(CallFrameInterface* call_frame) {
     Executor::Args args;
     args.call_frame = call_frame;
     args.runner = runner_;
@@ -121,7 +135,7 @@ class ExecutorTest : public ::testing::Test {
 
   void TestContext(Executor::Args args,
                    std::function<void(OpKernelContext*)> test_fn) {
-    auto g = absl::make_unique<Graph>(OpRegistry::Global());
+    auto g = std::make_unique<Graph>(OpRegistry::Global());
     Node* arg = test::graph::Arg(g.get(), 0, DT_FLOAT);
     Node* tmp;
     TF_ASSERT_OK(NodeBuilder(g->NewName("n"), "Mock")
@@ -166,16 +180,6 @@ float V(const Tensor& tensor) {
   return tensor.scalar<float>()();
 }
 
-Rendezvous::ParsedKey Key(const string& sender, const uint64 incarnation,
-                          const string& receiver, const string& name) {
-  Rendezvous::ParsedKey result;
-  TF_CHECK_OK(
-      Rendezvous::ParseKey(Rendezvous::CreateKey(sender, incarnation, receiver,
-                                                 name, FrameAndIter(0, 0)),
-                           &result));
-  return result;
-}
-
 TEST_F(ExecutorTest, UserIntraOpThreadPool) {
   class DummyThreadPool : public thread::ThreadPoolInterface {
    public:
@@ -198,7 +202,7 @@ TEST_F(ExecutorTest, UserIntraOpThreadPool) {
 
 TEST_F(ExecutorTest, SimpleAdd) {
   // c = a + b
-  auto g = absl::make_unique<Graph>(OpRegistry::Global());
+  auto g = std::make_unique<Graph>(OpRegistry::Global());
   auto in0 = test::graph::Arg(g.get(), 0, DT_FLOAT);
   auto in1 = test::graph::Arg(g.get(), 1, DT_FLOAT);
   auto tmp = test::graph::Add(g.get(), in0, in1);
@@ -222,6 +226,28 @@ TEST_F(ExecutorTest, SimpleAdd) {
   EXPECT_EQ(2.0, V(*arg_1));
 }
 
+TEST_F(ExecutorTest, EmptyOutput) {
+  // in, _ = MockOp(in)
+  auto g = std::make_unique<Graph>(OpRegistry::Global());
+  Node* in = test::graph::Arg(g.get(), 0, DT_FLOAT);
+  Node* mock;
+  TF_ASSERT_OK(
+      NodeBuilder(g->NewName("n"), "Mock").Input(in).Finalize(g.get(), &mock));
+  test::graph::Retval(g.get(), 0, mock, 0);
+  test::graph::Retval(g.get(), 1, mock, 1);
+  FixupSourceAndSinkEdges(g.get());
+  Create(std::move(g),
+         [&](OpKernelContext* ctx) { ctx->set_output(0, ctx->input(0)); });
+  FunctionCallFrame call_frame({DT_FLOAT}, {DT_FLOAT, DT_STRING});
+  TF_ASSERT_OK(call_frame.SetArgs({V(1.0)}));
+  TF_ASSERT_OK(Run(&call_frame));
+  std::vector<Tensor> retvals;
+  TF_ASSERT_OK(call_frame.ConsumeRetvals(&retvals, false));
+  EXPECT_EQ(1.0, V(retvals[0]));
+  EXPECT_EQ(DT_STRING, retvals[1].dtype());
+  EXPECT_EQ(0, retvals[1].tensor_data().size());
+}
+
 TEST_F(ExecutorTest, SelfAdd) {
   // v0 <- a
   // v1 = v0 + v0
@@ -231,7 +257,7 @@ TEST_F(ExecutorTest, SelfAdd) {
   //
   // b <- v10
   // All nodes are executed by one thread.
-  auto g = absl::make_unique<Graph>(OpRegistry::Global());
+  auto g = std::make_unique<Graph>(OpRegistry::Global());
   auto v = test::graph::Arg(g.get(), 0, DT_FLOAT);
   const int N = 10;
   for (int i = 1; i <= N; ++i) {
@@ -287,7 +313,7 @@ void BuildTree(int N, Graph* g) {
 }
 
 TEST_F(ExecutorTest, RandomTree) {
-  auto g = absl::make_unique<Graph>(OpRegistry::Global());
+  auto g = std::make_unique<Graph>(OpRegistry::Global());
   BuildTree(4096, g.get());
   Create(std::move(g));
   FunctionCallFrame call_frame({DT_FLOAT}, {DT_FLOAT});
@@ -299,7 +325,7 @@ TEST_F(ExecutorTest, RandomTree) {
 }
 
 TEST_F(ExecutorTest, OpError) {
-  auto g = absl::make_unique<Graph>(OpRegistry::Global());
+  auto g = std::make_unique<Graph>(OpRegistry::Global());
   auto zero = test::graph::Constant(g.get(), V(0.0));
   auto inf = test::graph::Unary(g.get(), "Reciprocal", zero);
   auto check = test::graph::CheckNumerics(g.get(), inf, "message");
@@ -309,11 +335,11 @@ TEST_F(ExecutorTest, OpError) {
   Create(std::move(g));
   FunctionCallFrame call_frame({}, {});
   // Fails due to invalid dtype.
-  EXPECT_TRUE(errors::IsInvalidArgument(Run(&call_frame)));
+  EXPECT_TRUE(absl::IsInvalidArgument(Run(&call_frame)));
 }
 
 TEST_F(ExecutorTest, ControlDependenciesFromSpecialNodes) {
-  auto g = absl::make_unique<Graph>(OpRegistry::Global());
+  auto g = std::make_unique<Graph>(OpRegistry::Global());
   auto in0 = test::graph::Arg(g.get(), 0, DT_FLOAT);
   auto one = test::graph::Constant(g.get(), V(2.0));
   auto add = test::graph::Add(g.get(), in0, one);
@@ -330,6 +356,45 @@ TEST_F(ExecutorTest, ControlDependenciesFromSpecialNodes) {
   EXPECT_EQ(3.0, V(retvals[0]));  // out = 1.0 + 2.0 = 3.0
 }
 
+TEST_F(ExecutorTest, HostMemoryInputAllocAttrs) {
+  auto g = std::make_unique<Graph>(OpRegistry::Global());
+  Node* in = test::graph::Arg(g.get(), 0, DT_FLOAT);
+  Node* c = test::graph::Constant(g.get(), V(2.0));
+  c->AddAttr("_output_hostmem", std::vector<int32_t>{0});
+  Node* mock_arg;
+  TF_ASSERT_OK(NodeBuilder(g->NewName("mock_arg"), "Mock")
+                   .Input(in)
+                   .Attr("_input_hostmem", std::vector<int32_t>{0})
+                   .Finalize(g.get(), &mock_arg));
+  Node* mock_const;
+  TF_ASSERT_OK(NodeBuilder(g->NewName("mock_const"), "Mock")
+                   .Input(c)
+                   .Finalize(g.get(), &mock_const));
+  Node* mock_dev;
+  TF_ASSERT_OK(
+      NodeBuilder("mock_dev", "Mock").Input(in).Finalize(g.get(), &mock_dev));
+  auto add = test::graph::Add(g.get(), mock_arg, mock_const);
+  auto sum = test::graph::Add(g.get(), add, mock_dev);
+  test::graph::Retval(g.get(), 0, sum);
+  FixupSourceAndSinkEdges(g.get());
+
+  int mock_calls = 0;
+  Create(std::move(g), [&](OpKernelContext* ctx) {
+    ++mock_calls;
+    const bool want_host = ctx->op_kernel().name() != "mock_dev";
+    EXPECT_EQ(want_host, ctx->input_alloc_attr(0).on_host())
+        << ctx->op_kernel().name();
+    ctx->set_output(0, ctx->input(0));
+  });
+  FunctionCallFrame call_frame({DT_FLOAT}, {DT_FLOAT});
+  TF_ASSERT_OK(call_frame.SetArgs({V(1.0)}));
+  TF_ASSERT_OK(Run(&call_frame));
+  EXPECT_EQ(3, mock_calls);
+  std::vector<Tensor> retvals;
+  TF_ASSERT_OK(call_frame.ConsumeRetvals(&retvals, false));
+  EXPECT_EQ(4.0, V(retvals[0]));
+}
+
 void BM_executor(::testing::benchmark::State& state) {
   const int width = state.range(0);
   const int depth = state.range(1);
@@ -337,8 +402,8 @@ void BM_executor(::testing::benchmark::State& state) {
   Graph* g = new Graph(OpRegistry::Global());
   random::PhiloxRandom philox(1729, 17);
   random::SimplePhilox rand(&philox);
-  uint64 cur = 0;
-  uint32 r = 1 + rand.Rand32() % width;
+  uint64_t cur = 0;
+  uint32_t r = 1 + rand.Rand32() % width;
   std::vector<Node*> ready_nodes;
   for (int i = 0; i < r; ++i) {
     ready_nodes.push_back(test::graph::NoOp(g, {}));
@@ -366,10 +431,11 @@ void BM_executor(::testing::benchmark::State& state) {
   test::Benchmark("cpu", g, nullptr, nullptr, nullptr,
                   "SINGLE_THREADED_EXECUTOR", /*old_benchmark_api=*/false)
       .Run(state);
-  state.SetLabel(strings::StrCat("Nodes = ", cur));
+  state.SetLabel(absl::StrCat("Nodes = ", cur));
   state.SetItemsProcessed(cur * static_cast<int64_t>(state.iterations()));
 }
 
+// NOLINTBEGIN(misc-include-cleaner)
 // Tall skinny graphs
 BENCHMARK(BM_executor)->UseRealTime()->ArgPair(16, 1024);
 BENCHMARK(BM_executor)->UseRealTime()->ArgPair(32, 8192);
@@ -380,6 +446,7 @@ BENCHMARK(BM_executor)->UseRealTime()->ArgPair(8192, 32);
 
 // Tall fat graph
 BENCHMARK(BM_executor)->UseRealTime()->ArgPair(1024, 1024);
+// NOLINTEND(misc-include-cleaner)
 
 void BM_const_identity(::testing::benchmark::State& state) {
   const int width = state.range(0);
@@ -398,16 +465,18 @@ void BM_const_identity(::testing::benchmark::State& state) {
                   "SINGLE_THREADED_EXECUTOR",
                   /*old_benchmark_api=*/false)
       .Run(state);
-  state.SetLabel(strings::StrCat("Nodes = ", (1 + outputs_per_const) * width));
+  state.SetLabel(absl::StrCat("Nodes = ", (1 + outputs_per_const) * width));
   state.SetItemsProcessed((1 + outputs_per_const) * width *
                           static_cast<int64_t>(state.iterations()));
 }
 
+// NOLINTBEGIN(misc-include-cleaner)
 // Graph with actual op execution.
 BENCHMARK(BM_const_identity)->UseRealTime()->ArgPair(1, 1);
 BENCHMARK(BM_const_identity)->UseRealTime()->ArgPair(1, 100);
 BENCHMARK(BM_const_identity)->UseRealTime()->ArgPair(100, 1);
 BENCHMARK(BM_const_identity)->UseRealTime()->ArgPair(100, 100);
+// NOLINTEND(misc-include-cleaner)
 
 // TODO(mrry): This benchmark currently crashes with a use-after free, because
 // test::Benchmark::RunWithArgs() assumes that the executor will take ownership

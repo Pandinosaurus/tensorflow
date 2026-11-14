@@ -25,8 +25,8 @@ limitations under the License.
 // This map will be merged after fused_conv2d_bias_activation_op_kernels is
 // merged into conv_ops_fused_impl.h (b/177365158, b/189530096)
 
-#ifndef TENSORFLOW_CORE_UTIL_AUTOTUNE_MAPS_FUSED_CONV_BIAS_ACTIVATION_AUTOTUNE_MAP_H_
-#define TENSORFLOW_CORE_UTIL_AUTOTUNE_MAPS_FUSED_CONV_BIAS_ACTIVATION_AUTOTUNE_MAP_H_
+#ifndef TENSORFLOW_CORE_UTIL_AUTOTUNE_MAPS_CONV_AUTOTUNE_MAPS_H_
+#define TENSORFLOW_CORE_UTIL_AUTOTUNE_MAPS_CONV_AUTOTUNE_MAPS_H_
 
 #if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 #include <string>
@@ -39,14 +39,22 @@ namespace tensorflow {
 
 // A dummy type to group forward convolution autotune results together.
 struct ConvAutotuneGroup {
-  static string name() { return "Conv"; }
+  static std::string name() { return "Conv"; }
 };
 
-typedef AutotuneSingleton<ConvAutotuneGroup, ConvParameters,
-                          se::dnn::AlgorithmConfig>
-    AutotuneConv;
+using ConvAutotuneMap = AutotuneSingleton<ConvAutotuneGroup, ConvParameters,
+                                          AutotuneEntry<se::dnn::ConvOp>>;
+
+// A dummy type to group fused convolution autotune results together.
+struct ConvFusedAutotuneGroup {
+  static std::string name() { return "FusedConv"; }
+};
+
+using FusedConvAutotuneMap =
+    AutotuneSingleton<ConvAutotuneGroup, ConvParameters,
+                      AutotuneEntry<se::dnn::FusedConvOp>>;
 
 }  // namespace tensorflow
 #endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 
-#endif  // TENSORFLOW_CORE_UTIL_AUTOTUNE_MAPS_FUSED_CONV_BIAS_ACTIVATION_AUTOTUNE_MAP_H_
+#endif  // TENSORFLOW_CORE_UTIL_AUTOTUNE_MAPS_CONV_AUTOTUNE_MAPS_H_

@@ -13,8 +13,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#ifndef TENSORFLOW_CORE_KERNELS_EXTENSION_TYPE_VARIANT_H_
-#define TENSORFLOW_CORE_KERNELS_EXTENSION_TYPE_VARIANT_H_
+#ifndef TENSORFLOW_CORE_KERNELS_COMPOSITE_TENSOR_VARIANT_H_
+#define TENSORFLOW_CORE_KERNELS_COMPOSITE_TENSOR_VARIANT_H_
 
 #include <vector>
 
@@ -64,7 +64,7 @@ class CompositeTensorVariant {
   const CompositeTensorVariantMetadata& metadata() const { return *metadata_; }
 
   // Variant methods.
-  string TypeName() const { return kTypeName; }
+  std::string TypeName() const { return kTypeName; }
 
   // Updates `VariantTensorData` with an encoding for this value.
   void Encode(VariantTensorData* data) const;
@@ -73,7 +73,7 @@ class CompositeTensorVariant {
   bool Decode(const VariantTensorData& data);
 
   // Returns a string summary for this value.
-  string DebugString() const;
+  std::string DebugString() const;
 
   // Name of this type (used for variant serialization).
   static constexpr const char kTypeName[] = "CompositeTensorVariant";
@@ -93,4 +93,4 @@ class CompositeTensorVariant {
 
 }  // namespace tensorflow
 
-#endif  // TENSORFLOW_CORE_KERNELS_EXTENSION_TYPE_VARIANT_H_
+#endif  // TENSORFLOW_CORE_KERNELS_COMPOSITE_TENSOR_VARIANT_H_

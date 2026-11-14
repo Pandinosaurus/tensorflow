@@ -23,16 +23,17 @@ limitations under the License.
 
 #include "tensorflow/core/common_runtime/dma_helper.h"
 #include "tensorflow/core/framework/op_kernel.h"
+#include "tensorflow/core/framework/op_requires.h"
 #include "tensorflow/core/framework/register_types.h"
 #include "tensorflow/core/framework/tensor.h"
 #include "tensorflow/core/framework/tensor.pb.h"
+#include "tensorflow/core/framework/tensor_shape.h"
 #include "tensorflow/core/framework/tensor_util.h"
 #include "tensorflow/core/framework/types.h"
 #include "tensorflow/core/framework/variant.h"
 #include "tensorflow/core/framework/variant_encode_decode.h"
 #include "tensorflow/core/kernels/reshape_util.h"
 #include "tensorflow/core/lib/gtl/inlined_vector.h"
-#include "tensorflow/core/lib/gtl/optional.h"
 #include "tensorflow/core/util/sparse/group_iterator.h"
 #include "tensorflow/core/util/sparse/sparse_tensor.h"
 
@@ -50,8 +51,8 @@ class SerializeSparseOp : public OpKernel {
 
   bool IsExpensive() override;
 
-  Status Initialize(Tensor* result);
-  Status Serialize(const Tensor& input, T* result);
+  absl::Status Initialize(Tensor* result);
+  absl::Status Serialize(const Tensor& input, T* result);
 
   void Compute(OpKernelContext* context) override {
     const Tensor* input_indices;
@@ -62,19 +63,19 @@ class SerializeSparseOp : public OpKernel {
     OP_REQUIRES_OK(context, context->input("sparse_values", &input_values));
     OP_REQUIRES_OK(context, context->input("sparse_shape", &input_shape));
     OP_REQUIRES(context, TensorShapeUtils::IsMatrix(input_indices->shape()),
-                errors::InvalidArgument(
+                absl::InvalidArgumentError(absl::StrCat(
                     "Input indices should be a matrix but received shape ",
-                    input_indices->shape().DebugString()));
+                    input_indices->shape().DebugString())));
 
     OP_REQUIRES(context, TensorShapeUtils::IsVector(input_values->shape()),
-                errors::InvalidArgument(
+                absl::InvalidArgumentError(absl::StrCat(
                     "Input values should be a vector but received shape ",
-                    input_values->shape().DebugString()));
+                    input_values->shape().DebugString())));
 
     OP_REQUIRES(context, TensorShapeUtils::IsVector(input_shape->shape()),
-                errors::InvalidArgument(
+                absl::InvalidArgumentError(absl::StrCat(
                     "Input shape should be a vector but received shape ",
-                    input_shape->shape().DebugString()));
+                    input_shape->shape().DebugString())));
 
     Tensor serialized_sparse;
     OP_REQUIRES_OK(context, Initialize(&serialized_sparse));
@@ -104,18 +105,18 @@ bool SerializeSparseOp<Variant>::IsExpensive() {
 }
 
 template <>
-Status SerializeSparseOp<tstring>::Initialize(Tensor* result) {
+absl::Status SerializeSparseOp<tstring>::Initialize(Tensor* result) {
   *result = Tensor(DT_STRING, TensorShape({3}));
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 template <>
-Status SerializeSparseOp<tstring>::Serialize(const Tensor& input,
-                                             tstring* result) {
+absl::Status SerializeSparseOp<tstring>::Serialize(const Tensor& input,
+                                                   tstring* result) {
   TensorProto proto;
   input.AsProtoTensorContent(&proto);
   *result = proto.SerializeAsString();
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 REGISTER_KERNEL_BUILDER(Name("SerializeSparse")
@@ -124,16 +125,16 @@ REGISTER_KERNEL_BUILDER(Name("SerializeSparse")
                         SerializeSparseOp<tstring>);
 
 template <>
-Status SerializeSparseOp<Variant>::Initialize(Tensor* result) {
+absl::Status SerializeSparseOp<Variant>::Initialize(Tensor* result) {
   *result = Tensor(DT_VARIANT, TensorShape({3}));
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 template <>
-Status SerializeSparseOp<Variant>::Serialize(const Tensor& input,
-                                             Variant* result) {
+absl::Status SerializeSparseOp<Variant>::Serialize(const Tensor& input,
+                                                   Variant* result) {
   *result = input;
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 REGISTER_KERNEL_BUILDER(Name("SerializeSparse")
@@ -146,9 +147,9 @@ struct SerializeGroups {};
 
 template <typename T>
 struct SerializeGroups<T, tstring> {
-  Status operator()(sparse::GroupIterable* minibatch,
-                    const Tensor& output_shape, int64_t N, int rank,
-                    Tensor* serialized_sparse) {
+  absl::Status operator()(sparse::GroupIterable* minibatch,
+                          const Tensor& output_shape, int64_t N, int rank,
+                          Tensor* serialized_sparse) {
     auto serialized_sparse_t = serialized_sparse->matrix<tstring>();
 
     int64_t last_nonempty_group = -1;
@@ -172,9 +173,9 @@ struct SerializeGroups<T, tstring> {
     for (const auto& subset : *minibatch) {
       const int64_t b = subset.group_at(0);
       if (b < 0 || b >= N) {
-        return errors::InvalidArgument(
+        return absl::InvalidArgumentError(absl::StrCat(
             "Received unexpected column 0 value in input SparseTensor: ", b,
-            " < 0 or >= N (= ", N, ")");
+            " < 0 or >= N (= ", N, ")"));
       }
 
       // GroupIterable generates only the non-empty groups of rows, so we must
@@ -212,7 +213,7 @@ struct SerializeGroups<T, tstring> {
       serialize_empty_element(empty_b);
     }
 
-    return Status::OK();
+    return absl::OkStatus();
   }
 };
 
@@ -250,9 +251,9 @@ void CopyValues<Eigen::half>(const Eigen::half* src, Eigen::half* dest,
 
 template <typename T>
 struct SerializeGroups<T, Variant> {
-  Status operator()(sparse::GroupIterable* minibatch,
-                    const Tensor& output_shape, int64_t N, int rank,
-                    Tensor* serialized_sparse) {
+  absl::Status operator()(sparse::GroupIterable* minibatch,
+                          const Tensor& output_shape, int64_t N, int rank,
+                          Tensor* serialized_sparse) {
     auto serialized_sparse_t = serialized_sparse->template matrix<Variant>();
 
     int64_t last_nonempty_group = -1;
@@ -273,9 +274,9 @@ struct SerializeGroups<T, Variant> {
     for (const auto& subset : *minibatch) {
       const int64_t b = subset.group_at(0);
       if (b < 0 || b >= N) {
-        return errors::InvalidArgument(
+        return absl::InvalidArgumentError(absl::StrCat(
             "Received unexpected column 0 value in input SparseTensor: ", b,
-            " < 0 or >= N (= ", N, ")");
+            " < 0 or >= N (= ", N, ")"));
       }
 
       // GroupIterable generates only the non-empty groups of rows, so we must
@@ -327,7 +328,7 @@ struct SerializeGroups<T, Variant> {
       serialize_empty_element(empty_b);
     }
 
-    return Status::OK();
+    return absl::OkStatus();
   }
 };
 
@@ -345,29 +346,32 @@ class SerializeManySparseOp : public OpKernel {
     OP_REQUIRES_OK(context, context->input("sparse_values", &input_values));
     OP_REQUIRES_OK(context, context->input("sparse_shape", &input_shape));
     OP_REQUIRES(context, TensorShapeUtils::IsMatrix(input_indices->shape()),
-                errors::InvalidArgument(
+                absl::InvalidArgumentError(absl::StrCat(
                     "Input indices should be a matrix but received shape ",
-                    input_indices->shape().DebugString()));
+                    input_indices->shape().DebugString())));
 
     OP_REQUIRES(context, TensorShapeUtils::IsVector(input_values->shape()),
-                errors::InvalidArgument(
+                absl::InvalidArgumentError(absl::StrCat(
                     "Input values should be a vector but received shape ",
-                    input_values->shape().DebugString()));
+                    input_values->shape().DebugString())));
 
     OP_REQUIRES(context, TensorShapeUtils::IsVector(input_shape->shape()),
-                errors::InvalidArgument(
+                absl::InvalidArgumentError(absl::StrCat(
                     "Input shape should be a vector but received shape ",
-                    input_shape->shape().DebugString()));
+                    input_shape->shape().DebugString())));
 
     int rank = input_shape->NumElements();
 
     OP_REQUIRES(
         context, rank > 1,
-        errors::InvalidArgument(
-            "Rank of input SparseTensor should be > 1, but saw rank: ", rank));
+        absl::InvalidArgumentError(absl::StrCat(
+            "Rank of input SparseTensor should be > 1, but saw rank: ", rank)));
 
-    TensorShape tensor_input_shape(input_shape->vec<int64_t>());
-    gtl::InlinedVector<int64_t, 8> std_order(rank);
+    TensorShape tensor_input_shape;
+    OP_REQUIRES_OK(context,
+                   TensorShape::BuildTensorShape(input_shape->vec<int64_t>(),
+                                                 &tensor_input_shape));
+    absl::InlinedVector<int64_t, 8> std_order(rank);
     std::iota(std_order.begin(), std_order.end(), 0);
     SparseTensor input_st;
     OP_REQUIRES_OK(context, SparseTensor::Create(*input_indices, *input_values,
@@ -404,7 +408,6 @@ class SerializeManySparseOp : public OpKernel {
 
 TF_CALL_ALL_TYPES(REGISTER_KERNELS);
 #undef REGISTER_KERNELS
-
 
 #define REGISTER_KERNELS(type)                                      \
   REGISTER_KERNEL_BUILDER(Name("SerializeManySparse")               \

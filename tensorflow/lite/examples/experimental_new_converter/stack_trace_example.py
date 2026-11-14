@@ -14,15 +14,12 @@
 # ==============================================================================
 """CodeLab for displaying error stack trace w/ MLIR-based converter."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import sys
 
 from absl import app
 
 import tensorflow as tf
+from tensorflow.lite.python import lite
 
 
 def suppress_exception(f):
@@ -53,7 +50,7 @@ def test_from_saved_model():
   tf.saved_model.save(test_model, saved_model_path, options=save_options)
 
   # load the model and convert
-  converter = tf.lite.TFLiteConverter.from_saved_model(saved_model_path)
+  converter = lite.TFLiteConverterV2.from_saved_model(saved_model_path)
   converter.convert()
 
 
@@ -67,7 +64,7 @@ def test_from_concrete_function():
     return y + y
 
   func = model.get_concrete_function()
-  converter = tf.lite.TFLiteConverter.from_concrete_functions([func], model)
+  converter = lite.TFLiteConverterV2.from_concrete_functions([func], model)
   converter.convert()
 
 

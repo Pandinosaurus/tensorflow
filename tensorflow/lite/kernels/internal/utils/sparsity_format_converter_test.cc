@@ -14,9 +14,10 @@ limitations under the License.
 ==============================================================================*/
 #include "tensorflow/lite/kernels/internal/utils/sparsity_format_converter.h"
 
-#include <gmock/gmock.h>
+#include <vector>
+
 #include <gtest/gtest.h>
-#include "tensorflow/lite/model.h"
+#include "tensorflow/lite/c/common.h"
 
 namespace tflite {
 namespace internal {
@@ -640,6 +641,34 @@ TEST(FormatConverterTest, BlockTestD0S1ColMajorBlock) {
   converter.SparseToDense(expected_data.data(), dense_data.size(),
                           dense_data.data(), nullptr);
   EXPECT_EQ(dense_data, dense_values);
+}
+
+TEST(FormatConverterTest, RejectsMismatchedDimMetadataAndTraversalOrderSize) {
+  TfLiteIntArray* traversal_order = TfLiteIntArrayCreate(2);
+  traversal_order->data[0] = 0;
+  traversal_order->data[1] = 1;
+
+  TfLiteDimensionMetadata metadata = {};
+  metadata.format = kTfLiteDimDense;
+  metadata.dense_size = 4;
+
+  TfLiteSparsity sparsity = {};
+  sparsity.traversal_order = traversal_order;
+  sparsity.block_map = nullptr;
+  sparsity.dim_metadata = &metadata;
+  sparsity.dim_metadata_size = 1;
+
+  const std::vector<int> dense_shape = {4, 4};
+  const std::vector<int> sparse_data(16, 1);
+  FormatConverter<int> converter(dense_shape, sparsity);
+  EXPECT_EQ(converter.SparseToDense(sparse_data.data()), kTfLiteError);
+
+  std::vector<int> dense_data(16);
+  EXPECT_EQ(converter.SparseToDense(sparse_data.data(), dense_data.size(),
+                                    dense_data.data(), nullptr),
+            kTfLiteError);
+
+  TfLiteIntArrayFree(traversal_order);
 }
 }  // namespace
 }  // namespace sparsity

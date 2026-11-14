@@ -15,11 +15,20 @@ limitations under the License.
 
 #include "tensorflow/core/data/service/data_transfer.h"
 
+#include <cstdint>
 #include <functional>
+#include <memory>
+#include <string>
+#include <unordered_map>
+#include <vector>
 
 #include "absl/strings/str_join.h"
+#include "tensorflow/core/framework/tensor.h"
+#include "tensorflow/core/framework/types.pb.h"
+#include "tensorflow/core/framework/variant.h"
 #include "tensorflow/core/platform/errors.h"
 #include "tensorflow/core/platform/mutex.h"
+#include "tensorflow/core/platform/status.h"
 
 namespace tensorflow {
 namespace data {
@@ -31,25 +40,53 @@ mutex* get_lock() {
 }
 
 using DataTransferServerFactories =
-    std::unordered_map<std::string,
-                       std::function<std::shared_ptr<DataTransferServer>(
-                           DataTransferServer::GetElementT)>>;
+    std::unordered_map<std::string, DataTransferServer::ServerFactoryT>;
 DataTransferServerFactories& transfer_server_factories() {
   static auto& factories = *new DataTransferServerFactories();
   return factories;
 }
 
 using DataTransferClientFactories =
-    std::unordered_map<std::string, DataTransferClient::FactoryT>;
+    std::unordered_map<std::string, DataTransferClient::ClientFactoryT>;
 DataTransferClientFactories& transfer_client_factories() {
   static auto& factories = *new DataTransferClientFactories();
   return factories;
 }
 }  // namespace
 
-void DataTransferServer::Register(
-    std::string name,
-    std::function<std::shared_ptr<DataTransferServer>(GetElementT)> factory) {
+GetElementResult GetElementResult::Copy() const {
+  GetElementResult copy;
+  copy.components = components;
+  copy.element_index = element_index;
+  copy.end_of_sequence = end_of_sequence;
+  copy.skip = skip;
+  return copy;
+}
+
+size_t GetElementResult::EstimatedMemoryUsageBytes() const {
+  size_t size_bytes = components.size() * sizeof(Tensor) +
+                      sizeof(element_index) + sizeof(end_of_sequence) +
+                      sizeof(skip);
+  for (const Tensor& tensor : components) {
+    size_bytes += tensor.TotalBytes();
+    if (tensor.dtype() != DT_VARIANT) {
+      continue;
+    }
+
+    // Estimates the memory usage of compressed elements.
+    auto variants = tensor.flat<Variant>();
+    for (int64_t i = 0; i < variants.size(); ++i) {
+      const CompressedElement* compressed =
+          variants(i).get<CompressedElement>();
+      if (compressed) {
+        size_bytes += compressed->SpaceUsedLong();
+      }
+    }
+  }
+  return size_bytes;
+}
+
+void DataTransferServer::Register(std::string name, ServerFactoryT factory) {
   mutex_lock l(*get_lock());
   if (!transfer_server_factories().insert({name, factory}).second) {
     LOG(ERROR)
@@ -58,27 +95,27 @@ void DataTransferServer::Register(
   }
 }
 
-Status DataTransferServer::Build(std::string name, GetElementT get_element,
-                                 std::shared_ptr<DataTransferServer>* out) {
+absl::Status DataTransferServer::Build(
+    std::string name, GetElementT get_element,
+    std::shared_ptr<DataTransferServer>* out) {
   mutex_lock l(*get_lock());
   auto it = transfer_server_factories().find(name);
   if (it != transfer_server_factories().end()) {
-    *out = it->second(get_element);
-    return Status::OK();
+    return it->second(get_element, out);
   }
 
-  std::vector<string> available_names;
+  std::vector<std::string> available_names;
   for (const auto& factory : transfer_server_factories()) {
     available_names.push_back(factory.first);
   }
 
-  return errors::NotFound(
+  return absl::NotFoundError(absl::StrCat(
       "No data transfer server factory has been registered for name ", name,
       ". The available names are: [ ", absl::StrJoin(available_names, ", "),
-      " ]");
+      " ]"));
 }
 
-void DataTransferClient::Register(std::string name, FactoryT factory) {
+void DataTransferClient::Register(std::string name, ClientFactoryT factory) {
   mutex_lock l(*get_lock());
   if (!transfer_client_factories().insert({name, factory}).second) {
     LOG(ERROR)
@@ -87,23 +124,23 @@ void DataTransferClient::Register(std::string name, FactoryT factory) {
   }
 }
 
-Status DataTransferClient::Build(std::string name, Config config,
-                                 std::unique_ptr<DataTransferClient>* out) {
+absl::Status DataTransferClient::Build(
+    std::string name, Config config, std::unique_ptr<DataTransferClient>* out) {
   mutex_lock l(*get_lock());
   auto it = transfer_client_factories().find(name);
   if (it != transfer_client_factories().end()) {
     return it->second(config, out);
   }
 
-  std::vector<string> available_names;
+  std::vector<std::string> available_names;
   for (const auto& factory : transfer_client_factories()) {
     available_names.push_back(factory.first);
   }
 
-  return errors::NotFound(
+  return absl::NotFoundError(absl::StrCat(
       "No data transfer client factory has been registered for name ", name,
       ". The available names are: [ ", absl::StrJoin(available_names, ", "),
-      " ]");
+      " ]"));
 }
 
 }  // namespace data

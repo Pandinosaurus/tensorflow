@@ -23,9 +23,9 @@ limitations under the License.
 namespace tensorflow {
 namespace graph_transforms {
 
-Status FlattenAtrousConv(const GraphDef& input_graph_def,
-                         const TransformFuncContext& context,
-                         GraphDef* output_graph_def) {
+absl::Status FlattenAtrousConv(const GraphDef& input_graph_def,
+                               const TransformFuncContext& context,
+                               GraphDef* output_graph_def) {
   GraphDef replaced_graph_def;
   TF_RETURN_IF_ERROR(ReplaceMatchingOpTypes(
       input_graph_def,  // clang-format off
@@ -47,8 +47,8 @@ Status FlattenAtrousConv(const GraphDef& input_graph_def,
               {"*"}                           // crops
           }
       },  // clang-format on
-      [](const NodeMatch& match, const std::set<string>& input_nodes,
-         const std::set<string>& output_nodes,
+      [](const NodeMatch& match, const std::set<std::string>& input_nodes,
+         const std::set<std::string>& output_nodes,
          std::vector<NodeDef>* new_nodes) {
         // Find all the nodes we expect in the subgraph.
         const NodeDef& batch_to_space_node = match.node;
@@ -61,8 +61,8 @@ Status FlattenAtrousConv(const GraphDef& input_graph_def,
         // The atrous rate value is inferred from the block shape.
         Tensor block_shape =
             GetNodeTensorAttr(space_to_batch_block_shape_node, "value");
-        const int32_t block_height = block_shape.flat<int32>()(0);
-        const int32_t block_width = block_shape.flat<int32>()(1);
+        const int32_t block_height = block_shape.flat<int32_t>()(0);
+        const int32_t block_width = block_shape.flat<int32_t>()(1);
 
         // Compute the upsampled filter.
         const Tensor& filter = GetNodeTensorAttr(filter_node, "value");
@@ -127,11 +127,11 @@ Status FlattenAtrousConv(const GraphDef& input_graph_def,
         new_nodes->push_back(upsampled_filter_node);
         new_nodes->push_back(flattened_conv_node);
 
-        return Status::OK();
+        return absl::OkStatus();
       },
       {}, &replaced_graph_def));
   *output_graph_def = replaced_graph_def;
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 REGISTER_GRAPH_TRANSFORM("flatten_atrous_conv", FlattenAtrousConv);

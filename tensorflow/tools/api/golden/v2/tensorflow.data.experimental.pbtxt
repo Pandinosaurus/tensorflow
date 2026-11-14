@@ -2,79 +2,83 @@ path: "tensorflow.data.experimental"
 tf_module {
   member {
     name: "AUTOTUNE"
-    mtype: "<type \'int\'>"
+    mtype: "<class \'int\'>"
   }
   member {
     name: "AutoShardPolicy"
-    mtype: "<class \'enum.EnumMeta\'>"
+    mtype: "<class \'enum.EnumType\'>"
+  }
+  member {
+    name: "AutotuneAlgorithm"
+    mtype: "<class \'enum.EnumType\'>"
   }
   member {
     name: "AutotuneOptions"
-    mtype: "<type \'type\'>"
-  }
-  member {
-    name: "CheckpointInputPipelineHook"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "CsvDataset"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'abc.ABCMeta\'>"
   }
   member {
     name: "DatasetInitializer"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "DistributeOptions"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "ExternalStatePolicy"
-    mtype: "<class \'enum.EnumMeta\'>"
+    mtype: "<class \'enum.EnumType\'>"
   }
   member {
     name: "INFINITE_CARDINALITY"
-    mtype: "<type \'int\'>"
+    mtype: "<class \'int\'>"
   }
   member {
     name: "OptimizationOptions"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "Optional"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'abc.ABCMeta\'>"
   }
   member {
     name: "RandomDataset"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'abc.ABCMeta\'>"
   }
   member {
     name: "Reducer"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "SHARD_HINT"
-    mtype: "<type \'int\'>"
+    mtype: "<class \'int\'>"
+  }
+  member {
+    name: "ServiceOptions"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "SqlDataset"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'abc.ABCMeta\'>"
   }
   member {
     name: "TFRecordWriter"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "ThreadingOptions"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "UNKNOWN_CARDINALITY"
-    mtype: "<type \'int\'>"
+    mtype: "<class \'int\'>"
   }
   member {
     name: "service"
-    mtype: "<type \'module\'>"
+    mtype: "<class \'module\'>"
   }
   member_method {
     name: "Counter"
@@ -83,6 +87,10 @@ tf_module {
   member_method {
     name: "assert_cardinality"
     argspec: "args=[\'expected_cardinality\'], varargs=None, keywords=None, defaults=None"
+  }
+  member_method {
+    name: "at"
+    argspec: "args=[\'dataset\', \'index\'], varargs=None, keywords=None, defaults=None"
   }
   member_method {
     name: "bucket_by_sequence_length"
@@ -109,6 +117,10 @@ tf_module {
     argspec: "args=[\'batch_size\', \'row_shape\'], varargs=None, keywords=None, defaults=None"
   }
   member_method {
+    name: "distributed_save"
+    argspec: "args=[\'dataset\', \'path\', \'data_service_address\', \'compression\'], varargs=None, keywords=None, defaults=[\'AUTO\'], "
+  }
+  member_method {
     name: "enable_debug_mode"
     argspec: "args=[], varargs=None, keywords=None, defaults=None"
   }
@@ -117,8 +129,16 @@ tf_module {
     argspec: "args=[\'start\'], varargs=None, keywords=None, defaults=[\'0\'], "
   }
   member_method {
+    name: "from_list"
+    argspec: "args=[\'elements\', \'name\'], varargs=None, keywords=None, defaults=[\'None\'], "
+  }
+  member_method {
     name: "from_variant"
     argspec: "args=[\'variant\', \'structure\'], varargs=None, keywords=None, defaults=None"
+  }
+  member_method {
+    name: "get_model_proto"
+    argspec: "args=[\'iterator\'], varargs=None, keywords=None, defaults=None"
   }
   member_method {
     name: "get_next_as_optional"
@@ -158,7 +178,7 @@ tf_module {
   }
   member_method {
     name: "make_csv_dataset"
-    argspec: "args=[\'file_pattern\', \'batch_size\', \'column_names\', \'column_defaults\', \'label_name\', \'select_columns\', \'field_delim\', \'use_quote_delim\', \'na_value\', \'header\', \'num_epochs\', \'shuffle\', \'shuffle_buffer_size\', \'shuffle_seed\', \'prefetch_buffer_size\', \'num_parallel_reads\', \'sloppy\', \'num_rows_for_inference\', \'compression_type\', \'ignore_errors\'], varargs=None, keywords=None, defaults=[\'None\', \'None\', \'None\', \'None\', \',\', \'True\', \'\', \'True\', \'None\', \'True\', \'10000\', \'None\', \'None\', \'None\', \'False\', \'100\', \'None\', \'False\'], "
+    argspec: "args=[\'file_pattern\', \'batch_size\', \'column_names\', \'column_defaults\', \'label_name\', \'select_columns\', \'field_delim\', \'use_quote_delim\', \'na_value\', \'header\', \'num_epochs\', \'shuffle\', \'shuffle_buffer_size\', \'shuffle_seed\', \'prefetch_buffer_size\', \'num_parallel_reads\', \'sloppy\', \'num_rows_for_inference\', \'compression_type\', \'ignore_errors\', \'encoding\'], varargs=None, keywords=None, defaults=[\'None\', \'None\', \'None\', \'None\', \',\', \'True\', \'\', \'True\', \'None\', \'True\', \'10000\', \'None\', \'None\', \'None\', \'False\', \'100\', \'None\', \'False\', \'utf-8\'], "
   }
   member_method {
     name: "make_saveable_from_iterator"
@@ -167,6 +187,10 @@ tf_module {
   member_method {
     name: "map_and_batch"
     argspec: "args=[\'map_func\', \'batch_size\', \'num_parallel_batches\', \'drop_remainder\', \'num_parallel_calls\'], varargs=None, keywords=None, defaults=[\'None\', \'False\', \'None\'], "
+  }
+  member_method {
+    name: "pad_to_cardinality"
+    argspec: "args=[\'cardinality\', \'mask_key\'], varargs=None, keywords=None, defaults=[\'valid\'], "
   }
   member_method {
     name: "parallel_interleave"

@@ -12,13 +12,15 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
+#include <gmock/gmock.h>
 #include <gtest/gtest.h>
+#include "tensorflow/lite/c/c_api_types.h"
+#include "tensorflow/lite/c/common.h"
 #include "tensorflow/lite/delegates/hexagon/builders/tests/hexagon_delegate_op_model.h"
-#include "tensorflow/lite/kernels/internal/types.h"
+#include "tensorflow/lite/kernels/test_util.h"
 #include "tensorflow/lite/schema/schema_generated.h"
 
 namespace tflite {
-using testing::ElementsAre;
 using testing::ElementsAreArray;
 
 class FullyConnectedOpModel : public SingleOpModelWithHexagon {
@@ -104,6 +106,128 @@ class FullyConnectedOpModel : public SingleOpModelWithHexagon {
   int input_size_;
 };
 
+class PerChannelFullyConnectedOpModel : public SingleOpModelWithHexagon {
+ public:
+  PerChannelFullyConnectedOpModel(int units, int batches,
+                                  const TensorData& input,
+                                  const TensorData& output)
+      : batches_(batches), units_(units) {
+    int total_input_size = 1;
+    for (size_t i = 0; i < input.shape.size(); ++i) {
+      total_input_size *= input.shape[i];
+    }
+    input_size_ = total_input_size / batches_;
+
+    input_ = AddInput(input);
+    weights_ = AddInput({input.type,
+                         {units_, input_size_},
+                         0,
+                         0,
+                         0,
+                         0,
+                         true,
+                         {1.0f, 2.0f, 3.0f},
+                         {0, 0, 0},
+                         0});
+
+    bias_ = AddInput({TensorType_INT32,
+                      {units_},
+                      0,
+                      0,
+                      0,
+                      0,
+                      true,
+                      {1.0f, 2.0f, 3.0f},
+                      {0, 0, 0},
+                      0});
+    output_ = AddOutput(output);
+
+    SetBuiltinOp(
+        BuiltinOperator_FULLY_CONNECTED, BuiltinOptions_FullyConnectedOptions,
+        CreateFullyConnectedOptions(builder_, ActivationFunctionType_NONE,
+                                    FullyConnectedOptionsWeightsFormat_DEFAULT,
+                                    /*keep_num_dims=*/false)
+            .Union());
+    BuildInterpreter({GetShape(input_), GetShape(weights_)});
+
+    auto* weights_tensor = interpreter_->tensor(weights_);
+    weights_tensor->allocation_type = kTfLiteMmapRo;
+    auto* bias_tensor = interpreter_->tensor(bias_);
+    bias_tensor->allocation_type = kTfLiteMmapRo;
+  }
+
+  void SetPerChannelQuantizedFilter(const std::vector<float>& data) {
+    PerChannelSymmetricQuantizeAndPopulate(weights_, data);
+  }
+
+  void SetPerChannelQuantizedBias(const std::vector<float>& data) {
+    PerChannelQuantizeBias(bias_, data);
+  }
+
+  void SetInt8Input(const std::vector<float>& data) {
+    QuantizeAndPopulate<int8_t>(input_, data);
+  }
+
+  bool ApplyDelegateAndExpectRejection() {
+    static const char kDelegateName[] = "TfLiteHexagonDelegate";
+
+    setenv(
+        "ADSP_LIBRARY_PATH",
+        "/data/local/tmp/hexagon_delegate_test;/system/lib/rfsa/adsp;/system/"
+        "vendor/lib/rfsa/adsp;/dsp",
+        /*overwrite=*/1);
+
+    TfLiteHexagonDelegateOptions params = {0};
+    params.min_nodes_per_partition = 1;
+    auto* delegate_ptr = TfLiteHexagonDelegateCreate(&params);
+    if (!delegate_ptr) return true;
+
+    Interpreter::TfLiteDelegatePtr delegate(
+        delegate_ptr, [](TfLiteDelegate* delegate) {
+          TfLiteHexagonDelegateDelete(delegate);
+          TfLiteHexagonTearDown();
+        });
+
+    TfLiteHexagonInit();
+    if (interpreter_->ModifyGraphWithDelegate(delegate.get()) == kTfLiteError) {
+      return true;
+    }
+
+    for (int node : interpreter_->execution_plan()) {
+      const auto* node_and_reg = interpreter_->node_and_registration(node);
+      if (node_and_reg && node_and_reg->second.custom_name &&
+          strcmp(kDelegateName, node_and_reg->second.custom_name) == 0) {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+ protected:
+  int input_;
+  int weights_;
+  int bias_;
+  int output_;
+
+  int batches_;
+  int units_;
+  int input_size_;
+};
+
+TEST(QuantizedFullyConnectedOpTest, PerChannelQuantizedRejected) {
+  PerChannelFullyConnectedOpModel m(
+      /*units=*/3, /*batches=*/2,
+      /*input=*/{TensorType_INT8, {2, 2}, -63.5, 64},
+      /*output=*/{TensorType_INT8, {}, -127, 128});
+
+  m.SetInt8Input({1, 2, 3, 4});
+  m.SetPerChannelQuantizedFilter({1, 2, 3, 4, 5, 6});
+  m.SetPerChannelQuantizedBias({1, 2, 3});
+
+  EXPECT_TRUE(m.ApplyDelegateAndExpectRejection());
+}
+
 class QuantizedFullyConnectedOpTest
     : public ::testing::TestWithParam<ActivationFunctionType> {};
 
@@ -126,7 +250,7 @@ TEST_P(QuantizedFullyConnectedOpTest, TestQuantizedInt8) {
       1, 2, 3, 4, 5, 6, 7, -8, 9,  -10,  // b = 1
   });
 
-  m.Invoke();
+  ASSERT_EQ(m.Invoke(), kTfLiteOk);
   auto reference_output = m.GetDequantizedOutput<int8_t>();
 
   m.ApplyDelegateAndInvoke();
@@ -154,7 +278,7 @@ TEST_P(QuantizedFullyConnectedOpTest, TestQuantizedUint8) {
       1, 2, 3, 4, 5, 6, 7, -8, 9,  -10,  // b = 1
   });
 
-  m.Invoke();
+  ASSERT_EQ(m.Invoke(), kTfLiteOk);
   auto reference_output = m.GetDequantizedOutput<uint8_t>();
 
   m.ApplyDelegateAndInvoke();
@@ -181,7 +305,7 @@ TEST_P(QuantizedFullyConnectedOpTest, TestQuantizedUint8_NoBias) {
       1, 2, 3, 4, 5, 6, 7, -8, 9,  -10,  // b = 1
   });
 
-  m.Invoke();
+  ASSERT_EQ(m.Invoke(), kTfLiteOk);
   auto reference_output = m.GetDequantizedOutput<uint8_t>();
 
   m.ApplyDelegateAndInvoke();
@@ -208,7 +332,7 @@ TEST_P(QuantizedFullyConnectedOpTest, TestQuantizedInt8_NoBias) {
       1, 2, 3, 4, 5, 6, 7, -8, 9,  -10,  // b = 1
   });
 
-  m.Invoke();
+  ASSERT_EQ(m.Invoke(), kTfLiteOk);
   auto reference_output = m.GetDequantizedOutput<int8_t>();
 
   m.ApplyDelegateAndInvoke();
@@ -236,7 +360,7 @@ TEST_P(QuantizedFullyConnectedOpTest, TestQuantizedInt8_NonConstWeights) {
       1, 2, 3, 4, 5, 6, 7, -8, 9,  -10,  // b = 1
   });
 
-  m.Invoke();
+  ASSERT_EQ(m.Invoke(), kTfLiteOk);
   auto reference_output = m.GetDequantizedOutput<int8_t>();
 
   m.ApplyDelegateAndInvoke();
@@ -264,7 +388,7 @@ TEST_P(QuantizedFullyConnectedOpTest, TestQuantizedUint8_NonConstWeights) {
       1, 2, 3, 4, 5, 6, 7, -8, 9,  -10,  // b = 1
   });
 
-  m.Invoke();
+  ASSERT_EQ(m.Invoke(), kTfLiteOk);
   auto reference_output = m.GetDequantizedOutput<uint8_t>();
 
   m.ApplyDelegateAndInvoke();
@@ -300,7 +424,7 @@ TEST(QuantizedFullyConnected, TestQuantizedUint8_NonConstWeights_Relu6) {
       1, 2, 3, 4, 5, 6, 7, -8, 9,  -10,  // b = 1
   });
 
-  m.Invoke();
+  ASSERT_EQ(m.Invoke(), kTfLiteOk);
   auto reference_output = m.GetDequantizedOutput<uint8_t>();
 
   m.ApplyDelegateAndInvoke();

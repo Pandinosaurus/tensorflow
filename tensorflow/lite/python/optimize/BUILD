@@ -1,6 +1,26 @@
-load("//tensorflow:tensorflow.bzl", "pybind_extension")
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@xla//third_party/rules_python/python:py_library.bzl", "py_library")
+load("//tensorflow:tensorflow.bzl", "py_test")
+load("//tensorflow:tensorflow.default.bzl", "pybind_extension")
+load("//tensorflow/lite:build_def.bzl", "tflite_exec_properties")
 
 package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:LICENSE"],
     default_visibility = ["//visibility:public"],
     licenses = ["notice"],
 )
@@ -10,10 +30,14 @@ cc_library(
     srcs = ["calibration_wrapper.cc"],
     hdrs = ["calibration_wrapper.h"],
     deps = [
+        "//tensorflow/compiler/mlir/lite:offset_buffer",
+        "//tensorflow/compiler/mlir/lite/schema:schema_fbs_with_mutable",
         "//tensorflow/lite:framework",
         "//tensorflow/lite:shared_library",
-        "//tensorflow/lite/c:common",
-        "//tensorflow/lite/kernels:builtin_ops",
+        "//tensorflow/lite:string_util",
+        "//tensorflow/lite/core:framework",
+        "//tensorflow/lite/core/c:common",
+        "//tensorflow/lite/core/kernels:builtin_ops",
         "//tensorflow/lite/python/interpreter_wrapper:numpy",
         "//tensorflow/lite/python/interpreter_wrapper:python_error_reporter",
         "//tensorflow/lite/python/interpreter_wrapper:python_utils",
@@ -21,10 +45,11 @@ cc_library(
         "//tensorflow/lite/tools/optimize:quantize_model",
         "//tensorflow/lite/tools/optimize/calibration:calibration_reader",
         "//tensorflow/lite/tools/optimize/calibration:calibrator_lib",
-        "//third_party/python_runtime:headers",  # buildcleaner: keep
-        "@com_google_absl//absl/memory",
+        "@com_google_absl//absl/algorithm:container",
+        "@com_google_absl//absl/strings",
         "@com_google_absl//absl/strings:str_format",
         "@com_google_absl//absl/types:optional",
+        "@xla//third_party/python_runtime:headers",  # buildcleaner: keep
     ],
 )
 
@@ -34,14 +59,26 @@ pybind_extension(
         "calibration_wrapper_pybind11.cc",
     ],
     hdrs = ["calibration_wrapper.h"],
+    additional_stubgen_deps = [
+        "//third_party/py/numpy:numpy",
+    ],
+    common_lib_packages = [
+        "litert/python",
+        "tensorflow/lite/python",
+    ],
+    enable_stub_generation = True,
     link_in_framework = True,
-    module_name = "_pywrap_tensorflow_lite_calibration_wrapper",
+    pytype_srcs = [
+        "_pywrap_tensorflow_lite_calibration_wrapper.pyi",
+    ],
+    wrap_py_init = True,
     deps = [
         ":calibration_wrapper_lib",
-        "//tensorflow/lite:framework_lib",
-        "//tensorflow/python:pybind11_lib",
-        "//third_party/python_runtime:headers",
+        "//tensorflow/lite:framework",
+        "//tensorflow/lite/core:framework_stable",
+        "//tensorflow/python/lib/core:pybind11_lib",
         "@pybind11",
+        "@xla//third_party/python_runtime:headers",
     ],
 )
 
@@ -50,14 +87,14 @@ py_library(
     srcs = [
         "calibrator.py",
     ],
-    srcs_version = "PY3",
+    strict_deps = True,
     visibility = ["//visibility:public"],
     deps = [
         ":_pywrap_tensorflow_lite_calibration_wrapper",  # buildcleaner: keep
         "//tensorflow/lite/python:convert_phase",
         "//tensorflow/lite/python:interpreter",
-        "//tensorflow/python:dtypes",
-        "//tensorflow/python:util",
+        "//tensorflow/python/framework:dtypes",
+        "//tensorflow/python/util:lazy_loader",
         "//third_party/py/numpy",
     ],
 )
@@ -69,17 +106,21 @@ py_test(
         ":test_data",
         "//tensorflow/lite:testdata/multi_add.bin",
     ],
-    python_version = "PY3",
-    srcs_version = "PY3",
+    exec_properties = tflite_exec_properties(),
+    strict_deps = True,
     tags = ["no_oss"],
     deps = [
         ":calibrator",
-        "//tensorflow/python:client_testlib",
-        "//tensorflow/python:dtypes",
-        "//tensorflow/python:framework_test_lib",
-        "//tensorflow/python:platform",
-        "//third_party/py/numpy",
         "@absl_py//absl/testing:parameterized",
-        "@six_archive//:six",
+        #internal proto upb dep
+        "//third_party/py/numpy",
+        "//tensorflow:tensorflow_py_no_contrib",
+        "//tensorflow/lite/python:lite",
+        "//tensorflow/lite/python:schema_py",
+        "//tensorflow/lite/tools:flatbuffer_utils",
+        "//tensorflow/python/framework:dtypes",
+        "//tensorflow/python/framework:test_lib",
+        "//tensorflow/python/platform:client_testlib",
+        "//tensorflow/python/platform:resource_loader",
     ],
 )

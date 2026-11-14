@@ -1,15 +1,29 @@
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
 # Fallback from TFRT to TF kernels and related utilities.
 load(
     "//tensorflow:tensorflow.bzl",
-    "if_oss",
+    "tf_cc_shared_test",
     "tf_cc_test",
-    "tf_cuda_library",
 )
 load("//tensorflow/core/platform:rules_cc.bzl", "cc_library")
 
 package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
     default_visibility = ["//tensorflow/core/runtime_fallback:internal"],
-    features = ["-layering_check"],
     licenses = ["notice"],
 )
 
@@ -20,13 +34,13 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":attr_util",
-        "@com_google_absl//absl/strings",
-        "@llvm-project//llvm:Support",
         "//tensorflow/core/runtime_fallback/util:attr_util",
         "//tensorflow/core/tfrt/utils:error_util",
-        "@tf_runtime//backends/common:eigencompat",
+        "@com_google_absl//absl/strings",
+        "@llvm-project//llvm:Support",
         "@tf_runtime//:core_runtime",
         "@tf_runtime//:hostcontext",
+        "@tf_runtime//backends/common:eigencompat",
     ] + select({
         "//tensorflow:android": [
             "//tensorflow/core:portable_tensorflow_lib_lite",  # TODO(annarev): exclude runtime srcs
@@ -41,7 +55,7 @@ cc_library(
     }),
 )
 
-tf_cc_test(
+tf_cc_shared_test(
     name = "tfrt_op_kernel_test",
     srcs = ["tfrt_op_kernel_test.cc"],
     tags = ["no_oss"],
@@ -54,6 +68,7 @@ tf_cc_test(
             "//tensorflow/core:portable_tensorflow_lib_lite",  # TODO(annarev): exclude runtime srcs
         ],
         "//conditions:default": [
+            "//tensorflow/c:c_api",
             "//tensorflow/core:test",
             "//tensorflow/core:test_main",
             "//tensorflow/core/framework:types_proto_cc",
@@ -69,10 +84,44 @@ cc_library(
     hdrs = ["attr_util.h"],
     visibility = ["//visibility:public"],
     deps = [
-        "@llvm-project//llvm:Support",
+        "//tensorflow/core:portable_gif_internal",
         "//tensorflow/core/runtime_fallback/util:attr_util",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings",
+        "@llvm-project//llvm:Support",
         "@tf_runtime//:core_runtime",
         "@tf_runtime//:hostcontext",
+    ] + select({
+        "//tensorflow:android": [
+            "//tensorflow/core:portable_tensorflow_lib_lite",  # TODO(annarev): exclude runtime srcs
+        ],
+        "//conditions:default": [
+            "//tensorflow/core/framework:types_proto_cc",
+            "//tensorflow/core/platform:errors",
+            "//tensorflow/core/platform:status",
+            "//tensorflow/core/platform:str_util",
+            "//tensorflow/core/platform:stringpiece",
+            "//tensorflow/core/util:padding",
+        ],
+    }),
+)
+
+cc_library(
+    name = "tensor_util",
+    srcs = ["tensor_util.cc"],
+    hdrs = ["tensor_util.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":kernel_fallback_tensor",
+        "//tensorflow/core:framework",
+        "//tensorflow/core/common_runtime:copy_tensor",
+        "//tensorflow/core/runtime_fallback/runtime:kernel_utils",
+        "//tensorflow/core/runtime_fallback/util:attr_util",
+        "@com_google_absl//absl/synchronization",
+        "@llvm-project//llvm:Support",
+        "@tf_runtime//:core_runtime",
+        "@tf_runtime//:hostcontext",
+        "@tf_runtime//:support",
     ] + select({
         "//tensorflow:android": [
             "//tensorflow/core:portable_tensorflow_lib_lite",  # TODO(annarev): exclude runtime srcs
@@ -94,6 +143,8 @@ tf_cc_test(
     tags = ["no_oss"],
     deps = [
         ":attr_util",
+        "//tensorflow/c:tf_tensor",
+        "@com_google_absl//absl/status",
         "@tf_runtime//:core_runtime",
         "@tf_runtime//:hostcontext",
         "@tf_runtime//:support",
@@ -149,24 +200,24 @@ cc_library(
         "//tensorflow/core/tfrt:__subpackages__",
     ],
     deps = [
+        "//tensorflow/core/runtime_fallback/util:tensor_util",
+        "//tensorflow/core/runtime_fallback/util:type_util",
         "@llvm-project//llvm:Support",
+        "@tf_runtime//:dtype",
         "@tf_runtime//:hostcontext",
         "@tf_runtime//:support",
-        "@tf_runtime//:dtype",
-        "//tensorflow/core/runtime_fallback/util:tensor_util",
         "@tf_runtime//:tensor_alwayslink",
-        "//tensorflow/core/runtime_fallback/util:type_util",
     ] + select({
         "//tensorflow:android": [
             "//tensorflow/core:portable_tensorflow_lib_lite",  # TODO(annarev): exclude runtime srcs
         ],
         "//conditions:default": [
+            "//tensorflow/c:tf_datatype",
+            "//tensorflow/c:tf_tensor_internal",
             "//tensorflow/core/framework:tensor",
             "//tensorflow/core/framework:tensor_shape",
             "//tensorflow/core/framework:types_proto_cc",
             "//tensorflow/core/platform:status",
-            "//tensorflow/c:tf_datatype",
-            "//tensorflow/c:tf_tensor_internal",
         ],
     }),
 )
@@ -182,12 +233,11 @@ cc_library(
     includes = [
         "third_party/tf_runtime/include",
     ],
-    visibility = [
-        "//tensorflow/core/runtime_fallback:internal",
-        "//tensorflow/core/tfrt:__subpackages__",
-    ],
     deps = [
         ":kernel_fallback_tensor",
+        ":tensor_util",
+        "//tensorflow/core:portable_gif_internal",
+        "//tensorflow/core/framework:types_proto_cc",
         "//tensorflow/core/runtime_fallback/util:tensor_util",
         "//tensorflow/core/runtime_fallback/util:type_util",
         "@tf_runtime//:dtype",
@@ -217,47 +267,6 @@ cc_library(
     alwayslink = 1,
 )
 
-tf_cuda_library(
-    name = "kernel_fallback_gpu_alwayslink",
-    srcs = [
-        "gpu/conversion_function.cc",
-        "gpu/static_registration.cc",
-    ],
-    hdrs = [
-        "gpu/conversion_function.h",
-    ],
-    compatible_with = [],
-    # Only build this library with --config=cuda.
-    tags = [
-        "no_oss",
-        "requires_cuda",
-    ] + if_oss(["manual"]),
-    visibility = ["//visibility:public"],
-    deps = [
-        ":kernel_fallback_execute_compat",
-        ":kernel_fallback_tensor",
-        "@com_google_absl//absl/strings",
-        "//tensorflow/core/runtime_fallback/util:gpu_util",
-        "//tensorflow/core/runtime_fallback/util:tensor_util",
-        "//tensorflow/core/runtime_fallback/util:type_util",
-        "@tf_runtime//:hostcontext",
-        "@tf_runtime//:tensor",
-        "@tf_runtime//backends/gpu:gpu_config",
-        "@tf_runtime//backends/gpu:gpu_device",
-        "@tf_runtime//backends/gpu:gpu_op_handler_alwayslink",
-        "@tf_runtime//backends/gpu:gpu_tensor",
-    ] + select({
-        "//tensorflow:android": [
-            "//tensorflow/core:portable_tensorflow_lib_lite",  # TODO(annarev): exclude runtime srcs
-        ],
-        "//conditions:default": [
-            "//tensorflow/core:protos_all_cc",
-            "//tensorflow/core/common_runtime/eager:tensor_handle",
-        ],
-    }),
-    alwayslink = 1,
-)
-
 cc_library(
     name = "kernel_fallback_op_handler",
     srcs = ["kernel_fallback_op_handler.cc"],
@@ -267,19 +276,25 @@ cc_library(
         ":kernel_fallback_execute_compat",
         ":kernel_fallback_tensor",
         ":kernel_fallback_tensor_conversion_alwayslink",
+        "//tensorflow/core/framework:types_proto_cc",
+        "//tensorflow/core/runtime_fallback/kernel:kernel_fallback_compat_request_state",
+        "//tensorflow/core/runtime_fallback/runtime:kernel_utils",
+        "//tensorflow/core/runtime_fallback/util:attr_util",
+        "//tensorflow/core/tfrt/fallback:op_kernel_runner",
+        "//tensorflow/core/tfrt/fallback:op_kernel_runner_cache",
+        "@llvm-project//llvm:Support",
         "@tf_runtime//:core_runtime",
         "@tf_runtime//:hostcontext",
         "@tf_runtime//:support",
-        "//tensorflow/core/runtime_fallback/runtime:kernel_utils",
         "@tf_runtime//:tensor_alwayslink",
     ] + select({
         "//tensorflow:android": [
             "//tensorflow/core:portable_tensorflow_lib_lite",  # TODO(annarev): exclude runtime srcs
         ],
         "//conditions:default": [
-            "//tensorflow/core/platform:mutex",
             "//tensorflow/core/common_runtime/eager:context",
             "//tensorflow/core/framework:tensor",
+            "//tensorflow/core/platform:mutex",
         ],
     }),
     alwayslink = True,
@@ -295,9 +310,9 @@ cc_library(
         ":tfrt_op_kernel",
         "@llvm-project//llvm:Support",
         "@tf_runtime//:core_runtime",
+        "@tf_runtime//:dtype",
         "@tf_runtime//:hostcontext",
         "@tf_runtime//:support",
-        "@tf_runtime//:dtype",
         "@tf_runtime//:tensor_alwayslink",
         "@tf_runtime//backends/common:eigencompat",
     ] + select({
@@ -316,83 +331,99 @@ cc_library(
     hdrs = ["kernel_fallback_execute_compat.h"],
     visibility = [
         "//tensorflow/core/runtime_fallback:internal",
-        "//tensorflow/core/tfrt/eager:__pkg__",
+        "//tensorflow/core/tfrt/graph_executor:__pkg__",
         "//tensorflow/core/tfrt/saved_model:__pkg__",
     ],
     deps = [
         ":kernel_fallback_compat_request_state",
-        ":kernel_fallback_tensor_conversion_alwayslink",
-        ":op_kernel_runner",
-        "@llvm-project//llvm:Support",
-        "//tensorflow/core/profiler/lib:traceme",
-        "//tensorflow/core/runtime_fallback/runtime:kernel_utils",
+        ":kernel_fallback_tensor",
+        ":kernel_fallback_utils",
+        "//tensorflow/core/framework:tensor_proto_cc",
         "//tensorflow/core/runtime_fallback/runtime:op_logger",
         "//tensorflow/core/runtime_fallback/util:attr_util",
-        "//tensorflow/core/tfrt/utils:error_util",
+        "//tensorflow/core/runtime_fallback/util:type_util",
+        "//tensorflow/core/tfrt/fallback:cost_recorder",
+        "//tensorflow/core/tfrt/fallback:device_with_custom_allocator",
+        "//tensorflow/core/tfrt/fallback:op_kernel_runner",
+        "//tensorflow/core/tfrt/fallback:op_kernel_runner_cache",
+        "//tensorflow/core/tfrt/utils",
         "//tensorflow/core/tfrt/utils:fallback_tensor",
         "//tensorflow/core/tfrt/utils:tensor_util",
-        "//tensorflow/core/tfrt/utils:model_metadata",
+        "@com_google_absl//absl/base",
+        "@com_google_absl//absl/base:core_headers",
+        "@com_google_absl//absl/container:flat_hash_set",
+        "@com_google_absl//absl/container:inlined_vector",
+        "@com_google_absl//absl/log",
+        "@com_google_absl//absl/log:check",
+        "@com_google_absl//absl/log:vlog_is_on",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/strings:string_view",
+        "@llvm-project//llvm:Support",
         "@tf_runtime//:core_runtime",
+        "@tf_runtime//:dtype",
         "@tf_runtime//:hostcontext",
         "@tf_runtime//:support",
-        "@tf_runtime//:tracing",
         "@tf_runtime//:tensor_alwayslink",
+        "@tsl//tsl/profiler/lib:traceme",
+        "@tsl//tsl/profiler/lib:traceme_encode",
     ] + select({
         "//tensorflow:android": [
             "//tensorflow/core:portable_tensorflow_lib_lite",  # TODO(annarev): exclude runtime srcs
         ],
         "//conditions:default": [
-            "//tensorflow/core/framework:tensor",
             "//tensorflow/core:framework",
             "//tensorflow/core:lib",
-            "//tensorflow/core/common_runtime/eager:context",
-            "//tensorflow/core/common_runtime/eager:core",
+            "//tensorflow/core/framework:tensor",
         ],
     }),
     alwayslink = True,
 )
 
 cc_library(
-    name = "op_kernel_runner",
-    srcs = ["op_kernel_runner.cc"],
-    hdrs = ["op_kernel_runner.h"],
+    name = "kernel_fallback_execute_compat_eager",
+    srcs = ["kernel_fallback_execute_compat_eager.cc"],
+    hdrs = ["kernel_fallback_execute_compat_eager.h"],
     visibility = [
+        "//tensorflow/compiler/mlir/tfrt:__pkg__",
         "//tensorflow/core/runtime_fallback:internal",
-        "//tensorflow/core/tfrt/eager:__pkg__",
     ],
     deps = [
         ":kernel_fallback_compat_request_state",
         ":kernel_fallback_tensor",
         ":kernel_fallback_tensor_conversion_alwayslink",
-        "@com_google_absl//absl/container:flat_hash_map",
-        "@com_google_absl//absl/container:inlined_vector",
-        "@com_google_absl//absl/meta:type_traits",
-        "@com_google_absl//absl/types:span",
-        "@llvm-project//llvm:Support",
+        ":kernel_fallback_utils",
+        "//tensorflow/core/profiler/lib:traceme",
+        "//tensorflow/core/runtime_fallback/runtime:kernel_utils",
+        "//tensorflow/core/runtime_fallback/runtime:op_logger",
         "//tensorflow/core/runtime_fallback/util:attr_util",
+        "//tensorflow/core/tfrt/fallback:cost_recorder",
+        "//tensorflow/core/tfrt/fallback:device_with_custom_allocator",
+        "//tensorflow/core/tfrt/fallback:op_kernel_runner",
+        "//tensorflow/core/tfrt/fallback:op_kernel_runner_cache",
+        "//tensorflow/core/tfrt/utils:error_util",
         "//tensorflow/core/tfrt/utils:fallback_tensor",
-        "//tensorflow/core/tfrt/utils:statusor",
+        "//tensorflow/core/tfrt/utils:tensor_util",
+        "@com_google_absl//absl/base",
+        "@llvm-project//llvm:Support",
         "@tf_runtime//:core_runtime",
         "@tf_runtime//:hostcontext",
         "@tf_runtime//:support",
         "@tf_runtime//:tensor_alwayslink",
+        "@tsl//tsl/platform:refcount",
     ] + select({
         "//tensorflow:android": [
             "//tensorflow/core:portable_tensorflow_lib_lite",  # TODO(annarev): exclude runtime srcs
         ],
         "//conditions:default": [
-            "//tensorflow/core/common_runtime/eager:attr_builder",
-            "//tensorflow/core/common_runtime/eager:core",
             "//tensorflow/core:framework",
-            "//tensorflow/core:framework_lite",
-            "//tensorflow/core/framework:node_def_proto_cc",
-            "//tensorflow/core/framework:op_def_proto_cc",
+            "//tensorflow/core:lib",
+            "//tensorflow/core/common_runtime/eager:context",
+            "//tensorflow/core/common_runtime/eager:core",
             "//tensorflow/core/framework:tensor",
-            "//tensorflow/core/platform:errors",
-            "//tensorflow/core/platform:status",
-            "//tensorflow/core:core_cpu_base",
         ],
     }),
+    alwayslink = True,
 )
 
 cc_library(
@@ -401,17 +432,20 @@ cc_library(
     hdrs = ["kernel_fallback_compat_request_state.h"],
     visibility = [
         "//tensorflow/core/runtime_fallback:internal",
-        # JIT compilation kernels need access to fallback state to set up
-        # Eigen thread pool as async runtime worker threads.
-        "//tensorflow/compiler/mlir/tfrt:__pkg__",
-        # TPU runtime needs to access fallback state to configure MLIR bridge
-        # rollout state
-        "//third_party/tf_runtime_google:__pkg__",
+        # Sync fallback kernels need access to the fallback state.
+        "//learning/brain/experimental/tfrt/native_lowering/kernels:__subpackages__",
+        "//tensorflow/core/tfrt/graph_executor:__subpackages__",
+        "//tensorflow/core/tfrt/saved_model:__subpackages__",
+        "//tensorflow/core/tfrt/mlrt/kernel:__subpackages__",
+        "//tensorflow/core/tfrt/gpu/kernel:__subpackages__",
     ],
     deps = [
-        ":kernel_fallback_tensor_conversion_alwayslink",
+        "//tensorflow/core/tfrt/fallback:cost_recorder",
+        "//tensorflow/core/tfrt/fallback:op_kernel_runner",
+        "//tensorflow/core/tfrt/graph_executor:config",
+        "//tensorflow/core/tfrt/graph_executor:config_proto_cc",
         "//tensorflow/core/tfrt/utils:fallback_tensor",
-        "//tensorflow/core/tfrt/utils:model_metadata",
+        "@com_google_absl//absl/time",
         "@tf_runtime//:hostcontext",
         "@tf_runtime//:support",
         "@tf_runtime//:tensor_alwayslink",
@@ -420,15 +454,30 @@ cc_library(
             "//tensorflow/core:portable_tensorflow_lib_lite",  # TODO(annarev): exclude runtime srcs
         ],
         "//conditions:default": [
-            "//tensorflow/core/common_runtime:renamed_device",
-            "//tensorflow/core/common_runtime/eager:context",
-            "//tensorflow/core/common_runtime/eager:core",
             "//tensorflow/core:core_cpu_base",
             "//tensorflow/core:framework",
             "//tensorflow/core:framework_lite",
             "//tensorflow/core:lib",
-            "//tensorflow/core/platform:refcount",
+            "//tensorflow/core/common_runtime:renamed_device",
+            "//tensorflow/core/common_runtime:rendezvous_mgr",
             "//tensorflow/core/framework:tensor",
+            "//tensorflow/core/platform:refcount",
         ],
     }),
+)
+
+cc_library(
+    name = "kernel_fallback_utils",
+    srcs = ["kernel_fallback_utils.cc"],
+    hdrs = ["kernel_fallback_utils.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":kernel_fallback_compat_request_state",
+        "//tensorflow/core:framework",
+        "//tensorflow/core/tfrt/fallback:op_kernel_runner",
+        "//tensorflow/core/tfrt/utils:fallback_tensor",
+        "@com_google_absl//absl/container:inlined_vector",
+        "@tf_runtime//:hostcontext",
+        "@tf_runtime//:support",
+    ],
 )

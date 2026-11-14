@@ -13,30 +13,37 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 #include "tensorflow/core/common_runtime/rendezvous_util.h"
-#include "tensorflow/core/platform/mutex.h"
 
+#include <string>
+#include <tuple>
+#include <utility>
+#include <vector>
+
+#include "absl/status/status.h"
+#include "absl/types/span.h"
+#include "tensorflow/core/platform/mutex.h"
 #include "tensorflow/core/util/reffed_status_callback.h"
 
 namespace tensorflow {
 
-Status SendTensorsToRendezvous(
+absl::Status SendTensorsToRendezvous(
     RendezvousInterface* rendezvous, DeviceContext* device_context,
     const std::vector<AllocatorAttributes>& alloc_attrs,
-    const std::vector<string>& keys, gtl::ArraySlice<Tensor> tensors_to_send) {
+    const std::vector<std::string>& keys,
+    absl::Span<const Tensor> tensors_to_send) {
   if (keys.size() != tensors_to_send.size()) {
-    return errors::InvalidArgument(
+    return absl::InvalidArgumentError(absl::StrCat(
         "keys and tensors_to_send are not the same size. keys.size() = ",
-        keys.size(), "; tensors_to_send.size() = ", tensors_to_send.size());
+        keys.size(), "; tensors_to_send.size() = ", tensors_to_send.size()));
   }
   if (!alloc_attrs.empty() && (keys.size() != alloc_attrs.size())) {
-    return errors::InvalidArgument(
-        "keys and alloc_attrs are not the same size. ",
-        "keys.size() = ", keys.size(),
-        "; alloc_attrs.size() = ", alloc_attrs.size());
+    return absl::InvalidArgumentError(absl::StrCat(
+        "keys and alloc_attrs are not the same size. ", "keys.size() = ",
+        keys.size(), "; alloc_attrs.size() = ", alloc_attrs.size()));
   }
 
   if (!rendezvous) {
-    return errors::InvalidArgument("Rendezvous is null.");
+    return absl::InvalidArgumentError("Rendezvous is null.");
   }
 
   Rendezvous::ParsedKey parsed;
@@ -50,32 +57,32 @@ Status SendTensorsToRendezvous(
     TF_RETURN_IF_ERROR(
         rendezvous->Send(parsed, rendez_args, tensors_to_send[i], false));
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 void RecvOutputsFromRendezvousAsync(
     RendezvousInterface* rendezvous, DeviceContext* device_context,
     const std::vector<AllocatorAttributes>& alloc_attrs,
-    const std::vector<string>& keys, std::vector<Tensor>* received_tensors,
+    const std::vector<std::string>& keys, std::vector<Tensor>* received_tensors,
     StatusCallback done) {
   if (keys.empty()) {
-    done(Status::OK());
+    done(absl::OkStatus());
     return;
   }
   if (!alloc_attrs.empty() && (keys.size() != alloc_attrs.size())) {
-    done(errors::InvalidArgument(
+    done(absl::InvalidArgumentError(absl::StrCat(
         "keys and alloc_attrs are not the same size. ", "keys.size() = ",
-        keys.size(), "; alloc_attrs.size() = ", alloc_attrs.size()));
+        keys.size(), "; alloc_attrs.size() = ", alloc_attrs.size())));
   }
 
-  received_tensors->reserve(keys.size());
-  std::vector<
-      std::tuple<string, Tensor*, Rendezvous::ParsedKey, AllocatorAttributes>>
+  received_tensors->resize(keys.size());
+  std::vector<std::tuple<std::string, Tensor*, Rendezvous::ParsedKey,
+                         AllocatorAttributes>>
       arguments;
+  arguments.reserve(keys.size());
   for (int i = 0; i < keys.size(); ++i) {
     Rendezvous::ParsedKey parsed;
-    Status s = Rendezvous::ParseKey(keys[i], &parsed);
-    received_tensors->push_back(Tensor());
+    absl::Status s = Rendezvous::ParseKey(keys[i], &parsed);
     if (!s.ok()) {
       done(s);
       return;
@@ -90,7 +97,7 @@ void RecvOutputsFromRendezvousAsync(
 
   auto status_cb = new ReffedStatusCallback(std::move(done));
   for (auto& p : arguments) {
-    const string& key = std::get<0>(p);
+    const std::string& key = std::get<0>(p);
     Tensor* val = std::get<1>(p);
     Rendezvous::ParsedKey parsed = std::get<2>(p);
     Rendezvous::Args rendez_args;
@@ -99,16 +106,16 @@ void RecvOutputsFromRendezvousAsync(
     status_cb->Ref();
     rendezvous->RecvAsync(
         parsed, rendez_args,
-        [val, key, status_cb](const Status& s,
+        [val, key, status_cb](const absl::Status& s,
                               const Rendezvous::Args& send_args,
                               const Rendezvous::Args& recv_args,
                               const Tensor& v, const bool is_dead) {
-          Status status = s;
+          absl::Status status = s;
           if (status.ok()) {
             *val = v;
             if (is_dead) {
-              status = errors::InvalidArgument("The tensor returned for ", key,
-                                               " was not valid.");
+              status = absl::InvalidArgumentError(absl::StrCat(
+                  "The tensor returned for ", key, " was not valid."));
             }
           }
           status_cb->UpdateStatus(status);
@@ -118,23 +125,23 @@ void RecvOutputsFromRendezvousAsync(
   status_cb->Unref();
 }
 
-Status RecvOutputsFromRendezvous(RendezvousInterface* rendezvous,
-                                 NamedTensors* out,
-                                 const Rendezvous::Args& args) {
+absl::Status RecvOutputsFromRendezvous(RendezvousInterface* rendezvous,
+                                       NamedTensors* out,
+                                       const Rendezvous::Args& args) {
   // Receives values requested by the caller.
   Rendezvous::ParsedKey parsed;
   for (auto& p : *out) {
-    const string& key = p.first;
+    const std::string& key = p.first;
     Tensor* val = &p.second;
     bool is_dead = false;
     TF_RETURN_IF_ERROR(Rendezvous::ParseKey(key, &parsed));
     TF_RETURN_IF_ERROR(rendezvous->Recv(parsed, args, val, &is_dead));
     if (is_dead) {
-      return errors::InvalidArgument("The tensor returned for ", key,
-                                     " was not valid.");
+      return absl::InvalidArgumentError(
+          absl::StrCat("The tensor returned for ", key, " was not valid."));
     }
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 }  // namespace tensorflow

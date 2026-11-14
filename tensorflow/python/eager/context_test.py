@@ -13,16 +13,12 @@
 # limitations under the License.
 # ==============================================================================
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import weakref
 
 from absl.testing import parameterized
 import numpy as np
 
-from tensorflow.compiler.xla.service import hlo_pb2
+from xla.service import hlo_pb2
 from tensorflow.python.eager import context
 from tensorflow.python.eager import def_function
 from tensorflow.python.framework import constant_op
@@ -168,6 +164,27 @@ class ContextTest(test.TestCase, parameterized.TestCase):
     concrete = f.get_concrete_function()
     self.assertIn(concrete.name.decode(),
                   context.context().list_function_names())
+
+  def testCoordinationServiceMethodsInitializeNonGlobalContext(self):
+    # Each method must initialize its own (non-global) context before calling
+    # the C API; without a coordination service it then fails cleanly.
+    with self.assertRaisesRegex(
+        errors.FailedPreconditionError,
+        'Coordination service agent is not enabled',
+    ):
+      context.Context().set_config_key_value('key', 'value')
+    with self.assertRaisesRegex(
+        errors.FailedPreconditionError, 'Coordination service is not enabled'
+    ):
+      context.Context().get_config_key_value('key', timeout_in_ms=1)
+    with self.assertRaisesRegex(
+        errors.FailedPreconditionError, 'Coordination service is not enabled'
+    ):
+      context.Context().delete_config_key_value('key')
+    with self.assertRaisesRegex(
+        errors.FailedPreconditionError, 'Coordination service is not enabled'
+    ):
+      context.Context().wait_at_barrier('barrier', 1)
 
   def testSetLogicalDeviceAfterContextInitialization(self):
     ctx = context.Context()

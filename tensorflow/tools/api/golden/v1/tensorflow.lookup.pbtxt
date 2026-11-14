@@ -2,26 +2,26 @@ path: "tensorflow.lookup"
 tf_module {
   member {
     name: "KeyValueTensorInitializer"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "StaticHashTable"
-    mtype: "<class \'tensorflow.python.training.tracking.tracking.ResourceMetaclass\'>"
+    mtype: "<class \'tensorflow.python.trackable.resource._ResourceMetaclass\'>"
   }
   member {
     name: "StaticVocabularyTable"
-    mtype: "<class \'tensorflow.python.training.tracking.tracking.ResourceMetaclass\'>"
+    mtype: "<class \'tensorflow.python.trackable.resource._ResourceMetaclass\'>"
   }
   member {
     name: "TextFileIndex"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "TextFileInitializer"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "experimental"
-    mtype: "<type \'module\'>"
+    mtype: "<class \'module\'>"
   }
 }

@@ -15,26 +15,25 @@ limitations under the License.
 
 #include "tensorflow/core/common_runtime/pluggable_device/pluggable_device_util.h"
 
-#include "tensorflow/core/common_runtime/copy_tensor.h"
-#include "tensorflow/core/common_runtime/device.h"
+#include <cstdint>
+
+#include "absl/log/log.h"
+#include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
+#include "xla/stream_executor/device_memory.h"
 #include "tensorflow/core/common_runtime/device/device_event_mgr.h"
-#include "tensorflow/core/common_runtime/device_factory.h"
 #include "tensorflow/core/common_runtime/dma_helper.h"
 #include "tensorflow/core/common_runtime/pluggable_device/pluggable_device_context.h"
-#include "tensorflow/core/common_runtime/pluggable_device/pluggable_device_process_state.h"
+#include "tensorflow/core/framework/allocator.h"
+#include "tensorflow/core/framework/device.h"
+#include "tensorflow/core/framework/device_base.h"
 #include "tensorflow/core/framework/tensor.h"
 #include "tensorflow/core/framework/tensor.pb.h"
 #include "tensorflow/core/framework/tensor_reference.h"
 #include "tensorflow/core/framework/types.h"
 #include "tensorflow/core/lib/core/errors.h"
-#include "tensorflow/core/lib/core/refcount.h"
-#include "tensorflow/core/lib/hash/hash.h"
-#include "tensorflow/core/lib/strings/strcat.h"
-#include "tensorflow/core/lib/strings/stringprintf.h"
 #include "tensorflow/core/platform/logging.h"
-#include "tensorflow/core/platform/stream_executor.h"
-#include "tensorflow/core/platform/tensor_coding.h"
-#include "tensorflow/core/util/util.h"
+#include "tensorflow/core/platform/status.h"
 
 // IMPLEMENTATION NOTE:
 //
@@ -51,53 +50,54 @@ limitations under the License.
 namespace tensorflow {
 
 using se::DeviceMemoryBase;
-using se::Stream;
 
-static Status PrepareCopy(Device* device, const DeviceContext* ctx,
-                          const Tensor& src, const Tensor* dst,
-                          const DeviceBase::GpuDeviceInfo** dev_info,
-                          se::Stream** stream) {
+static absl::Status PrepareCopy(
+    Device* device, const DeviceContext* ctx, const Tensor& src,
+    const Tensor* dst, const DeviceBase::AcceleratorDeviceInfo** dev_info,
+    se::Stream** stream) {
   if (device == nullptr) {
-    return errors::Internal("Unexpected null device.");
+    return absl::InternalError("Unexpected null device.");
   }
-  auto di = device->tensorflow_gpu_device_info();
+  auto di = device->tensorflow_accelerator_device_info();
   if (di == nullptr) {
-    return errors::Internal("Unexpected null device info.");
+    return absl::InternalError("Unexpected null device info.");
   }
 
   *dev_info = di;
   if (ctx == nullptr) {
-    return errors::Internal("Unexpected null device context.");
+    return absl::InternalError("Unexpected null device context.");
   }
   auto device_stream =
       static_cast<const PluggableDeviceContext*>(ctx)->stream();
   if (device_stream == nullptr) {
-    return errors::Internal("No PluggableDevice stream is available.");
+    return absl::InternalError("No PluggableDevice stream is available.");
   }
   *stream = device_stream;
   if (dst != nullptr) {
     if (src.dtype() != dst->dtype()) {
-      return errors::Internal("Can't copy a tensor of ",
-                              DataTypeString(src.dtype()), " into a tensor of ",
-                              DataTypeString(dst->dtype()));
+      return absl::InternalError(
+          absl::StrCat("Can't copy a tensor of ", DataTypeString(src.dtype()),
+                       " into a tensor of ", DataTypeString(dst->dtype())));
     }
     if (src.TotalBytes() != dst->TotalBytes()) {
-      return errors::Internal("Can't copy ", src.TotalBytes(),
-                              " bytes of a tensor into another with ",
-                              dst->TotalBytes(), " bytes buffer.");
+      return absl::InternalError(
+          absl::StrCat("Can't copy ", src.TotalBytes(),
+                       " bytes of a tensor into another with ",
+                       dst->TotalBytes(), " bytes buffer."));
     }
     if ((src.TotalBytes() > 0) && !src.IsInitialized()) {
-      return errors::Internal("Src tensor is not initialized.");
+      return absl::InternalError("Src tensor is not initialized.");
     }
     if ((dst->TotalBytes() > 0) && !dst->IsInitialized()) {
-      return errors::Internal("Dst tensor is not initialized.");
+      return absl::InternalError("Dst tensor is not initialized.");
     }
   }
   if (!DMAHelper::CanUseDMA(&src)) {
-    return errors::Internal("PluggableDevice copy from non-DMA",
-                            DataTypeString(src.dtype()), " tensor.");
+    return absl::InternalError(absl::StrCat("PluggableDevice copy from non-DMA",
+                                            DataTypeString(src.dtype()),
+                                            " tensor."));
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 static void* GetBase(const Tensor* src) {
@@ -112,10 +112,10 @@ void PluggableDeviceUtil::DeviceToDeviceCopy(
     Device* src, Device* dst, AllocatorAttributes src_alloc_attr,
     AllocatorAttributes dst_alloc_attr, const Tensor* input, Tensor* output,
     int dev_to_dev_stream_index, StatusCallback done) {
-  const DeviceBase::GpuDeviceInfo* dev_info = nullptr;
+  const DeviceBase::AcceleratorDeviceInfo* dev_info = nullptr;
   se::Stream* send_stream = nullptr;
-  Status s = PrepareCopy(src, send_dev_context, *input, output, &dev_info,
-                         &send_stream);
+  absl::Status s = PrepareCopy(src, send_dev_context, *input, output, &dev_info,
+                               &send_stream);
   if (!s.ok()) {
     done(s);
     return;
@@ -125,13 +125,17 @@ void PluggableDeviceUtil::DeviceToDeviceCopy(
       static_cast<const PluggableDeviceContext*>(send_dev_context)
           ->device_to_device_stream(dev_to_dev_stream_index);
   if (send_device_to_device_stream == nullptr) {
-    done(errors::Internal(
+    done(absl::InternalError(
         "No send PluggableDevice copy-out-stream is available."));
     return;
   }
   // Wait for the main stream on the sender to make sure the result is
   // available.
-  send_device_to_device_stream->ThenWaitFor(send_stream);
+  s = send_device_to_device_stream->WaitFor(send_stream);
+  if (!s.ok()) {
+    done(s);
+    return;
+  }
 
   const int64_t total_bytes = input->TotalBytes();
   if (total_bytes > 0) {
@@ -142,17 +146,25 @@ void PluggableDeviceUtil::DeviceToDeviceCopy(
     auto recv_stream =
         static_cast<const PluggableDeviceContext*>(recv_dev_context)->stream();
     if (recv_stream == nullptr) {
-      done(errors::Internal("No recv PluggableDevice stream is available."));
+      done(absl::InternalError("No recv PluggableDevice stream is available."));
       return;
     }
     // Since we want to use the memory from recv_stream in the
     // send_device_to_host_stream, add a dependency to make sure the memory is
     // truly free.
-    send_device_to_device_stream->ThenWaitFor(recv_stream);
+    s = send_device_to_device_stream->WaitFor(recv_stream);
+    if (!s.ok()) {
+      done(s);
+      return;
+    }
 
     VLOG(2) << "src_ptr " << src_ptr << " dst_ptr " << dst_ptr;
-    send_device_to_device_stream->ThenMemcpy(&device_dst_ptr, device_src_ptr,
+    s = send_device_to_device_stream->Memcpy(&device_dst_ptr, device_src_ptr,
                                              total_bytes);
+    if (!s.ok()) {
+      done(s);
+      return;
+    }
   }
   // Use of input may outlive stack scope, so keep a ref.
   TensorReference input_ref(*input);
@@ -164,7 +176,7 @@ void PluggableDeviceUtil::DeviceToDeviceCopy(
           LOG(FATAL) << "PluggableDevice->PluggableDevice Memcpy "  // Crash OK
                      << "failed.";
         }
-        done(Status::OK());
+        done(absl::OkStatus());
       });
   send_dev_context->MaintainLifetimeOnStream(input,
                                              send_device_to_device_stream);
@@ -175,10 +187,10 @@ void PluggableDeviceUtil::CopyPluggableDeviceTensorToCPU(
     Device* device, const DeviceContext* device_context,
     const Tensor* device_tensor, Tensor* cpu_tensor, StatusCallback done) {
   VLOG(1) << "CopyPluggableDeviceTensorToCPU";
-  const DeviceBase::GpuDeviceInfo* dev_info = nullptr;
+  const DeviceBase::AcceleratorDeviceInfo* dev_info = nullptr;
   se::Stream* send_stream = nullptr;
-  Status s = PrepareCopy(device, device_context, *device_tensor, cpu_tensor,
-                         &dev_info, &send_stream);
+  absl::Status s = PrepareCopy(device, device_context, *device_tensor,
+                               cpu_tensor, &dev_info, &send_stream);
   if (!s.ok()) {
     done(s);
     return;
@@ -188,20 +200,28 @@ void PluggableDeviceUtil::CopyPluggableDeviceTensorToCPU(
       static_cast<const PluggableDeviceContext*>(device_context)
           ->device_to_host_stream();
   if (send_device_to_host_stream == nullptr) {
-    done(errors::Internal(
+    done(absl::InternalError(
         "No send PluggableDevice copy-out-stream is available."));
     return;
   }
   // Wait for the sender's main stream to make sure that the data are available.
-  send_device_to_host_stream->ThenWaitFor(send_stream);
+  s = send_device_to_host_stream->WaitFor(send_stream);
+  if (!s.ok()) {
+    done(s);
+    return;
+  }
 
   const int64_t total_bytes = device_tensor->TotalBytes();
   if (total_bytes > 0) {
     void* src_ptr = GetBase(device_tensor);
     DeviceMemoryBase device_src_ptr(src_ptr, total_bytes);
     void* dst_ptr = GetBase(cpu_tensor);
-    send_device_to_host_stream->ThenMemcpy(dst_ptr, device_src_ptr,
+    s = send_device_to_host_stream->Memcpy(dst_ptr, device_src_ptr,
                                            total_bytes);
+    if (!s.ok()) {
+      done(s);
+      return;
+    }
   }
 
   // Use of the input may outlive stack scope, so keep a ref.
@@ -213,7 +233,7 @@ void PluggableDeviceUtil::CopyPluggableDeviceTensorToCPU(
           LOG(FATAL) << "PluggableDevice->CPU Memcpy failed.";  // Crash OK
         }
         input_ref.Unref();
-        done(Status::OK());
+        done(absl::OkStatus());
       });
 }
 
@@ -223,10 +243,10 @@ void PluggableDeviceUtil::CopyCPUTensorToPluggableDevice(
     Device* device, Tensor* device_tensor, StatusCallback done,
     bool sync_dst_compute) {
   VLOG(1) << "CopyCPUTensorToPluggableDevice";
-  const DeviceBase::GpuDeviceInfo* dev_info = nullptr;
+  const DeviceBase::AcceleratorDeviceInfo* dev_info = nullptr;
   se::Stream* recv_stream = nullptr;
-  Status s = PrepareCopy(device, device_context, *cpu_tensor, device_tensor,
-                         &dev_info, &recv_stream);
+  absl::Status s = PrepareCopy(device, device_context, *cpu_tensor,
+                               device_tensor, &dev_info, &recv_stream);
   if (!s.ok()) {
     done(s);
     return;
@@ -236,13 +256,17 @@ void PluggableDeviceUtil::CopyCPUTensorToPluggableDevice(
       static_cast<const PluggableDeviceContext*>(device_context)
           ->host_to_device_stream();
   if (recv_host_to_device_stream == nullptr) {
-    done(errors::Internal(
+    done(absl::InternalError(
         "No send PluggableDevice copy-out-stream is available."));
     return;
   }
   // Wait for the recv-stream to make sure the buffer is truly available.
   if (sync_dst_compute) {
-    recv_host_to_device_stream->ThenWaitFor(recv_stream);
+    s = recv_host_to_device_stream->WaitFor(recv_stream);
+    if (!s.ok()) {
+      done(s);
+      return;
+    }
   }
   const int64_t total_bytes = cpu_tensor->TotalBytes();
   // Note that 0-size tensors have no backing buffer.
@@ -250,8 +274,12 @@ void PluggableDeviceUtil::CopyCPUTensorToPluggableDevice(
     void* src_ptr = GetBase(cpu_tensor);
     void* dst_ptr = GetBase(device_tensor);
     DeviceMemoryBase device_dst_ptr(dst_ptr, total_bytes);
-    recv_host_to_device_stream->ThenMemcpy(&device_dst_ptr, src_ptr,
+    s = recv_host_to_device_stream->Memcpy(&device_dst_ptr, src_ptr,
                                            total_bytes);
+    if (!s.ok()) {
+      done(s);
+      return;
+    }
   }
   // Use of cpu_tensor may outlive stack scope, so keep a ref.
   TensorReference input_ref(*cpu_tensor);
@@ -262,30 +290,30 @@ void PluggableDeviceUtil::CopyCPUTensorToPluggableDevice(
         if (!recv_host_to_device_stream->ok()) {
           LOG(FATAL) << "CPU->PluggableDevice Memcpy failed.";  // Crash OK
         }
-        done(Status::OK());
+        done(absl::OkStatus());
       });
 }
 
-Status PluggableDeviceUtil::Sync(Device* device) {
+absl::Status PluggableDeviceUtil::Sync(Device* device) {
   VLOG(1) << "PluggableDeviceUtil::Sync";
-  auto* dev_info = device->tensorflow_gpu_device_info();
+  auto* dev_info = device->tensorflow_accelerator_device_info();
   if (!dev_info) {
-    return errors::Internal("Failed to find dest device GPUDeviceInfo.");
+    return absl::InternalError("Failed to find dest device GPUDeviceInfo.");
   }
   return dev_info->stream->BlockHostUntilDone();
 }
 
-Status PluggableDeviceUtil::SyncAll(Device* device) {
+absl::Status PluggableDeviceUtil::SyncAll(Device* device) {
   VLOG(1) << "PluggableDeviceUtil::SyncAll";
-  auto* dev_info = device->tensorflow_gpu_device_info();
+  auto* dev_info = device->tensorflow_accelerator_device_info();
   if (!dev_info) {
-    return errors::Internal("Failed to find dest device GPUDeviceInfo.");
+    return absl::InternalError("Failed to find dest device GPUDeviceInfo.");
   }
   if (!dev_info->stream->parent()->SynchronizeAllActivity() ||
       !dev_info->stream->ok()) {
-    return errors::Internal("PluggableDevice SyncAll failed.");
+    return absl::InternalError("PluggableDevice SyncAll failed.");
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 // static
@@ -294,10 +322,10 @@ void PluggableDeviceUtil::CopyPluggableDeviceTensorToSameDevice(
     const Tensor* src_device_tensor, Tensor* dst_device_tensor,
     StatusCallback done) {
   VLOG(1) << "CopyPluggableDeviceTensorToSameDevice";
-  const DeviceBase::GpuDeviceInfo* dev_info = nullptr;
+  const DeviceBase::AcceleratorDeviceInfo* dev_info = nullptr;
   se::Stream* send_stream = nullptr;
-  Status s = PrepareCopy(device, device_context, *src_device_tensor,
-                         dst_device_tensor, &dev_info, &send_stream);
+  absl::Status s = PrepareCopy(device, device_context, *src_device_tensor,
+                               dst_device_tensor, &dev_info, &send_stream);
   if (!s.ok()) {
     done(s);
     return;
@@ -309,10 +337,15 @@ void PluggableDeviceUtil::CopyPluggableDeviceTensorToSameDevice(
     DeviceMemoryBase device_src_ptr(src_ptr, total_bytes);
     void* dst_ptr = GetBase(dst_device_tensor);
     DeviceMemoryBase device_dst_ptr(dst_ptr, total_bytes);
-    send_stream->ThenMemcpy(&device_dst_ptr, device_src_ptr, total_bytes);
+    auto status =
+        send_stream->Memcpy(&device_dst_ptr, device_src_ptr, total_bytes);
+    if (!status.ok()) {
+      done(status);
+      return;
+    }
   }
 
-  done(Status::OK());
+  done(absl::OkStatus());
 }
 
 }  // namespace tensorflow

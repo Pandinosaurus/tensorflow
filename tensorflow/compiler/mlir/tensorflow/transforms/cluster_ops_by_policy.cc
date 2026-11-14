@@ -15,15 +15,24 @@ limitations under the License.
 
 #include "tensorflow/compiler/mlir/tensorflow/transforms/cluster_ops_by_policy.h"
 
+#include <cassert>
+#include <cstddef>
+#include <functional>
+#include <optional>
+#include <string>
+#include <utility>
+
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/FormatVariadic.h"
-#include "mlir/Dialect/StandardOps/IR/Ops.h"  // from @llvm-project
+#include "llvm/Support/raw_ostream.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"  // from @llvm-project
 #include "mlir/IR/BuiltinTypes.h"  // from @llvm-project
 #include "mlir/IR/Operation.h"  // from @llvm-project
 #include "mlir/IR/Value.h"  // from @llvm-project
+#include "mlir/Support/LLVM.h"  // from @llvm-project
 #include "mlir/Support/LogicalResult.h"  // from @llvm-project
 
 #define DEBUG_TYPE "cluster-ops-by-policy"
@@ -41,7 +50,7 @@ ValueConstraint Merge(ValueConstraint a, ValueConstraint b) {
 
 LogicalResult IsStaticallyResolved(Value value, ValueConstraint constraint) {
   // Resolve constraints inferred from the tensor type.
-  if (auto tensor = value.getType().dyn_cast<TensorType>()) {
+  if (auto tensor = mlir::dyn_cast<TensorType>(value.getType())) {
     if (constraint == ValueConstraint::kRank && tensor.hasRank())
       return success();
     if (constraint == ValueConstraint::kShape && tensor.hasStaticShape())
@@ -96,15 +105,15 @@ void ValuesConstraintSet::Walk(
   for (auto &kv : constraints_) walk(kv.getFirst(), kv.getSecond());
 }
 
-Optional<ValueConstraint> ValuesConstraintSet::GetConstraint(
+std::optional<ValueConstraint> ValuesConstraintSet::GetConstraint(
     Value value) const {
   auto it = constraints_.find(value);
-  if (it == constraints_.end()) return None;
+  if (it == constraints_.end()) return std::nullopt;
   return it->getSecond();
 }
 
 bool ValuesConstraintSet::HasConstraint(Value value) const {
-  return GetConstraint(value).hasValue();
+  return GetConstraint(value).has_value();
 }
 
 void ValuesConstraintSet::MergeAll(const ValuesConstraintSet &other) {
@@ -254,9 +263,9 @@ LogicalResult ClusteringState::VerifyDominanceProperty(
 
     // Block arguments do not really participate in clustering, they are only
     // used to connect independent operation using the same argument.
-    if (member.source.is<BlockArgument *>()) continue;
+    if (isa<BlockArgument*>(member.source)) continue;
 
-    Operation *op = member.source.dyn_cast<Operation *>();
+    Operation* op = llvm::dyn_cast<Operation*>(member.source);
     assert(op && "member operation must be not null");
 
     for (Operation *user : op->getUsers()) {
@@ -294,7 +303,7 @@ LogicalResult ClusteringState::VerifyValueConstraints(
   // Start from all operations in the `src_root` cluster.
   llvm::SmallVector<Operation *> worklist;
   for (Member &member : members)
-    if (Operation *op = member.source.dyn_cast<Operation *>())
+    if (Operation* op = llvm::dyn_cast_if_present<Operation*>(member.source))
       if (FindRoot(member.root) == src_root) worklist.emplace_back(op);
 
   // Collect `dst_root` constraints that are applicable to the values defined in
@@ -338,9 +347,10 @@ LogicalResult ClusteringState::Union(unsigned a, unsigned b,
   auto debug_clustered_ops = [&](unsigned root) {
     for (Member &member : members)
       if (FindRoot(member.root) == root) {
-        if (auto *op = member.source.dyn_cast<Operation *>()) {
+        if (auto* op = llvm::dyn_cast_if_present<Operation*>(member.source)) {
           llvm::dbgs() << "  " << *op << "\n";
-        } else if (auto *arg = member.source.dyn_cast<BlockArgument *>()) {
+        } else if (auto* arg = llvm::dyn_cast_if_present<BlockArgument*>(
+                       member.source)) {
           llvm::dbgs() << "  " << *arg;
         }
       }
@@ -380,15 +390,15 @@ LogicalResult ClusteringState::Union(unsigned a, unsigned b,
 // Returns constraints on the operands specified by the clustering policy if the
 // operation can be clustered (constraints could be empty). Otherwise return
 // empty optional.
-static Optional<ValuesConstraintSet> CanBeClustered(
+static std::optional<ValuesConstraintSet> CanBeClustered(
     Operation *op, const ClusteringPolicySet &policies,
     const std::function<bool(Operation *op)> &filter) {
   // Check that op has no side effects. This guarantees that we will not
   // reorder side-effecting ops during cluster formation.
-  if (!MemoryEffectOpInterface::hasNoEffect(op)) return llvm::None;
+  if (!isMemoryEffectFree(op)) return std::nullopt;
 
   // Operation rejected by the custom filter.
-  if (filter && !filter(op)) return llvm::None;
+  if (filter && !filter(op)) return std::nullopt;
 
   // Initially we do not have any constraints on the operation results.
   ValuesConstraintSet result_constraints;
@@ -400,7 +410,7 @@ static Optional<ValuesConstraintSet> CanBeClustered(
       return operands_constraints.Resolve();
   }
 
-  return llvm::None;
+  return std::nullopt;
 }
 
 // Compute initial clustering state based on the clustering polocy.
@@ -425,7 +435,7 @@ static ClusteringState InitializeClusteringState(
   }
 
   // Initialize mapping from the member operation (block argument) to the id.
-  for (auto &tuple : llvm::enumerate(state.members)) {
+  for (const auto &tuple : llvm::enumerate(state.members)) {
     state.member_ids.try_emplace(tuple.value().source, tuple.index());
   }
 
@@ -441,7 +451,7 @@ static llvm::SmallVector<Operation *> GetClusteringCandidates(
     const ClusteringState &state, Source source) {
   // Users of operation result must be in the same block and placed on the same
   // device.
-  if (auto op = source.dyn_cast<Operation *>()) {
+  if (auto op = llvm::dyn_cast<Operation*>(source)) {
     auto range = llvm::make_filter_range(op->getUsers(), [&](Operation *user) {
       bool same_block = user->getBlock() == op->getBlock();
       bool same_device = op->getAttr(kDeviceAttr) == user->getAttr(kDeviceAttr);
@@ -451,7 +461,7 @@ static llvm::SmallVector<Operation *> GetClusteringCandidates(
   }
 
   // Users of block argument must be in the same block.
-  if (auto arg = source.dyn_cast<BlockArgument *>()) {
+  if (auto arg = llvm::dyn_cast<BlockArgument*>(source)) {
     auto range = llvm::make_filter_range(arg->getUsers(), [&](Operation *user) {
       bool same_block = user->getBlock() == arg->getOwner();
       return same_block && state.IsMember(user);
@@ -468,7 +478,7 @@ static bool RunClusteringPass(ClusteringState &state,
                               const ClusteringPolicySet &policies) {
   bool clustered = false;
 
-  for (auto &tuple : llvm::enumerate(state.members)) {
+  for (const auto &tuple : llvm::enumerate(state.members)) {
     size_t member_id = tuple.index();
     Member &member = tuple.value();
 
@@ -507,15 +517,14 @@ llvm::SmallVector<Cluster> FindClustersInTheBlock(
   llvm::DenseMap<unsigned, Cluster> root_clusters;
 
   for (Member &member : state.members) {
-    unsigned root = state.FindRoot(member.root);
-    Cluster &cluster = root_clusters.FindAndConstruct(root).getSecond();
+    Cluster &cluster = root_clusters[state.FindRoot(member.root)];
 
     // If member is a root of the cluster, copy inferred constraints.
     if (state.FindRoot(member.root) == member.root)
       cluster.constraints = std::move(member.constraints);
 
     // Add operation to the cluster.
-    if (auto op = member.source.dyn_cast<Operation *>())
+    if (auto op = llvm::dyn_cast_if_present<Operation*>(member.source))
       cluster.operations.emplace_back(op);
   }
 
@@ -567,17 +576,17 @@ tf_device::ClusterOp CreateClusterOp(Cluster &cluster, StringAttr policy) {
   OpBuilder builder(back);
 
   auto cluster_op =
-      builder.create<tf_device::ClusterOp>(loc, return_types, policy);
+      tf_device::ClusterOp::create(builder, loc, return_types, policy);
 
   // Create block in cluster_op's region and move 'cluster.operations' into
   // it.
-  auto block = builder.createBlock(&cluster_op.body());
+  auto block = builder.createBlock(&cluster_op.getBody());
   auto block_end = block->end();
   for (auto op : cluster.operations) op->moveBefore(block, block_end);
 
   // Add 'tf_device::ReturnOp' at the end of the block.
   builder.setInsertionPointToEnd(block);
-  builder.create<tf_device::ReturnOp>(loc, return_values.getArrayRef());
+  tf_device::ReturnOp::create(builder, loc, return_values.getArrayRef());
 
   // Set device attribute
   if (auto device = back->getAttr(kDeviceAttr))
@@ -603,7 +612,7 @@ tf_device::ClusterOp CreateClusterOp(Cluster &cluster, StringAttr policy) {
 mlir::LogicalResult PropagateValuesConstraints(
     llvm::ArrayRef<Operation *> root, std::function<bool(Operation *)> filter,
     const ClusteringPolicySet &policies, ValuesConstraintSet &constraints,
-    bool resolve) {
+    bool resolve, bool emit_remarks) {
   // A set of constraints for operation results.
   llvm::DenseMap<Operation *, ValuesConstraintSet> op_results_constraints;
   assert(filter && "filter predicate must be defined");
@@ -645,7 +654,14 @@ mlir::LogicalResult PropagateValuesConstraints(
     // Signal a failure if could not propagate non-empty constraints on the
     // operation results to the operands.
     if (!updated && !results.Empty()) {
-      op->emitError("failed to propagate results constraints");
+      if (emit_remarks) {
+        std::string err_msg;
+        llvm::raw_string_ostream os(err_msg);
+        for (unsigned i = 0; i < op->getNumResults(); ++i)
+          os << " " << i << ":" << results.GetConstraint(op->getResult(i));
+        op->emitError(llvm::formatv(
+            "failed to propagate results constraints:{0}", os.str()));
+      }
       return failure();
     }
 
@@ -674,7 +690,7 @@ mlir::LogicalResult PropagateValuesConstraints(
 
 mlir::LogicalResult PropagateValuesConstraints(
     mlir::Region &region, const ClusteringPolicySet &policies,
-    ValuesConstraintSet &constraints, bool resolve) {
+    ValuesConstraintSet &constraints, bool resolve, bool emit_remarks) {
   // Propagate constraints for all operations in the region.
   llvm::SmallVector<Operation *> worklist;
   region.walk([&](Operation *op) { worklist.emplace_back(op); });
@@ -685,7 +701,7 @@ mlir::LogicalResult PropagateValuesConstraints(
   };
 
   return PropagateValuesConstraints(worklist, filter, policies, constraints,
-                                    resolve);
+                                    resolve, emit_remarks);
 }
 
 void EmitValueConstraintsRemarks(const ValuesConstraintSet &constraints) {
@@ -697,18 +713,18 @@ void EmitValueConstraintsRemarks(const ValuesConstraintSet &constraints) {
   });
 }
 
-void EmitInputsConstraintsRemarks(FuncOp func,
+void EmitInputsConstraintsRemarks(func::FuncOp func,
                                   const ValuesConstraintSet &constraints) {
   constraints.Walk([&](Value value, ValueConstraint constraint) {
-    if (auto arg = value.dyn_cast<BlockArgument>())
-      if (arg.getOwner() == &func.body().front())
+    if (auto arg = mlir::dyn_cast<BlockArgument>(value))
+      if (arg.getOwner() == &func.getBody().front())
         func.emitRemark(llvm::formatv("input #{0} constrained to: {1}",
                                       arg.getArgNumber(), constraint));
   });
 }
 
 LogicalResult InferFunctionBodyValuesConstraints(
-    FuncOp func, ValuesConstraintSet &constraints) {
+    func::FuncOp func, ValuesConstraintSet &constraints) {
   for (unsigned i = 0; i < func.getNumResults(); ++i) {
     auto str = func.getResultAttrOfType<StringAttr>(i, "tf.constraint");
     if (!str) continue;
@@ -719,8 +735,8 @@ LogicalResult InferFunctionBodyValuesConstraints(
                                      .Case("value", ValueConstraint::kValue);
 
     // Propagate constraints through function return operations.
-    for (Block &block : func.body()) {
-      ReturnOp ret = dyn_cast<ReturnOp>(block.back());
+    for (Block &block : func.getBody()) {
+      func::ReturnOp ret = dyn_cast<func::ReturnOp>(block.back());
       if (ret) constraints.Insert(ret.getOperand(i), constraint);
     }
   }

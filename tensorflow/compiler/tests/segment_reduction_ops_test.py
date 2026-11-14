@@ -14,16 +14,15 @@
 # ==============================================================================
 """Test cases for segment reduction ops."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import functools
 
 import numpy as np
 
 from tensorflow.compiler.tests import xla_test
+from tensorflow.python.client import device_lib
+from tensorflow.python.eager import def_function
 from tensorflow.python.framework import dtypes
+from tensorflow.python.framework import errors
 from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import math_ops
 from tensorflow.python.platform import googletest
@@ -31,6 +30,13 @@ from tensorflow.python.platform import googletest
 
 class SegmentReductionOpsTest(xla_test.XLATestCase):
   """Test cases for segment reduction ops."""
+
+  def _findDevice(self, device_name):
+    devices = device_lib.list_local_devices()
+    for d in devices:
+      if d.device_type == device_name:
+        return True
+    return False
 
   def _segmentReduction(self, op, data, indices, num_segments):
     with self.session() as sess, self.test_scope():
@@ -45,6 +51,22 @@ class SegmentReductionOpsTest(xla_test.XLATestCase):
     return self._segmentReduction(math_ops.unsorted_segment_sum, data, indices,
                                   num_segments)
 
+  def _segmentSumV2(self, data, indices, num_segments):
+    return self._segmentReduction(math_ops.segment_sum_v2, data, indices,
+                                  num_segments)
+
+  def _segmentProdV2(self, data, indices, num_segments):
+    return self._segmentReduction(math_ops.segment_prod_v2, data, indices,
+                                  num_segments)
+
+  def _segmentMinV2(self, data, indices, num_segments):
+    return self._segmentReduction(math_ops.segment_min_v2, data, indices,
+                                  num_segments)
+
+  def _segmentMaxV2(self, data, indices, num_segments):
+    return self._segmentReduction(math_ops.segment_max_v2, data, indices,
+                                  num_segments)
+
   def _unsortedSegmentProd(self, data, indices, num_segments):
     return self._segmentReduction(math_ops.unsorted_segment_prod, data, indices,
                                   num_segments)
@@ -56,6 +78,210 @@ class SegmentReductionOpsTest(xla_test.XLATestCase):
   def _unsortedSegmentMax(self, data, indices, num_segments):
     return self._segmentReduction(math_ops.unsorted_segment_max, data, indices,
                                   num_segments)
+
+  def testSegmentSum(self):
+    for dtype in self.numeric_types:
+      self.assertAllClose(
+          np.array([1, 0, 2, 12], dtype=dtype),
+          self._segmentSumV2(
+              np.array([0, 1, 2, 3, 4, 5], dtype=dtype),
+              np.array([0, 0, 2, 3, 3, 3], dtype=np.int32), 4))
+
+  def testSegmentProd(self):
+    for dtype in self.numeric_types:
+      self.assertAllClose(
+          np.array([0, 1, 2, 60], dtype=dtype),
+          self._segmentProdV2(
+              np.array([0, 1, 2, 3, 4, 5], dtype=dtype),
+              np.array([0, 0, 2, 3, 3, 3], dtype=np.int32), 4))
+
+  def testSegmentProdNumSegmentsLess(self):
+    for dtype in self.numeric_types:
+      self.assertAllClose(
+          np.array([0, 1, 2], dtype=dtype),
+          self._segmentProdV2(
+              np.array([0, 1, 2, 3, 4, 5], dtype=dtype),
+              np.array([0, 0, 2, 3, 3, 3], dtype=np.int32), 3))
+
+  def testSegmentProdNumSegmentsMore(self):
+    for dtype in self.numeric_types:
+      self.assertAllClose(
+          np.array([0, 1, 2, 60, 1], dtype=dtype),
+          self._segmentProdV2(
+              np.array([0, 1, 2, 3, 4, 5], dtype=dtype),
+              np.array([0, 0, 2, 3, 3, 3], dtype=np.int32), 5))
+
+  def testSegmentMin(self):
+    for dtype in self.int_types | self.float_types:
+      maxval = dtypes.as_dtype(dtype).max
+      if dtype == np.float64 and self._findDevice("TPU"):
+        maxval = np.inf
+      self.assertAllClose(
+          np.array([0, maxval, 2, 3], dtype=dtype),
+          self._segmentMinV2(
+              np.array([0, 1, 2, 3, 4, 5], dtype=dtype),
+              np.array([0, 0, 2, 3, 3, 3], dtype=np.int32), 4))
+
+  def testSegmentMinNumSegmentsLess(self):
+    for dtype in self.int_types | self.float_types:
+      maxval = dtypes.as_dtype(dtype).max
+      if dtype == np.float64 and self._findDevice("TPU"):
+        maxval = np.inf
+      self.assertAllClose(
+          np.array([0, maxval, 2], dtype=dtype),
+          self._segmentMinV2(
+              np.array([0, 1, 2, 3, 4, 5], dtype=dtype),
+              np.array([0, 0, 2, 3, 3, 3], dtype=np.int32), 3))
+
+  def testSegmentMinNumSegmentsMore(self):
+    for dtype in self.int_types | self.float_types:
+      maxval = dtypes.as_dtype(dtype).max
+      if dtype == np.float64 and self._findDevice("TPU"):
+        maxval = np.inf
+      self.assertAllClose(
+          np.array([0, maxval, 2, 3, maxval], dtype=dtype),
+          self._segmentMinV2(
+              np.array([0, 1, 2, 3, 4, 5], dtype=dtype),
+              np.array([0, 0, 2, 3, 3, 3], dtype=np.int32), 5))
+
+  def testSegmentMax(self):
+    for dtype in self.int_types | self.float_types:
+      minval = dtypes.as_dtype(dtype).min
+      if dtype == np.float64 and self._findDevice("TPU"):
+        minval = -np.inf
+      self.assertAllClose(
+          np.array([1, minval, 2, 5], dtype=dtype),
+          self._segmentMaxV2(
+              np.array([0, 1, 2, 3, 4, 5], dtype=dtype),
+              np.array([0, 0, 2, 3, 3, 3], dtype=np.int32), 4))
+
+  def testSegmentMaxNumSegmentsLess(self):
+    for dtype in self.int_types | self.float_types:
+      minval = dtypes.as_dtype(dtype).min
+      if dtype == np.float64 and self._findDevice("TPU"):
+        minval = -np.inf
+      self.assertAllClose(
+          np.array([1, minval, 2], dtype=dtype),
+          self._segmentMaxV2(
+              np.array([0, 1, 2, 3, 4, 5], dtype=dtype),
+              np.array([0, 0, 2, 3, 3, 3], dtype=np.int32), 3))
+
+  def testSegmentMaxNumSegmentsMore(self):
+    for dtype in self.int_types | self.float_types:
+      minval = dtypes.as_dtype(dtype).min
+      if dtype == np.float64 and self._findDevice("TPU"):
+        minval = -np.inf
+      self.assertAllClose(
+          np.array([1, minval, 2, 5, minval], dtype=dtype),
+          self._segmentMaxV2(
+              np.array([0, 1, 2, 3, 4, 5], dtype=dtype),
+              np.array([0, 0, 2, 3, 3, 3], dtype=np.int32), 5))
+
+  def _testZeroSegments(self, reductions, all_indices):
+    # With no segments, every segment id is dropped and the result is empty.
+    # Negative ids are dropped in eager too; non-negative ones are out of range,
+    # which XLA drops as it does for any number of segments, while eager
+    # rejects them.
+    for indices in all_indices:
+      for reduction, types in reductions:
+        for dtype in types:
+          self.assertAllEqual(
+              reduction(np.ones([2, 3], dtype=dtype), indices, 0),
+              np.zeros([0, 3], dtype=dtype),
+          )
+
+  def testUnsortedSegmentReductionWithZeroSegments(self):
+    real_types = self.int_types | self.float_types
+    self._testZeroSegments(
+        (
+            (self._unsortedSegmentSum, self.numeric_types),
+            (self._unsortedSegmentProd, self.numeric_types),
+            (self._unsortedSegmentMin, real_types),
+            (self._unsortedSegmentMax, real_types),
+        ),
+        (np.array([-1, -2], dtype=np.int32), np.array([0, 1], dtype=np.int32)),
+    )
+
+  def testSortedSegmentReductionV2WithZeroSegments(self):
+    # The sorted V2 ops share the XLA kernel. The ids have to be non-empty to
+    # reach the scatter, and sorted.
+    real_types = self.int_types | self.float_types
+    self._testZeroSegments(
+        (
+            (self._segmentSumV2, self.numeric_types),
+            (self._segmentProdV2, self.numeric_types),
+            (self._segmentMinV2, real_types),
+            (self._segmentMaxV2, real_types),
+        ),
+        (np.array([-1, -1], dtype=np.int32), np.array([0, 1], dtype=np.int32)),
+    )
+
+  def testSegmentSumNegativeNumSegments(self):
+    # Graph shape inference rejects a negative constant num_segments, so feed
+    # it to reach the XLA kernel, which used to CHECK-fail on it.
+    for op in (math_ops.unsorted_segment_sum, math_ops.segment_sum_v2):
+      with self.subTest(op=op.__name__), self.session() as sess:
+        with self.test_scope():
+          d = array_ops.placeholder(np.float32, shape=[2, 3])
+          i = array_ops.placeholder(np.int32, shape=[2])
+          n = array_ops.placeholder(np.int32, shape=[])
+          out = op(d, i, n)
+        with self.assertRaisesRegex(
+            errors.InvalidArgumentError,
+            "num_segments == -1 must not be negative",
+        ):
+          sess.run(
+              out, {d: np.ones([2, 3], dtype=np.float32), i: [0, 1], n: -1}
+          )
+
+  def testSegmentSumRuntimeNumSegments(self):
+    if "GPU" in self.device or "TPU" in self.device:
+      self.skipTest(
+          "XLA:GPU's dynamic padder doesn't support the dynamic "
+          "select that boolean_mask produces, and XLA:TPU doesn't "
+          "support the scatter into a padded dynamic dimension."
+      )
+    # num_segments is only known at run time, where it is 2 - offset, with a
+    # bound of 4 - offset. Zero gives no segments, and a negative one, which
+    # the check on the bound can't see, is clamped to no segments rather than
+    # set as a dimension size.
+    for dtype in (dtypes.int32, dtypes.int64):
+      for offset, expected in (
+          (0, np.ones([2, 3])),
+          (2, np.zeros([0, 3])),
+          (3, np.zeros([0, 3])),
+      ):
+
+        @def_function.function(jit_compile=True)
+        def segment_sums(data, ids, mask, dtype=dtype, offset=offset):
+          n = (
+              array_ops.shape(
+                  array_ops.boolean_mask(mask, mask), out_type=dtype
+              )[0]
+              - offset
+          )
+          return (
+              math_ops.unsorted_segment_sum(data, ids, n),
+              math_ops.segment_sum_v2(data, ids, n),
+          )
+
+        with self.subTest(dtype=dtype.name, offset=offset):
+          with self.session() as sess:
+            with self.test_scope():
+              data = array_ops.placeholder(np.float32, shape=[2, 3])
+              ids = array_ops.placeholder(np.int32, shape=[2])
+              mask = array_ops.placeholder(np.bool_, shape=[4])
+              out = segment_sums(data, ids, mask)
+            unsorted_result, sorted_result = sess.run(
+                out,
+                {
+                    data: np.ones([2, 3], dtype=np.float32),
+                    ids: [0, 1],
+                    mask: [True, False, True, False],
+                },
+            )
+          self.assertAllEqual(expected, unsorted_result)
+          self.assertAllEqual(expected, sorted_result)
 
   def testUnsortedSegmentSum0DIndices1DData(self):
     for dtype in self.numeric_types:
@@ -118,25 +344,25 @@ class SegmentReductionOpsTest(xla_test.XLATestCase):
     for dtype in self.numeric_types:
       data = np.array(
           [[[0, 1, 2], [10, 11, 12]], [[100, 101, 102], [110, 111, 112]], [[
-              200, 201, 202
-          ], [210, 211, 212]], [[300, 301, 302], [310, 311, 312]]],
+              80, 81, 82
+          ], [123, 124, 125]], [[103, 104, 105], [106, 107, 108]]],
           dtype=dtype)
       indices = np.array([[3, 5], [3, 1], [5, 0], [6, 2]], dtype=np.int32)
       num_segments = 8
       y = self._unsortedSegmentSum(data, indices, num_segments)
       self.assertAllClose(
           np.array(
-              [[210, 211, 212], [110, 111, 112], [310, 311, 312], [
+              [[123, 124, 125], [110, 111, 112], [106, 107, 108], [
                   100, 102, 104
-              ], [0, 0, 0.], [210, 212, 214], [300, 301, 302], [0, 0, 0]],
+              ], [0, 0, 0.], [90, 92, 94], [103, 104, 105], [0, 0, 0]],
               dtype=dtype), y)
 
   def testUnsortedSegmentSum1DIndices3DData(self):
     for dtype in self.numeric_types:
       data = np.array(
           [[[0, 1, 2], [10, 11, 12]], [[100, 101, 102], [110, 111, 112]], [[
-              200, 201, 202
-          ], [210, 211, 212]], [[300, 301, 302], [310, 311, 312]]],
+              120, 121, 122
+          ], [123, 124, 125]], [[103, 104, 105], [106, 107, 108]]],
           dtype=dtype)
       indices = np.array([3, 0, 2, 5], dtype=np.int32)
       num_segments = 6
@@ -144,8 +370,8 @@ class SegmentReductionOpsTest(xla_test.XLATestCase):
       self.assertAllClose(
           np.array(
               [[[100, 101, 102.], [110, 111, 112]], [[0, 0, 0], [0, 0, 0]],
-               [[200, 201, 202], [210, 211, 212]], [[0, 1, 2.], [10, 11, 12]],
-               [[0, 0, 0], [0, 0, 0]], [[300, 301, 302], [310, 311, 312]]],
+               [[120, 121, 122], [123, 124, 125]], [[0, 1, 2.], [10, 11, 12]],
+               [[0, 0, 0], [0, 0, 0]], [[103, 104, 105], [106, 107, 108]]],
               dtype=dtype), y)
 
   def testUnsortedSegmentSumShapeError(self):
@@ -158,6 +384,57 @@ class SegmentReductionOpsTest(xla_test.XLATestCase):
           functools.partial(self._segmentReduction,
                             math_ops.unsorted_segment_sum, data, indices,
                             num_segments))
+
+  def testUnsortedSegmentSumBoundedDynamicPrefixDimension(self):
+    # Slicing by a run-time size gives a bounded-dynamic leading dimension.
+    # The kernel read that dimension as its upper bound and rejected it
+    # against the other operand's smaller size, even though the two are equal
+    # at run time.
+    for dtype in self.numeric_types:
+      with self.session() as sess, self.test_scope():
+        mask = array_ops.placeholder(np.bool_, shape=[3])
+        count = math_ops.reduce_sum(math_ops.cast(mask, dtypes.int32))
+
+        # Dynamic indices (bound 3, run-time 2) against static data (2).
+        data = array_ops.placeholder(dtype, shape=[2])
+        all_indices = array_ops.placeholder(np.int32, shape=[3])
+        y0 = math_ops.unsorted_segment_sum(
+            data, array_ops.slice(all_indices, [0], [count]), 3
+        )
+
+        # Dynamic data (bound 3, run-time 2) against static indices (2).
+        all_data = array_ops.placeholder(dtype, shape=[3])
+        indices = array_ops.placeholder(np.int32, shape=[2])
+        y1 = math_ops.unsorted_segment_sum(
+            array_ops.slice(all_data, [0], [count]), indices, 3
+        )
+
+        # Both sides dynamic, with different bounds. This is where the kernel
+        # slices the larger side while cwise_ops.cc pads instead.
+        pair_data = array_ops.placeholder(dtype, shape=[5])
+        pair_indices = array_ops.placeholder(np.int32, shape=[2])
+        y2 = math_ops.unsorted_segment_sum(
+            array_ops.slice(pair_data, [0], [count]),
+            array_ops.slice(pair_indices, [0], [count]),
+            3,
+        )
+
+        r0, r1, r2 = sess.run(
+            [y0, y1, y2],
+            {
+                mask: np.array([True, False, True]),
+                data: np.array([1, 2], dtype=dtype),
+                all_indices: np.array([0, 2, 1], dtype=np.int32),
+                all_data: np.array([1, 2, 9], dtype=dtype),
+                indices: np.array([0, 2], dtype=np.int32),
+                pair_data: np.array([1, 2, 7, 8, 9], dtype=dtype),
+                pair_indices: np.array([0, 2], dtype=np.int32),
+            },
+        )
+
+      self.assertAllClose(np.array([1, 0, 2], dtype=dtype), r0)
+      self.assertAllClose(np.array([1, 0, 2], dtype=dtype), r1)
+      self.assertAllClose(np.array([1, 0, 2], dtype=dtype), r2)
 
   def testUnsortedSegmentOps1DIndices1DDataNegativeIndices(self):
     """Tests for min, max, and prod ops.
@@ -186,6 +463,34 @@ class SegmentReductionOpsTest(xla_test.XLATestCase):
           self._unsortedSegmentMax(
               np.array([0, 1, 2, 3, 4, 5, 6], dtype=dtype),
               np.array([3, -1, 0, 1, 0, -1, 3], dtype=np.int32), 4))
+
+  def testNaNHandling(self):
+    for dtype in self.float_types:
+      hi = dtypes.as_dtype(dtype).max
+      lo = dtypes.as_dtype(dtype).min
+      if self.device == "TPU" and dtype == np.float64:
+        hi = np.inf
+        lo = -np.inf
+      self.assertAllClose(
+          np.array([1.0], dtype=dtype),
+          self._unsortedSegmentMin(
+              np.array([1.0, np.nan, 3.0], dtype=dtype),
+              np.array([0, 0, 0], dtype=np.int32), 1))
+      self.assertAllClose(
+          np.array([3.0], dtype=dtype),
+          self._unsortedSegmentMax(
+              np.array([np.nan, 1.0, 3.0], dtype=dtype),
+              np.array([0, 0, 0], dtype=np.int32), 1))
+      self.assertAllClose(
+          np.array([hi], dtype=dtype),
+          self._unsortedSegmentMin(
+              np.array([np.nan, np.nan], dtype=dtype),
+              np.array([0, 0], dtype=np.int32), 1))
+      self.assertAllClose(
+          np.array([lo], dtype=dtype),
+          self._unsortedSegmentMax(
+              np.array([np.nan, np.nan], dtype=dtype),
+              np.array([0, 0], dtype=np.int32), 1))
 
 
 if __name__ == "__main__":

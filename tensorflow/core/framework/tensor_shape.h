@@ -18,17 +18,16 @@ limitations under the License.
 
 #include <string>
 
-#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
+#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
 #include "tensorflow/core/framework/types.pb.h"
-#include "tensorflow/core/lib/core/errors.h"
-#include "tensorflow/core/lib/core/status.h"
-#include "tensorflow/core/lib/core/stringpiece.h"
 #include "tensorflow/core/lib/gtl/array_slice.h"
 #include "tensorflow/core/lib/gtl/inlined_vector.h"
 #include "tensorflow/core/lib/strings/str_util.h"
 #include "tensorflow/core/platform/errors.h"
 #include "tensorflow/core/platform/logging.h"
 #include "tensorflow/core/platform/macros.h"
+#include "tensorflow/core/platform/status.h"
+#include "tensorflow/core/platform/statusor.h"
 
 namespace tensorflow {
 
@@ -92,21 +91,23 @@ class TensorShapeRep {
   // For PartialTensorShape, a dimension of static_cast<uint??>(-1) is unknown.
   // This value is not allowed in TensorShape either for format compatibility.
   struct Rep16 {
-    uint16 dims_[6];
+    uint16_t dims_[6];
   };
   struct Rep32 {
-    uint32 dims_[3];
+    uint32_t dims_[3];
   };
   struct Rep64 {
-    gtl::InlinedVector<int64_t, 4>* dims_;
+    absl::InlinedVector<int64_t, 4UL>* dims_;
   };
 
   // We use the max value of uint16 or uint32 to represent unknown shapes, so
   // the maximum representable valid shape in these representations is one less.
-  static constexpr int64_t kMaxRep16 = std::numeric_limits<uint16>::max() - 1;
-  static constexpr int64_t kMaxRep32 = std::numeric_limits<uint32>::max() - 1;
-  static constexpr uint16 kUnknownRep16 = std::numeric_limits<uint16>::max();
-  static constexpr uint32 kUnknownRep32 = std::numeric_limits<uint32>::max();
+  static constexpr int64_t kMaxRep16 = std::numeric_limits<uint16_t>::max() - 1;
+  static constexpr int64_t kMaxRep32 = std::numeric_limits<uint32_t>::max() - 1;
+  static constexpr uint16_t kUnknownRep16 =
+      std::numeric_limits<uint16_t>::max();
+  static constexpr uint32_t kUnknownRep32 =
+      std::numeric_limits<uint32_t>::max();
 
   Rep16* as16() { return reinterpret_cast<Rep16*>(buf()); }
   Rep32* as32() { return reinterpret_cast<Rep32*>(buf()); }
@@ -127,19 +128,19 @@ class TensorShapeRep {
   DataType data_type() const { return static_cast<DataType>(buf()[13]); }
   void set_data_type(DataType dt) {
     // We only have 8 bits available to store DataType, so make sure it fits
-    DCHECK_LT(static_cast<uint32>(dt), 256u);
-    buf()[13] = static_cast<uint8>(dt);
+    DCHECK_LT(static_cast<uint32_t>(dt), 256u);
+    buf()[13] = static_cast<uint8_t>(dt);
   }
 
   // We store the number of dimensions in byte 14, and the RepTag in byte 15.
   // Bytes [0..13] vary depending on the representation.
   // A value of 255 indicates unknown rank in the PartialTensorShape case.
-  static constexpr uint8 kUnknownRank = 255;
-  uint8 ndims_byte() const { return buf()[14]; }
-  void set_ndims_byte(uint8 nd) { buf()[14] = nd; }
+  static constexpr uint8_t kUnknownRank = 255;
+  uint8_t ndims_byte() const { return buf()[14]; }
+  void set_ndims_byte(uint8_t nd) { buf()[14] = nd; }
 
   RepTag tag() const { return static_cast<RepTag>(buf()[15]); }
-  void set_tag(RepTag tag) { buf()[15] = static_cast<uint8>(tag); }
+  void set_tag(RepTag tag) { buf()[15] = static_cast<uint8_t>(tag); }
 
   void set_num_elements(int64_t n) { num_elements_ = n; }
 
@@ -147,11 +148,11 @@ class TensorShapeRep {
   void DestructorOutOfLine();
   void SlowCopyFrom(const TensorShapeRep& b);
 
-  uint8* buf() { return &u_.buf[0]; }
-  const uint8* buf() const { return &u_.buf[0]; }
+  uint8_t* buf() { return &u_.buf[0]; }
+  const uint8_t* buf() const { return &u_.buf[0]; }
 
   union {
-    uint8 buf[16];
+    uint8_t buf[16];
     // Force data to be aligned enough for a pointer.
     Rep64* unused_aligner;
   } u_;
@@ -167,28 +168,29 @@ class TensorShapeBase : public TensorShapeRep {
  public:
   /// \brief Construct a `TensorShapeBase` from the provided sizes.
   /// REQUIRES: `dim_sizes[i] >= 0` (or >= -1 for PartialTensorShape)
-  explicit TensorShapeBase(gtl::ArraySlice<int64_t> dim_sizes);
+  explicit TensorShapeBase(absl::Span<const int64_t> dim_sizes);
   TensorShapeBase(std::initializer_list<int64_t> dim_sizes)
-      : TensorShapeBase(gtl::ArraySlice<int64_t>(dim_sizes)) {}
+      : TensorShapeBase(absl::Span<const int64_t>(dim_sizes)) {}
 
   /// Construct an empty TensorShape, or an unknown rank PartialTensorShape
   TensorShapeBase();
 
-  // TODO(mihaimaruseac): Mark this explicit in a subsequent change
+  // Cannot be made explicit because we rely on conversion between proto and
+  // `TensorShapeBase` throughtout the codebase (needs bigger cleanup)
   TensorShapeBase(const TensorShapeProto& proto);
 
   // These factory methods should be used instead of the constructors that take
   // an array of sizes if calling code cannot validate that the sizes specify a
   // valid `TensorShape`.
   // The value in `*out` is valid iff the returned value is `Status::OK`.
-  static Status BuildTensorShapeBase(gtl::ArraySlice<int64_t> dim_sizes,
-                                     TensorShapeBase* out);
-  static Status BuildTensorShapeBase(std::initializer_list<int64_t> dim_sizes,
-                                     TensorShapeBase* out) {
-    return BuildTensorShapeBase(gtl::ArraySlice<int64_t>(dim_sizes), out);
+  static absl::Status BuildTensorShapeBase(absl::Span<const int64_t> dim_sizes,
+                                           TensorShapeBase* out);
+  static absl::Status BuildTensorShapeBase(
+      std::initializer_list<int64_t> dim_sizes, TensorShapeBase* out) {
+    return BuildTensorShapeBase(absl::Span<const int64_t>(dim_sizes), out);
   }
-  static Status BuildTensorShapeBase(const TensorShapeProto& proto,
-                                     TensorShapeBase* out);
+  static absl::Status BuildTensorShapeBase(const TensorShapeProto& proto,
+                                           TensorShapeBase* out);
 
   /// Returns `true` iff `proto` is a valid tensor shape.
   // For TensorShape, the proto shape must be fully defined.
@@ -196,7 +198,7 @@ class TensorShapeBase : public TensorShapeRep {
 
   /// Returns `OK` iff `proto` is a valid tensor shape, and a descriptive error
   /// status otherwise.
-  static Status IsValidShape(const TensorShapeProto& proto);
+  static absl::Status IsValidShape(const TensorShapeProto& proto);
 
   /// Returns `true` iff this is a valid tensor shape.
   bool IsValid();
@@ -207,14 +209,14 @@ class TensorShapeBase : public TensorShapeRep {
 
   /// Same as `AddDim` but returns a `Status`.
   /// Use if unsure is `size >= 0`, to prevent `CHECK`-crashes.
-  Status AddDimWithStatus(int64_t size);
+  absl::Status AddDimWithStatus(int64_t size);
 
   /// Appends all the dimensions from `shape`.
   void AppendShape(const TensorShapeBase& shape);
 
   /// Same as `RemoveDim` but returns a `Status`.
   /// Use if you cannot validate all invariants, to prevent `CHECK`-fail.
-  Status AppendShapeWithStatus(const TensorShapeBase& shape);
+  absl::Status AppendShapeWithStatus(const TensorShapeBase& shape);
 
   /// \brief Insert a dimension somewhere in the `TensorShape`.
   /// REQUIRES: `0 <= d <= dims()`
@@ -224,7 +226,7 @@ class TensorShapeBase : public TensorShapeRep {
   /// Same as `InsertDim` but returns a `Status`.
   /// Use if unsure if requirements in `InsertDim` are satistified, to prevent
   /// `CHECK`-fail crashes.
-  Status InsertDimWithStatus(int d, int64_t size);
+  absl::Status InsertDimWithStatus(int d, int64_t size);
 
   /// \brief Modifies the size of the dimension `d` to be `size`
   /// REQUIRES: `0 <= d < dims()`
@@ -234,7 +236,7 @@ class TensorShapeBase : public TensorShapeRep {
   /// Same as `set_dim` but returns a `Status`.
   /// Use if unsure if requirements in `set_dim` are satistified, to prevent
   /// `CHECK`-fail crashes.
-  Status SetDimWithStatus(int d, int64_t size);
+  absl::Status SetDimWithStatus(int d, int64_t size);
 
   /// \brief Removes dimension `d` from the `TensorShape`.
   /// REQUIRES: `0 <= d < dims()`
@@ -245,10 +247,10 @@ class TensorShapeBase : public TensorShapeRep {
 
   /// Same as `RemoveDim` but returns a `Status`.
   /// Use if unsure is `0 <= d < dims()`, to prevent `CHECK`-crashes.
-  Status RemoveDimWithStatus(int64_t d) {
+  absl::Status RemoveDimWithStatus(int64_t d) {
     if (TF_PREDICT_FALSE(d < 0)) {
-      return errors::Internal(
-          "Expected dimension index to be non-negative, got ", d);
+      return absl::InternalError(
+          absl::StrCat("Expected dimension index to be non-negative, got ", d));
     }
     return RemoveDimRangeWithStatus(d, d + 1);
   }
@@ -262,8 +264,8 @@ class TensorShapeBase : public TensorShapeRep {
 
   /// Same as `RemoveLastDims` but returns a `Status`.
   /// Use if unsure is `0 <= n <= dims()`, to prevent `CHECK`-crashes.
-  Status RemoveLastDimsWithStatus(int64_t n) {
-    if (TF_PREDICT_FALSE(n < dims())) {
+  absl::Status RemoveLastDimsWithStatus(int64_t n) {
+    if (TF_PREDICT_FALSE(n > dims())) {
       return errors::Internal("Expected dimension index to be at most ", dims(),
                               " got ", n);
     }
@@ -280,7 +282,7 @@ class TensorShapeBase : public TensorShapeRep {
   /// Same as `RemoveDimRange` but returns a `Status`.
   /// Use if unsure if requirements in `RemoveDimRange` are satistified, to
   /// prevent `CHECK`-fail crashes.
-  Status RemoveDimRangeWithStatus(int begin, int end);
+  absl::Status RemoveDimRangeWithStatus(int begin, int end);
 
   /// Return whether the rank is unknown
   bool unknown_rank() const {
@@ -290,7 +292,7 @@ class TensorShapeBase : public TensorShapeRep {
   /// Return the number of dimensions in the tensor.
   /// Can be -1 meaning unknown rank for PartialTensorShape.
   int dims() const {
-    uint8 dims = ndims_byte();
+    uint8_t dims = ndims_byte();
     return kIsPartial && dims == kUnknownRank ? -1 : dims;
   }
 
@@ -302,7 +304,7 @@ class TensorShapeBase : public TensorShapeRep {
 
   /// Returns sizes of all dimensions.
   // Returns an empty list for unknown rank PartialTensorShape.
-  gtl::InlinedVector<int64, 4> dim_sizes() const;
+  absl::InlinedVector<int64_t, 4UL> dim_sizes() const;
 
   /// Return true iff the rank and all of the dimensions are well defined
   // TODO(irving): Rename to is_fully_defined now that it's fast.
@@ -310,6 +312,7 @@ class TensorShapeBase : public TensorShapeRep {
 
   /// Fill `*proto` from `*this`.
   void AsProto(TensorShapeProto* proto) const;
+  TensorShapeProto AsProto() const;
 
   /// For iterating through the dimensions.
   TensorShapeIter<Shape> begin() const;
@@ -323,13 +326,12 @@ class TensorShapeBase : public TensorShapeRep {
   explicit TensorShapeBase(DataType dt);
 
  private:
-  Status RecomputeNumElements();
-  Status InitDims(gtl::ArraySlice<int64_t> dim_sizes);
+  absl::Status RecomputeNumElements();
+  absl::Status InitDims(absl::Span<const int64_t> dim_sizes);
 
   // True for PartialTensorShape, false for TensorShape
-  static constexpr bool kIsPartial =
-      std::is_same<Shape, PartialTensorShape>::value;
-  static_assert(kIsPartial || std::is_same<Shape, TensorShape>::value,
+  static constexpr bool kIsPartial = std::is_same_v<Shape, PartialTensorShape>;
+  static_assert(kIsPartial || std::is_same_v<Shape, TensorShape>,
                 "Shape is neither TensorShape nor PartialTensorShape");
 
   // Used by AddDim and MakeShapeHelper.  Does no error checking.
@@ -337,7 +339,7 @@ class TensorShapeBase : public TensorShapeRep {
 
   // For use by TensorShapeUtils::MakeShape
   template <class T, class S>
-  friend Status MakeShapeHelper(const T*, int64_t, S*);
+  friend absl::Status MakeShapeHelper(const T*, int64_t, S*);
 };
 
 /// Outputs `TensorShapeBase` to `std::ostream`.
@@ -359,14 +361,36 @@ class TensorShape : public TensorShapeBase<TensorShape> {
  public:
   using TensorShapeBase<TensorShape>::TensorShapeBase;
 
+  // These factory methods should be used instead of the constructors that take
+  // an array of sizes if calling code cannot validate that the sizes specify a
+  // valid `TensorShape`.
+  // The value in `*out` is valid iff the returned value is `Status::OK`.
+  static absl::Status BuildTensorShape(absl::Span<const int64_t> dim_sizes,
+                                       TensorShape* out) {
+    return BuildTensorShapeBase(dim_sizes, out);
+  }
+  static absl::Status BuildTensorShape(std::initializer_list<int64_t> dim_sizes,
+                                       TensorShape* out) {
+    return BuildTensorShape(absl::Span<const int64_t>(dim_sizes), out);
+  }
+  static absl::Status BuildTensorShape(const TensorShapeProto& proto,
+                                       TensorShape* out) {
+    return BuildTensorShapeBase(proto, out);
+  }
+
+  static absl::StatusOr<TensorShape> BuildTensorShape(
+      const TensorShapeProto& proto) {
+    TensorShape out;
+    TF_RETURN_IF_ERROR(BuildTensorShape(proto, &out));
+    return out;
+  }
+
   /// Allow a TensorShape to be used as a PartialTensorShape without copying
   operator const PartialTensorShape&() const;  // NOLINT(runtime/explicit)
 
   /// Returns true if `*this` and `b` have the same sizes. Ignores
   /// dimension names.
   bool IsSameSize(const TensorShape& b) const;
-  bool operator==(const TensorShape& b) const { return IsSameSize(b); }
-  bool operator!=(const TensorShape& b) const { return !IsSameSize(b); }
 
   /// Fill `*dsizes` from `*this`.
   /// Notice: Using IndexType=int32 in combination with To32Bit() can
@@ -379,7 +403,8 @@ class TensorShape : public TensorShapeBase<TensorShape> {
   // not equal to `dims()`.
   // Caller must take ownership of `out`.
   template <int NDIMS, typename IndexType = Eigen::DenseIndex>
-  Status AsEigenDSizesWithStatus(Eigen::DSizes<IndexType, NDIMS>* out) const;
+  absl::Status AsEigenDSizesWithStatus(
+      Eigen::DSizes<IndexType, NDIMS>* out) const;
 
   /// Same as `AsEigenDSizes()` but allows for `NDIMS > dims()` -- in
   /// which case we pad the rest of the sizes with 1.
@@ -393,15 +418,15 @@ class TensorShape : public TensorShapeBase<TensorShape> {
   // not equal to `dims()`.
   // Caller must take ownership of `out`.
   template <int NDIMS, typename IndexType = Eigen::DenseIndex>
-  Status AsEigenDSizesWithPaddingWithStatus(
+  absl::Status AsEigenDSizesWithPaddingWithStatus(
       Eigen::DSizes<IndexType, NDIMS>* out) const;
 
  private:
   // These CHECK fail to ease debugging.
   // REQUIRES: dims() == NDIMS
   void CheckDimsEqual(int NDIMS) const;
-  // REQUIRES: dims() >= NDIMS
-  void CheckDimsAtLeast(int NDIMS) const;
+  // REQUIRES: dims() <= NDIMS
+  void CheckDimsAtMost(int NDIMS) const;
 
   // Fill output from `*this`.
   // Helper method for common code between `AsEigenDSize()` and
@@ -418,6 +443,13 @@ class TensorShape : public TensorShapeBase<TensorShape> {
   // For access to TensorShapeBase(DataType).
   friend class Tensor;
 };
+
+inline bool operator==(const TensorShape& a, const TensorShape& b) {
+  return a.IsSameSize(b);
+}
+inline bool operator!=(const TensorShape& a, const TensorShape& b) {
+  return !(a == b);
+}
 
 /// Outputs `TensorShapeBase` to `std::ostream`.
 inline std::ostream& operator<<(std::ostream& os, const TensorShape& ts) {
@@ -476,21 +508,25 @@ class TensorShapeUtils {
 
   /// \brief Returns a `TensorShape` whose dimensions are
   /// `dims[0]`, `dims[1]`, ..., `dims[n-1]`.
-  static Status MakeShape(const int32* dims, int64_t n, TensorShape* out);
-  static Status MakeShape(const int64_t* dims, int64_t n, TensorShape* out);
-  static Status MakeShape(gtl::ArraySlice<int32> shape, TensorShape* out);
-  static Status MakeShape(gtl::ArraySlice<int64_t> shape, TensorShape* out);
-  static Status MakeShape(const int32* dims, int64_t n,
-                          PartialTensorShape* out);
-  static Status MakeShape(const int64_t* dims, int64_t n,
-                          PartialTensorShape* out);
-  static Status MakeShape(gtl::ArraySlice<int32> shape,
-                          PartialTensorShape* out);
-  static Status MakeShape(gtl::ArraySlice<int64_t> shape,
-                          PartialTensorShape* out);
+  static absl::Status MakeShape(const int32_t* dims, int64_t n,
+                                TensorShape* out);
+  static absl::Status MakeShape(const int64_t* dims, int64_t n,
+                                TensorShape* out);
+  static absl::Status MakeShape(absl::Span<const int32_t> shape,
+                                TensorShape* out);
+  static absl::Status MakeShape(absl::Span<const int64_t> shape,
+                                TensorShape* out);
+  static absl::Status MakeShape(const int32_t* dims, int64_t n,
+                                PartialTensorShape* out);
+  static absl::Status MakeShape(const int64_t* dims, int64_t n,
+                                PartialTensorShape* out);
+  static absl::Status MakeShape(absl::Span<const int32_t> shape,
+                                PartialTensorShape* out);
+  static absl::Status MakeShape(absl::Span<const int64_t> shape,
+                                PartialTensorShape* out);
 
   static std::string ShapeListString(
-      const gtl::ArraySlice<TensorShape>& shapes);
+      const absl::Span<const TensorShape>& shapes);
 
   /// \brief Returns true iff `shape` starts with `prefix`.
   static bool StartsWith(const TensorShape& shape, const TensorShape& prefix);
@@ -501,8 +537,8 @@ class TensorShapeUtils {
   /// \brief Returns the product of values in an int64 array,
   /// or a failing Status if the array represents a value larger than
   /// a `TensorShape` can hold.
-  static Status NumElements(gtl::ArraySlice<int64_t> shape,
-                            int64_t* num_elements);
+  static absl::Status NumElements(absl::Span<const int64_t> shape,
+                                  int64_t* num_elements);
 };
 
 /// Manages the partially known dimensions of a Tensor and their sizes.
@@ -510,6 +546,30 @@ class PartialTensorShape : public TensorShapeBase<PartialTensorShape> {
  public:
   PartialTensorShape() {}
   using TensorShapeBase<PartialTensorShape>::TensorShapeBase;
+
+  // These factory methods should be used instead of the constructors that take
+  // an array of sizes if calling code cannot validate that the sizes specify a
+  // valid `PartialTensorShape`.
+  // The value in `*out` is valid iff the returned value is `Status::OK`.
+  static absl::Status BuildPartialTensorShape(
+      absl::Span<const int64_t> dim_sizes, PartialTensorShape* out) {
+    return BuildTensorShapeBase(dim_sizes, out);
+  }
+  static absl::Status BuildPartialTensorShape(
+      std::initializer_list<int64_t> dim_sizes, PartialTensorShape* out) {
+    return BuildPartialTensorShape(absl::Span<const int64_t>(dim_sizes), out);
+  }
+  static absl::Status BuildPartialTensorShape(const TensorShapeProto& proto,
+                                              PartialTensorShape* out) {
+    return BuildTensorShapeBase(proto, out);
+  }
+
+  static absl::StatusOr<PartialTensorShape> BuildPartialTensorShape(
+      const TensorShapeProto& proto) {
+    PartialTensorShape out;
+    TF_RETURN_IF_ERROR(BuildTensorShapeBase(proto, &out));
+    return out;
+  }
 
   /// Add a dimension to the end ("inner-most"), returns a new
   /// PartialTensorShape.
@@ -519,7 +579,8 @@ class PartialTensorShape : public TensorShapeBase<PartialTensorShape> {
   /// Similar to `Concatenate` but returning `Status`.
   /// Use if calling code cannot validate all requirements and if `CHECK`-fails
   /// are to be avoided.
-  Status ConcatenateWithStatus(int64_t size, PartialTensorShape* out) const;
+  absl::Status ConcatenateWithStatus(int64_t size,
+                                     PartialTensorShape* out) const;
 
   /// Appends all the dimensions from `shape`.  Returns a new
   /// PartialTensorShape.
@@ -528,14 +589,14 @@ class PartialTensorShape : public TensorShapeBase<PartialTensorShape> {
   /// Similar to `Concatenate` but returning `Status`.
   /// Use if calling code cannot validate all requirements and if `CHECK`-fails
   /// are to be avoided.
-  Status ConcatenateWithStatus(const PartialTensorShape& shape,
-                               PartialTensorShape* out) const;
+  absl::Status ConcatenateWithStatus(const PartialTensorShape& shape,
+                                     PartialTensorShape* out) const;
 
   /// Merges all the dimensions from `shape`.  Returns
   /// `InvalidArgument` error if either `shape` has a different rank
   /// or if any of the dimensions are incompatible.
-  Status MergeWith(const PartialTensorShape& shape,
-                   PartialTensorShape* result) const;
+  absl::Status MergeWith(const PartialTensorShape& shape,
+                         PartialTensorShape* result) const;
 
   /// Exact equality test. Returns true iff the ranks match (i.e., both are
   /// unknown, or both are known and equal), and all dimensions are equal (i.e.,
@@ -557,24 +618,30 @@ class PartialTensorShape : public TensorShapeBase<PartialTensorShape> {
   /// `dims[0]`, `dims[1]`, ..., `dims[n-1]`.  Values of -1 are
   /// considered "unknown".
   template <class T>
-  static Status MakePartialShape(const T* dims, int n,
-                                 PartialTensorShape* out) {
+  static absl::Status MakePartialShape(const T* dims, int n,
+                                       PartialTensorShape* out) {
     return TensorShapeUtils::MakeShape(dims, n, out);
   }
 };
+
+inline bool operator==(const PartialTensorShape& a,
+                       const PartialTensorShape& b) {
+  return a.IsIdenticalTo(b);
+}
 
 /// \brief Static helper routines for `PartialTensorShape`. Includes a few
 /// common predicates on a partially known tensor shape.
 class PartialTensorShapeUtils {
  public:
   static std::string PartialShapeListString(
-      const gtl::ArraySlice<PartialTensorShape>& shapes);
+      const absl::Span<const PartialTensorShape>& shapes);
 
-  static bool AreIdentical(const gtl::ArraySlice<PartialTensorShape>& shapes0,
-                           const gtl::ArraySlice<PartialTensorShape>& shapes1);
+  static bool AreIdentical(const absl::Span<const PartialTensorShape>& shapes0,
+                           const absl::Span<const PartialTensorShape>& shapes1);
 
-  static bool AreCompatible(const gtl::ArraySlice<PartialTensorShape>& shapes0,
-                            const gtl::ArraySlice<PartialTensorShape>& shapes1);
+  static bool AreCompatible(
+      const absl::Span<const PartialTensorShape>& shapes0,
+      const absl::Span<const PartialTensorShape>& shapes1);
 };
 
 // ----------------------------------------------------------------------------
@@ -610,31 +677,33 @@ Eigen::DSizes<IndexType, NDIMS> TensorShape::AsEigenDSizes() const {
 }
 
 template <int NDIMS, typename IndexType>
-Status TensorShape::AsEigenDSizesWithStatus(
+absl::Status TensorShape::AsEigenDSizesWithStatus(
     Eigen::DSizes<IndexType, NDIMS>* out) const {
   if (TF_PREDICT_FALSE(NDIMS != dims())) {
-    return errors::Internal("Asking for tensor of ", NDIMS,
-                            " dimensions from a tensor of ", dims(),
-                            " dimensions");
+    return absl::InternalError(absl::StrCat("Asking for tensor of ", NDIMS,
+                                            " dimensions from a tensor of ",
+                                            dims(), " dimensions"));
   }
   *out = AsEigenDSizesCopy<NDIMS, IndexType>();
+  return absl::OkStatus();
 }
 
 template <int NDIMS, typename IndexType>
 Eigen::DSizes<IndexType, NDIMS> TensorShape::AsEigenDSizesWithPadding() const {
-  CheckDimsAtLeast(NDIMS);
+  CheckDimsAtMost(NDIMS);
   return AsEigenDSizesCopyAndPad<NDIMS, IndexType>();
 }
 
 template <int NDIMS, typename IndexType>
-Status TensorShape::AsEigenDSizesWithPaddingWithStatus(
+absl::Status TensorShape::AsEigenDSizesWithPaddingWithStatus(
     Eigen::DSizes<IndexType, NDIMS>* out) const {
   if (TF_PREDICT_FALSE(NDIMS < dims())) {
-    return errors::Internal("Asking for tensor of at least ", NDIMS,
-                            " dimensions from a tensor of ", dims(),
-                            " dimensions");
+    return absl::InternalError(
+        absl::StrCat("Asking for tensor of at most ", NDIMS,
+                     " dimensions from a tensor of ", dims(), " dimensions"));
   }
   *out = AsEigenDSizesCopyAndPad<NDIMS, IndexType>();
+  return absl::OkStatus();
 }
 
 // ----------------------------------------------------------------------------
@@ -707,7 +776,7 @@ inline TensorShapeBase<Shape>::TensorShapeBase(DataType dt) {
   // Optimized implementation of InitDims() where the shape is statically known
   // to be {0}.
   set_ndims_byte(1);
-  uint16* dst = as16()->dims_;
+  uint16_t* dst = as16()->dims_;
   *dst = 0;
   set_num_elements(0);
 }

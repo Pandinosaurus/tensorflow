@@ -12,11 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-"""Tests for `tf.data.Dataset.scan()`."""
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import itertools
 
 from absl.testing import parameterized
@@ -25,6 +20,8 @@ import numpy as np
 from tensorflow.python.data.kernel_tests import checkpoint_test_base
 from tensorflow.python.data.kernel_tests import test_base
 from tensorflow.python.data.ops import dataset_ops
+from tensorflow.python.data.ops import options as options_lib
+from tensorflow.python.data.ops import scan_op
 from tensorflow.python.framework import combinations
 from tensorflow.python.framework import constant_op
 from tensorflow.python.framework import dtypes
@@ -34,7 +31,7 @@ from tensorflow.python.framework import sparse_tensor
 from tensorflow.python.framework import test_ops
 from tensorflow.python.framework import test_util
 from tensorflow.python.ops import array_ops
-from tensorflow.python.ops import control_flow_ops
+from tensorflow.python.ops import cond
 from tensorflow.python.ops import control_flow_v2_toggles
 from tensorflow.python.ops import math_ops
 from tensorflow.python.ops import script_ops
@@ -142,7 +139,7 @@ class ScanTest(test_base.DatasetTestBase, parameterized.TestCase):
 
     def scan_fn(ta, x):
       updated = ta.write(ta.size(), x)
-      next_iter = control_flow_ops.cond(
+      next_iter = cond.cond(
           math_ops.equal(x % 3, 0), empty, lambda: updated)
       return (next_iter, updated.stack())
 
@@ -178,7 +175,7 @@ class ScanTest(test_base.DatasetTestBase, parameterized.TestCase):
       updated = ta.write(ta.size(), x)
       # Here, capture empty_ta from outside the function.  However, it may be
       # either a TF1-style TensorArray or an Eager-style TensorArray.
-      next_iter = control_flow_ops.cond(
+      next_iter = cond.cond(
           math_ops.equal(x % 3, 0), lambda: empty_ta, lambda: updated)
       return (next_iter, updated.stack())
 
@@ -236,6 +233,23 @@ class ScanTest(test_base.DatasetTestBase, parameterized.TestCase):
           scan_func=_scan_fn)
 
   @combinations.generate(test_base.default_test_combinations())
+  def testStateLengthMismatch(self):
+
+    def _scan_fn(state, _):
+      return (state, state), state
+
+    dataset = dataset_ops.Dataset.range(10)
+    with self.assertRaisesRegex(
+        TypeError,
+        "The state returned by `scan_func` must have the same number of "
+        "elements as the initial state.",
+    ):
+      dataset.scan(
+          initial_state=constant_op.constant(1, dtype=dtypes.int32),
+          scan_func=_scan_fn,
+      )
+
+  @combinations.generate(test_base.default_test_combinations())
   def testIncorrectReturnType(self):
 
     def _scan_fn(unused_state, unused_input_value):
@@ -285,7 +299,7 @@ class ScanTest(test_base.DatasetTestBase, parameterized.TestCase):
 
     data = variables.Variable(initial_value=array_ops.zeros((1, 1000, 1000)))
     dataset = dataset_ops.Dataset.from_tensor_slices(data)
-    dataset = dataset_ops._ScanDataset(
+    dataset = scan_op._ScanDataset(
         dataset, np.int64(1), scan_fn, use_default_device=use_default_device)
     get_next = self.getNext(dataset)
 
@@ -304,19 +318,26 @@ class ScanTest(test_base.DatasetTestBase, parameterized.TestCase):
 class ScanCheckpointTest(checkpoint_test_base.CheckpointTestBase,
                          parameterized.TestCase):
 
-  def _build_dataset(self, num_elements):
+  def _build_dataset(self, num_elements, symbolic_checkpoint):
     dataset = dataset_ops.Dataset.from_tensors(1).repeat(num_elements)
-    return dataset.scan(
+    dataset = dataset.scan(
         initial_state=[0, 1],
         scan_func=lambda a, _: ([a[1], a[0] + a[1]], a[1]))
+    options = options_lib.Options()
+    options.experimental_symbolic_checkpoint = symbolic_checkpoint
+    return dataset.with_options(options)
 
   @combinations.generate(
-      combinations.times(test_base.default_test_combinations(),
-                         checkpoint_test_base.default_test_combinations()))
-  def test(self, verify_fn):
-    num_outputs = 5
+      combinations.times(
+          test_base.default_test_combinations(),
+          checkpoint_test_base.default_test_combinations(),
+          combinations.combine(symbolic_checkpoint=[False, True])))
+  def test(self, verify_fn, symbolic_checkpoint):
+    num_outputs = 10
     verify_fn(
-        self, lambda: self._build_dataset(num_outputs), num_outputs=num_outputs)
+        self,
+        lambda: self._build_dataset(num_outputs, symbolic_checkpoint),
+        num_outputs=num_outputs)
 
 
 if __name__ == "__main__":

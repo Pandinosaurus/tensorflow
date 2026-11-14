@@ -15,9 +15,13 @@ limitations under the License.
 
 #include "tensorflow/c/eager/dlpack.h"
 
+#include <string>
+
+#include "absl/status/status.h"
 #include "include/dlpack/dlpack.h"  // from @dlpack
 #include "tensorflow/c/eager/c_api.h"
 #include "tensorflow/c/eager/c_api_experimental.h"
+#include "tensorflow/c/eager/immediate_execution_tensor_handle.h"
 #include "tensorflow/c/eager/tfe_tensorhandle_internal.h"
 #include "tensorflow/c/tf_status_internal.h"
 #include "tensorflow/core/common_runtime/eager/tensor_handle.h"
@@ -44,14 +48,20 @@ struct TfDlManagedTensorCtx {
 // Gets tensor from eager tensor handle.
 const Tensor* GetTensorFromHandle(TFE_TensorHandle* h, TF_Status* status) {
   if (h == nullptr) {
-    status->status = tensorflow::errors::InvalidArgument("Invalid handle");
+    status->status = absl::InvalidArgumentError("Invalid handle");
+    return nullptr;
+  }
+  tensorflow::ImmediateExecutionTensorHandle* unwrapped_handle =
+      tensorflow::unwrap(h);
+  if (!tensorflow::TensorHandle::classof(unwrapped_handle)) {
+    status->status = absl::InvalidArgumentError("Invalid handle");
     return nullptr;
   }
   tensorflow::TensorHandle* handle =
-      tensorflow::TensorHandleFromInterface(tensorflow::unwrap(h));
+      tensorflow::TensorHandleFromInterface(unwrapped_handle);
   if (handle->Type() != TensorHandle::LOCAL) {
-    status->status = tensorflow::errors::InvalidArgument(
-        "DLPack doesn't support ", handle->TypeString(), " tensor");
+    status->status = absl::InvalidArgumentError(absl::StrCat(
+        "DLPack doesn't support ", handle->TypeString(), " tensor"));
     return nullptr;
   }
   const tensorflow::Tensor* tensor;
@@ -76,6 +86,9 @@ DLDataType GetDlDataType(TF_DataType data_type, TF_Status* status) {
   dtype.lanes = 1;
   dtype.bits = TF_DataTypeSize(data_type) * 8;
   switch (data_type) {
+    case TF_DataType::TF_BOOL:
+      dtype.code = DLDataTypeCode::kDLBool;
+      break;
     case TF_DataType::TF_HALF:
     case TF_DataType::TF_FLOAT:
     case TF_DataType::TF_DOUBLE:
@@ -87,7 +100,6 @@ DLDataType GetDlDataType(TF_DataType data_type, TF_Status* status) {
     case TF_DataType::TF_INT64:
       dtype.code = DLDataTypeCode::kDLInt;
       break;
-    case TF_DataType::TF_BOOL:
     case TF_DataType::TF_UINT8:
     case TF_DataType::TF_UINT16:
     case TF_DataType::TF_UINT32:
@@ -97,18 +109,22 @@ DLDataType GetDlDataType(TF_DataType data_type, TF_Status* status) {
     case TF_DataType::TF_BFLOAT16:
       dtype.code = DLDataTypeCode::kDLBfloat;
       break;
+    case TF_DataType::TF_COMPLEX64:
+    case TF_DataType::TF_COMPLEX128:
+      dtype.code = DLDataTypeCode::kDLComplex;
+      break;
     default:
-      status->status = tensorflow::errors::InvalidArgument(
-          DataType_Name(static_cast<DataType>(data_type)),
-          " is not supported by dlpack");
+      status->status = absl::InvalidArgumentError(
+          absl::StrCat(DataType_Name(static_cast<DataType>(data_type)),
+                       " is not supported by dlpack"));
       break;
   }
   return dtype;
 }
 
-// Gets DLPack's DLContext from eager tensor handle.
-DLContext GetDlContext(TFE_TensorHandle* h, TF_Status* status) {
-  DLContext ctx;
+// Gets DLPack's DLDevice from eager tensor handle.
+DLDevice GetDlContext(TFE_TensorHandle* h, TF_Status* status) {
+  DLDevice ctx;
   const char* device_name =
       tensorflow::unwrap(h)->BackingDeviceName(&status->status);
   DeviceNameUtils::ParsedName parsed_name;
@@ -123,99 +139,127 @@ DLContext GetDlContext(TFE_TensorHandle* h, TF_Status* status) {
   if (device_type == "CPU") {
     ctx.device_type = DLDeviceType::kDLCPU;
   } else if (device_type == "GPU") {
-    ctx.device_type = DLDeviceType::kDLGPU;
+#if TENSORFLOW_USE_ROCM
+    ctx.device_type = DLDeviceType::kDLROCM;
+#else
+    ctx.device_type = DLDeviceType::kDLCUDA;
+#endif
   } else {
-    status->status = tensorflow::errors::InvalidArgument(
-        "Unsupported Device Type for dlpack");
+    status->status =
+        absl::InvalidArgumentError("Unsupported Device Type for dlpack");
   }
 
   return ctx;
 }
 
-// Converts DLContext to TF device name.
-absl::optional<std::string> DeviceNameFromDlContext(const DLContext& ctx,
+// Converts DLDevice to TF device name.
+absl::optional<std::string> DeviceNameFromDlContext(const DLDevice& ctx,
                                                     TF_Status* status) {
   switch (ctx.device_type) {
     case DLDeviceType::kDLCPU:
       return "CPU:0";
-    case DLDeviceType::kDLGPU:
+    case DLDeviceType::kDLCUDA:
+      return absl::StrCat("GPU:", ctx.device_id);
+    case DLDeviceType::kDLROCM:
       return absl::StrCat("GPU:", ctx.device_id);
     default:
-      return absl::nullopt;
+      return std::nullopt;
   }
 }
 
 // Converts DLPack data type to TF_DATATYPE.
-Status TfDataTypeFormDlDataType(const DLDataType& dtype,
-                                TF_DataType* tf_dtype) {
+absl::Status TfDataTypeFormDlDataType(const DLDataType& dtype,
+                                      TF_DataType* tf_dtype) {
   switch (dtype.code) {
+    case DLDataTypeCode::kDLBool:
+      if (dtype.bits != 8) {
+        return absl::InvalidArgumentError(
+            absl::StrCat("Only DLPack bools of bitwidth 8 are supported, got: ",
+                         dtype.bits));
+      }
+      *tf_dtype = TF_DataType::TF_BOOL;
+      return absl::OkStatus();
+
     case DLDataTypeCode::kDLUInt:
       switch (dtype.bits) {
         case 8:
           *tf_dtype = TF_DataType::TF_UINT8;
-          return Status::OK();
+          return absl::OkStatus();
         case 16:
           *tf_dtype = TF_DataType::TF_UINT16;
-          return Status::OK();
+          return absl::OkStatus();
         case 32:
           *tf_dtype = TF_DataType::TF_UINT32;
-          return Status::OK();
+          return absl::OkStatus();
         case 64:
           *tf_dtype = TF_DataType::TF_UINT64;
-          return Status::OK();
+          return absl::OkStatus();
         default:
-          return tensorflow::errors::InvalidArgument("Unsupported UInt bits: ",
-                                                     dtype.bits);
+          return absl::InvalidArgumentError(
+              absl::StrCat("Unsupported UInt bits: ", dtype.bits));
       }
-      return Status::OK();
+      return absl::OkStatus();
     case DLDataTypeCode::kDLInt:
       switch (dtype.bits) {
         case 8:
           *tf_dtype = TF_DataType::TF_INT8;
-          return Status::OK();
+          return absl::OkStatus();
         case 16:
           *tf_dtype = TF_DataType::TF_INT16;
-          return Status::OK();
+          return absl::OkStatus();
         case 32:
           *tf_dtype = TF_DataType::TF_INT32;
-          return Status::OK();
+          return absl::OkStatus();
         case 64:
           *tf_dtype = TF_DataType::TF_INT64;
-          return Status::OK();
+          return absl::OkStatus();
         default:
-          return tensorflow::errors::InvalidArgument("Unsupported Int bits: ",
-                                                     dtype.bits);
+          return absl::InvalidArgumentError(
+              absl::StrCat("Unsupported Int bits: ", dtype.bits));
       }
-      return Status::OK();
+      return absl::OkStatus();
     case DLDataTypeCode::kDLFloat:
       switch (dtype.bits) {
         case 16:
           *tf_dtype = TF_DataType::TF_HALF;
-          return Status::OK();
+          return absl::OkStatus();
         case 32:
           *tf_dtype = TF_DataType::TF_FLOAT;
-          return Status::OK();
+          return absl::OkStatus();
         case 64:
           *tf_dtype = TF_DataType::TF_DOUBLE;
-          return Status::OK();
+          return absl::OkStatus();
         default:
-          return tensorflow::errors::InvalidArgument("Unsupported Float bits: ",
-                                                     dtype.bits);
+          return absl::InvalidArgumentError(
+              absl::StrCat("Unsupported Float bits: ", dtype.bits));
       }
       break;
     case DLDataTypeCode::kDLBfloat:
       switch (dtype.bits) {
         case 16:
           *tf_dtype = TF_DataType::TF_BFLOAT16;
-          return Status::OK();
+          return absl::OkStatus();
         default:
-          return tensorflow::errors::InvalidArgument(
-              "Unsupported BFloat bits: ", dtype.bits);
+          return absl::InvalidArgumentError(
+              absl::StrCat("Unsupported BFloat bits: ", dtype.bits));
+      }
+      break;
+    case DLDataTypeCode::kDLComplex:
+      switch (dtype.bits) {
+        case 64:
+          *tf_dtype = TF_DataType::TF_COMPLEX64;
+          return absl::OkStatus();
+        case 128:
+          *tf_dtype = TF_DataType::TF_COMPLEX128;
+          return absl::OkStatus();
+        default:
+          return absl::InvalidArgumentError(
+              absl::StrCat("Unsupported Complex bits: ", dtype.bits));
       }
       break;
     default:
-      return tensorflow::errors::InvalidArgument("Unsupported Type Codes: ",
-                                                 dtype.code);
+      return absl::InvalidArgumentError(
+          absl::StrCat("Unsupported Type Codes: ", dtype.code));
   }
 }
 
@@ -229,17 +273,25 @@ void DeallocatorWrapperFunc(void* data, size_t len, void* dlmt_vptr) {
 // data.
 bool IsValidStrideCompactRowMajorData(int64_t* shape_arr, int64_t* stride_arr,
                                       int ndim) {
-  if (ndim >= 1 && stride_arr[ndim - 1] != 1) {
-    return false;
-  }
-  for (int i = ndim - 2; i >= 0; --i) {
-    if (stride_arr[i] != shape_arr[i + 1] * stride_arr[i + 1]) {
-      return false;
+  bool valid = true;
+  int64_t expected_stride = 1;
+  for (int i = ndim - 1; i >= 0; --i) {
+    // Empty tensors are always compact regardless of strides.
+    if (shape_arr[i] == 0) return true;
+    // Note that dimensions with size=1 can have any stride.
+    if (shape_arr[i] != 1 && stride_arr[i] != expected_stride) {
+      valid = false;
     }
+    expected_stride *= shape_arr[i];
   }
-  return true;
+  return valid;
 }
 }  // namespace
+
+void* TFE_GetDLDevice(TFE_TensorHandle* h, TF_Status* status) {
+  auto dl_device = GetDlContext(h, status);
+  return new DLDevice{dl_device.device_type, dl_device.device_id};
+}
 
 void TFE_CallDLManagedTensorDeleter(void* dlm_ptr) {
   DLManagedTensor* dlMTensor = static_cast<DLManagedTensor*>(dlm_ptr);
@@ -260,6 +312,9 @@ void* TFE_HandleToDLPack(TFE_TensorHandle* h, TF_Status* status) {
   }
 
   const Tensor* tensor = GetTensorFromHandle(h, status);
+  if (!status->status.ok() || tensor == nullptr) {
+    return nullptr;
+  }
   TF_DataType data_type = static_cast<TF_DataType>(tensor->dtype());
 
   auto tf_dlm_type = GetDlDataType(data_type, status);
@@ -274,7 +329,7 @@ void* TFE_HandleToDLPack(TFE_TensorHandle* h, TF_Status* status) {
   DLManagedTensor* dlm_tensor = &tf_dlm_tensor_ctx->tensor;
   dlm_tensor->manager_ctx = tf_dlm_tensor_ctx;
   dlm_tensor->deleter = &DLManagedTensorDeleter;
-  dlm_tensor->dl_tensor.ctx = tf_dlm_context;
+  dlm_tensor->dl_tensor.device = tf_dlm_context;
   int ndim = tensor->dims();
   dlm_tensor->dl_tensor.ndim = ndim;
   dlm_tensor->dl_tensor.data = tf_dlm_data;
@@ -309,14 +364,13 @@ TFE_TensorHandle* TFE_HandleFromDLPack(void* dlm, TF_Status* status,
   DLManagedTensor* dlmt = static_cast<DLManagedTensor*>(dlm);
   DLTensor* dl_tensor = &dlmt->dl_tensor;
   absl::optional<std::string> device_name =
-      DeviceNameFromDlContext(dl_tensor->ctx, status);
+      DeviceNameFromDlContext(dl_tensor->device, status);
   if (!device_name.has_value()) {
-    status->status =
-        tensorflow::errors::InvalidArgument("Unsupported Device Type");
+    status->status = absl::InvalidArgumentError("Unsupported Device Type");
     return nullptr;
   }
   TF_DataType dtype;
-  Status s = TfDataTypeFormDlDataType(dl_tensor->dtype, &dtype);
+  absl::Status s = TfDataTypeFormDlDataType(dl_tensor->dtype, &dtype);
   if (!s.ok()) {
     status->status = std::move(s);
     return nullptr;
@@ -324,6 +378,13 @@ TFE_TensorHandle* TFE_HandleFromDLPack(void* dlm, TF_Status* status,
   int num_dims = dl_tensor->ndim;
   const int64_t* dims = dl_tensor->shape;
   void* data = dl_tensor->data;
+
+  if (dl_tensor->byte_offset != 0) {
+    status->status = absl::InvalidArgumentError(
+        absl::StrCat("Unsupported byte_offset (", dl_tensor->byte_offset,
+                     ") from DLPack, must be zero"));
+    return nullptr;
+  }
 
   size_t total_bytes = dl_tensor->dtype.bits / 8;
   for (int i = 0; i < num_dims; i++) {
@@ -333,8 +394,8 @@ TFE_TensorHandle* TFE_HandleFromDLPack(void* dlm, TF_Status* status,
   if (dl_tensor->strides != nullptr &&
       !IsValidStrideCompactRowMajorData(dl_tensor->shape, dl_tensor->strides,
                                         num_dims)) {
-    status->status = tensorflow::errors::InvalidArgument(
-        "Invalid strides array from DLPack");
+    status->status =
+        absl::InvalidArgumentError("Invalid strides array from DLPack");
     return nullptr;
   }
 

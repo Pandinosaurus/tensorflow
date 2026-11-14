@@ -16,10 +16,6 @@
 # RUN: %p/hash_table_v1 | FileCheck %s
 
 # pylint: disable=missing-docstring,line-too-long
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import tensorflow.compat.v1 as tf
 from tensorflow.compiler.mlir.tensorflow.tests.tf_saved_model import common_v1
 
@@ -34,11 +30,12 @@ from tensorflow.compiler.mlir.tensorflow.tests.tf_saved_model import common_v1
 # CHECK-SAME: producer
 
 # CHECK: "tf_saved_model.global_tensor"()
-# CHECK: "tf_saved_model.session_initializer"() {initializers = [@[[init:.*]]]} : () -> ()
+# CHECK: "tf_saved_model.session_initializer"() <{initializers = [@[[init:.*]]]}> : () -> ()
 
 # CHECK:      func @[[init]]
-# CHECK-NEXT: [[R5:%.*]] = "tf.Const"()
+# CHECK-SAME: tf_saved_model.initializer_type = "init_op"
 # CHECK-NEXT: [[R6:%.*]] = "tf.Const"()
+# CHECK-NEXT: [[R5:%.*]] = "tf.Const"() <{value = dense<[1, 2,
 # CHECK-NEXT: [[R7:%.*]] = "tf.HashTableV2"()
 # CHECK-SAME: shared_name = "[[hash_table:.*]]"
 # CHECK-NEXT: "tf.LookupTableImportV2"([[R7]], [[R5]], [[R6]])

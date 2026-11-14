@@ -1,7 +1,21 @@
+// Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+// ==============================================================================
 // RUN: tf-mlir-translate -mlir-to-graphdef %s -o - | FileCheck %s
 
 module attributes {tf.versions = {bad_consumers = [], min_consumer = 0 : i32, producer = 175 : i32}} {
-  func @main(%arg0: tensor<32x!tf_type.string>) -> (tensor<?x2xi64>) attributes {tf.entry_function = {inputs = "input0", outputs = "ParseExample/ParseExampleV2"}} {
+  func.func @main(%arg0: tensor<32x!tf_type.string>) -> (tensor<?x2xi64>) attributes {tf.entry_function = {inputs = "input0", outputs = "ParseExample/ParseExampleV2"}} {
 
     %0 = tf_executor.graph {
       %outputs, %control = tf_executor.island wraps "tf.Const"() {device = "", dtype = f32, value = dense<[]> : tensor<0xf32>} : () -> tensor<0xf32>
@@ -11,16 +25,16 @@ module attributes {tf.versions = {bad_consumers = [], min_consumer = 0 : i32, pr
       %outputs_6, %control_7 = tf_executor.island wraps "tf.Const"() {device = "", dtype = !tf_type.string, value = dense<""> : tensor<0x!tf_type.string>} : () -> tensor<0x!tf_type.string>
       %outputs_8, %control_9 = tf_executor.island wraps "tf.Const"() {device = "", dtype = !tf_type.string, value = dense<""> : tensor<2x!tf_type.string>} : () -> tensor<2x!tf_type.string>
 
-      %outputs_10:8, %control_11 = tf_executor.island wraps "tf.ParseExampleV2"(%arg0, %outputs_4, %outputs_8, %outputs_2, %outputs_6, %outputs, %outputs_0) {Tdense = ["tfdtype$DT_FLOAT", "tfdtype$DT_FLOAT"], dense_shapes = [#tf_type.shape<>, #tf_type.shape<>], device = "", num_sparse = 2 : i64, ragged_split_types = [], ragged_value_types = [], result_segment_sizes = dense<[2, 2, 2, 2, 0, 0]> : vector<6xi32>, sparse_types = ["tfdtype$DT_STRING", "tfdtype$DT_INT64"]} : (tensor<32x!tf_type.string>, tensor<0x!tf_type.string>, tensor<2x!tf_type.string>, tensor<2x!tf_type.string>, tensor<0x!tf_type.string>, tensor<0xf32>, tensor<0xf32>) -> (tensor<?x2xi64>, tensor<?x2xi64>, tensor<?x!tf_type.string>, tensor<?xi64>, tensor<2xi64>, tensor<2xi64>, tensor<32xf32>, tensor<32xf32>) loc("ParseExample")
+      %outputs_10:8, %control_11 = tf_executor.island wraps "tf.ParseExampleV2"(%arg0, %outputs_4, %outputs_8, %outputs_2, %outputs_6, %outputs, %outputs_0) {Tdense = ["tfdtype$DT_FLOAT", "tfdtype$DT_FLOAT"], dense_shapes = [#tf_type.shape<>, #tf_type.shape<>], device = "", num_sparse = 2 : i64, ragged_split_types = [], ragged_value_types = [], resultSegmentSizes = array<i32: 2, 2, 2, 2, 0, 0>, sparse_types = ["tfdtype$DT_STRING", "tfdtype$DT_INT64"]} : (tensor<32x!tf_type.string>, tensor<0x!tf_type.string>, tensor<2x!tf_type.string>, tensor<2x!tf_type.string>, tensor<0x!tf_type.string>, tensor<0xf32>, tensor<0xf32>) -> (tensor<?x2xi64>, tensor<?x2xi64>, tensor<?x!tf_type.string>, tensor<?xi64>, tensor<2xi64>, tensor<2xi64>, tensor<32xf32>, tensor<32xf32>) loc("ParseExample")
       // CHECK:      name: "ParseExample"
       // CHECK-NEXT: op: "ParseExampleV2"
       // CHECK-NEXT: input: "input0"
-      // CHECK-NEXT: input: "tf.Const3"
-      // CHECK-NEXT: input: "tf.Const5"
-      // CHECK-NEXT: input: "tf.Const2"
-      // CHECK-NEXT: input: "tf.Const4"
+      // CHECK-NEXT: input: "tf.Const{{_.*_3}}"
+      // CHECK-NEXT: input: "tf.Const{{_.*_5}}"
+      // CHECK-NEXT: input: "tf.Const{{_.*_2}}"
+      // CHECK-NEXT: input: "tf.Const{{_.*_4}}"
       // CHECK-NEXT: input: "tf.Const"
-      // CHECK-NEXT: input: "tf.Const1"
+      // CHECK-NEXT: input: "tf.Const{{_.*_1}}"
       // CHECK-NEXT: attr {
       // CHECK-NEXT:   key: "Tdense"
       // CHECK-NEXT:     value {
@@ -73,7 +87,7 @@ module attributes {tf.versions = {bad_consumers = [], min_consumer = 0 : i32, pr
 
       tf_executor.fetch %outputs_10#0 : tensor<?x2xi64>
     }
-    return %0#0 : tensor<?x2xi64>
+    func.return %0#0 : tensor<?x2xi64>
     // CHECK:      name: "ParseExample/ParseExampleV2"
     // CHECK-NEXT: op: "_Retval"
     // CHECK-NEXT: input: "ParseExample"

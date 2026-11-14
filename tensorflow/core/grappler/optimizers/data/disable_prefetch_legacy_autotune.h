@@ -30,29 +30,33 @@ class DisablePrefetchLegacyAutotune : public TFDataOptimizerBase {
   DisablePrefetchLegacyAutotune() = default;
   ~DisablePrefetchLegacyAutotune() override = default;
 
-  string name() const override { return "disable_prefetch_legacy_autotune"; };
+  std::string name() const override {
+    return "disable_prefetch_legacy_autotune";
+  };
 
   bool UsesFunctionLibrary() const override { return false; }
 
-  Status Init(
+  absl::Status Init(
       const tensorflow::RewriterConfig_CustomGraphOptimizer* config) override {
-    if (!config) return Status::OK();
+    if (!config) return absl::OkStatus();
 
-    const string& autotune = config->parameter_map().at(kAutotune).s();
+    const std::string& autotune = config->parameter_map().at(kAutotune).s();
     if (autotune == "true") {
       autotune_ = true;
     } else if (autotune == "false") {
       autotune_ = false;
     } else {
-      return errors::InvalidArgument("Received an invalid value for parameter ",
-                                     kAutotune, ": ", autotune);
+      return absl::InvalidArgumentError(
+          absl::StrCat("Received an invalid value for parameter ", kAutotune,
+                       ": ", autotune));
     }
-    return Status::OK();
+    return absl::OkStatus();
   }
 
-  Status OptimizeAndCollectStats(Cluster* cluster, const GrapplerItem& item,
-                                 GraphDef* output,
-                                 OptimizationStats* stats) override;
+  absl::Status OptimizeAndCollectStats(Cluster* cluster,
+                                       const GrapplerItem& item,
+                                       GraphDef* output,
+                                       OptimizationStats* stats) override;
 
  private:
   bool autotune_ = true;

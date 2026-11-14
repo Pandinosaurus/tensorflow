@@ -15,12 +15,14 @@ limitations under the License.
 #ifndef TENSORFLOW_CORE_DISTRIBUTED_RUNTIME_EAGER_CLUSTER_FUNCTION_LIBRARY_RUNTIME_H_
 #define TENSORFLOW_CORE_DISTRIBUTED_RUNTIME_EAGER_CLUSTER_FUNCTION_LIBRARY_RUNTIME_H_
 
+#include <memory>
+#include <utility>
+#include <vector>
+
 #include "absl/types/optional.h"
 #include "tensorflow/core/common_runtime/device_mgr.h"
 #include "tensorflow/core/common_runtime/eager/context.h"
 #include "tensorflow/core/common_runtime/eager/eager_operation.h"
-#include "tensorflow/core/common_runtime/eager/tensor_handle.h"
-#include "tensorflow/core/distributed_runtime/worker_session.h"
 #include "tensorflow/core/framework/function.h"
 #include "tensorflow/core/protobuf/remote_tensor_handle.pb.h"
 
@@ -35,19 +37,20 @@ namespace eager {
 class EagerClusterFunctionLibraryRuntime
     : public DistributedFunctionLibraryRuntime {
  public:
-  EagerClusterFunctionLibraryRuntime(const uint64 context_id, EagerContext* ctx,
+  EagerClusterFunctionLibraryRuntime(const uint64_t context_id,
+                                     EagerContext* ctx,
                                      DeviceMgr* remote_device_mgr)
       : context_id_(context_id),
         ctx_(ctx),
         remote_device_mgr_(remote_device_mgr) {}
 
-  ~EagerClusterFunctionLibraryRuntime() override{};
+  ~EagerClusterFunctionLibraryRuntime() override = default;
 
   // Register a partition (i.e., component function) of a multi-device function
   // on the remote target specified in `options.target`. This should be
   // triggered as part of instantiating a multi-device function in
   // ProcessFunctionLibraryRuntime.
-  void Instantiate(const string& function_name,
+  void Instantiate(const std::string& function_name,
                    const FunctionLibraryDefinition& lib_def, AttrSlice attrs,
                    const FunctionLibraryRuntime::InstantiateOptions& options,
                    FunctionLibraryRuntime::LocalHandle* handle,
@@ -62,7 +65,7 @@ class EagerClusterFunctionLibraryRuntime
   // (i.e., the done callbacks triggered) before finishing its execution.
   void Run(const FunctionLibraryRuntime::Options& opts,
            FunctionLibraryRuntime::LocalHandle handle,
-           gtl::ArraySlice<Tensor> args, std::vector<Tensor>* rets,
+           absl::Span<const Tensor> args, std::vector<Tensor>* rets,
            FunctionLibraryRuntime::DoneCallback done) override;
 
   // The component function inputs `args` and outputs `rets` may refer to remote
@@ -70,26 +73,26 @@ class EagerClusterFunctionLibraryRuntime
   // the inputs/outputs are actually consumed.
   void Run(const FunctionLibraryRuntime::Options& opts,
            FunctionLibraryRuntime::LocalHandle handle,
-           gtl::ArraySlice<FunctionArg> args, std::vector<FunctionRet>* rets,
+           absl::Span<const FunctionArg> args, std::vector<FunctionRet>* rets,
            FunctionLibraryRuntime::DoneCallback done) override;
 
-  void CleanUp(uint64 step_id, FunctionLibraryRuntime::LocalHandle handle,
+  void CleanUp(uint64_t step_id, FunctionLibraryRuntime::LocalHandle handle,
                FunctionLibraryRuntime::DoneCallback done) override;
 
   DeviceMgr* remote_device_mgr() const override { return remote_device_mgr_; }
 
  private:
-  const uint64 context_id_;
+  const uint64_t context_id_;
   EagerContext* ctx_;
   DeviceMgr* remote_device_mgr_;  // not owned.
 
   struct FunctionData {
-    const string target;
+    const std::string target;
     const absl::optional<std::vector<int>> ret_indices;
     core::RefCountPtr<EagerClient> eager_client;
     std::unique_ptr<EagerOperation> op;
 
-    FunctionData(const string& target,
+    FunctionData(const std::string& target,
                  const absl::optional<std::vector<int>>& ret_indices,
                  EagerClient* eager_client, std::unique_ptr<EagerOperation> op)
         : target(target),
@@ -105,7 +108,8 @@ class EagerClusterFunctionLibraryRuntime
 };
 
 DistributedFunctionLibraryRuntime* CreateClusterFLR(
-    const uint64 context_id, EagerContext* ctx, WorkerSession* worker_session);
+    const uint64_t context_id, EagerContext* ctx,
+    WorkerSession* worker_session);
 
 }  // namespace eager
 }  // namespace tensorflow

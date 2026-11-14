@@ -13,15 +13,20 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <vector>
 
+#include <gmock/gmock.h>
+#include <gtest/gtest.h>
 #include "flatbuffers/flexbuffers.h"  // from @flatbuffers
-#include "tensorflow/lite/interpreter.h"
+#include "tensorflow/lite/core/c/builtin_op_data.h"
+#include "tensorflow/lite/core/interpreter.h"
 #include "tensorflow/lite/kernels/perception/perception_ops.h"
 #include "tensorflow/lite/kernels/test_util.h"
-#include "tensorflow/lite/testing/util.h"
+#include "tensorflow/lite/schema/schema_generated.h"
 
 namespace tflite {
 namespace ops {
@@ -37,7 +42,8 @@ class MaxpoolingWithArgMaxOpModel : public SingleOpModel {
                               int stride_width, int filter_height,
                               int filter_width, TfLitePadding padding,
                               const TensorData& output,
-                              const TensorData& indices) {
+                              const TensorData& indices,
+                              bool allocate_and_delegate = true) {
     input_ = AddInput(input);
     output_ = AddOutput(output);
     indices_ = AddOutput(indices);
@@ -45,7 +51,9 @@ class MaxpoolingWithArgMaxOpModel : public SingleOpModel {
     std::vector<uint8_t> custom_option = CreateCustomOptions(
         stride_height, stride_width, filter_height, filter_width, padding);
     SetCustomOp("MaxPoolWithArgmax", custom_option, RegisterMaxPoolWithArgmax);
-    BuildInterpreter({GetShape(input_)});
+    BuildInterpreter({GetShape(input_)}, /*num_threads=*/-1,
+                     /*allow_fp32_relax_to_fp16=*/false,
+                     /*apply_delegate=*/true, allocate_and_delegate);
   }
 
   void SetInput(const std::vector<float>& data) {
@@ -98,6 +106,21 @@ class MaxpoolingWithArgMaxOpModel : public SingleOpModel {
   }
 };
 
+TEST(MaxpoolWithArgMaxPrepareTest, RejectsPaddingOutsideInt16Range) {
+  constexpr int kFilterWidth =
+      2 * (std::numeric_limits<int16_t>::max() + 1) + 1;
+  MaxpoolingWithArgMaxOpModel model(
+      /*input=*/{TensorType_FLOAT32, {1, 1, 1, 1}},
+      /*stride_height=*/1, /*stride_width=*/1,
+      /*filter_height=*/1, /*filter_width=*/kFilterWidth,
+      /*padding=*/kTfLitePaddingSame,
+      /*output=*/{TensorType_FLOAT32, {}},
+      /*indices=*/{TensorType_INT32, {}},
+      /*allocate_and_delegate=*/false);
+
+  EXPECT_EQ(model.AllocateTensors(), kTfLiteError);
+}
+
 TEST(MaxpoolWithArgMaxTest, UnsupportedInt64Test) {
   EXPECT_DEATH_IF_SUPPORTED(MaxpoolingWithArgMaxOpModel model(
                                 /*input=*/{TensorType_FLOAT32, {1, 2, 4, 1}},
@@ -118,7 +141,7 @@ TEST(MaxpoolWithArgMaxTest, SimpleTest) {
       /*output=*/{TensorType_FLOAT32, {}},
       /*indices=*/{TensorType_INT32, {}});
   model.SetInput({0, 13, 2, 0, 0, 1, 4, 0});
-  model.Invoke();
+  ASSERT_EQ(model.Invoke(), kTfLiteOk);
 
   EXPECT_THAT(model.GetOutputShape(), ElementsAreArray({1, 1, 2, 1}));
   EXPECT_THAT(model.GetOutput(), ElementsAreArray({13, 4}));
@@ -136,7 +159,7 @@ TEST(MaxpoolWithArgMaxTest, Strides2x1Test) {
       /*indices=*/{TensorType_INT32, {}});
 
   model.SetInput({1, 0, 0, 2, 3, 0, 0, 4, 5, 0, 0, 6, 7, 0, 0, 8});
-  model.Invoke();
+  ASSERT_EQ(model.Invoke(), kTfLiteOk);
 
   EXPECT_THAT(model.GetOutputShape(), ElementsAreArray({1, 2, 2, 2}));
   EXPECT_THAT(model.GetOutput(), ElementsAreArray({3, 4, 0, 4, 7, 8, 0, 8}));
@@ -156,7 +179,7 @@ TEST(MaxpoolWithArgMaxTest, Strides2x2Test) {
 
   model.SetInput({1, 0, 0, 0, 0, 2, 0, 0, 0, 0, 3, 0, 0, 4, 0, 0,
                   0, 0, 0, 5, 6, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 8});
-  model.Invoke();
+  ASSERT_EQ(model.Invoke(), kTfLiteOk);
 
   EXPECT_THAT(model.GetOutputShape(), ElementsAreArray({1, 2, 4, 1}));
   EXPECT_THAT(model.GetOutput(), ElementsAreArray({1, 3, 4, 0, 0, 7, 6, 8}));
@@ -176,7 +199,7 @@ TEST(MaxpoolWithArgMaxTest, Strides2x2UnfitTest) {
 
   model.SetInput({1, 0, 0, 0, 0, 2, 0, 0, 0, 0, 3, 0, 0, 4,
                   0, 0, 0, 0, 0, 5, 6, 0, 0, 0, 0, 0, 0, 7});
-  model.Invoke();
+  ASSERT_EQ(model.Invoke(), kTfLiteOk);
 
   EXPECT_THAT(model.GetOutputShape(), ElementsAreArray({1, 2, 4, 1}));
   EXPECT_THAT(model.GetOutput(), ElementsAreArray({1, 3, 2, 4, 0, 0, 5, 7}));
@@ -196,7 +219,7 @@ TEST(MaxpoolWithArgMaxTest, PaddingValidTest) {
 
   model.SetInput(
       {0, 0, 0, 0, 0, 0, 7, 0, 0, 10, 0, 0, 0, 0, 0, 0, 20, 0, 0, 19});
-  model.Invoke();
+  ASSERT_EQ(model.Invoke(), kTfLiteOk);
 
   EXPECT_THAT(model.GetOutputShape(), ElementsAreArray({1, 2, 2, 1}));
   EXPECT_THAT(model.GetOutput(), ElementsAreArray({7, 10, 20, 19}));
@@ -215,7 +238,7 @@ TEST(MaxpoolWithArgMaxTest, PaddingValidUnfitTest) {
 
   model.SetInput({0, 0, 0, 0, 0,  0, 7, 0,  0,  10, 0, 0,
                   0, 0, 0, 0, 20, 0, 0, 19, 24, 1,  2, 44});
-  model.Invoke();
+  ASSERT_EQ(model.Invoke(), kTfLiteOk);
 
   EXPECT_THAT(model.GetOutputShape(), ElementsAreArray({1, 2, 2, 1}));
   EXPECT_THAT(model.GetOutput(), ElementsAreArray({7, 10, 24, 24}));
@@ -244,7 +267,7 @@ TEST(MaxpoolWithArgMaxTest, InputWithBatchTest) {
                   0,  0,  27, 28, 0,  0,  0,  0,  29, 0, 0,  0,  0, 0, 0,  32,
                   0,  0,  0,  0,  25, 26, 0,  0,  0,  0, 0,  0,  0, 0, 0,  0,
                   0,  0,  0,  0,  0,  0,  31, 0,  0,  0, 0,  0,  0, 0, 0,  0});
-  model.Invoke();
+  ASSERT_EQ(model.Invoke(), kTfLiteOk);
 
   EXPECT_THAT(model.GetOutputShape(), ElementsAreArray({2, 2, 4, 2}));
   EXPECT_THAT(model.GetOutput(),
@@ -278,7 +301,7 @@ TEST(MaxpoolWithArgMaxTest, InputWithBatchAndPaddingValidTest) {
                   0,  0,  23, 0, 0, 0, 0,  0,  0,  0,  27, 28, 0,  0,  0,  0,
                   29, 0,  0,  0, 0, 0, 0,  32, 0,  0,  0,  0,  25, 26, 0,  0,
                   0,  0,  0,  0, 0, 0, 0,  0,  0,  0,  0,  0,  0,  0,  31, 0});
-  model.Invoke();
+  ASSERT_EQ(model.Invoke(), kTfLiteOk);
 
   EXPECT_THAT(model.GetOutputShape(), ElementsAreArray({2, 2, 4, 2}));
   EXPECT_THAT(model.GetOutput(),

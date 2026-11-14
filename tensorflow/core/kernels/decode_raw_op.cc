@@ -50,27 +50,27 @@ class DecodeRawOp : public OpKernel {
         str_size = in_str.size();
       } else {
         OP_REQUIRES(context, str_size == in_str.size(),
-                    errors::InvalidArgument(
+                    absl::InvalidArgumentError(absl::StrCat(
                         "DecodeRaw requires input strings to all be the same "
                         "size, but element ",
-                        i, " has size ", str_size, " != ", in_str.size()));
+                        i, " has size ", str_size, " != ", in_str.size())));
       }
     }
     TensorShape out_shape = input.shape();
     if (str_size == -1 || str_size == 0) {  // Empty input
-      out_shape.AddDim(0);
+      OP_REQUIRES_OK(context, out_shape.AddDimWithStatus(0));
       Tensor* output_tensor = nullptr;
       OP_REQUIRES_OK(context, context->allocate_output("output", out_shape,
                                                        &output_tensor));
       return;
     }
-    OP_REQUIRES(
-        context, str_size % sizeof(T) == 0,
-        errors::InvalidArgument("Input to DecodeRaw has length ", str_size,
-                                " that is not a multiple of ", sizeof(T),
-                                ", the size of ", DataTypeString(out_type_)));
+    OP_REQUIRES(context, str_size % sizeof(T) == 0,
+                absl::InvalidArgumentError(
+                    absl::StrCat("Input to DecodeRaw has length ", str_size,
+                                 " that is not a multiple of ", sizeof(T),
+                                 ", the size of ", DataTypeString(out_type_))));
     const int64_t added_dim = str_size / sizeof(T);
-    out_shape.AddDim(added_dim);
+    OP_REQUIRES_OK(context, out_shape.AddDimWithStatus(added_dim));
     Tensor* output_tensor = nullptr;
     OP_REQUIRES_OK(
         context, context->allocate_output("output", out_shape, &output_tensor));
@@ -82,8 +82,7 @@ class DecodeRawOp : public OpKernel {
     // output type is a single byte, we can copy the memory directly.
     if (!convert_data_endianness_ || sizeof(T) == 1) {
       for (int64_t i = 0; i < flat_in.size(); ++i) {
-        const T* in_data = reinterpret_cast<const T*>(flat_in(i).data());
-        memcpy(out_data, in_data, str_size);
+        memcpy(out_data, flat_in(i).data(), str_size);
         out_data += added_dim;
       }
     } else {
@@ -130,11 +129,11 @@ class DecodeRawOp : public OpKernel {
 REGISTER(Eigen::half);
 REGISTER(float);
 REGISTER(double);
-REGISTER(int32);
-REGISTER(uint16);
-REGISTER(uint8);
-REGISTER(int16);
-REGISTER(int8);
+REGISTER(int32_t);
+REGISTER(uint16_t);
+REGISTER(uint8_t);
+REGISTER(int16_t);
+REGISTER(int8_t);
 REGISTER(int64_t);
 REGISTER(bool);
 REGISTER(complex64);

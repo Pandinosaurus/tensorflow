@@ -29,7 +29,8 @@ limitations under the License.
 namespace tensorflow {
 namespace {
 
-void ReadFileToStringOrDie(Env* env, const string& filename, string* output) {
+void ReadFileToStringOrDie(Env* env, const std::string& filename,
+                           std::string* output) {
   TF_CHECK_OK(ReadFileToString(env, filename, output));
 }
 
@@ -42,8 +43,8 @@ std::unique_ptr<Session> CreateSession() {
 class ExtractExampleParserConfigurationTest : public ::testing::Test {
  protected:
   void SetUp() override {
-    string proto_string;
-    string filename =
+    std::string proto_string;
+    std::string filename =
         io::JoinPath(testing::TensorFlowSrcRoot(),
                      "core/example/testdata/parse_example_graph_def.pbtxt");
     ReadFileToStringOrDie(Env::Default(), filename, &proto_string);
@@ -68,7 +69,7 @@ class ExtractExampleParserConfigurationTest : public ::testing::Test {
 TEST_F(ExtractExampleParserConfigurationTest, OpNotFound) {
   std::vector<FixedLenFeature> dense_vec;
   std::vector<VarLenFeature> sparse_vec;
-  Status status = ExtractExampleParserConfiguration(
+  absl::Status status = ExtractExampleParserConfiguration(
       graph_def_, "BlarseExample/ParseExample", session_.get(), &dense_vec,
       &sparse_vec);
 
@@ -83,7 +84,7 @@ TEST_F(ExtractExampleParserConfigurationTest, InconsistentAttrNsparse) {
   auto mutable_attr = node->mutable_attr();
   (*mutable_attr)["Nsparse"].set_i(3);
 
-  Status status = ExtractExampleParserConfiguration(
+  absl::Status status = ExtractExampleParserConfiguration(
       graph_def_, "ParseExample/ParseExample", session_.get(), &dense_vec,
       &sparse_vec);
 
@@ -98,7 +99,7 @@ TEST_F(ExtractExampleParserConfigurationTest, InconsistentAttrNdense) {
   auto mutable_attr = node->mutable_attr();
   (*mutable_attr)["Ndense"].set_i(2);
 
-  Status status = ExtractExampleParserConfiguration(
+  absl::Status status = ExtractExampleParserConfiguration(
       graph_def_, "ParseExample/ParseExample", session_.get(), &dense_vec,
       &sparse_vec);
 
@@ -108,11 +109,11 @@ TEST_F(ExtractExampleParserConfigurationTest, InconsistentAttrNdense) {
 TEST_F(ExtractExampleParserConfigurationTest, Basic) {
   std::vector<FixedLenFeature> dense_vec;
   std::vector<VarLenFeature> sparse_vec;
-  Status status = ExtractExampleParserConfiguration(
+  absl::Status status = ExtractExampleParserConfiguration(
       graph_def_, "ParseExample/ParseExample", session_.get(), &dense_vec,
       &sparse_vec);
 
-  EXPECT_EQ(Status::OK(), status);
+  EXPECT_EQ(absl::OkStatus(), status);
   EXPECT_EQ(2, sparse_vec.size());
   EXPECT_EQ(3, dense_vec.size());
 

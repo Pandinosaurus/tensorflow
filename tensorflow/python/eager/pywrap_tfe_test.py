@@ -14,10 +14,6 @@
 # ==============================================================================
 """Tests for low-level eager execution primitives."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import sys
 import traceback
 
@@ -36,11 +32,13 @@ from tensorflow.python.framework import ops
 from tensorflow.python.framework import test_ops
 from tensorflow.python.framework import test_util
 from tensorflow.python.ops import array_ops
+from tensorflow.python.ops import array_ops_stack
 from tensorflow.python.ops import math_ops
 from tensorflow.python.ops import random_ops
 from tensorflow.python.ops import resource_variable_ops
 
 
+@test_util.with_eager_op_as_function
 class Tests(test.TestCase):
 
   @test_util.assert_no_new_tensors
@@ -258,12 +256,13 @@ class Tests(test.TestCase):
   @test_util.assert_no_garbage_created
   def testInvalidNumOutputs(self):
     with self.assertRaisesRegex(
-        Exception, r"Value for number_attr\(\) -1 < 0 \[Op:Split\]"):
+        Exception, r"Value for number_attr\(\) -1 < 0 \[Op:Split\]|"
+        r"Value for attr 'num_split' of -1 must be at least minimum 1"):
       array_ops.split(value=[1, 2, 3], num_or_size_splits=-1)
 
     with self.assertRaisesRegex(
         Exception,
-        "Value for attr 'num_split' of 0 must be at least minimum 1"):
+        r"Value for attr 'num_split' of 0 must be at least minimum 1"):
       array_ops.split(value=[1, 2, 3], num_or_size_splits=0)
 
   def testIsFunction(self):
@@ -281,9 +280,11 @@ class Tests(test.TestCase):
     with ops.Graph().as_default():
       a_2_by_2 = constant_op.constant(1.0, shape=[2, 2])
       m = resource_variable_ops.ResourceVariable(a_2_by_2)
-      with self.assertRaisesRegex(TypeError,
-                                  "Expected list for 'values' argument"):
-        _ = array_ops.stack(m, axis=1)
+      with self.assertRaisesRegex(
+          TypeError,
+          r"Argument `values` must be a sequence of Tensor objects",
+      ):
+        _ = array_ops_stack.stack(m, axis=1)
 
   def testGraphResourceVariableRaisesFallback(self):
     with ops.Graph().as_default():
@@ -362,6 +363,7 @@ class Tests(test.TestCase):
     ctx = context.context()
     ctx.ensure_initialized()
 
+    full_exception_text = ""
     try:
       math_ops.mat_mul([[1., 1.] * 2], [[1., 1.] * 3])
     except errors.InvalidArgumentError:
@@ -383,6 +385,39 @@ class Tests(test.TestCase):
     pywrap_tfe.TFE_Py_FastPathExecute(ctx, "RandomUniformInt", None,
                                       shape, minval, maxval,
                                       "seed", seed)
+
+  def testTapeAndWatcherTypeCheckAndRefcount(self):
+    dummy_obj = 100
+    with self.assertRaises(TypeError):
+      pywrap_tfe.TFE_Py_TapeWatchVariable(dummy_obj, None)
+    with self.assertRaises(TypeError):
+      pywrap_tfe.TFE_Py_TapeWatchedVariables(dummy_obj)
+    with self.assertRaises(TypeError):
+      pywrap_tfe.TFE_Py_VariableWatcherRemove(dummy_obj)
+    with self.assertRaises(TypeError):
+      pywrap_tfe.TFE_Py_VariableWatcherWatchedVariables(dummy_obj)
+    with self.assertRaises(TypeError):
+      pywrap_tfe.TFE_Py_ForwardAccumulatorSetAdd(dummy_obj)
+    with self.assertRaises(TypeError):
+      pywrap_tfe.TFE_Py_ForwardAccumulatorSetRemove(dummy_obj)
+    with self.assertRaises(TypeError):
+      pywrap_tfe.TFE_Py_ForwardAccumulatorWatch(dummy_obj, None, None)
+    with self.assertRaises(TypeError):
+      pywrap_tfe.TFE_Py_ForwardAccumulatorJVP(dummy_obj, None)
+
+    # Double remove on a tape, watcher, or accumulator should not double decref
+    t = pywrap_tfe.TFE_Py_TapeSetNew(False, False)
+    pywrap_tfe.TFE_Py_TapeSetRemove(t)
+    pywrap_tfe.TFE_Py_TapeSetRemove(t)
+
+    vw = pywrap_tfe.TFE_Py_VariableWatcherNew()
+    pywrap_tfe.TFE_Py_VariableWatcherRemove(vw)
+    pywrap_tfe.TFE_Py_VariableWatcherRemove(vw)
+
+    acc = pywrap_tfe.TFE_Py_ForwardAccumulatorNew(False)
+    pywrap_tfe.TFE_Py_ForwardAccumulatorSetAdd(acc)
+    pywrap_tfe.TFE_Py_ForwardAccumulatorSetRemove(acc)
+    pywrap_tfe.TFE_Py_ForwardAccumulatorSetRemove(acc)
 
 
 if __name__ == "__main__":

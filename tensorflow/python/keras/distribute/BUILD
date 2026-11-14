@@ -1,14 +1,31 @@
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
 # Description:
 #   keras/distribute package is intended to serve as the centralized place for things
 #   related to dist-strat used by Keras..
 
+load("@xla//third_party/rules_python/python:defs.bzl", "py_library")
+
 package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
     # TODO(scottzhu): Remove this deps when distribute test are converted to integration test.
     default_visibility = [
         "//tensorflow:internal",
         "//tensorflow/python/distribute:__pkg__",
         "//tensorflow/python/keras:__subpackages__",
-        "//tensorflow/tools/pip_package:__pkg__",
     ],
     licenses = ["notice"],
 )
@@ -27,10 +44,9 @@ py_library(
         "distributed_training_utils_v1.py",
     ],
     srcs_version = "PY3",
+    strict_deps = False,
     deps = [
         ":distribute_coordinator_utils",
-        ":sidecar_evaluator",
-        "//tensorflow/python:client_testlib",
         "//tensorflow/python/data",
         "//tensorflow/python/distribute:distribute_coordinator",
         "//tensorflow/python/distribute:distribute_lib",
@@ -50,16 +66,11 @@ py_library(
         "//tensorflow/python/keras/mixed_precision:policy",
         "//tensorflow/python/keras/utils:engine_utils",
         "//tensorflow/python/keras/utils:mode_keys",
-        "//tensorflow/python/training/tracking:data_structures",
+        "//tensorflow/python/ops:variable_v1",
+        "//tensorflow/python/platform:client_testlib",
+        "//tensorflow/python/platform:tf_logging",
+        "//tensorflow/python/trackable:data_structures",
         "//tensorflow/tools/docs:doc_controls",
-    ],
-)
-
-py_library(
-    name = "distribute_test_lib_pip",
-    srcs_version = "PY3",
-    deps = [
-        ":multi_worker_testing_utils",
     ],
 )
 
@@ -67,11 +78,12 @@ py_library(
     name = "optimizer_combinations",
     srcs = ["optimizer_combinations.py"],
     srcs_version = "PY3",
+    strict_deps = False,
     deps = [
-        "//tensorflow/python:training",
         "//tensorflow/python/distribute:combinations",
         "//tensorflow/python/distribute:strategy_combinations",
         "//tensorflow/python/keras/optimizer_v2",
+        "//tensorflow/python/training",
     ],
 )
 
@@ -81,45 +93,18 @@ py_library(
         "worker_training_state.py",
     ],
     srcs_version = "PY3",
+    strict_deps = False,
     deps = [
         ":distributed_file_utils",
-        "//tensorflow/python:constant_op",
-        "//tensorflow/python:dtypes",
-        "//tensorflow/python:lib",
-        "//tensorflow/python:variables",
+        "//tensorflow/python/checkpoint",
+        "//tensorflow/python/framework:constant_op",
+        "//tensorflow/python/framework:dtypes",
+        "//tensorflow/python/framework:errors",
         "//tensorflow/python/keras:backend",
         "//tensorflow/python/keras/utils:mode_keys",
+        "//tensorflow/python/lib/io:file_io",
+        "//tensorflow/python/ops:variables",
         "//tensorflow/python/training:checkpoint_management",
-        "//tensorflow/python/training/tracking:util",
-    ],
-)
-
-py_library(
-    name = "multi_worker_testing_utils",
-    srcs = [
-        "multi_worker_testing_utils.py",
-    ],
-    srcs_version = "PY3",
-    deps = [
-        "//tensorflow/python:array_ops",
-        "//tensorflow/python:framework_ops",
-        "//tensorflow/python:random_ops",
-        "//tensorflow/python/data/ops:dataset_ops",
-        "//tensorflow/python/keras",
-        "//tensorflow/python/keras/optimizer_v2",
-    ],
-)
-
-py_library(
-    name = "tpu_strategy_test_utils",
-    srcs = ["tpu_strategy_test_utils.py"],
-    srcs_version = "PY3",
-    deps = [
-        "//tensorflow/python:platform",
-        "//tensorflow/python/distribute:tpu_strategy",
-        "//tensorflow/python/distribute/cluster_resolver:tpu_cluster_resolver_py",
-        "//tensorflow/python/eager:remote",
-        "//tensorflow/python/tpu:tpu_strategy_util",
     ],
 )
 
@@ -129,34 +114,10 @@ py_library(
         "distributed_file_utils.py",
     ],
     srcs_version = "PY3",
+    strict_deps = False,
     deps = [
-        "//tensorflow/python:lib",
         "//tensorflow/python/distribute:distribute_lib",
-    ],
-)
-
-py_library(
-    name = "sidecar_evaluator",
-    srcs = ["sidecar_evaluator.py"],
-    srcs_version = "PY3",
-    deps = [
-        "//tensorflow/python:dtypes",
-        "//tensorflow/python:errors",
-        "//tensorflow/python:summary_ops_v2",
-        "//tensorflow/python:training_lib",
-        "//tensorflow/python:util",
-        "//tensorflow/python:variables",
-        "//tensorflow/python/training/tracking:util",
-        "//tensorflow/python/util:tf_export",
-    ],
-)
-
-py_library(
-    name = "strategy_combinations",
-    srcs = ["strategy_combinations.py"],
-    srcs_version = "PY3",
-    deps = [
-        "//tensorflow/python/distribute:strategy_combinations",
+        "//tensorflow/python/lib/io:file_io",
     ],
 )
 
@@ -166,12 +127,13 @@ py_library(
         "distribute_coordinator_utils.py",
     ],
     srcs_version = "PY3",
+    strict_deps = False,
     deps = [
         "//tensorflow/core:protos_all_py",
-        "//tensorflow/python:platform",
-        "//tensorflow/python:session",
-        "//tensorflow/python:training_server_lib",
+        "//tensorflow/python/client:session",
         "//tensorflow/python/distribute:distribute_coordinator_context",
         "//tensorflow/python/distribute:multi_worker_util",
+        "//tensorflow/python/platform:tf_logging",
+        "//tensorflow/python/training:server_lib",
     ],
 )

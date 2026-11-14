@@ -1,4 +1,3 @@
-# Lint as python3
 # Copyright 2018 The TensorFlow Authors. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -37,12 +36,11 @@ import zipfile
 
 import numpy as np
 
-from tensorflow.python.framework import ops
+from tensorflow.python.framework import tensor
 from six.moves.urllib.request import urlopen
 from tensorflow.python.keras.utils import tf_inspect
 from tensorflow.python.keras.utils.generic_utils import Progbar
 from tensorflow.python.keras.utils.io_utils import path_to_string
-from tensorflow.python.util.tf_export import keras_export
 
 # Required to support google internal urlretrieve
 if sys.version_info[0] == 2:
@@ -90,7 +88,7 @@ else:
 def is_generator_or_sequence(x):
   """Check if `x` is a Keras generator type."""
   builtin_iterators = (str, list, tuple, dict, set, frozenset)
-  if isinstance(x, (ops.Tensor, np.ndarray) + builtin_iterators):
+  if isinstance(x, (tensor.Tensor, np.ndarray) + builtin_iterators):
     return False
   return (tf_inspect.isgenerator(x) or
           isinstance(x, Sequence) or
@@ -134,7 +132,23 @@ def _extract_archive(file_path, path='.', archive_format='auto'):
     if is_match_fn(file_path):
       with open_fn(file_path) as archive:
         try:
-          archive.extractall(path)
+          if archive_type == 'tar':
+            members = []
+            abs_path = os.path.realpath(path)
+            for member in archive.getmembers():
+              abs_target = os.path.realpath(os.path.join(path, member.name))
+              if os.path.commonpath([abs_path, abs_target]) == abs_path:
+                members.append(member)
+            archive.extractall(path, members=members)
+          else:
+            # zip
+            members = []
+            abs_path = os.path.realpath(path)
+            for member in archive.infolist():
+              abs_target = os.path.realpath(os.path.join(path, member.filename))
+              if os.path.commonpath([abs_path, abs_target]) == abs_path:
+                members.append(member)
+            archive.extractall(path, members=members)
         except (tarfile.TarError, RuntimeError, KeyboardInterrupt):
           if os.path.exists(path):
             if os.path.isfile(path):
@@ -146,7 +160,6 @@ def _extract_archive(file_path, path='.', archive_format='auto'):
   return False
 
 
-@keras_export('keras.utils.get_file')
 def get_file(fname,
              origin,
              untar=False,
@@ -390,7 +403,6 @@ def threadsafe_generator(f):
   return g
 
 
-@keras_export('keras.utils.Sequence')
 class Sequence(object):
   """Base object for fitting to a sequence of data, such as a dataset.
 
@@ -461,7 +473,6 @@ class Sequence(object):
   def on_epoch_end(self):
     """Method called at the end of every epoch.
     """
-    pass
 
   def __iter__(self):
     """Create a generator that iterate over the Sequence."""
@@ -494,7 +505,6 @@ _SEQUENCE_COUNTER = None
 # need to be able to check on the status of Pools that we create.
 _DATA_POOLS = weakref.WeakSet()
 _WORKER_ID_QUEUE = None  # Only created if needed.
-_WORKER_IDS = set()
 _FORCE_THREADPOOL = False
 _FORCE_THREADPOOL_LOCK = threading.RLock()
 
@@ -548,7 +558,6 @@ def get_index(uid, i):
   return _SHARED_SEQUENCES[uid][i]
 
 
-@keras_export('keras.utils.SequenceEnqueuer')
 class SequenceEnqueuer(object):
   """Base class to enqueue inputs.
 
@@ -619,8 +628,7 @@ class SequenceEnqueuer(object):
     self.workers = workers
     self.queue = queue.Queue(max_queue_size)
     self.stop_signal = threading.Event()
-    self.run_thread = threading.Thread(target=self._run)
-    self.run_thread.daemon = True
+    self.run_thread = threading.Thread(target=self._run, daemon=True)
     self.run_thread.start()
 
   def _send_sequence(self):
@@ -677,7 +685,6 @@ class SequenceEnqueuer(object):
     raise NotImplementedError
 
 
-@keras_export('keras.utils.OrderedEnqueuer')
 class OrderedEnqueuer(SequenceEnqueuer):
   """Builds a Enqueuer from a Sequence.
 
@@ -810,7 +817,6 @@ def next_sample(uid):
   return next(_SHARED_SEQUENCES[uid])
 
 
-@keras_export('keras.utils.GeneratorEnqueuer')
 class GeneratorEnqueuer(SequenceEnqueuer):
   """Builds a queue out of a data generator.
 

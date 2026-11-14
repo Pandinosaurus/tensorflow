@@ -1,0 +1,148 @@
+/* Copyright 2019 The TensorFlow Authors. All Rights Reserved.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+==============================================================================*/
+#ifndef TENSORFLOW_TSL_PROFILER_LIB_SCOPED_ANNOTATION_H_
+#define TENSORFLOW_TSL_PROFILER_LIB_SCOPED_ANNOTATION_H_
+
+#include <stddef.h>
+
+#include <atomic>
+#include <string>
+#include <string_view>
+#include <utility>
+
+#include "absl/strings/string_view.h"
+#include "xla/tsl/platform/macros.h"
+#include "tsl/platform/platform.h"  // IWYU pragma: keep
+#include "tsl/profiler/lib/nvtx_utils.h"
+
+#if !defined(IS_MOBILE_PLATFORM)
+#include "xla/tsl/profiler/backends/cpu/annotation_stack.h"
+#endif
+
+namespace tsl::profiler {
+
+// Adds an annotation to all activities through the currently registered
+// TraceCollector until PopAnnotation() is called.
+template <typename Generator>
+void PushAnnotation(const Generator& generator) {
+  auto domain = DefaultProfilerDomain();
+  const bool push_nvtx = TF_PREDICT_FALSE(domain != nullptr);
+#if !defined(IS_MOBILE_PLATFORM)
+  const bool push_stack = TF_PREDICT_FALSE(AnnotationStack::IsEnabled());
+#else
+  constexpr bool push_stack = false;
+#endif
+  if (TF_PREDICT_FALSE(push_nvtx || push_stack)) {
+    // Now CUPTI supports multiple subscribers we may need both sets of
+    // annotations at the same time.
+    decltype(auto) annotation = generator();
+    if (push_nvtx) {
+      RangePush(domain, annotation);
+    }
+#if !defined(IS_MOBILE_PLATFORM)
+    if (push_stack) {
+      AnnotationStack::PushAnnotation(
+          static_cast<absl::string_view>(annotation));
+    }
+#endif
+  }
+}
+
+template <typename AnnotationGenerator, typename RangeGenerator>
+void PushAnnotation(const AnnotationGenerator& annotation_generator,
+                    const RangeGenerator& range_generator) {
+  if (auto domain = DefaultProfilerDomain();
+      TF_PREDICT_FALSE(domain != nullptr)) {
+    RangePush(domain, range_generator());
+  }
+
+#if !defined(IS_MOBILE_PLATFORM)
+  if (TF_PREDICT_FALSE(AnnotationStack::IsEnabled())) {
+    AnnotationStack::PushAnnotation(
+        static_cast<absl::string_view>(annotation_generator()));
+  }
+#endif
+}
+
+inline void PushAnnotation(const char* name) {
+  PushAnnotation([&] { return name; });
+}
+inline void PushAnnotation(const std::string& name) {
+  PushAnnotation([&] { return name; });
+}
+
+inline void PopAnnotation() {
+  // TODO(b/137971921): without this memory fence, two presubmit tests will
+  // fail probably due to compiler in that presubmit config.
+  std::atomic_thread_fence(std::memory_order_acquire);
+
+#if !defined(IS_MOBILE_PLATFORM)
+  if (TF_PREDICT_FALSE(AnnotationStack::IsEnabled())) {
+    AnnotationStack::PopAnnotation();
+  }
+#endif
+
+  if (auto domain = DefaultProfilerDomain();
+      TF_PREDICT_FALSE(domain != nullptr)) {
+    RangePop(domain);
+  }
+}
+
+// Adds an annotation to all activities for the duration of the instance
+// lifetime through the currently registered TraceCollector.
+//
+// Usage: {
+//          ScopedAnnotation annotation("my kernels");
+//          Kernel1<<<x,y>>>;
+//          LaunchKernel2(); // Launches a CUDA kernel.
+//        }
+// This will add 'my kernels' to both kernels in the profiler UI
+class ScopedAnnotation {
+ public:
+  template <typename Generator>
+  explicit ScopedAnnotation(Generator&& generator) {
+    PushAnnotation(std::forward<Generator>(generator));
+  }
+
+  // The annotation generator provides the string pushed to the annotation
+  // stack. The range generator provides the object pushed to the profiler
+  // domain's range stack, which can carry a compact registered name and a
+  // structured payload.
+  template <typename AnnotationGenerator, typename RangeGenerator>
+  explicit ScopedAnnotation(AnnotationGenerator&& annotation_generator,
+                            RangeGenerator&& range_generator) {
+    PushAnnotation(std::forward<AnnotationGenerator>(annotation_generator),
+                   std::forward<RangeGenerator>(range_generator));
+  }
+
+  // Pops the annotation and/or range pushed by the constructor.
+  ~ScopedAnnotation() { PopAnnotation(); }
+
+  static bool IsEnabled() {
+#if !defined(IS_MOBILE_PLATFORM)
+    return AnnotationStack::IsEnabled();
+#else
+    return false;
+#endif
+  }
+
+ private:
+  ScopedAnnotation(const ScopedAnnotation&) = delete;
+  ScopedAnnotation& operator=(const ScopedAnnotation&) = delete;
+};
+
+}  // namespace tsl::profiler
+
+#endif  // TENSORFLOW_TSL_PROFILER_LIB_SCOPED_ANNOTATION_H_

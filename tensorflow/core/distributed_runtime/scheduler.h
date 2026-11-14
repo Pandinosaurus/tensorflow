@@ -32,7 +32,7 @@ class SlackAnalysis {
  public:
   SlackAnalysis(const Graph* g, const CostModel* cost_model);
 
-  ~SlackAnalysis() {}
+  ~SlackAnalysis() = default;
 
   // Compute the earliest possible start time for each node, based on
   // a given cost model. 'asap_time' is indexed by node id.
@@ -49,7 +49,8 @@ class SlackAnalysis {
   const Graph* graph_;
   const CostModel* cost_model_;
 
-  TF_DISALLOW_COPY_AND_ASSIGN(SlackAnalysis);
+  SlackAnalysis(const SlackAnalysis&) = delete;
+  void operator=(const SlackAnalysis&) = delete;
 };
 
 class GreedyScheduler {
@@ -85,9 +86,10 @@ class GreedyScheduler {
   const CostModel* cost_model_;
   const Graph* graph_;
   std::vector<int64_t>* priority_;
-  std::unordered_map<string, Sim*> device_states_;
+  std::unordered_map<std::string, Sim*> device_states_;
 
-  TF_DISALLOW_COPY_AND_ASSIGN(GreedyScheduler);
+  GreedyScheduler(const GreedyScheduler&) = delete;
+  void operator=(const GreedyScheduler&) = delete;
 };
 
 class PriorityScheduler {
@@ -95,7 +97,7 @@ class PriorityScheduler {
   PriorityScheduler(const DeviceSet* devices, const CostModel* cost_model,
                     const Graph* g);
 
-  ~PriorityScheduler() {}
+  ~PriorityScheduler() = default;
 
   // Computes a schedule of the ideal start time for each node.
   // Returns the makespan (the total running time).
@@ -110,7 +112,8 @@ class PriorityScheduler {
   const CostModel* cost_model_;
   const Graph* graph_;
 
-  TF_DISALLOW_COPY_AND_ASSIGN(PriorityScheduler);
+  PriorityScheduler(const PriorityScheduler&) = delete;
+  void operator=(const PriorityScheduler&) = delete;
 };
 
 }  // namespace tensorflow

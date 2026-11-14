@@ -1,8 +1,21 @@
+// Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+// ==============================================================================
+
 syntax = "proto3";
 
 package mlir.quant;
-
-option cc_enable_arenas = true;
 
 // Represents the quantization parameters for a list of named tensors.
 message QuantizationInfo {
@@ -34,13 +47,16 @@ message QuantizationInfo {
 
   // The metadata defines the target properties.
   message Metadata {
-    //  Bit number of fixed-point data the target kernel supports.
+    // Bit number of fixed-point data the target kernel supports.
     int32 num_bits = 1;
-    //  The quantized axis index if it is per-axis quantization.
+
+    // The quantized axis index if it is per-axis quantization.
     int32 quantize_axis = 2;
+
     // The minimum allowed value of the fixed-point data range.
     // This can also be used to derive the sign of storage type.
     int32 range_min = 3;
+
     // The minimum allowed value of the fixed-point data range.
     int32 range_max = 4;
   }

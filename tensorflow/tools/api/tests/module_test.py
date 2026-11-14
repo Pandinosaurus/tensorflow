@@ -15,13 +15,9 @@
 # ==============================================================================
 """Smoke tests for tensorflow module."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
+import importlib.util
 
-import pkgutil
-
-import tensorflow as tf
+import tensorflow as tf  # pylint: disable=g-direct-tensorflow-import
 
 from tensorflow.python import tf2
 from tensorflow.python.platform import test
@@ -30,7 +26,7 @@ from tensorflow.python.platform import test
 class ModuleTest(test.TestCase):
 
   def testCanLoadWithPkgutil(self):
-    out = pkgutil.find_loader('tensorflow')
+    out = importlib.util.find_spec('tensorflow')
     self.assertIsNotNone(out)
 
   def testDocString(self):

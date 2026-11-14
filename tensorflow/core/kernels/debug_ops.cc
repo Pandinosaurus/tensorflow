@@ -46,6 +46,12 @@ REGISTER_KERNEL_BUILDER(Name("DebugIdentity")
                             .HostMemory("output"),
                         DebugIdentityOp);
 
+REGISTER_KERNEL_BUILDER(Name("DebugIdentityV3")
+                            .Device(DEVICE_DEFAULT)
+                            .HostMemory("input")
+                            .HostMemory("output"),
+                        DebugIdentityV3Op);
+
 // Register debug NaN-counter (non-ref and ref) ops.
 #define REGISTER_DEBUG_NAN_COUNT(type)                                    \
   REGISTER_KERNEL_BUILDER(                                                \
@@ -138,14 +144,14 @@ TF_CALL_bool(REGISTER_DEBUG_NUMERIC_SUMMARY_V2_DOUBLE);
 REGISTER_DEBUG_NUMERIC_SUMMARY_V2_GPU(Eigen::half, float);
 REGISTER_DEBUG_NUMERIC_SUMMARY_V2_GPU(float, float);
 REGISTER_DEBUG_NUMERIC_SUMMARY_V2_GPU(double, float);
-REGISTER_DEBUG_NUMERIC_SUMMARY_V2_GPU(int16, float);
-REGISTER_DEBUG_NUMERIC_SUMMARY_V2_GPU(int32, float);
+REGISTER_DEBUG_NUMERIC_SUMMARY_V2_GPU(int16_t, float);
+REGISTER_DEBUG_NUMERIC_SUMMARY_V2_GPU(int32_t, float);
 
 REGISTER_DEBUG_NUMERIC_SUMMARY_V2_GPU(Eigen::half, double);
 REGISTER_DEBUG_NUMERIC_SUMMARY_V2_GPU(float, double);
 REGISTER_DEBUG_NUMERIC_SUMMARY_V2_GPU(double, double);
-REGISTER_DEBUG_NUMERIC_SUMMARY_V2_GPU(int16, double);
-REGISTER_DEBUG_NUMERIC_SUMMARY_V2_GPU(int32, double);
+REGISTER_DEBUG_NUMERIC_SUMMARY_V2_GPU(int16_t, double);
+REGISTER_DEBUG_NUMERIC_SUMMARY_V2_GPU(int32_t, double);
 
 #endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 

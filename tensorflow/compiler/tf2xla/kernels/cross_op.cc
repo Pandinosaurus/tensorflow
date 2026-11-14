@@ -13,10 +13,15 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include <cstdint>
+#include <vector>
+
+#include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
 #include "tensorflow/compiler/tf2xla/xla_helpers.h"
 #include "tensorflow/compiler/tf2xla/xla_op_kernel.h"
 #include "tensorflow/compiler/tf2xla/xla_op_registry.h"
-#include "tensorflow/compiler/xla/client/xla_builder.h"
+#include "xla/hlo/builder/xla_builder.h"
 
 namespace tensorflow {
 namespace {
@@ -28,17 +33,18 @@ class CrossOp : public XlaOpKernel {
   void Compile(XlaOpKernelContext* ctx) override {
     TensorShape in0_shape = ctx->InputShape(0);
     TensorShape in1_shape = ctx->InputShape(1);
-    OP_REQUIRES(ctx, in0_shape == in1_shape,
-                errors::InvalidArgument("Both inputs must be of same shape: ",
-                                        in0_shape.DebugString(), " vs. ",
-                                        in1_shape.DebugString()));
+    OP_REQUIRES(
+        ctx, in0_shape == in1_shape,
+        absl::InvalidArgumentError(absl::StrCat(
+            "Both inputs must be of same shape: ", in0_shape.DebugString(),
+            " vs. ", in1_shape.DebugString())));
     OP_REQUIRES(ctx, in0_shape.dims() >= 1,
-                errors::InvalidArgument("Input must be at least 1D",
-                                        in0_shape.DebugString()));
+                absl::InvalidArgumentError(absl::StrCat(
+                    "Input must be at least 1D", in0_shape.DebugString())));
 
     auto inner_dim = in0_shape.dim_size(in0_shape.dims() - 1);
     OP_REQUIRES(ctx, inner_dim == 3,
-                errors::FailedPrecondition(
+                absl::FailedPreconditionError(
                     "Cross-products are only defined for 3-element vectors."));
 
     // in0 is a [...,X,Y,Z,3]
@@ -49,6 +55,8 @@ class CrossOp : public XlaOpKernel {
 
     std::vector<int64_t> starts(in0_shape.dims(), 0);
     std::vector<int64_t> limits;
+    const auto& dim_sizes = in0_shape.dim_sizes();
+    limits.reserve(dim_sizes.size());
     for (auto dim_size : in0_shape.dim_sizes()) {
       limits.push_back(dim_size);
     }
@@ -79,7 +87,8 @@ class CrossOp : public XlaOpKernel {
   }
 
  private:
-  TF_DISALLOW_COPY_AND_ASSIGN(CrossOp);
+  CrossOp(const CrossOp&) = delete;
+  void operator=(const CrossOp&) = delete;
 };
 
 REGISTER_XLA_OP(Name("Cross"), CrossOp);

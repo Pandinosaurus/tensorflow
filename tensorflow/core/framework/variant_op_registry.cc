@@ -25,6 +25,21 @@ limitations under the License.
 #include "tensorflow/core/public/version.h"
 
 namespace tensorflow {
+namespace {
+static thread_local int g_variant_decode_depth = 0;
+
+// Aligns with the protobuf default recursion limit (100) and XLA's
+// kMaxShapeDepth (100). Legitimate DT_VARIANT nesting rarely exceeds
+// 5–10 levels, so 100 provides generous headroom while capping stack
+// consumption well below platform limits.
+static constexpr int kMaxVariantDecodeDepth = 100;
+
+struct VariantDecodeDepthGuard {
+  explicit VariantDecodeDepthGuard(int* depth) : depth_(depth) { ++(*depth_); }
+  ~VariantDecodeDepthGuard() { --(*depth_); }
+  int* depth_;
+};
+}  // namespace
 
 const char* VariantUnaryOpToString(VariantUnaryOp op) {
   switch (op) {
@@ -46,9 +61,10 @@ const char* VariantBinaryOpToString(VariantBinaryOp op) {
   }
 }
 
-std::unordered_set<string>* UnaryVariantOpRegistry::PersistentStringStorage() {
-  static std::unordered_set<string>* string_storage =
-      new std::unordered_set<string>();
+std::unordered_set<std::string>*
+UnaryVariantOpRegistry::PersistentStringStorage() {
+  static std::unordered_set<std::string>* string_storage =
+      new std::unordered_set<std::string>();
   return string_storage;
 }
 
@@ -63,29 +79,40 @@ UnaryVariantOpRegistry* UnaryVariantOpRegistryGlobal() {
 }
 
 UnaryVariantOpRegistry::VariantDecodeFn* UnaryVariantOpRegistry::GetDecodeFn(
-    StringPiece type_name) {
+    absl::string_view type_name) {
   auto found = decode_fns.find(type_name);
   if (found == decode_fns.end()) return nullptr;
   return &found->second;
 }
 
 void UnaryVariantOpRegistry::RegisterDecodeFn(
-    const string& type_name, const VariantDecodeFn& decode_fn) {
+    const std::string& type_name, const VariantDecodeFn& decode_fn) {
   CHECK(!type_name.empty()) << "Need a valid name for UnaryVariantDecode";
   VariantDecodeFn* existing = GetDecodeFn(type_name);
   CHECK_EQ(existing, nullptr)
       << "Unary VariantDecodeFn for type_name: " << type_name
       << " already registered";
-  decode_fns.insert(std::pair<StringPiece, VariantDecodeFn>(
+  decode_fns.insert(std::pair<absl::string_view, VariantDecodeFn>(
       GetPersistentStringPiece(type_name), decode_fn));
 }
 
 bool DecodeUnaryVariant(Variant* variant) {
   CHECK_NOTNULL(variant);
+
+  VariantDecodeDepthGuard guard(&g_variant_decode_depth);
+  if (g_variant_decode_depth >= kMaxVariantDecodeDepth) {
+    LOG(ERROR) << "DecodeUnaryVariant: Maximum recursion depth ("
+               << kMaxVariantDecodeDepth
+               << ") exceeded for type: " << variant->TypeName();
+    variant->clear();
+    return false;
+  }
+
   if (variant->TypeName().empty()) {
     VariantTensorDataProto* t = variant->get<VariantTensorDataProto>();
     if (t == nullptr || !t->metadata().empty() || !t->tensors().empty()) {
       // Malformed variant.
+      variant->clear();
       return false;
     } else {
       // Serialization of an empty Variant.
@@ -93,19 +120,25 @@ bool DecodeUnaryVariant(Variant* variant) {
       return true;
     }
   }
+
   UnaryVariantOpRegistry::VariantDecodeFn* decode_fn =
       UnaryVariantOpRegistry::Global()->GetDecodeFn(variant->TypeName());
   if (decode_fn == nullptr) {
     return false;
   }
-  const string type_name = variant->TypeName();
+  const std::string type_name = variant->TypeName();
   bool decoded = (*decode_fn)(variant);
-  if (!decoded) return false;
+
+  if (!decoded) {
+    variant->clear();
+    return false;
+  }
   if (variant->TypeName() != type_name) {
     LOG(ERROR) << "DecodeUnaryVariant: Variant type_name before decoding was: "
                << type_name
                << " but after decoding was: " << variant->TypeName()
                << ".  Treating this as a failure.";
+    variant->clear();
     return false;
   }
   return true;
@@ -125,7 +158,7 @@ REGISTER_VARIANT_DECODE_TYPE(double);
 
 #undef REGISTER_VARIANT_DECODE_TYPE
 
-Status VariantDeviceCopy(
+absl::Status VariantDeviceCopy(
     const VariantDeviceCopyDirection direction, const Variant& from,
     Variant* to,
     const UnaryVariantOpRegistry::AsyncTensorDeviceCopyFn& copy_fn) {
@@ -133,23 +166,23 @@ Status VariantDeviceCopy(
       UnaryVariantOpRegistry::Global()->GetDeviceCopyFn(direction,
                                                         from.TypeId());
   if (device_copy_fn == nullptr) {
-    return errors::Internal(
+    return absl::InternalError(absl::StrCat(
         "No unary variant device copy function found for direction: ",
         direction, " and Variant type_index: ",
-        port::MaybeAbiDemangle(from.TypeId().name()));
+        port::MaybeAbiDemangle(from.TypeId().name())));
   }
   return (*device_copy_fn)(from, to, copy_fn);
 }
 
 namespace {
 template <typename T>
-Status DeviceCopyPrimitiveType(
+absl::Status DeviceCopyPrimitiveType(
     const T& in, T* out,
     const UnaryVariantOpRegistry::AsyncTensorDeviceCopyFn& copier) {
   // Dummy copy, we don't actually bother copying to the device and back for
   // testing.
   *out = in;
-  return Status::OK();
+  return absl::OkStatus();
 }
 }  // namespace
 
@@ -174,10 +207,10 @@ REGISTER_VARIANT_DEVICE_COPY_TYPE(bool);
 
 namespace {
 template <typename T>
-Status ZerosLikeVariantPrimitiveType(OpKernelContext* ctx, const T& t,
-                                     T* t_out) {
+absl::Status ZerosLikeVariantPrimitiveType(OpKernelContext* ctx, const T& t,
+                                           T* t_out) {
   *t_out = T(0);
-  return Status::OK();
+  return absl::OkStatus();
 }
 }  // namespace
 
@@ -196,10 +229,10 @@ REGISTER_VARIANT_ZEROS_LIKE_TYPE(bool);
 
 namespace {
 template <typename T>
-Status AddVariantPrimitiveType(OpKernelContext* ctx, const T& a, const T& b,
-                               T* out) {
+absl::Status AddVariantPrimitiveType(OpKernelContext* ctx, const T& a,
+                                     const T& b, T* out) {
   *out = a + b;
-  return Status::OK();
+  return absl::OkStatus();
 }
 }  // namespace
 

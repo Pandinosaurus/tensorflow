@@ -1,3 +1,17 @@
+// Copyright 2026 Google Inc. All Rights Reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+// ==============================================================================
 // RUN: tf-opt %s -mlir-print-debuginfo -mlir-print-local-scope | tf-opt -mlir-print-debuginfo -mlir-print-op-generic -mlir-print-local-scope | FileCheck %s
 
 // This file should be written in the generic form with debug locations.
@@ -17,26 +31,26 @@
 // When parsing it back, we should recover all 3 locations (the
 // tf_executor.island, tf.Identity, and tf_executor.yield).
 
-// CHECK-LABEL: "builtin.func"
-// CHECK:    "tf_executor.graph"() ( {
-// CHECK-NEXT:      "tf_executor.island"() ( {
+// CHECK-LABEL: "func.func"
+// CHECK: sym_name = "island_one_op_all_locs_same"
+// CHECK:    "tf_executor.graph"() ({
+// CHECK-NEXT:      "tf_executor.island"() ({
 // CHECK-NEXT:        "tf.Identity"(%{{.*}}) : (tensor<f32>) -> tensor<f32> loc("identity@some_function")
 // CHECK-NEXT:        "tf_executor.yield"(%{{.*}}) : (tensor<f32>) -> () loc("identity@some_function")
 // CHECK-NEXT:      }) : () -> (tensor<f32>, !tf_executor.control) loc("identity@some_function")
 // CHECK-NEXT:      "tf_executor.fetch"(%{{.*}}) : (tensor<f32>) -> () loc(unknown)
 // CHECK-NEXT:    }) : () -> tensor<f32> loc(unknown)
-// CHECK-NEXT:    "std.return"(%{{.*}}) : (tensor<f32>) -> () loc(unknown)
-// CHECK-NEXT: sym_name = "island_one_op_all_locs_same"
+// CHECK-NEXT:    "func.return"(%{{.*}}) : (tensor<f32>) -> () loc(unknown)
 
-func @island_one_op_all_locs_same(%arg0: tensor<f32>) -> tensor<f32> {
-  %0 = "tf_executor.graph"() ( {
-    %1:2 = "tf_executor.island"() ( {
+func.func @island_one_op_all_locs_same(%arg0: tensor<f32>) -> tensor<f32> {
+  %0 = "tf_executor.graph"() ({
+    %1:2 = "tf_executor.island"() ({
       %2 = "tf.Identity"(%arg0) : (tensor<f32>) -> tensor<f32> loc("identity@some_function")
       "tf_executor.yield"(%2) : (tensor<f32>) -> () loc("identity@some_function")
     }) : () -> (tensor<f32>, !tf_executor.control) loc("identity@some_function")
     "tf_executor.fetch"(%1#0) : (tensor<f32>) -> () loc(unknown)
   }) : () -> tensor<f32> loc(unknown)
-  "std.return"(%0) : (tensor<f32>) -> () loc(unknown)
+  "func.return"(%0) : (tensor<f32>) -> () loc(unknown)
 } loc(unknown)
 
 // This test cases exercises our handling of the "tf_executor.island wraps"
@@ -44,24 +58,24 @@ func @island_one_op_all_locs_same(%arg0: tensor<f32>) -> tensor<f32> {
 // it is incorrect to use that syntax if the island, wrapped op, and yield
 // don't have identical locations.
 
-// CHECK-LABEL: "builtin.func"
-// CHECK:    "tf_executor.graph"() ( {
-// CHECK-NEXT:      "tf_executor.island"() ( {
+// CHECK-LABEL: "func.func"
+// CHECK: sym_name = "island_one_op_all_locs_NOT_same"
+// CHECK:    "tf_executor.graph"() ({
+// CHECK-NEXT:      "tf_executor.island"() ({
 // CHECK-NEXT:        "tf.Identity"(%{{.*}}) : (tensor<f32>) -> tensor<f32> loc("identity@some_function")
 // CHECK-NEXT:        "tf_executor.yield"(%{{.*}}) : (tensor<f32>) -> () loc("identity@some_function")
 // CHECK-NEXT:      }) : () -> (tensor<f32>, !tf_executor.control) loc("NOT_identity@some_function")
 // CHECK-NEXT:      "tf_executor.fetch"(%{{.*}}) : (tensor<f32>) -> () loc(unknown)
 // CHECK-NEXT:    }) : () -> tensor<f32> loc(unknown)
-// CHECK-NEXT:    "std.return"(%{{.*}}) : (tensor<f32>) -> () loc(unknown)
-// CHECK-NEXT: sym_name = "island_one_op_all_locs_NOT_same"
+// CHECK-NEXT:    "func.return"(%{{.*}}) : (tensor<f32>) -> () loc(unknown)
 
-func @island_one_op_all_locs_NOT_same(%arg0: tensor<f32>) -> tensor<f32> {
-  %0 = "tf_executor.graph"() ( {
-    %1:2 = "tf_executor.island"() ( {
+func.func @island_one_op_all_locs_NOT_same(%arg0: tensor<f32>) -> tensor<f32> {
+  %0 = "tf_executor.graph"() ({
+    %1:2 = "tf_executor.island"() ({
       %2 = "tf.Identity"(%arg0) : (tensor<f32>) -> tensor<f32> loc("identity@some_function")
       "tf_executor.yield"(%2) : (tensor<f32>) -> () loc("identity@some_function")
     }) : () -> (tensor<f32>, !tf_executor.control) loc("NOT_identity@some_function")
     "tf_executor.fetch"(%1#0) : (tensor<f32>) -> () loc(unknown)
   }) : () -> tensor<f32> loc(unknown)
-  "std.return"(%0) : (tensor<f32>) -> () loc(unknown)
+  "func.return"(%0) : (tensor<f32>) -> () loc(unknown)
 } loc(unknown)

@@ -13,6 +13,10 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include <utility>
+
+#include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
 #include "tensorflow/compiler/tf2xla/literal_util.h"
 #include "tensorflow/compiler/tf2xla/type_util.h"
 #include "tensorflow/compiler/tf2xla/xla_compilation_device.h"
@@ -20,9 +24,10 @@ limitations under the License.
 #include "tensorflow/compiler/tf2xla/xla_helpers.h"
 #include "tensorflow/compiler/tf2xla/xla_op_kernel.h"
 #include "tensorflow/compiler/tf2xla/xla_op_registry.h"
-#include "tensorflow/compiler/xla/client/xla_builder.h"
-#include "tensorflow/compiler/xla/literal_util.h"
+#include "xla/hlo/builder/xla_builder.h"
+#include "xla/literal_util.h"
 #include "tensorflow/core/framework/kernel_def_builder.h"
+#include "tensorflow/core/framework/types.pb.h"
 #include "tensorflow/core/lib/core/errors.h"
 
 namespace tensorflow {
@@ -49,9 +54,9 @@ class XlaArgOp : public XlaOpKernel {
       // cases. See XlaOpKernelContext::SetOutputExpression for details.
       if (DataTypeCanUseMemcpy(dtype_)) {
         OP_REQUIRES(ctx, val->dtype() == dtype_,
-                    errors::InvalidArgument(
+                    absl::InvalidArgumentError(absl::StrCat(
                         "Type mismatch: actual ", DataTypeString(val->dtype()),
-                        " vs. expect ", DataTypeString(dtype_)));
+                        " vs. expect ", DataTypeString(dtype_))));
       }
       // Forwards the argument from the frame.
       ctx->op_kernel_context()->set_output(0, *val);
@@ -59,8 +64,9 @@ class XlaArgOp : public XlaOpKernel {
     }
 
     const XlaExpression& arg = ctx->xla_context()->args()[index_];
-    OP_REQUIRES(ctx, arg.kind() != XlaExpression::Kind::kInvalid,
-                errors::InvalidArgument("Invalid/missing argument expression"));
+    OP_REQUIRES(
+        ctx, arg.kind() != XlaExpression::Kind::kInvalid,
+        absl::InvalidArgumentError("Invalid/missing argument expression"));
     if (ctx->expected_output_dtype(0) == DT_VARIANT) {
       ctx->SetTensorListOutput(0, arg.handle());
     } else if (arg.value_bound().has_value()) {
@@ -90,15 +96,14 @@ class XlaArgOp : public XlaOpKernel {
       // Note that `arg` is still considered dynamic as long as one element
       // inside is dynamic, therefore the argument node can't be constant folded
       // into a constant node.
-      xla::Literal bound = HostTensorToLiteral(*arg.value_bound()).ValueOrDie();
+      xla::Literal bound = HostTensorToLiteral(*arg.value_bound()).value();
       xla::Literal dynamism =
-          HostTensorToLiteral(*arg.value_dynamism()).ValueOrDie();
+          HostTensorToLiteral(*arg.value_dynamism()).value();
       xla::Literal tuple = xla::LiteralUtil::MakeTupleOwned(
           std::move(bound), std::move(dynamism));
-      ctx->SetOutput(
-          0, xla::CustomCall(builder, "SetBound", {input_op},
-                             builder->GetShape(input_op).ValueOrDie(), "",
-                             false, {}, &tuple));
+      ctx->SetOutput(0, xla::CustomCall(builder, "SetBound", {input_op},
+                                        builder->GetShape(input_op).value(), "",
+                                        false, {}, &tuple));
       return;
     } else {
       ctx->SetOutputExpression(0, arg);
@@ -109,7 +114,8 @@ class XlaArgOp : public XlaOpKernel {
   int index_;
   DataType dtype_;
 
-  TF_DISALLOW_COPY_AND_ASSIGN(XlaArgOp);
+  XlaArgOp(const XlaArgOp&) = delete;
+  void operator=(const XlaArgOp&) = delete;
 };
 
 REGISTER_XLA_OP(

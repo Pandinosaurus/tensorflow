@@ -1,0 +1,72 @@
+ *******************************************************************************
+ Copyright 2023 Arm Limited and affiliates.
+ SPDX-License-Identifier: Apache-2.0
+
+ Licensed under the Apache License, Version 2.0 (the "License");
+ you may not use this file except in compliance with the License.
+ You may obtain a copy of the License at
+
+     http://www.apache.org/licenses/LICENSE-2.0
+
+ Unless required by applicable law or agreed to in writing, software
+ distributed under the License is distributed on an "AS IS" BASIS,
+ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ See the License for the specific language governing permissions and
+ limitations under the License.
+ *******************************************************************************
+diff --git a/BUILD.bazel b/BUILD.bazel
+index 8be867e814..ada3c191b4 100644
+--- a/BUILD.bazel
++++ b/BUILD.bazel
+@@ -23,1 +23,2 @@
++load("@rules_cc//cc:cc_library.bzl", "cc_library")
+ load("@bazel_skylib//rules:common_settings.bzl", "string_flag")
+@@ -258,6 +259,9 @@ cc_library(
+         "arm_compute",
+         "//:common_defines",
+         "//arm_compute:graph_headers",
++        "//include",
++        "//support",
++        "//utils",
+     ],
+     alwayslink = True,
+ )
+@@ -423,7 +427,7 @@ cc_library(
+         "//include",
+         "//support",
+         "//utils",
+-        "@@kleidiai//:common",
+-        "@@kleidiai//kai/ukernels/matmul:matmul",
++        "@KleidiAI//:common",
++        "@KleidiAI//kai/ukernels/matmul:matmul",
+         "//:arm_compute_sve",
+         "//:arm_compute_sve2"
+     ],
+diff --git a/arm_compute/BUILD.bazel b/arm_compute/BUILD.bazel
+--- a/arm_compute/BUILD.bazel
++++ b/arm_compute/BUILD.bazel
+@@ -23,1 +23,3 @@
++load("@rules_cc//cc:cc_library.bzl", "cc_library")
++
+ cc_library(
+diff --git a/include/BUILD.bazel b/include/BUILD.bazel
+--- a/include/BUILD.bazel
++++ b/include/BUILD.bazel
+@@ -23,1 +23,3 @@
++load("@rules_cc//cc:cc_library.bzl", "cc_library")
++
+ cc_library(
+diff --git a/support/BUILD.bazel b/support/BUILD.bazel
+--- a/support/BUILD.bazel
++++ b/support/BUILD.bazel
+@@ -23,1 +23,3 @@
++load("@rules_cc//cc:cc_library.bzl", "cc_library")
++
+ cc_library(
+diff --git a/utils/BUILD.bazel b/utils/BUILD.bazel
+--- a/utils/BUILD.bazel
++++ b/utils/BUILD.bazel
+@@ -23,1 +23,3 @@
++load("@rules_cc//cc:cc_library.bzl", "cc_library")
++
+ cc_library(

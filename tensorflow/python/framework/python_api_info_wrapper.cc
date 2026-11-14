@@ -15,9 +15,9 @@ limitations under the License.
 // Note: This library is only used by python_api_info_test.  It
 // is not meant to be used in other circumstances.
 
-#include "pybind11/pybind11.h"
-#include "pybind11/pytypes.h"
-#include "pybind11/stl.h"
+#include "pybind11/pybind11.h"  // from @pybind11
+#include "pybind11/pytypes.h"  // from @pybind11
+#include "pybind11/stl.h"  // from @pybind11
 #include "tensorflow/python/framework/python_api_info.h"
 
 namespace py = pybind11;
@@ -38,7 +38,7 @@ void InitializeFromParamSpecs(
     PythonAPIInfo* api_info,
     const std::map<std::string, std::string>& input_specs,
     const std::map<std::string, std::string>& attr_specs,
-    const std::vector<string>& param_names, py::handle defaults_tuple) {
+    const std::vector<std::string>& param_names, py::handle defaults_tuple) {
   auto result = api_info->InitializeFromParamSpecs(
       input_specs, attr_specs, param_names, defaults_tuple.ptr());
   if (!result.ok()) {
@@ -55,7 +55,7 @@ std::string DebugInfo(PythonAPIInfo* api_info) { return api_info->DebugInfo(); }
 using PythonAPIInfo = tensorflow::PythonAPIInfo;
 using InferredAttributes = tensorflow::PythonAPIInfo::InferredAttributes;
 
-PYBIND11_MODULE(_pywrap_python_api_info, m) {
+PYBIND11_MODULE(_pywrap_python_api_info, m, py::mod_gil_not_used()) {
   py::class_<PythonAPIInfo>(m, "PythonAPIInfo")
       .def(py::init<const std::string&>())
       .def("InitializeFromRegisteredOp",

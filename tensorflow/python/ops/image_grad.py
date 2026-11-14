@@ -14,19 +14,16 @@
 # ==============================================================================
 """Contains Gradient functions for image ops."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import ops
 from tensorflow.python.ops import array_ops
+from tensorflow.python.ops import array_ops_stack
 from tensorflow.python.ops import gen_image_ops
 from tensorflow.python.ops import math_ops
 
 
 @ops.RegisterGradient("ResizeNearestNeighbor")
-def _ResizeNearestNeighborGrad(op, grad):
+def _ResizeNearestNeighborGrad(op: ops.Operation, grad):
   """The derivatives for nearest neighbor resizing.
 
   Args:
@@ -50,8 +47,67 @@ def _ResizeNearestNeighborGrad(op, grad):
   return [grads, None]
 
 
+@ops.RegisterGradient("ResizeNearestNeighborGrad")
+def _ResizeNearestNeighborGradGrad(op: ops.Operation, grad):
+  """The transpose of the nearest neighbor resize gradient is a resize."""
+  image = op.inputs[0]
+  if image.get_shape()[1:3].is_fully_defined():
+    image_shape = image.get_shape()[1:3]
+  else:
+    image_shape = array_ops.shape(image)[1:3]
+  return [
+      gen_image_ops.resize_nearest_neighbor(
+          grad,
+          image_shape,
+          align_corners=op.get_attr("align_corners"),
+          half_pixel_centers=op.get_attr("half_pixel_centers"),
+      ),
+      None,
+  ]
+
+
+@ops.RegisterGradient("AdjustContrastv2")
+def _AdjustContrastGrad(op: ops.Operation, grad):
+  """The derivatives for `tf.image.adjust_contrast`.
+
+  The kernel computes `(images - mean) * contrast_factor + mean`, where
+  `mean` is taken per batch and channel over the last three dimensions,
+  which are interpreted as [height, width, channels].
+
+  Args:
+    op: The `AdjustContrastv2` `Operation`.
+    grad: The tensor representing the gradient w.r.t. the output.
+
+  Returns:
+    The gradients w.r.t. the images and the contrast factor.
+  """
+  images = op.inputs[0]
+  factor = op.inputs[1]
+  factor_t = math_ops.cast(factor, images.dtype)
+  static_rank = images.shape.rank
+  if static_rank is not None:
+    spatial_axes = list(range(static_rank - 3, static_rank - 1))
+  else:
+    dynamic_rank = array_ops.rank(images)
+    spatial_axes = math_ops.range(dynamic_rank - 3, dynamic_rank - 1)
+  mean = math_ops.reduce_mean(images, axis=spatial_axes, keepdims=True)
+  grad_images = grad * factor_t + (1.0 - factor_t) * math_ops.reduce_mean(
+      grad,
+      axis=spatial_axes,
+      keepdims=True,
+  )
+  grad_factor = math_ops.reduce_sum(
+      math_ops.cast(grad, dtypes.float32)
+      * (
+          math_ops.cast(images, dtypes.float32)
+          - math_ops.cast(mean, dtypes.float32)
+      )
+  )
+  return grad_images, grad_factor
+
+
 @ops.RegisterGradient("ResizeBilinear")
-def _ResizeBilinearGrad(op, grad):
+def _ResizeBilinearGrad(op: ops.Operation, grad):
   """The derivatives for bilinear resizing.
 
   Args:
@@ -61,12 +117,19 @@ def _ResizeBilinearGrad(op, grad):
   Returns:
     The gradients w.r.t. the input.
   """
-  grad0 = gen_image_ops.resize_bilinear_grad(
-      grad,
-      op.inputs[0],
-      align_corners=op.get_attr("align_corners"),
-      half_pixel_centers=op.get_attr("half_pixel_centers"))
+  image = op.inputs[0]
+  grad0 = None
+  if image.dtype.is_floating:
+    grad0 = gen_image_ops.resize_bilinear_grad(
+        grad,
+        image,
+        align_corners=op.get_attr("align_corners"),
+        half_pixel_centers=op.get_attr("half_pixel_centers"),
+    )
   return [grad0, None]
+
+
+ops.NotDifferentiable("ResizeBilinearGrad")
 
 
 @ops.RegisterGradient("ScaleAndTranslate")
@@ -81,18 +144,26 @@ def _ScaleAndTranslateGrad(op, grad):
     The gradients w.r.t. the input.
   """
 
-  grad0 = gen_image_ops.scale_and_translate_grad(
-      grad,
-      op.inputs[0],
-      op.inputs[2],
-      op.inputs[3],
-      kernel_type=op.get_attr("kernel_type"),
-      antialias=op.get_attr("antialias"))
+  image = op.inputs[0]
+  grad0 = None
+  if image.dtype.is_floating:
+    # ScaleAndTranslateGrad only has a float32 kernel and only reads the shape
+    # of the original image, while the forward op also accepts half, bfloat16
+    # and double images. Run it in float32 and return the input's dtype.
+    grad0 = gen_image_ops.scale_and_translate_grad(
+        grad,
+        math_ops.cast(image, dtypes.float32),
+        op.inputs[2],
+        op.inputs[3],
+        kernel_type=op.get_attr("kernel_type"),
+        antialias=op.get_attr("antialias"),
+    )
+    grad0 = math_ops.cast(grad0, image.dtype)
   return [grad0, None, None, None]
 
 
 @ops.RegisterGradient("ResizeBicubic")
-def _ResizeBicubicGrad(op, grad):
+def _ResizeBicubicGrad(op: ops.Operation, grad):
   """The derivatives for bicubic resizing.
 
   Args:
@@ -103,18 +174,25 @@ def _ResizeBicubicGrad(op, grad):
     The gradients w.r.t. the input.
   """
   allowed_types = [dtypes.float32, dtypes.float64]
+  image = op.inputs[0]
   grad0 = None
-  if op.inputs[0].dtype in allowed_types:
+  if image.dtype.is_floating:
+    # ResizeBicubicGrad only takes float32 and float64 images, so compute the
+    # gradient for half and bfloat16 images in float32.
+    if image.dtype not in allowed_types:
+      image = math_ops.cast(image, dtypes.float32)
     grad0 = gen_image_ops.resize_bicubic_grad(
         grad,
-        op.inputs[0],
+        image,
         align_corners=op.get_attr("align_corners"),
-        half_pixel_centers=op.get_attr("half_pixel_centers"))
+        half_pixel_centers=op.get_attr("half_pixel_centers"),
+    )
+    grad0 = math_ops.cast(grad0, op.inputs[0].dtype)
   return [grad0, None]
 
 
 @ops.RegisterGradient("CropAndResize")
-def _CropAndResizeGrad(op, grad):
+def _CropAndResizeGrad(op: ops.Operation, grad):
   """The derivatives for crop_and_resize.
 
   We back-propagate to the image only when the input image tensor has floating
@@ -164,11 +242,11 @@ def _CustomReciprocal(x):
   Returns:
     x_reciprocal -> reciprocal of x without NaNs.
   """
-  return math_ops.div_no_nan(1.0, x)
+  return math_ops.div_no_nan(math_ops.cast(1.0, x.dtype), x)
 
 
 @ops.RegisterGradient("RGBToHSV")
-def _RGBToHSVGrad(op, grad):
+def _RGBToHSVGrad(op: ops.Operation, grad):
   """The gradients for `rgb_to_hsv` operation.
 
   This function is a piecewise continuous function as defined here:
@@ -192,22 +270,24 @@ def _RGBToHSVGrad(op, grad):
   saturation = op.outputs[0][..., 1]
   value = op.outputs[0][..., 2]
 
+  dtype = op.inputs[0].dtype
+
   # Mask/Indicator for max and min values of each pixel.
   # Arbitrary assignment in case of tie breakers with R>G>B.
   # Max values
   red_biggest = math_ops.cast((reds >= blues) & \
-                 (reds >= greens), dtypes.float32)
+                 (reds >= greens), dtype)
   green_biggest = math_ops.cast((greens > reds) & \
-                   (greens >= blues), dtypes.float32)
+                   (greens >= blues), dtype)
   blue_biggest = math_ops.cast((blues > reds) & \
-                  (blues > greens), dtypes.float32)
+                  (blues > greens), dtype)
   # Min values
   red_smallest = math_ops.cast((reds < blues) & \
-                  (reds < greens), dtypes.float32)
+                  (reds < greens), dtype)
   green_smallest = math_ops.cast((greens <= reds) & \
-                    (greens < blues), dtypes.float32)
+                    (greens < blues), dtype)
   blue_smallest = math_ops.cast((blues <= reds) & \
-                   (blues <= greens), dtypes.float32)
+                   (blues <= greens), dtype)
 
   # Derivatives of R, G, B wrt Value slice
   dv_dr = red_biggest
@@ -222,24 +302,18 @@ def _RGBToHSVGrad(op, grad):
   # The second term is the case when the corresponding color from
   # (r,g,b) was "MIN"
   # -> derivative = -1/MAX, MAX could be one of the other two colours.
-  ds_dr = math_ops.cast(reds > 0, dtypes.float32) * \
-               math_ops.add(red_biggest * \
-               math_ops.add(green_smallest * greens, blue_smallest * blues) * \
-               _CustomReciprocal(math_ops.square(reds)),\
-               red_smallest * -1 * _CustomReciprocal((green_biggest * \
-               greens) + (blue_biggest * blues)))
-  ds_dg = math_ops.cast(greens > 0, dtypes.float32) * \
-               math_ops.add(green_biggest * \
-               math_ops.add(red_smallest * reds, blue_smallest * blues) * \
-               _CustomReciprocal(math_ops.square(greens)),\
-               green_smallest * -1 * _CustomReciprocal((red_biggest * \
-               reds) + (blue_biggest * blues)))
-  ds_db = math_ops.cast(blues > 0, dtypes.float32) * \
-               math_ops.add(blue_biggest * \
-               math_ops.add(green_smallest * greens, red_smallest * reds) * \
-               _CustomReciprocal(math_ops.square(blues)),\
-               blue_smallest * -1 * _CustomReciprocal((green_biggest * \
-               greens) + (red_biggest * reds)))
+  ds_dr = math_ops.cast(reds > 0, dtype) * math_ops.add(
+      red_biggest * math_ops.add(green_smallest * greens, blue_smallest * blues)
+      * _CustomReciprocal(math_ops.square(reds)), red_smallest * -1 *
+      _CustomReciprocal((green_biggest * greens) + (blue_biggest * blues)))
+  ds_dg = math_ops.cast(greens > 0, dtype) * math_ops.add(
+      green_biggest * math_ops.add(red_smallest * reds, blue_smallest * blues) *
+      _CustomReciprocal(math_ops.square(greens)), green_smallest * -1 *
+      _CustomReciprocal((red_biggest * reds) + (blue_biggest * blues)))
+  ds_db = math_ops.cast(blues > 0, dtype) * math_ops.add(
+      blue_biggest * math_ops.add(green_smallest * greens, red_smallest * reds)
+      * _CustomReciprocal(math_ops.square(blues)), blue_smallest * -1 *
+      _CustomReciprocal((green_biggest * greens) + (red_biggest * reds)))
 
   # Derivatives of R, G, B wrt Hue slice
 
@@ -263,21 +337,22 @@ def _RGBToHSVGrad(op, grad):
   #     reciprocal(square(blues - reds))
   #   dh_dr_5 ->
   #   if red was NOT MIN -> 60 * 1/MAX-MIN == 60 * reciprocal(blues-greens)
-  dh_dr_1 = 60 * (math_ops.cast(reds > 0, dtypes.float32) * red_biggest * \
-                  -1  * \
-                  (greens - blues) * \
-                  _CustomReciprocal(math_ops.square(saturation)) *\
-                  _CustomReciprocal(math_ops.square(value)))
-  dh_dr_2 = 60 * (math_ops.cast(greens > 0, dtypes.float32) * green_biggest * \
-                  red_smallest  * (blues - greens) * \
-                  _CustomReciprocal(math_ops.square(reds - greens)))
-  dh_dr_3 = 60 * (math_ops.cast(greens > 0, dtypes.float32) * green_biggest * \
-                  blue_smallest * -1 * _CustomReciprocal(greens - blues))
-  dh_dr_4 = 60 * (math_ops.cast(blues > 0, dtypes.float32) * blue_biggest * \
-                  red_smallest * (blues - greens) * \
-                  _CustomReciprocal(math_ops.square(blues - reds)))
-  dh_dr_5 = 60 * (math_ops.cast(blues > 0, dtypes.float32) * blue_biggest * \
-                  green_smallest * _CustomReciprocal(blues - greens))
+  dh_dr_1 = 60 * (
+      math_ops.cast(reds > 0, dtype) * red_biggest * -1 *
+      (greens - blues) * _CustomReciprocal(math_ops.square(saturation)) *
+      _CustomReciprocal(math_ops.square(value)))
+  dh_dr_2 = 60 * (
+      math_ops.cast(greens > 0, dtype) * green_biggest * red_smallest *
+      (blues - greens) * _CustomReciprocal(math_ops.square(reds - greens)))
+  dh_dr_3 = 60 * (
+      math_ops.cast(greens > 0, dtype) * green_biggest * blue_smallest * -1 *
+      _CustomReciprocal(greens - blues))
+  dh_dr_4 = 60 * (
+      math_ops.cast(blues > 0, dtype) * blue_biggest * red_smallest *
+      (blues - greens) * _CustomReciprocal(math_ops.square(blues - reds)))
+  dh_dr_5 = 60 * (
+      math_ops.cast(blues > 0, dtype) * blue_biggest * green_smallest *
+      _CustomReciprocal(blues - greens))
 
   dh_dr = dh_dr_1 + dh_dr_2 + dh_dr_3 + dh_dr_4 + dh_dr_5
   # Converting from degrees to [0,1] scale as specified in
@@ -305,20 +380,22 @@ def _RGBToHSVGrad(op, grad):
   #     reciprocal(square(blues-greens)))
   #   dh_dr_5 ->
   #   if green was NOT MIN -> 60 * -1/MAX-MIN == -60 * reciprocal(blues - reds)
-  dh_dg_1 = 60 * (math_ops.cast(greens > 0, dtypes.float32) * green_biggest * \
-                  -1 * (blues - reds) * \
-                  _CustomReciprocal(math_ops.square(saturation))\
-                  * _CustomReciprocal(math_ops.square(value)))
-  dh_dg_2 = 60 * (math_ops.cast(reds > 0, dtypes.float32) * red_biggest * \
-                  green_smallest * (reds - blues) * \
-                  _CustomReciprocal(math_ops.square(reds - greens)))
-  dh_dg_3 = 60 * (math_ops.cast(reds > 0, dtypes.float32) * red_biggest * \
-                  blue_smallest * _CustomReciprocal(reds - blues))
-  dh_dg_4 = 60 * (math_ops.cast(blues > 0, dtypes.float32) * blue_biggest * \
-                  green_smallest * (reds - blues) * \
-                  _CustomReciprocal(math_ops.square(blues - greens)))
-  dh_dg_5 = 60 * (math_ops.cast(blues > 0, dtypes.float32) * blue_biggest * \
-                  red_smallest * -1 * _CustomReciprocal(blues - reds))
+  dh_dg_1 = 60 * (
+      math_ops.cast(greens > 0, dtype) * green_biggest * -1 *
+      (blues - reds) * _CustomReciprocal(math_ops.square(saturation)) *
+      _CustomReciprocal(math_ops.square(value)))
+  dh_dg_2 = 60 * (
+      math_ops.cast(reds > 0, dtype) * red_biggest * green_smallest *
+      (reds - blues) * _CustomReciprocal(math_ops.square(reds - greens)))
+  dh_dg_3 = 60 * (
+      math_ops.cast(reds > 0, dtype) * red_biggest * blue_smallest *
+      _CustomReciprocal(reds - blues))
+  dh_dg_4 = 60 * (
+      math_ops.cast(blues > 0, dtype) * blue_biggest * green_smallest *
+      (reds - blues) * _CustomReciprocal(math_ops.square(blues - greens)))
+  dh_dg_5 = 60 * (
+      math_ops.cast(blues > 0, dtype) * blue_biggest * red_smallest * -1 *
+      _CustomReciprocal(blues - reds))
 
   dh_dg = dh_dg_1 + dh_dg_2 + dh_dg_3 + dh_dg_4 + dh_dg_5
   # Converting from degrees to [0,1] scale as specified in
@@ -345,21 +422,22 @@ def _RGBToHSVGrad(op, grad):
   #     reciprocal(square(greens - blues)))
   #   dh_dr_5 ->
   #   if blue was NOT MIN -> 60 * 1/MAX-MIN == 60 * reciprocal(greens - reds)
-  dh_db_1 = 60 * (math_ops.cast(blues > 0, dtypes.float32) * blue_biggest * \
-                   -1 * \
-                  (reds - greens) * \
-                  _CustomReciprocal(math_ops.square(saturation)) * \
-                  _CustomReciprocal(math_ops.square(value)))
-  dh_db_2 = 60 * (math_ops.cast(reds > 0, dtypes.float32) * red_biggest *\
-                  blue_smallest * (greens - reds) * \
-                  _CustomReciprocal(math_ops.square(reds - blues)))
-  dh_db_3 = 60 * (math_ops.cast(reds > 0, dtypes.float32) * red_biggest * \
-                  green_smallest * -1 * _CustomReciprocal(reds - greens))
-  dh_db_4 = 60 * (math_ops.cast(greens > 0, dtypes.float32) * green_biggest * \
-                  blue_smallest * (greens - reds) * \
-                  _CustomReciprocal(math_ops.square(greens - blues)))
-  dh_db_5 = 60 * (math_ops.cast(greens > 0, dtypes.float32) * green_biggest * \
-                  red_smallest * _CustomReciprocal(greens - reds))
+  dh_db_1 = 60 * (
+      math_ops.cast(blues > 0, dtype) * blue_biggest * -1 *
+      (reds - greens) * _CustomReciprocal(math_ops.square(saturation)) *
+      _CustomReciprocal(math_ops.square(value)))
+  dh_db_2 = 60 * (
+      math_ops.cast(reds > 0, dtype) * red_biggest * blue_smallest *
+      (greens - reds) * _CustomReciprocal(math_ops.square(reds - blues)))
+  dh_db_3 = 60 * (
+      math_ops.cast(reds > 0, dtype) * red_biggest * green_smallest * -1 *
+      _CustomReciprocal(reds - greens))
+  dh_db_4 = 60 * (
+      math_ops.cast(greens > 0, dtype) * green_biggest * blue_smallest *
+      (greens - reds) * _CustomReciprocal(math_ops.square(greens - blues)))
+  dh_db_5 = 60 * (
+      math_ops.cast(greens > 0, dtype) * green_biggest * red_smallest *
+      _CustomReciprocal(greens - reds))
 
   dh_db = dh_db_1 + dh_db_2 + dh_db_3 + dh_db_4 + dh_db_5
   # Converting from degrees to [0,1] scale as specified in
@@ -367,13 +445,13 @@ def _RGBToHSVGrad(op, grad):
   dh_db = dh_db / 360
 
   # Gradients wrt to inputs
-  dv_drgb = array_ops.stack(
+  dv_drgb = array_ops_stack.stack(
       [grad[..., 2] * dv_dr, grad[..., 2] * dv_dg, grad[..., 2] * dv_db],
       axis=-1)
-  ds_drgb = array_ops.stack(
+  ds_drgb = array_ops_stack.stack(
       [grad[..., 1] * ds_dr, grad[..., 1] * ds_dg, grad[..., 1] * ds_db],
       axis=-1)
-  dh_drgb = array_ops.stack(
+  dh_drgb = array_ops_stack.stack(
       [grad[..., 0] * dh_dr, grad[..., 0] * dh_dg, grad[..., 0] * dh_db],
       axis=-1)
 

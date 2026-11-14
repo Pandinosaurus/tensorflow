@@ -28,7 +28,7 @@ struct NodeOut {
   int index;
 
   // Returns the string name that represents the output of this node.
-  string name() const;
+  std::string name() const;
   // Returns the data type of the output of this node.
   DataType dtype() const;
 };
@@ -47,11 +47,11 @@ struct NodeOut {
 // implementation only supports gradients for functions). In particular,
 // the nodes in 'x_nodes' are currently restricted to have one output.
 
-Status AddSymbolicGradients(gtl::ArraySlice<NodeOut> y_node_outputs,
-                            gtl::ArraySlice<NodeOut> x_node_outputs,
-                            gtl::ArraySlice<NodeOut> y_grad_node_outputs,
-                            std::vector<NodeOut>* x_grad_node_outputs,
-                            Graph* graph);
+absl::Status AddSymbolicGradients(absl::Span<const NodeOut> y_node_outputs,
+                                  absl::Span<const NodeOut> x_node_outputs,
+                                  absl::Span<const NodeOut> y_grad_node_outputs,
+                                  std::vector<NodeOut>* x_grad_node_outputs,
+                                  Graph* graph);
 
 }  // namespace tensorflow
 

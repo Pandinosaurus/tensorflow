@@ -17,7 +17,7 @@ limitations under the License.
 
 #include "tensorflow/compiler/tf2xla/literal_util.h"
 #include "tensorflow/compiler/tf2xla/shape_util.h"
-#include "tensorflow/compiler/xla/client/value_inference.h"
+#include "xla/hlo/builder/value_inference.h"
 #include "tensorflow/core/framework/types.pb.h"
 #include "tensorflow/core/lib/core/errors.h"
 
@@ -73,7 +73,7 @@ XlaExpression XlaExpression::Resource(XlaResource* resource) {
   return e;
 }
 
-string XlaExpression::HumanString() const {
+std::string XlaExpression::HumanString() const {
   switch (kind_) {
     case Kind::kInvalid:
       return "invalid";
@@ -89,7 +89,7 @@ string XlaExpression::HumanString() const {
 }
 
 xla::XlaOp XlaExpression::AsXlaOp(xla::XlaBuilder* builder) const {
-  return builder->ReportErrorOrReturn([&]() -> StatusOr<xla::XlaOp> {
+  return builder->ReportErrorOrReturn([&]() -> absl::StatusOr<xla::XlaOp> {
     switch (kind_) {
       case Kind::kConstant: {
         xla::BorrowingLiteral literal;
@@ -101,18 +101,18 @@ xla::XlaOp XlaExpression::AsXlaOp(xla::XlaBuilder* builder) const {
         TF_FALLTHROUGH_INTENDED;
       case Kind::kXlaOp:
         if (builder != handle_.builder()) {
-          return errors::InvalidArgument(
+          return absl::InvalidArgumentError(
               "Mismatched builders in XlaExpression::AsXlaOp");
         }
         return handle_;
       default:
-        return errors::InvalidArgument("AsXlaOp called on XlaExpression: ",
-                                       HumanString());
+        return absl::InvalidArgumentError(
+            absl::StrCat("AsXlaOp called on XlaExpression: ", HumanString()));
     }
   });
 }
 
-StatusOr<Tensor> XlaExpression::ResolveDynamism(xla::Client* client) const {
+absl::StatusOr<Tensor> XlaExpression::ResolveDynamism() const {
   switch (kind()) {
     case Kind::kConstant: {
       // Constant values are considered static.
@@ -128,13 +128,10 @@ StatusOr<Tensor> XlaExpression::ResolveDynamism(xla::Client* client) const {
     case Kind::kResource:
       TF_FALLTHROUGH_INTENDED;
     case Kind::kInvalid:
-      return errors::InvalidArgument(
-          "ResolveDynamism called on unsupported XlaExpression: ",
-          HumanString());
+      return absl::InvalidArgumentError(
+          absl::StrCat("ResolveDynamism called on unsupported XlaExpression: ",
+                       HumanString()));
   }
-
-  if (!client)
-    return errors::InvalidArgument("client is required to resolve constant");
 
   TF_ASSIGN_OR_RETURN(TensorShape shape, GetShape());
 
@@ -150,7 +147,7 @@ StatusOr<Tensor> XlaExpression::ResolveDynamism(xla::Client* client) const {
   return tensor;
 }
 
-StatusOr<absl::optional<Tensor>> XlaExpression::ResolveConstant(
+absl::StatusOr<std::optional<Tensor>> XlaExpression::ResolveConstant(
     xla::Client* client, bool dynamic_dimension_is_minus_one,
     xla::ValueInferenceMode mode) const {
   switch (kind()) {
@@ -162,8 +159,8 @@ StatusOr<absl::optional<Tensor>> XlaExpression::ResolveConstant(
     case Kind::kTensorList:
       TF_FALLTHROUGH_INTENDED;
     case Kind::kInvalid:
-      return errors::InvalidArgument(
-          "ResolveConstant called on XlaExpression: ", HumanString());
+      return absl::InvalidArgumentError(absl::StrCat(
+          "ResolveConstant called on XlaExpression: ", HumanString()));
   }
   TF_ASSIGN_OR_RETURN(TensorShape shape, GetShape());
   // The XLA layout is specified minor to major, and TensorFlow uses a major to
@@ -180,7 +177,7 @@ StatusOr<absl::optional<Tensor>> XlaExpression::ResolveConstant(
     TF_ASSIGN_OR_RETURN(xla::OptionalLiteral literal,
                         value_inference.AnalyzeConstant(handle(), mode));
     if (!literal.GetValue().has_value()) {
-      return {absl::nullopt};
+      return {std::nullopt};
     }
     Tensor tensor;
     TF_RETURN_IF_ERROR(LiteralToHostTensor(
@@ -191,11 +188,11 @@ StatusOr<absl::optional<Tensor>> XlaExpression::ResolveConstant(
   TF_ASSIGN_OR_RETURN(bool is_constant,
                       handle().builder()->IsConstant(handle()));
   if (!is_constant) {
-    return {absl::nullopt};
+    return {std::nullopt};
   }
 
   if (!client)
-    return errors::InvalidArgument("client is required to resolve constant");
+    return absl::InvalidArgumentError("client is required to resolve constant");
 
   TF_ASSIGN_OR_RETURN(xla::XlaComputation constant_graph,
                       handle().builder()->BuildConstantSubGraph(
@@ -208,7 +205,7 @@ StatusOr<absl::optional<Tensor>> XlaExpression::ResolveConstant(
   return {tensor};
 }
 
-StatusOr<TensorShape> XlaExpression::GetShape() const {
+absl::StatusOr<TensorShape> XlaExpression::GetShape() const {
   switch (kind_) {
     case Kind::kConstant:
       return constant_value()->shape();
@@ -227,9 +224,17 @@ StatusOr<TensorShape> XlaExpression::GetShape() const {
     case Kind::kTensorList:
       return TensorShape({});
     case Kind::kInvalid:
-      return errors::InvalidArgument(
+      return absl::InvalidArgumentError(
           "GetShape() called on invalid XlaExpression");
   }
+}
+
+absl::StatusOr<xla::Shape> XlaExpression::GetXlaShape() const {
+  if (kind_ == Kind::kXlaOp) {
+    return handle().builder()->GetShape(handle());
+  }
+  TF_ASSIGN_OR_RETURN(TensorShape shape, GetShape());
+  return TensorShapeToXLAShape(dtype_, shape);
 }
 
 const XlaExpression* XlaExpression::CastExpressionFromTensor(

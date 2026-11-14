@@ -37,10 +37,10 @@ limitations under the License.
 namespace tensorflow {
 namespace {
 
-Status ForceXlaConstantsOnHost(const Scope& s,
-                               FunctionLibraryDefinition* flib_def,
-                               std::unique_ptr<Graph>* result) {
-  auto graph = absl::make_unique<Graph>(OpRegistry::Global());
+absl::Status ForceXlaConstantsOnHost(const Scope& s,
+                                     FunctionLibraryDefinition* flib_def,
+                                     std::unique_ptr<Graph>* result) {
+  auto graph = std::make_unique<Graph>(OpRegistry::Global());
   GraphOptimizationPassOptions options;
   SessionOptions session_options;
   session_options.env = Env::Default();
@@ -51,7 +51,7 @@ Status ForceXlaConstantsOnHost(const Scope& s,
   ForceXlaConstantsOnHostPass rewriter;
   TF_RETURN_IF_ERROR(rewriter.Run(options));
   *result = std::move(graph);
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 TEST(ForceXlaConstantsOnHostPassTest, Simple) {
@@ -95,7 +95,7 @@ TEST(ForceXlaConstantsOnHostPassTest, Simple) {
     if (CanCreateXlaKernel(node->def())) {
       EXPECT_FALSE(found);
       found = true;
-      std::vector<int32> hostmem_attr;
+      std::vector<int32_t> hostmem_attr;
       EXPECT_TRUE(TryGetNodeAttr(node->def(), "_input_hostmem", &hostmem_attr));
       EXPECT_EQ(hostmem_attr.size(), 1);
       EXPECT_EQ(hostmem_attr[0], 1);

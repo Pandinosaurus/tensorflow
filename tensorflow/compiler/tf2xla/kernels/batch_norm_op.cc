@@ -14,15 +14,26 @@ limitations under the License.
 ==============================================================================*/
 
 // XLA implementation of BatchNorm operations.
+#include <algorithm>
+#include <cstdint>
+#include <numeric>
+#include <string>
+#include <vector>
+
+#include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
 #include "tensorflow/compiler/tf2xla/kernels/relu_op.h"
+#include "tensorflow/compiler/tf2xla/mlir_xla_op_kernel.h"
 #include "tensorflow/compiler/tf2xla/type_util.h"
 #include "tensorflow/compiler/tf2xla/xla_helpers.h"
 #include "tensorflow/compiler/tf2xla/xla_op_kernel.h"
 #include "tensorflow/compiler/tf2xla/xla_op_registry.h"
-#include "tensorflow/compiler/xla/client/lib/constants.h"
-#include "tensorflow/compiler/xla/client/lib/math.h"
-#include "tensorflow/compiler/xla/client/xla_builder.h"
-#include "tensorflow/compiler/xla/util.h"
+#include "xla/hlo/builder/lib/constants.h"
+#include "xla/hlo/builder/lib/math.h"
+#include "xla/hlo/builder/xla_builder.h"
+#include "xla/util.h"
+#include "xla/xla_data.pb.h"
+#include "tensorflow/core/framework/types.pb.h"
 #include "tensorflow/core/util/tensor_format.h"
 
 namespace tensorflow {
@@ -39,26 +50,26 @@ class FusedBatchNormOp : public XlaOpKernel {
     OP_REQUIRES_OK(ctx, ctx->GetAttr("is_training", &is_training_));
     OP_REQUIRES_OK(
         ctx, ctx->GetAttr("exponential_avg_factor", &exponential_avg_factor_));
-    string data_format_str;
+    std::string data_format_str;
     OP_REQUIRES_OK(ctx, ctx->GetAttr("data_format", &data_format_str));
-    OP_REQUIRES(
-        ctx, FormatFromString(data_format_str, &data_format_),
-        errors::InvalidArgument("Invalid data format: ", data_format_str));
+    OP_REQUIRES(ctx, FormatFromString(data_format_str, &data_format_),
+                absl::InvalidArgumentError(
+                    absl::StrCat("Invalid data format: ", data_format_str)));
 
     if (is_batch_norm_ex) {
       int num_side_inputs;
       OP_REQUIRES_OK(ctx, ctx->GetAttr("num_side_inputs", &num_side_inputs));
       OP_REQUIRES(ctx, num_side_inputs >= 0 && num_side_inputs <= 1,
-                  errors::InvalidArgument(
+                  absl::InvalidArgumentError(
                       "FusedBatchNormEx supports at most 1 side input."));
       add_side_input_ = (num_side_inputs == 1);
-      string activation_mode;
+      std::string activation_mode;
       OP_REQUIRES_OK(ctx, ctx->GetAttr("activation_mode", &activation_mode));
       OP_REQUIRES(ctx,
                   activation_mode == "Identity" || activation_mode == "Relu",
-                  errors::InvalidArgument(
+                  absl::InvalidArgumentError(absl::StrCat(
                       "Unsupported FusedBatchNormEx activation mode: ",
-                      activation_mode));
+                      activation_mode)));
       apply_relu_ = (activation_mode == "Relu");
     } else {
       add_side_input_ = false;
@@ -128,8 +139,7 @@ class FusedBatchNormOp : public XlaOpKernel {
             kVarianceOutputIndex,
             xla::Broadcast(
                 xla::NanValue(b, ctx->output_xla_type(kVarianceOutputIndex)),
-                xla::AsInt64Slice(
-                    status_or_output_shape.ValueOrDie().dimensions())));
+                status_or_output_shape.value().dimensions()));
 
       } else {
         if (exponential_avg_factor_ == 1.0f) {
@@ -233,7 +243,7 @@ class FusedBatchNormOpEx : public FusedBatchNormOp {
 
 REGISTER_XLA_OP(Name("FusedBatchNorm"), FusedBatchNormOp);
 REGISTER_XLA_OP(Name("FusedBatchNormV2"), FusedBatchNormOp);
-REGISTER_XLA_OP(Name("FusedBatchNormV3"), FusedBatchNormOpV3);
+REGISTER_XLA_OP(Name("FusedBatchNormV3"), MlirXlaOpKernel);
 REGISTER_XLA_OP(Name("_FusedBatchNormEx"), FusedBatchNormOpEx);
 
 class FusedBatchNormGradOp : public XlaOpKernel {
@@ -241,11 +251,11 @@ class FusedBatchNormGradOp : public XlaOpKernel {
   explicit FusedBatchNormGradOp(OpKernelConstruction* ctx) : XlaOpKernel(ctx) {
     OP_REQUIRES_OK(ctx, ctx->GetAttr("epsilon", &epsilon_));
     OP_REQUIRES_OK(ctx, ctx->GetAttr("is_training", &is_training_));
-    string data_format_str;
+    std::string data_format_str;
     OP_REQUIRES_OK(ctx, ctx->GetAttr("data_format", &data_format_str));
-    OP_REQUIRES(
-        ctx, FormatFromString(data_format_str, &data_format_),
-        errors::InvalidArgument("Invalid data format: ", data_format_str));
+    OP_REQUIRES(ctx, FormatFromString(data_format_str, &data_format_),
+                absl::InvalidArgumentError(
+                    absl::StrCat("Invalid data format: ", data_format_str)));
     is_on_gpu_ = ctx->device_type().type_string() == DEVICE_GPU_XLA_JIT;
   }
 
@@ -350,7 +360,7 @@ class FusedBatchNormGradOp : public XlaOpKernel {
 
 REGISTER_XLA_OP(Name("FusedBatchNormGrad"), FusedBatchNormGradOp);
 REGISTER_XLA_OP(Name("FusedBatchNormGradV2"), FusedBatchNormGradOp);
-REGISTER_XLA_OP(Name("FusedBatchNormGradV3"), FusedBatchNormGradOp);
+REGISTER_XLA_OP(Name("FusedBatchNormGradV3"), MlirXlaOpKernel);
 
 }  // namespace
 }  // namespace tensorflow

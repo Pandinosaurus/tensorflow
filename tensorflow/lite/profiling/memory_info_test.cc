@@ -14,6 +14,10 @@ limitations under the License.
 ==============================================================================*/
 #include "tensorflow/lite/profiling/memory_info.h"
 
+#include <memory>
+#include <sstream>
+#include <string>
+
 #include <gtest/gtest.h>
 
 namespace tflite {
@@ -22,45 +26,97 @@ namespace memory {
 
 TEST(MemoryUsage, AddAndSub) {
   MemoryUsage mem1, mem2;
-  mem1.max_rss_kb = 5;
+  mem1.mem_footprint_kb = 5;
   mem1.total_allocated_bytes = 7000;
   mem1.in_use_allocated_bytes = 2000;
+  mem1.private_footprint_bytes = 1000;
 
-  mem2.max_rss_kb = 3;
+  mem2.mem_footprint_kb = 3;
   mem2.total_allocated_bytes = 7000;
   mem2.in_use_allocated_bytes = 4000;
+  mem2.private_footprint_bytes = 500;
 
   const auto add_mem = mem1 + mem2;
-  EXPECT_EQ(8, add_mem.max_rss_kb);
+  EXPECT_EQ(8, add_mem.mem_footprint_kb);
   EXPECT_EQ(14000, add_mem.total_allocated_bytes);
   EXPECT_EQ(6000, add_mem.in_use_allocated_bytes);
+  EXPECT_EQ(1500, add_mem.private_footprint_bytes);
 
   const auto sub_mem = mem1 - mem2;
-  EXPECT_EQ(2, sub_mem.max_rss_kb);
+  EXPECT_EQ(2, sub_mem.mem_footprint_kb);
   EXPECT_EQ(0, sub_mem.total_allocated_bytes);
   EXPECT_EQ(-2000, sub_mem.in_use_allocated_bytes);
+  EXPECT_EQ(500, sub_mem.private_footprint_bytes);
 }
 
 TEST(MemoryUsage, GetMemoryUsage) {
   MemoryUsage result;
-  EXPECT_EQ(MemoryUsage::kValueNotSet, result.max_rss_kb);
+  EXPECT_EQ(MemoryUsage::kValueNotSet, result.mem_footprint_kb);
   EXPECT_EQ(MemoryUsage::kValueNotSet, result.total_allocated_bytes);
   EXPECT_EQ(MemoryUsage::kValueNotSet, result.in_use_allocated_bytes);
+  EXPECT_EQ(MemoryUsage::kValueNotSet, result.private_footprint_bytes);
 
-#ifdef __linux__
-  // Just allocate some space in heap so that we could meaningful memory usage
-  // report.
-  std::unique_ptr<int[]> int_array(new int[1204]);
-  for (int i = 0; i < 1024; ++i) int_array[i] = i;
+#if defined(__linux__) || defined(__APPLE__) || defined(_WIN32)
+  // Just allocate some space in heap so that we have some meaningful
+  // memory usage to report.
+  constexpr int size = 10 * 1024 * 1024;
+  std::unique_ptr<unsigned char[]> byte_array(new unsigned char[size]);
+  for (int i = 0; i < size; ++i) {
+    byte_array[i] = i % 256;
+  }
+
   result = GetMemoryUsage();
 
-  // As the getrusage call may fail, we might not be able to get max_rss_kb.
-  EXPECT_NE(MemoryUsage::kValueNotSet, result.total_allocated_bytes);
-#endif
+  // Use the heap object that we allocated, so that the compiler can't
+  // (so easily) optimize it away.
+  for (int i = 0; i < size; ++i) {
+    EXPECT_EQ(byte_array[i], i % 256);
+  }
+
+  EXPECT_GE(result.mem_footprint_kb, size / 1024);
+#if (defined(__linux__) && !defined(ADDRESS_SANITIZER) &&         \
+     !defined(MEMORY_SANITIZER) && !defined(THREAD_SANITIZER)) || \
+    (defined(__APPLE__) && !defined(THREAD_SANITIZER)) || defined(_WIN32)
+  EXPECT_GE(result.total_allocated_bytes, size);
+  EXPECT_NE(result.total_allocated_bytes, -1);
+  EXPECT_GE(result.in_use_allocated_bytes, size);
+  EXPECT_NE(result.in_use_allocated_bytes, -1);
+#else
+  // The mallinfo() function, which is used on Linux, returns invalid
+  // results when address/memory/thread sanitizer is enabled, e.g.
+  // <https://github.com/google/sanitizers/issues/1845>, so the
+  // *_allocated_bytes fields are not supported in those cases,
+  // and should be set to either -1 or kValueNotSet(0).
+  // For Apple platforms, the mstats() function returns invalid results when
+  // thread sanitizer is enabled.
+  if (result.total_allocated_bytes != -1) {
+    EXPECT_EQ(result.total_allocated_bytes, MemoryUsage::kValueNotSet);
+  }
+  if (result.in_use_allocated_bytes != -1) {
+    EXPECT_EQ(result.in_use_allocated_bytes, MemoryUsage::kValueNotSet);
+  }
+#endif  // (defined(__linux__) && !defined(ADDRESS_SANITIZER) && \
+        // !defined(MEMORY_SANITIZER) && !defined(THREAD_SANITIZER)) || \
+        // (defined(__APPLE__) && !defined(THREAD_SANITIZER)) || defined(_WIN32)
+  EXPECT_GE(result.private_footprint_bytes, size);
+#endif  // defined(__linux__) || defined(__APPLE__) || defined(_WIN32)
+}
+
+// The main aim of this test is just to exercise the code for
+// the ostream operator << and verify that it doesn't crash.
+// There's not much that we can usefully assert about the resulting message
+// here without making the test too brittle, so we just verify that
+// it generates a non-empty message.
+TEST(MemoryUsage, OutputMemoryUsageToStream) {
+  MemoryUsage memory_usage = GetMemoryUsage();
+  std::stringstream stream;
+  stream << memory_usage;
+  std::string message = stream.str();
+  EXPECT_STRNE(message.c_str(), "");
 }
 
 TEST(MemoryUsage, IsSupported) {
-#ifdef __linux__
+#if defined(__linux__) || defined(__APPLE__) || defined(_WIN32)
   EXPECT_TRUE(MemoryUsage::IsSupported());
 #else
   EXPECT_FALSE(MemoryUsage::IsSupported());

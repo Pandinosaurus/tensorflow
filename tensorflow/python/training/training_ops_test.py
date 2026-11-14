@@ -12,25 +12,27 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-"""Tests for tensorflow.learning.training_ops."""
-
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
+"""Tests for tensorflow.ops.gen_training_ops."""
 
 import itertools
+import threading
 
 import numpy as np
 
+from tensorflow.python.eager import def_function
 from tensorflow.python.framework import constant_op
 from tensorflow.python.framework import dtypes
+from tensorflow.python.framework import errors
+from tensorflow.python.framework import ops
 from tensorflow.python.framework import test_util
 from tensorflow.python.framework.test_util import TensorFlowTestCase
 # Import resource_variable_ops for the variables-to-tensor implicit conversion.
+from tensorflow.python.ops import gen_training_ops
+from tensorflow.python.ops import math_ops
 from tensorflow.python.ops import resource_variable_ops  # pylint: disable=unused-import
+from tensorflow.python.ops import variable_v1
 from tensorflow.python.ops import variables
 from tensorflow.python.platform import googletest
-from tensorflow.python.training import training_ops
 
 
 class TrainingOpsTest(TensorFlowTestCase):
@@ -52,10 +54,10 @@ class TrainingOpsTest(TensorFlowTestCase):
   def _testTypes(self, x, alpha, delta, use_gpu=None):
     self.setUp()
     with self.session(use_gpu=use_gpu):
-      var = variables.VariableV1(x)
+      var = variable_v1.VariableV1(x)
       self.evaluate(variables.global_variables_initializer())
       self.assertAllCloseAccordingToType(x, self.evaluate(var))
-      apply_sgd = training_ops.apply_gradient_descent(var, alpha, delta)
+      apply_sgd = gen_training_ops.apply_gradient_descent(var, alpha, delta)
       out = self.evaluate(apply_sgd)
       self.assertShapeEqual(out, apply_sgd)
       self.assertAllCloseAccordingToType(x - alpha * delta, out)
@@ -73,12 +75,12 @@ class TrainingOpsTest(TensorFlowTestCase):
   def _testTypesForAdagrad(self, x, y, lr, grad, use_gpu=None):
     self.setUp()
     with self.session(use_gpu=use_gpu):
-      var = variables.VariableV1(x)
-      accum = variables.VariableV1(y)
+      var = variable_v1.VariableV1(x)
+      accum = variable_v1.VariableV1(y)
       self.evaluate(variables.global_variables_initializer())
 
       self.assertAllCloseAccordingToType(x, self.evaluate(var))
-      apply_adagrad = training_ops.apply_adagrad(var, accum, lr, grad)
+      apply_adagrad = gen_training_ops.apply_adagrad(var, accum, lr, grad)
       out = self.evaluate(apply_adagrad)
       self.assertShapeEqual(out, apply_adagrad)
       self.assertAllCloseAccordingToType(x - lr * grad * (y + grad * grad)**
@@ -97,14 +99,14 @@ class TrainingOpsTest(TensorFlowTestCase):
                         lr_power=-0.5):
     self.setUp()
     with self.session(use_gpu=use_gpu):
-      var = variables.VariableV1(x)
-      accum = variables.VariableV1(y)
-      linear = variables.VariableV1(z)
+      var = variable_v1.VariableV1(x)
+      accum = variable_v1.VariableV1(y)
+      linear = variable_v1.VariableV1(z)
       self.evaluate(variables.global_variables_initializer())
 
       self.assertAllCloseAccordingToType(x, self.evaluate(var))
-      apply_ftrl = training_ops.apply_ftrl(var, accum, linear, grad, lr, l1, l2,
-                                           lr_power)
+      apply_ftrl = gen_training_ops.apply_ftrl(var, accum, linear, grad, lr, l1,
+                                               l2, lr_power)
       out = self.evaluate(apply_ftrl)
       self.assertShapeEqual(out, apply_ftrl)
       accum_update = y + grad * grad
@@ -142,14 +144,14 @@ class TrainingOpsTest(TensorFlowTestCase):
                                           lr_power=-0.5):
     self.setUp()
     with self.session(use_gpu=use_gpu):
-      var = variables.VariableV1(x)
-      accum = variables.VariableV1(y)
-      linear = variables.VariableV1(z)
+      var = variable_v1.VariableV1(x)
+      accum = variable_v1.VariableV1(y)
+      linear = variable_v1.VariableV1(z)
       self.evaluate(variables.global_variables_initializer())
 
       self.assertAllCloseAccordingToType(x, self.evaluate(var))
       apply_ftrl = (
-          training_ops.apply_ftrl(
+          gen_training_ops.apply_ftrl(
               var,
               accum,
               linear,
@@ -196,6 +198,63 @@ class TrainingOpsTest(TensorFlowTestCase):
       grad = np.arange(100).astype(dtype)
       self._testTypesForAdagrad(x, y, lr, grad, use_gpu)
 
+  @test_util.run_v1_only(
+      "ApplyAdadelta op returns a ref, so it is not supported in eager mode."
+  )
+  def testApplyAdadeltaMismatchedShape(self):
+    for dtype in [dtypes.float32]:
+      var = variable_v1.VariableV1([1.0, 2.0], dtype=dtype)
+      accum = variable_v1.VariableV1([1.0, 2.0], dtype=dtype)
+      accum_update = variable_v1.VariableV1([1.0], dtype=dtype)
+      lr = constant_op.constant(1.0, dtype=dtype)
+      rho = constant_op.constant(0.9, dtype=dtype)
+      epsilon = constant_op.constant(1e-6, dtype=dtype)
+      grad = constant_op.constant([0.1, 0.2], dtype=dtype)
+      with self.cached_session() as sess:
+        self.evaluate(variables.global_variables_initializer())
+        with self.assertRaises((ValueError, errors.InvalidArgumentError)):
+          self.evaluate(
+              gen_training_ops.apply_adadelta(
+                  var,
+                  accum,
+                  accum_update,
+                  lr,
+                  rho,
+                  epsilon,
+                  grad,
+                  use_locking=False,
+              )
+          )
+
+  @test_util.run_v1_only(
+      "ResourceApplyAdadelta op returns a ref, so it is not "
+      "supported in eager mode."
+  )
+  def testResourceApplyAdadeltaMismatchedShape(self):
+    for dtype in [dtypes.float32]:
+      var = resource_variable_ops.ResourceVariable([1.0, 2.0], dtype=dtype)
+      accum = resource_variable_ops.ResourceVariable([1.0, 2.0], dtype=dtype)
+      accum_update = resource_variable_ops.ResourceVariable([1.0], dtype=dtype)
+      lr = constant_op.constant(1.0, dtype=dtype)
+      rho = constant_op.constant(0.9, dtype=dtype)
+      epsilon = constant_op.constant(1e-6, dtype=dtype)
+      grad = constant_op.constant([0.1, 0.2], dtype=dtype)
+      with self.cached_session() as sess:
+        self.evaluate(variables.global_variables_initializer())
+        with self.assertRaises((ValueError, errors.InvalidArgumentError)):
+          self.evaluate(
+              gen_training_ops.resource_apply_adadelta(
+                  var.handle,
+                  accum.handle,
+                  accum_update.handle,
+                  lr,
+                  rho,
+                  epsilon,
+                  grad,
+                  use_locking=False,
+              )
+          )
+
   @test_util.run_v1_only("ApplyFtrl op returns a ref, so it is not "
                          "supported in eager mode.")
   def testApplyFtrl(self):
@@ -226,12 +285,12 @@ class TrainingOpsTest(TensorFlowTestCase):
   def _testTypesForSparseAdagrad(self, x, y, lr, grad, indices, use_gpu):
     self.setUp()
     with self.session(use_gpu=use_gpu):
-      var = variables.VariableV1(x)
-      accum = variables.VariableV1(y)
+      var = variable_v1.VariableV1(x)
+      accum = variable_v1.VariableV1(y)
       self.evaluate(variables.global_variables_initializer())
 
       self.assertAllCloseAccordingToType(x, self.evaluate(var))
-      sparse_apply_adagrad = training_ops.sparse_apply_adagrad(
+      sparse_apply_adagrad = gen_training_ops.sparse_apply_adagrad(
           var, accum, lr, grad,
           constant_op.constant(indices, self._toType(indices.dtype)))
       out = self.evaluate(sparse_apply_adagrad)
@@ -257,13 +316,13 @@ class TrainingOpsTest(TensorFlowTestCase):
                               lr_power=-0.5):
     self.setUp()
     with self.session(use_gpu=use_gpu):
-      var = variables.VariableV1(x)
-      accum = variables.VariableV1(y)
-      linear = variables.VariableV1(z)
+      var = variable_v1.VariableV1(x)
+      accum = variable_v1.VariableV1(y)
+      linear = variable_v1.VariableV1(z)
       self.evaluate(variables.global_variables_initializer())
 
       self.assertAllCloseAccordingToType(x, self.evaluate(var))
-      sparse_apply_ftrl = training_ops.sparse_apply_ftrl(
+      sparse_apply_ftrl = gen_training_ops.sparse_apply_ftrl(
           var,
           accum,
           linear,
@@ -296,14 +355,14 @@ class TrainingOpsTest(TensorFlowTestCase):
                                                 lr_power=-0.5):
     self.setUp()
     with self.session(use_gpu=False):
-      var = variables.VariableV1(x)
-      accum = variables.VariableV1(y)
-      linear = variables.VariableV1(z)
+      var = variable_v1.VariableV1(x)
+      accum = variable_v1.VariableV1(y)
+      linear = variable_v1.VariableV1(z)
       self.evaluate(variables.global_variables_initializer())
 
       self.assertAllCloseAccordingToType(x, self.evaluate(var))
       sparse_apply_ftrl = (
-          training_ops.sparse_apply_ftrl(
+          gen_training_ops.sparse_apply_ftrl(
               var,
               accum,
               linear,
@@ -417,9 +476,9 @@ class TrainingOpsTest(TensorFlowTestCase):
   def _testTypesForAdam(self, var, m, v, grad, use_gpu):
     self.setUp()
     with self.session(use_gpu=use_gpu):
-      var_t = variables.VariableV1(var)
-      m_t = variables.VariableV1(m)
-      v_t = variables.VariableV1(v)
+      var_t = variable_v1.VariableV1(var)
+      m_t = variable_v1.VariableV1(m)
+      v_t = variable_v1.VariableV1(v)
 
       t = 1
       beta1 = np.array(0.9, dtype=var.dtype)
@@ -430,8 +489,8 @@ class TrainingOpsTest(TensorFlowTestCase):
       epsilon = np.array(1e-8, dtype=var.dtype)
       beta1_t = constant_op.constant(beta1, self._toType(var.dtype), [])
       beta2_t = constant_op.constant(beta2, self._toType(var.dtype), [])
-      beta1_power_t = variables.VariableV1(beta1_power)
-      beta2_power_t = variables.VariableV1(beta2_power)
+      beta1_power_t = variable_v1.VariableV1(beta1_power)
+      beta2_power_t = variable_v1.VariableV1(beta2_power)
       lr_t = constant_op.constant(lr, self._toType(var.dtype), [])
       epsilon_t = constant_op.constant(epsilon, self._toType(var.dtype), [])
       self.evaluate(variables.global_variables_initializer())
@@ -439,9 +498,9 @@ class TrainingOpsTest(TensorFlowTestCase):
       self.assertAllCloseAccordingToType(var, self.evaluate(var_t))
       new_var, _, _ = self._adamUpdateNumpy(var, grad, t, m, v, lr, beta1,
                                             beta2, epsilon)
-      apply_adam = training_ops.apply_adam(var_t, m_t, v_t, beta1_power_t,
-                                           beta2_power_t, lr_t, beta1_t,
-                                           beta2_t, epsilon_t, grad)
+      apply_adam = gen_training_ops.apply_adam(var_t, m_t, v_t, beta1_power_t,
+                                               beta2_power_t, lr_t, beta1_t,
+                                               beta2_t, epsilon_t, grad)
       out = self.evaluate(apply_adam)
       self.assertShapeEqual(out, apply_adam)
       self.assertAllCloseAccordingToType(new_var, out)
@@ -454,6 +513,235 @@ class TrainingOpsTest(TensorFlowTestCase):
 
     param_t = param - alpha_t * m_t / (np.sqrt(v_t) + epsilon)
     return param_t, m_t, v_t
+
+  @test_util.run_v2_only
+  def testResourceSparseApplyAdagradV2AndDisableCopyOnReadRace(self):
+    dtype = np.float32
+    index_type = np.int32
+    x_val = [np.arange(10), np.arange(10, 20), np.arange(20, 30)]
+    y_val = [np.arange(1, 11), np.arange(11, 21), np.arange(21, 31)]
+    x = np.array(x_val).astype(dtype)
+    y = np.array(y_val).astype(dtype)
+    lr = np.array(0.001, dtype=dtype)
+    epsilon = np.array(1e-8, dtype=dtype)
+    grad_val = [np.arange(10), np.arange(10)]
+    grad = np.array(grad_val).astype(dtype)
+    indices = np.array([0, 2]).astype(index_type)
+    var = variables.Variable(x)
+    accum = variables.Variable(y)
+    num_iter = 1000
+    self.evaluate(variables.global_variables_initializer())
+
+    @def_function.function
+    def fn_disable_copy_on_read():
+      ret = constant_op.constant(0, dtypes.int32)
+      for i in math_ops.range(num_iter):
+        op1 = resource_variable_ops.disable_copy_on_read(var.handle)
+        op2 = resource_variable_ops.disable_copy_on_read(accum.handle)
+        with ops.control_dependencies([op1, op2]):
+          ret += i
+      return ret
+
+    @def_function.function
+    def fn_resource_sparse_apply_adagrad_v2():
+      ret = constant_op.constant(0, dtypes.int32)
+      for i in math_ops.range(num_iter):
+        adagrad_op = gen_training_ops.resource_sparse_apply_adagrad_v2(
+            var.handle, accum.handle, lr, epsilon, grad,
+            constant_op.constant(indices, dtypes.int32))
+        with ops.control_dependencies([adagrad_op]):
+          ret += i
+      return ret
+
+    # Run two tf.functions simultaneously to make sure there is no race
+    # condition between the two ops that caused deadlock before (b/270712679).
+    thread1 = threading.Thread(
+        target=lambda: self.evaluate(fn_disable_copy_on_read()))
+    thread2 = threading.Thread(
+        target=lambda: self.evaluate(fn_resource_sparse_apply_adagrad_v2()))
+    thread1.start()
+    thread2.start()
+    thread1.join()
+    thread2.join()
+
+  def testResourceSparseApplyAdagradDARejectsScalarGrad(self):
+    # Regression test for #94130: a scalar grad made the kernel read dimension
+    # 1 and terminate the process instead of returning InvalidArgument.
+    with ops.device("/CPU:0"):
+      var, grad_accum, grad_squared_accum = [
+          variables.Variable(np.zeros((10, 2), np.float32)) for _ in range(3)
+      ]
+      self.evaluate(variables.global_variables_initializer())
+      with self.assertRaisesRegex(
+          errors.InvalidArgumentError,
+          "grad must have the same number of dimensions as var",
+      ):
+        self.evaluate(
+            gen_training_ops.resource_sparse_apply_adagrad_da(
+                var.handle,
+                grad_accum.handle,
+                grad_squared_accum.handle,
+                np.float32(0.0),
+                constant_op.constant([0, 0], dtypes.int32),
+                np.float32(0.0),
+                np.float32(0.0),
+                np.float32(0.0),
+                np.int64(1),
+                use_locking=True,
+            )
+        )
+
+  def testSparseApplyOpsRejectLowerRankGrad(self):
+    # Regression test for #94131: a grad of lower rank than var made the
+    # per-dimension shape check read past grad's rank and crash the process.
+    var, accum, accum2, accum3 = [
+        variables.Variable(np.ones((4, 4), np.float32)) for _ in range(4)
+    ]
+    self.evaluate(variables.global_variables_initializer())
+    s = np.float32(0.1)
+    grad = np.zeros(3, np.float32)  # rank 1, var is rank 2
+    idx = constant_op.constant([0, 1, 2], dtypes.int32)
+    g = gen_training_ops
+    cases = [
+        lambda: g.resource_sparse_apply_momentum(
+            var.handle, accum.handle, s, grad, idx, s
+        ),
+        lambda: g.resource_sparse_apply_keras_momentum(
+            var.handle, accum.handle, s, grad, idx, s
+        ),
+        lambda: g.resource_sparse_apply_adadelta(
+            var.handle, accum.handle, accum2.handle, s, s, s, grad, idx
+        ),
+        lambda: g.resource_sparse_apply_proximal_gradient_descent(
+            var.handle, s, s, s, grad, idx
+        ),
+        lambda: g.resource_sparse_apply_proximal_adagrad(
+            var.handle, accum.handle, s, s, s, grad, idx
+        ),
+        lambda: g.resource_sparse_apply_adagrad_da(
+            var.handle,
+            accum.handle,
+            accum2.handle,
+            grad,
+            idx,
+            s,
+            s,
+            s,
+            np.int64(1),
+        ),
+        lambda: g.resource_sparse_apply_ftrl(
+            var.handle,
+            accum.handle,
+            accum2.handle,
+            grad,
+            idx,
+            s,
+            s,
+            s,
+            np.float32(-0.5),
+        ),  # lr_power must be non-positive
+        lambda: g.resource_sparse_apply_rms_prop(
+            var.handle, accum.handle, accum2.handle, s, s, s, s, grad, idx
+        ),
+        lambda: g.resource_sparse_apply_centered_rms_prop(
+            var.handle,
+            accum.handle,
+            accum2.handle,
+            accum3.handle,
+            s,
+            s,
+            s,
+            s,
+            grad,
+            idx,
+        ),
+    ]
+    for apply_op in cases:
+      with self.assertRaises(errors.InvalidArgumentError):
+        self.evaluate(apply_op())
+
+  @test_util.run_v2_only
+  def testResourceSparseApplyAdagradDAInvalidGradRank(self):
+    # A scalar `grad` with a higher-rank `var` used to hit a fatal CHECK
+    # instead of raising InvalidArgumentError (see GitHub issue #94130).
+    # ResourceSparseApplyAdagradDA only has a CPU kernel, so pin the whole
+    # test to CPU rather than relying on default placement.
+    with ops.device("/cpu:0"):
+      var = variables.Variable([[0.0, 0.0]] * 10, dtype=dtypes.float32)
+      gradient_accumulator = variables.Variable(
+          [[0.0, 0.0]] * 10, dtype=dtypes.float32
+      )
+      gradient_squared_accumulator = variables.Variable(
+          [[0.0, 0.0]] * 10, dtype=dtypes.float32
+      )
+      self.evaluate(variables.global_variables_initializer())
+
+      grad = constant_op.constant(0.0, dtype=dtypes.float32)  # wrong rank
+      indices = constant_op.constant([0, 0], dtype=dtypes.int32)
+
+      with self.assertRaisesRegex(
+          errors.InvalidArgumentError,
+          "grad must have the same number of dimensions as var",
+      ):
+        self.evaluate(
+            gen_training_ops.resource_sparse_apply_adagrad_da(
+                var.handle,
+                gradient_accumulator.handle,
+                gradient_squared_accumulator.handle,
+                grad,
+                indices,
+                constant_op.constant(0.0, dtype=dtypes.float32),
+                constant_op.constant(0.0, dtype=dtypes.float32),
+                constant_op.constant(0.0, dtype=dtypes.float32),
+                constant_op.constant(1, dtype=dtypes.int64),
+            )
+        )
+
+  @test_util.run_in_graph_and_eager_modes
+  @test_util.disable_xla("Tests C++ kernel validation in training_op_helpers.h")
+  def testResourceVariableDtypeMismatch(self):
+    # A resource variable whose dtype differs from optimizer dtype T
+    # previously caused a fatal CHECK failure in CheckTypeAndIsAligned
+    # instead of raising an InvalidArgumentError (see GitHub issue #113145).
+    var = variables.Variable([[0.0, 0.0]], dtype=dtypes.float32)
+    accum = variables.Variable([[0.0, 0.0]], dtype=dtypes.float32)
+    var_f16 = variables.Variable([[0.0, 0.0]], dtype=dtypes.float16)
+    self.evaluate(variables.global_variables_initializer())
+
+    lr = constant_op.constant(0.1, dtype=dtypes.float16)
+    grad = constant_op.constant([[0.1, 0.2]], dtype=dtypes.float16)
+    indices = constant_op.constant([0], dtype=dtypes.int32)
+
+    with self.assertRaisesRegex(errors.InvalidArgumentError, "dtype mismatch"):
+      self.evaluate(
+          gen_training_ops.resource_sparse_apply_adagrad(
+              var=var.handle,
+              accum=accum.handle,
+              lr=lr,
+              grad=grad,
+              indices=indices,
+          )
+      )
+
+    with self.assertRaisesRegex(errors.InvalidArgumentError, "dtype mismatch"):
+      self.evaluate(
+          gen_training_ops.resource_sparse_apply_adagrad(
+              var=var_f16.handle,
+              accum=accum.handle,
+              lr=lr,
+              grad=grad,
+              indices=indices,
+          )
+      )
+
+    with self.assertRaisesRegex(errors.InvalidArgumentError, "dtype mismatch"):
+      self.evaluate(
+          gen_training_ops.resource_apply_gradient_descent(
+              var=var.handle,
+              alpha=lr,
+              delta=grad,
+          )
+      )
 
 
 if __name__ == '__main__':

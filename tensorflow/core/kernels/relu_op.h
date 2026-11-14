@@ -20,7 +20,7 @@ limitations under the License.
 
 #define EIGEN_USE_THREADS
 
-#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
+#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
 #include "tensorflow/core/framework/numeric_op.h"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/register_types.h"
@@ -49,7 +49,7 @@ struct ReluHelpers {
   static void ValidateSameSizeHelper(OpKernelContext* context, const Tensor& g,
                                      const Tensor& a) {
     OP_REQUIRES(context, a.IsSameSize(g),
-                errors::InvalidArgument("g and a must be the same size"));
+                absl::InvalidArgumentError("g and a must be the same size"));
   }
   static bool ValidateSameSize(OpKernelContext* context, const Tensor& g,
                                const Tensor& a) {

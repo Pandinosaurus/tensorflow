@@ -24,6 +24,7 @@ limitations under the License.
 #include <memory>
 #include <sstream>
 #include <string>
+#include <vector>
 
 #include "tensorflow/core/framework/tensor.h"
 #include "tensorflow/core/framework/types.pb.h"
@@ -88,7 +89,7 @@ class StatSummarizer {
     return stats_calculator_->GetStatsByNodeType();
   }
 
-  std::string GetStatsByMetric(const string& title,
+  std::string GetStatsByMetric(const std::string& title,
                                StatsCalculator::SortingMetric sorting_metric,
                                int num_stats) const {
     return stats_calculator_->GetStatsByMetric(title, sorting_metric,

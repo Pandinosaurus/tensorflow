@@ -14,12 +14,14 @@ limitations under the License.
 ==============================================================================*/
 #include <queue>
 
+#include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
 #include "tensorflow/core/framework/dataset.h"
 #include "tensorflow/core/framework/op_kernel.h"
+#include "tensorflow/core/framework/op_requires.h"
 #include "tensorflow/core/framework/partial_tensor_shape.h"
 #include "tensorflow/core/framework/tensor.h"
 #include "tensorflow/core/framework/tensor_shape.h"
-#include "tensorflow/core/lib/core/blocking_counter.h"
 #include "tensorflow/core/lib/core/errors.h"
 #include "tensorflow/core/lib/core/threadpool.h"
 #include "tensorflow/core/lib/io/buffered_inputstream.h"
@@ -29,6 +31,7 @@ limitations under the License.
 #include "tensorflow/core/lib/io/record_reader.h"
 #include "tensorflow/core/lib/io/zlib_compression_options.h"
 #include "tensorflow/core/lib/io/zlib_inputstream.h"
+#include "tensorflow/core/platform/blocking_counter.h"
 #include "tensorflow/core/platform/env.h"
 
 namespace tensorflow {
@@ -45,6 +48,8 @@ class MatchingFilesDatasetOp : public DatasetOpKernel {
     OP_REQUIRES_OK(ctx, ctx->input("patterns", &patterns_t));
     const auto patterns = patterns_t->flat<tstring>();
     size_t num_patterns = static_cast<size_t>(patterns.size());
+    OP_REQUIRES(ctx, num_patterns > 0,
+                absl::InvalidArgumentError("patterns must not be empty."));
     std::vector<tstring> pattern_strs;
     pattern_strs.reserve(num_patterns);
 
@@ -62,9 +67,9 @@ class MatchingFilesDatasetOp : public DatasetOpKernel {
         : DatasetBase(DatasetContext(ctx)), patterns_(std::move(patterns)) {}
 
     std::unique_ptr<IteratorBase> MakeIteratorInternal(
-        const string& prefix) const override {
-      return absl::make_unique<Iterator>(
-          Iterator::Params{this, strings::StrCat(prefix, "::MatchingFiles")});
+        const std::string& prefix) const override {
+      return std::make_unique<Iterator>(
+          Iterator::Params{this, absl::StrCat(prefix, "::MatchingFiles")});
     }
 
     const DataTypeVector& output_dtypes() const override {
@@ -78,25 +83,27 @@ class MatchingFilesDatasetOp : public DatasetOpKernel {
       return *shapes;
     }
 
-    string DebugString() const override {
+    std::string DebugString() const override {
       return "MatchingFilesDatasetOp::Dataset";
     }
 
-    Status InputDatasets(
+    absl::Status InputDatasets(
         std::vector<const DatasetBase*>* inputs) const override {
-      return Status::OK();
+      return absl::OkStatus();
     }
 
-    Status CheckExternalState() const override { return Status::OK(); }
+    absl::Status CheckExternalState() const override {
+      return absl::OkStatus();
+    }
 
    protected:
-    Status AsGraphDefInternal(SerializationContext* ctx,
-                              DatasetGraphDefBuilder* b,
-                              Node** output) const override {
+    absl::Status AsGraphDefInternal(SerializationContext* ctx,
+                                    DatasetGraphDefBuilder* b,
+                                    Node** output) const override {
       Node* patterns_node = nullptr;
       TF_RETURN_IF_ERROR(b->AddVector(patterns_, &patterns_node));
       TF_RETURN_IF_ERROR(b->AddDataset(this, {patterns_node}, output));
-      return Status::OK();
+      return absl::OkStatus();
     }
 
    private:
@@ -105,9 +112,9 @@ class MatchingFilesDatasetOp : public DatasetOpKernel {
       explicit Iterator(const Params& params)
           : DatasetIterator<Dataset>(params) {}
 
-      Status GetNextInternal(IteratorContext* ctx,
-                             std::vector<Tensor>* out_tensors,
-                             bool* end_of_sequence) override {
+      absl::Status GetNextInternal(IteratorContext* ctx,
+                                   std::vector<Tensor>* out_tensors,
+                                   bool* end_of_sequence) override {
         mutex_lock l(mu_);
         FileSystem* fs;
 
@@ -139,7 +146,7 @@ class MatchingFilesDatasetOp : public DatasetOpKernel {
               out_tensors->emplace_back(std::move(filepath_tensor));
               *end_of_sequence = false;
               hasMatch_ = true;
-              return Status::OK();
+              return absl::OkStatus();
             }
 
             // In this case, current_path is a directory. Then continue the
@@ -149,7 +156,8 @@ class MatchingFilesDatasetOp : public DatasetOpKernel {
           } else {
             // search a new pattern
             current_pattern_ = dataset()->patterns_[current_pattern_index_];
-            StringPiece current_pattern_view = StringPiece(current_pattern_);
+            absl::string_view current_pattern_view =
+                absl::string_view(current_pattern_);
 
             // Windows paths contain backslashes and Windows APIs accept forward
             // and backslashes equivalently, so we convert the pattern to use
@@ -166,9 +174,9 @@ class MatchingFilesDatasetOp : public DatasetOpKernel {
               isWindows_ = false;
             }
 
-            StringPiece fixed_prefix = current_pattern_view.substr(
+            absl::string_view fixed_prefix = current_pattern_view.substr(
                 0, current_pattern_view.find_first_of("*?[\\"));
-            string current_dir(io::Dirname(fixed_prefix));
+            std::string current_dir(io::Dirname(fixed_prefix));
 
             // If current_dir is empty then we need to fix up fixed_prefix and
             // current_pattern_ to include . as the top level directory.
@@ -185,9 +193,9 @@ class MatchingFilesDatasetOp : public DatasetOpKernel {
 
         *end_of_sequence = true;
         if (hasMatch_) {
-          return Status::OK();
+          return absl::OkStatus();
         } else {
-          return errors::NotFound("Don't find any matched files");
+          return absl::NotFoundError("Don't find any matched files");
         }
       }
 
@@ -197,8 +205,8 @@ class MatchingFilesDatasetOp : public DatasetOpKernel {
         return model::MakeSourceNode(std::move(args));
       }
 
-      Status SaveInternal(SerializationContext* ctx,
-                          IteratorStateWriter* writer) override {
+      absl::Status SaveInternal(SerializationContext* ctx,
+                                IteratorStateWriter* writer) override {
         mutex_lock l(mu_);
         TF_RETURN_IF_ERROR(writer->WriteScalar(
             full_name("current_pattern_index"), current_pattern_index_));
@@ -216,26 +224,33 @@ class MatchingFilesDatasetOp : public DatasetOpKernel {
           int i = 0;
           while (!filepath_queue_.empty()) {
             TF_RETURN_IF_ERROR(
-                writer->WriteScalar(full_name(strings::StrCat("path_", i)),
+                writer->WriteScalar(full_name(absl::StrCat("path_", i)),
                                     filepath_queue_.top().first));
-            TF_RETURN_IF_ERROR(writer->WriteScalar(
-                full_name(strings::StrCat("path_status_", i)),
-                filepath_queue_.top().second));
+            TF_RETURN_IF_ERROR(
+                writer->WriteScalar(full_name(absl::StrCat("path_status_", i)),
+                                    filepath_queue_.top().second));
             filepath_queue_.pop();
             i++;
           }
         }
 
-        return Status::OK();
+        return absl::OkStatus();
       }
 
-      Status RestoreInternal(IteratorContext* ctx,
-                             IteratorStateReader* reader) override {
+      absl::Status RestoreInternal(IteratorContext* ctx,
+                                   IteratorStateReader* reader) override {
         mutex_lock l(mu_);
         int64_t current_pattern_index;
         TF_RETURN_IF_ERROR(reader->ReadScalar(
             full_name("current_pattern_index"), &current_pattern_index));
-        current_pattern_index_ = size_t(current_pattern_index);
+        if (static_cast<size_t>(current_pattern_index) >
+            dataset()->patterns_.size()) {
+          return absl::InvalidArgumentError(
+              absl::StrCat("current_pattern_index must be between 0 and ",
+                           dataset()->patterns_.size(), ", but got ",
+                           current_pattern_index));
+        }
+        current_pattern_index_ = static_cast<size_t>(current_pattern_index);
 
         tstring current_pattern_tstr;
         TF_RETURN_IF_ERROR(reader->ReadScalar(full_name("current_pattern"),
@@ -259,28 +274,29 @@ class MatchingFilesDatasetOp : public DatasetOpKernel {
           for (int i = 0; i < queue_size; i++) {
             tstring path;
             int64_t path_status;
+            TF_RETURN_IF_ERROR(
+                reader->ReadScalar(full_name(absl::StrCat("path_", i)), &path));
             TF_RETURN_IF_ERROR(reader->ReadScalar(
-                full_name(strings::StrCat("path_", i)), &path));
-            TF_RETURN_IF_ERROR(reader->ReadScalar(
-                full_name(strings::StrCat("path_status_", i)), &path_status));
+                full_name(absl::StrCat("path_status_", i)), &path_status));
             filepath_queue_.push(
                 PathStatus(path, static_cast<bool>(path_status)));
           }
         }
 
-        return Status::OK();
+        return absl::OkStatus();
       }
 
      private:
-      Status UpdateIterator(IteratorContext* ctx, FileSystem* fs,
-                            const string& dir, const string& eval_pattern)
+      absl::Status UpdateIterator(IteratorContext* ctx, FileSystem* fs,
+                                  const std::string& dir,
+                                  const std::string& eval_pattern)
           TF_EXCLUSIVE_LOCKS_REQUIRED(mu_) {
-        StringPiece fixed_prefix =
-            StringPiece(eval_pattern)
+        absl::string_view fixed_prefix =
+            absl::string_view(eval_pattern)
                 .substr(0, eval_pattern.find_first_of("*?[\\"));
 
         filepath_queue_.push(PathStatus(dir, true));
-        Status ret;  // Status to return
+        absl::Status ret;  // Status to return
 
         // DFS to find the first element in the iterator.
         while (!filepath_queue_.empty()) {
@@ -289,14 +305,14 @@ class MatchingFilesDatasetOp : public DatasetOpKernel {
           // All the files in the heap are matched with the pattern, so finish
           // the search if current_path is a file.
           if (!current_path.second) {
-            return Status::OK();
+            return absl::OkStatus();
           }
 
           filepath_queue_.pop();
 
           // If current_path is a directory, search its children.
-          const string& current_dir = current_path.first;
-          std::vector<string> children;
+          const std::string& current_dir = current_path.first;
+          std::vector<std::string> children;
           ret.Update(fs->GetChildren(current_dir, &children));
 
           // Handle the error cases: 1) continue the search if the status is
@@ -312,19 +328,20 @@ class MatchingFilesDatasetOp : public DatasetOpKernel {
           // three possible values: OK for true; FAILED_PRECONDITION for false;
           // CANCELLED if we don't calculate IsDirectory (we might do that
           // because there isn't any point in exploring that child path).
-          std::vector<Status> children_dir_status;
+          std::vector<absl::Status> children_dir_status;
           children_dir_status.resize(children.size());
 
           // This IsDirectory call can be expensive for some FS. Parallelizing
           // it.
           auto is_directory_fn = [fs, current_dir, &children, &fixed_prefix,
                                   &children_dir_status](int i) {
-            const string child_path = io::JoinPath(current_dir, children[i]);
+            const std::string child_path =
+                io::JoinPath(current_dir, children[i]);
             // In case the child_path doesn't start with the fixed_prefix, then
             // we don't need to explore this path.
             if (!absl::StartsWith(child_path, fixed_prefix)) {
               children_dir_status[i] =
-                  errors::Cancelled("Operation not needed");
+                  absl::CancelledError("Operation not needed");
             } else {
               children_dir_status[i] = fs->IsDirectory(child_path);
             }
@@ -340,9 +357,9 @@ class MatchingFilesDatasetOp : public DatasetOpKernel {
           counter.Wait();
 
           for (int i = 0; i < children.size(); i++) {
-            const string& child_dir_path =
+            const std::string& child_dir_path =
                 io::JoinPath(current_dir, children[i]);
-            const Status& child_dir_status = children_dir_status[i];
+            const absl::Status& child_dir_status = children_dir_status[i];
 
             // If the IsDirectory call was cancelled we bail.
             if (child_dir_status.code() == tensorflow::error::CANCELLED) {
@@ -366,7 +383,7 @@ class MatchingFilesDatasetOp : public DatasetOpKernel {
 
       mutex mu_;
       // True means the path is a directory; False means the path is a filename.
-      typedef std::pair<string, bool> PathStatus;
+      typedef std::pair<std::string, bool> PathStatus;
       std::priority_queue<PathStatus, std::vector<PathStatus>,
                           std::greater<PathStatus>>
           filepath_queue_ TF_GUARDED_BY(mu_);

@@ -22,7 +22,9 @@ limitations under the License.
 #include <cfloat>
 #include <vector>
 
-#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
+#include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
+#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
 #include "tensorflow/core/common_runtime/device.h"
 #include "tensorflow/core/framework/kernel_shape_util.h"
 #include "tensorflow/core/framework/numeric_op.h"
@@ -41,29 +43,36 @@ namespace tensorflow {
 typedef Eigen::ThreadPoolDevice CPUDevice;
 typedef Eigen::GpuDevice GPUDevice;
 
-void ParseAttributes(OpKernelConstruction* context, std::vector<int32>* strides,
-                     std::vector<int32>* rates, Padding* padding) {
+void ParseAttributes(OpKernelConstruction* context,
+                     std::vector<int32_t>* strides, std::vector<int32_t>* rates,
+                     Padding* padding) {
   OP_REQUIRES_OK(context, context->GetAttr("strides", strides));
   OP_REQUIRES(context, strides->size() == 4,
-              errors::InvalidArgument("Sliding window stride field must "
-                                      "specify 4 dimensions"));
+              absl::InvalidArgumentError("Sliding window stride field must "
+                                         "specify 4 dimensions"));
   OP_REQUIRES(context, (*strides)[0] == 1 && (*strides)[3] == 1,
-              errors::Unimplemented(
+              absl::UnimplementedError(
                   "Stride is only supported across spatial dimensions."));
+  OP_REQUIRES(context, (*strides)[1] >= 1 && (*strides)[2] >= 1,
+              absl::InvalidArgumentError(
+                  "Strides in the spatial dimensions must be >= 1."));
 
   OP_REQUIRES_OK(context, context->GetAttr("rates", rates));
   OP_REQUIRES(context, rates->size() == 4,
-              errors::InvalidArgument("Input stride (atrous rate) field "
-                                      "must specify 4 dimensions"));
+              absl::InvalidArgumentError("Input stride (atrous rate) field "
+                                         "must specify 4 dimensions"));
   OP_REQUIRES(context, (*rates)[0] == 1 && (*rates)[3] == 1,
-              errors::Unimplemented(
+              absl::UnimplementedError(
                   "Rate is only supported across spatial dimensions."));
+  OP_REQUIRES(context, (*rates)[1] >= 1 && (*rates)[2] >= 1,
+              absl::InvalidArgumentError(
+                  "Rates in the spatial dimensions must be >= 1."));
 
   OP_REQUIRES_OK(context, context->GetAttr("padding", padding));
 }
 
-void ParseSizes(OpKernelContext* context, const std::vector<int32>& strides,
-                const std::vector<int32>& rates, const Padding& padding,
+void ParseSizes(OpKernelContext* context, const std::vector<int32_t>& strides,
+                const std::vector<int32_t>& rates, const Padding& padding,
                 int* stride_rows, int* stride_cols, int* rate_rows,
                 int* rate_cols, int64_t* pad_top, int64_t* pad_left,
                 int64_t* out_rows, int64_t* out_cols) {
@@ -71,8 +80,8 @@ void ParseSizes(OpKernelContext* context, const std::vector<int32>& strides,
   // [ batch, input_rows, input_cols, depth ]
   const Tensor& input = context->input(0);
   OP_REQUIRES(context, input.dims() == 4,
-              errors::InvalidArgument("input must be 4-dimensional",
-                                      input.shape().DebugString()));
+              absl::InvalidArgumentError(absl::StrCat(
+                  "input must be 4-dimensional", input.shape().DebugString())));
   const int input_rows = input.dim_size(1);
   const int input_cols = input.dim_size(2);
   const int depth = input.dim_size(3);
@@ -87,29 +96,32 @@ void ParseSizes(OpKernelContext* context, const std::vector<int32>& strides,
   // Input filter is of the following dimensions:
   // [ filter_rows, filter_cols, depth ]
   const Tensor& filter = context->input(1);
-  OP_REQUIRES(context, filter.dims() == 3,
-              errors::InvalidArgument("filter must be 3-dimensional: ",
-                                      filter.shape().DebugString()));
+  OP_REQUIRES(
+      context, filter.dims() == 3,
+      absl::InvalidArgumentError(absl::StrCat("filter must be 3-dimensional: ",
+                                              filter.shape().DebugString())));
   const int filter_rows = filter.dim_size(0);
   const int filter_cols = filter.dim_size(1);
   OP_REQUIRES(context, depth == filter.dim_size(2),
-              errors::InvalidArgument(
+              absl::InvalidArgumentError(absl::StrCat(
                   "input and filter must have the same depth: ", depth, " vs ",
-                  filter.dim_size(2)));
+                  filter.dim_size(2))));
 
   // Effective filter size, after introducing rate - 1 zeros between each
   // non-zero filter element.
-  const int filter_rows_eff =
-      filter_rows + (filter_rows - 1) * (*rate_rows - 1);
-  const int filter_cols_eff =
-      filter_cols + (filter_cols - 1) * (*rate_cols - 1);
+  const int64_t filter_rows_eff =
+      static_cast<int64_t>(filter_rows) +
+      static_cast<int64_t>(filter_rows - 1) * (*rate_rows - 1);
+  const int64_t filter_cols_eff =
+      static_cast<int64_t>(filter_cols) +
+      static_cast<int64_t>(filter_cols - 1) * (*rate_cols - 1);
 
-  OP_REQUIRES_OK(
-      context, GetWindowedOutputSize(input_rows, filter_rows_eff, *stride_rows,
-                                     padding, out_rows, pad_top));
-  OP_REQUIRES_OK(
-      context, GetWindowedOutputSize(input_cols, filter_cols_eff, *stride_cols,
-                                     padding, out_cols, pad_left));
+  OP_REQUIRES_OK(context, GetWindowedOutputSize(
+                              input_rows, filter_rows_eff, /*dilation_rate=*/1,
+                              *stride_rows, padding, out_rows, pad_top));
+  OP_REQUIRES_OK(context, GetWindowedOutputSize(
+                              input_cols, filter_cols_eff, /*dilation_rate=*/1,
+                              *stride_cols, padding, out_cols, pad_left));
 }
 
 template <typename Device, typename T>
@@ -154,8 +166,8 @@ class DilationOp : public OpKernel {
         pad_top, pad_left, output->tensor<T, 4>());
   }
 
-  std::vector<int32> strides_;
-  std::vector<int32> rates_;
+  std::vector<int32_t> strides_;
+  std::vector<int32_t> rates_;
   Padding padding_;
 };
 
@@ -225,8 +237,8 @@ class DilationBackpropInputOp : public OpKernel {
 
     if (std::is_same<Device, GPUDevice>::value) {
       OP_REQUIRES(context, !tensorflow::OpDeterminismRequired(),
-                  errors::Unimplemented("Determinism is not yet supported "
-                                        "for Dilation2DBackpropInput."));
+                  absl::UnimplementedError("Determinism is not yet supported "
+                                           "for Dilation2DBackpropInput."));
     }
     // Determine relevant sizes from input and filters.
     int stride_rows = 0, stride_cols = 0;
@@ -238,16 +250,22 @@ class DilationBackpropInputOp : public OpKernel {
                &out_cols);
     if (!context->status().ok()) return;
 
+    OP_REQUIRES(context, out_backprop.dims() == 4,
+                absl::InvalidArgumentError(
+                    absl::StrCat("out_backprop must be 4-dimensional",
+                                 out_backprop.shape().DebugString())));
+
     // Verify that the incoming gradient tensor has the expected size
     // [ batch, out_rows, out_cols, depth ]
     const int batch = input.dim_size(0);
     const int depth = input.dim_size(3);
-    OP_REQUIRES(context,
-                batch == out_backprop.dim_size(0) &&
-                    out_rows == out_backprop.dim_size(1) &&
-                    out_cols == out_backprop.dim_size(2) &&
-                    depth == out_backprop.dim_size(3),
-                errors::InvalidArgument("out_backprop has incompatible size."));
+    OP_REQUIRES(
+        context,
+        batch == out_backprop.dim_size(0) &&
+            out_rows == out_backprop.dim_size(1) &&
+            out_cols == out_backprop.dim_size(2) &&
+            depth == out_backprop.dim_size(3),
+        absl::InvalidArgumentError("out_backprop has incompatible size."));
 
     // The computed in_backprop has the same dimensions as the input:
     // [ batch, input_rows, input_cols, depth ]
@@ -267,8 +285,8 @@ class DilationBackpropInputOp : public OpKernel {
         in_backprop->tensor<T, 4>());
   }
 
-  std::vector<int32> strides_;
-  std::vector<int32> rates_;
+  std::vector<int32_t> strides_;
+  std::vector<int32_t> rates_;
   Padding padding_;
 };
 
@@ -349,8 +367,8 @@ class DilationBackpropFilterOp : public OpKernel {
   void Compute(OpKernelContext* context) override {
     if (std::is_same<Device, GPUDevice>::value) {
       OP_REQUIRES(context, !tensorflow::OpDeterminismRequired(),
-                  errors::Unimplemented("Determinism is not yet supported "
-                                        "for Dilation2DBackpropFilter."));
+                  absl::UnimplementedError("Determinism is not yet supported "
+                                           "for Dilation2DBackpropFilter."));
     }
     const Tensor& input = context->input(0);
     const Tensor& filter = context->input(1);
@@ -366,16 +384,22 @@ class DilationBackpropFilterOp : public OpKernel {
                &out_cols);
     if (!context->status().ok()) return;
 
+    OP_REQUIRES(context, out_backprop.dims() == 4,
+                absl::InvalidArgumentError(
+                    absl::StrCat("out_backprop must be 4-dimensional",
+                                 out_backprop.shape().DebugString())));
+
     // Verify that the incoming gradient tensor has the expected size
     // [ batch, out_rows, out_cols, depth ]
     const int batch = input.dim_size(0);
     const int depth = input.dim_size(3);
-    OP_REQUIRES(context,
-                batch == out_backprop.dim_size(0) &&
-                    out_rows == out_backprop.dim_size(1) &&
-                    out_cols == out_backprop.dim_size(2) &&
-                    depth == out_backprop.dim_size(3),
-                errors::InvalidArgument("out_backprop has incompatible size."));
+    OP_REQUIRES(
+        context,
+        batch == out_backprop.dim_size(0) &&
+            out_rows == out_backprop.dim_size(1) &&
+            out_cols == out_backprop.dim_size(2) &&
+            depth == out_backprop.dim_size(3),
+        absl::InvalidArgumentError("out_backprop has incompatible size."));
 
     // The computed filter_backprop has the same dimensions as the filter:
     // [ batch, input_rows, input_cols, depth ]
@@ -395,8 +419,8 @@ class DilationBackpropFilterOp : public OpKernel {
         filter_backprop->tensor<T, 3>());
   }
 
-  std::vector<int32> strides_;
-  std::vector<int32> rates_;
+  std::vector<int32_t> strides_;
+  std::vector<int32_t> rates_;
   Padding padding_;
 };
 

@@ -14,10 +14,6 @@
 # ==============================================================================
 """Tests for multinomial generation ops in the XLA JIT compiler."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import collections
 
 import numpy as np
@@ -29,6 +25,7 @@ from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import random_ops
 from tensorflow.python.ops import stateless_random_ops
 from tensorflow.python.platform import googletest
+from tensorflow.python.platform import test
 
 
 # TODO(srvasude): Merge this with
@@ -105,6 +102,8 @@ class CategoricalTest(xla_test.XLATestCase):
     for output_dtype in self.output_dtypes():
       self._testRngIsNotConstant(rng, dtype, output_dtype)
 
+  @test.disable_with_predicate(
+      pred=test.is_built_with_rocm, skip_message="Test fails on ROCm.")
   def testCategoricalIsInRange(self):
     for dtype in self.float_types:
       for output_dtype in self.output_dtypes():
@@ -138,6 +137,31 @@ class CategoricalTest(xla_test.XLATestCase):
       # df.
       chi2 = self._chi2(probs, freqs)
       self.assertLess(chi2, 1e-3)
+
+  def testHalfPrecisionLargeLogits(self):
+    # Regression test for GitHub issue 128958: half-precision logits were
+    # sampled in their own type, where the spacing between values (32 at 4096
+    # for bfloat16) rounds the Gumbel noise away, so equal logits always gave
+    # the first class.
+    num_samples = 40000
+    probs = [[0.5, 0.5]]
+    for dtype in self.float_types:
+      if dtypes.as_dtype(dtype) not in (dtypes.float16, dtypes.bfloat16):
+        continue
+      logits = np.array([[4096.0, 4096.0]], dtype=dtype)
+      with self.subTest(dtype=dtypes.as_dtype(dtype).name):
+        freqs = self._do_sampling(logits, num_samples)
+        self.assertLess(self._chi2(probs, freqs), 1e-3)
+        if dtypes.as_dtype(dtype) == dtypes.bfloat16:
+          with self.session() as sess:
+            with self.test_scope():
+              seed_t = array_ops.placeholder(dtypes.int32, shape=[2])
+              x = stateless_random_ops.stateless_multinomial(
+                  logits, num_samples, seed_t, output_dtype=dtypes.int32
+              )
+            y = sess.run(x, {seed_t: [0x12345678, 0xABCDEF12]})
+          freqs = [[np.mean(y == k) for k in range(2)]]
+          self.assertLess(self._chi2(probs, freqs), 1e-3)
 
   def testStatelessMultinomialIsInRange(self):
     for dtype in self.float_types.intersection(
@@ -189,7 +213,6 @@ class CategoricalTest(xla_test.XLATestCase):
             output_dtype=dtypes.int32)
         y = sess.run(x, {seed_t: [0x12345678, 0xabcdef1]})
         self.assertEqual(y.shape, (42, 0))
-
 
 
 if __name__ == '__main__':

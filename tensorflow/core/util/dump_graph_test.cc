@@ -15,13 +15,16 @@ limitations under the License.
 
 #include "tensorflow/core/util/dump_graph.h"
 
+#include "absl/strings/match.h"
+#include "xla/tsl/lib/core/status_test_util.h"
+#include "tensorflow/core/framework/op.h"
 #include "tensorflow/core/graph/graph.h"
 #include "tensorflow/core/graph/node_builder.h"
-#include "tensorflow/core/lib/core/status_test_util.h"
-#include "tensorflow/core/lib/io/path.h"
-#include "tensorflow/core/lib/strings/proto_serialization.h"
 #include "tensorflow/core/platform/env.h"
+#include "tensorflow/core/platform/path.h"
 #include "tensorflow/core/platform/test.h"
+#include "tensorflow/core/platform/types.h"
+#include "tsl/platform/status.h"
 
 namespace tensorflow {
 namespace {
@@ -32,7 +35,7 @@ TEST(DumpGraph, DumpGraphToFileSuccess) {
   TF_CHECK_OK(NodeBuilder("A", "NoOp").Finalize(&graph, &node));
 
   setenv("TF_DUMP_GRAPH_PREFIX", testing::TmpDir().c_str(), 1);
-  string ret = DumpGraphToFile("graph", graph);
+  std::string ret = DumpGraphToFile("graph", graph);
   EXPECT_EQ(ret, io::JoinPath(testing::TmpDir(), "graph.pbtxt"));
   ret = DumpGraphToFile("graph", graph);
   EXPECT_EQ(ret, io::JoinPath(testing::TmpDir(), "graph_1.pbtxt"));
@@ -40,7 +43,7 @@ TEST(DumpGraph, DumpGraphToFileSuccess) {
   GraphDef gdef;
   TF_ASSERT_OK(ReadTextProto(
       Env::Default(), io::JoinPath(testing::TmpDir(), "graph.pbtxt"), &gdef));
-  string read, written;
+  std::string read, written;
   gdef.AppendToString(&read);
   graph.ToGraphDefDebug().AppendToString(&written);
   EXPECT_EQ(read, written);
@@ -49,15 +52,44 @@ TEST(DumpGraph, DumpGraphToFileSuccess) {
 TEST(DumpGraph, DumpGraphToFileNoEnvPrefix) {
   Graph graph(OpRegistry::Global());
   unsetenv("TF_DUMP_GRAPH_PREFIX");
-  string ret = DumpGraphToFile("graph", graph);
-  EXPECT_TRUE(str_util::StrContains(ret, "TF_DUMP_GRAPH_PREFIX not specified"));
+  std::string ret = DumpGraphToFile("graph", graph);
+  EXPECT_TRUE(absl::StrContains(ret, "TF_DUMP_GRAPH_PREFIX not specified"));
 }
 
 TEST(DumpGraph, DumpFunctionDefToFileSuccess) {
   FunctionDef fdef;
   setenv("TF_DUMP_GRAPH_PREFIX", testing::TmpDir().c_str(), 1);
-  string ret = DumpFunctionDefToFile("function", fdef);
+  std::string ret = DumpFunctionDefToFile("function", fdef);
   EXPECT_EQ(ret, io::JoinPath(testing::TmpDir(), "function.pbtxt"));
+}
+
+TEST(DumpGraph, DumpProtoToFileSuccess) {
+  NodeDef ndef_in;
+  ndef_in.set_name("foo");
+  ndef_in.set_op("bar");
+  ndef_in.add_input("baz");
+  ndef_in.set_device("cpu:0");
+
+  setenv("TF_DUMP_GRAPH_PREFIX", testing::TmpDir().c_str(), 1);
+  setenv("TF_DUMP_GRAPH_FMT", "TXT", 1);
+  std::string expected_filepath =
+      io::JoinPath(testing::TmpDir(), "node_def.pbtxt");
+  std::string actual_filepath = DumpProtoToFile("node_def", ndef_in);
+  EXPECT_EQ(expected_filepath, actual_filepath);
+
+  NodeDef ndef_out;
+  TF_ASSERT_OK(ReadTextProto(Env::Default(), expected_filepath, &ndef_out));
+  EXPECT_EQ(ndef_in.DebugString(), ndef_out.DebugString());
+
+  setenv("TF_DUMP_GRAPH_FMT", "BIN", 1);
+  std::string ret = DumpProtoToFile("node_def", ndef_in);
+  EXPECT_EQ(ret, io::JoinPath(testing::TmpDir(), "node_def_1.pb"));
+  TF_ASSERT_OK(ReadBinaryProto(Env::Default(), ret, &ndef_out));
+  EXPECT_EQ(ndef_out.DebugString(), ndef_in.DebugString());
+
+  setenv("TF_DUMP_GRAPH_FMT", "unknown", 1);
+  ret = DumpProtoToFile("node_def", ndef_in);
+  EXPECT_TRUE(absl::StrContains(ret, "Unknown format"));
 }
 
 }  // namespace

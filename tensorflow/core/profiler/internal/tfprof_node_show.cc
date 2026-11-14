@@ -1,4 +1,4 @@
-/* Copyright 2016 The TensorFlow Authors All Rights Reserved.
+/* Copyright 2016 The TensorFlow Authors. All Rights Reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -13,6 +13,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 #include "tensorflow/core/profiler/internal/tfprof_node_show.h"
+
+#include <vector>
 
 namespace tensorflow {
 namespace tfprof {
@@ -134,7 +136,7 @@ ShowMultiNode::ShowMultiNode(TFMultiGraphNode* node)
 }
 
 bool ShowMultiNode::ReInit(int64_t step,
-                           const std::vector<string>& type_regexes) {
+                           const std::vector<std::string>& type_regexes) {
   bool has_matched_type = node->SnapshotNodes(step, type_regexes);
 
   std::vector<ShowNode> snodes;

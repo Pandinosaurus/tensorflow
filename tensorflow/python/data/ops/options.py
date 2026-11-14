@@ -14,18 +14,75 @@
 # ==============================================================================
 """API for specifying `tf.data` options."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import enum
+import platform
 
 from absl import logging
 
 from tensorflow.core.framework import dataset_options_pb2
+from tensorflow.core.framework import model_pb2
+from tensorflow.python.data.ops import test_mode
 from tensorflow.python.data.util import options as options_lib
 from tensorflow.python.util import deprecation
 from tensorflow.python.util.tf_export import tf_export
+
+
+@tf_export("data.experimental.AutotuneAlgorithm")
+class AutotuneAlgorithm(enum.Enum):
+  """Represents the type of autotuning algorithm to use.
+
+  DEFAULT: The default behavior is implementation specific and may change over
+  time.
+
+  HILL_CLIMB: In each optimization step, this algorithm chooses the optimal
+  parameter and increases its value by 1.
+
+  GRADIENT_DESCENT: In each optimization step, this algorithm updates the
+  parameter values in the optimal direction.
+
+  MAX_PARALLELISM: Similar to HILL_CLIMB but uses a relaxed stopping condition,
+  allowing the optimization to oversubscribe the CPU.
+
+  STAGE_BASED: In each optimization step, this algorithm chooses the worst
+  bottleneck parameter and increases its value by 1.
+  """
+  DEFAULT = 0
+  HILL_CLIMB = 1
+  GRADIENT_DESCENT = 2
+  MAX_PARALLELISM = 3
+  STAGE_BASED = 4
+
+  @classmethod
+  def _to_proto(cls, obj):
+    if obj == cls.DEFAULT:
+      return model_pb2.AutotuneAlgorithm.DEFAULT
+    if obj == cls.HILL_CLIMB:
+      return model_pb2.AutotuneAlgorithm.HILL_CLIMB
+    if obj == cls.GRADIENT_DESCENT:
+      return model_pb2.AutotuneAlgorithm.GRADIENT_DESCENT
+    if obj == cls.MAX_PARALLELISM:
+      return model_pb2.AutotuneAlgorithm.MAX_PARALLELISM
+    if obj == cls.STAGE_BASED:
+      return model_pb2.AutotuneAlgorithm.STAGE_BASED
+    raise ValueError(
+        f"Invalid `obj.` Supported values include `DEFAULT`, `HILL_CLIMB` "
+        f"`GRADIENT_DESCENT`, and `STAGE_BASED`. Got {obj.name}.")
+
+  @classmethod
+  def _from_proto(cls, pb):
+    if pb == model_pb2.AutotuneAlgorithm.DEFAULT:
+      return cls.DEFAULT
+    if pb == model_pb2.AutotuneAlgorithm.HILL_CLIMB:
+      return cls.HILL_CLIMB
+    if pb == model_pb2.AutotuneAlgorithm.GRADIENT_DESCENT:
+      return cls.GRADIENT_DESCENT
+    if pb == model_pb2.AutotuneAlgorithm.MAX_PARALLELISM:
+      return cls.MAX_PARALLELISM
+    if pb == model_pb2.AutotuneAlgorithm.STAGE_BASED:
+      return cls.STAGE_BASED
+    raise ValueError(
+        f"Invalid `pb.` Supported values include `DEFAULT`, `HILL_CLIMB`, "
+        f"`GRADIENT_DESCENT` and `STAGE_BASED`. Got {pb}.")
 
 
 @tf_export("data.experimental.AutoShardPolicy")
@@ -166,6 +223,34 @@ class AutotuneOptions(options_lib.OptionsBase):
       "may result in OOM. If None, defaults to half of the available RAM in "
       "bytes.")
 
+  autotune_algorithm = options_lib.create_option(
+      name="autotune_algorithm",
+      ty=AutotuneAlgorithm,
+      docstring="When autotuning is enabled (through `autotune`), determines "
+      "the algorithm to use.")
+
+  initial_parallelism = options_lib.create_option(
+      name="initial_parallelism",
+      ty=int,
+      docstring=(
+          "The initial parallelism to use for parallel transformations before"
+          " autotune has a chance to run. A higher value can help with quick"
+          " startup, but may cause the ram_budget to temporarily be exceeded."
+          " Memory-sensitive datasets should consider setting this to `1` to"
+          " avoid running out of memory. Defaults to 16."
+      ),
+  )
+
+  min_parallelism = options_lib.create_option(
+      name="min_parallelism",
+      ty=int,
+      docstring=(
+          "When true, `.map(num_parallel_calls=AUTOTUNE)` and"
+          " `.batch(num_parallel_calls=AUTOTUNE)` will be at least"
+          " parallelized by `min_parallelism` threads."
+      ),
+  )
+
   def _to_proto(self):
     pb = dataset_options_pb2.AutotuneOptions()
     if self.enabled is not None:
@@ -174,6 +259,13 @@ class AutotuneOptions(options_lib.OptionsBase):
       pb.cpu_budget = self.cpu_budget
     if self.ram_budget is not None:
       pb.ram_budget = self.ram_budget
+    if self.autotune_algorithm is not None:
+      pb.autotune_algorithm = AutotuneAlgorithm._to_proto(  # pylint: disable=protected-access
+          self.autotune_algorithm)
+    if self.initial_parallelism is not None:
+      pb.initial_parallelism = self.initial_parallelism
+    if self.min_parallelism is not None:
+      pb.min_parallelism = self.min_parallelism
     return pb
 
   def _from_proto(self, pb):
@@ -183,6 +275,13 @@ class AutotuneOptions(options_lib.OptionsBase):
       self.cpu_budget = pb.cpu_budget
     if pb.WhichOneof("optional_ram_budget") is not None:
       self.ram_budget = pb.ram_budget
+    if pb.WhichOneof("optional_autotune_algorithm") is not None:
+      self.autotune_algorithm = AutotuneAlgorithm._from_proto(  # pylint: disable=protected-access
+          pb.autotune_algorithm)
+    if pb.WhichOneof("optional_initial_parallelism") is not None:
+      self.initial_parallelism = pb.initial_parallelism
+    if pb.WhichOneof("optional_min_parallelism") is not None:
+      self.min_parallelism = pb.min_parallelism
 
   def _set_mutable(self, mutable):
     """Change the mutability value to `mutable` on this options and children."""
@@ -200,7 +299,7 @@ class DistributeOptions(options_lib.OptionsBase):
 
   ```python
   options = tf.data.Options()
-  options.experimental_distribute.auto_shard_policy = AutoShardPolicy.OFF
+  options.experimental_distribute.auto_shard_policy = tf.data.experimental.AutoShardPolicy.OFF
   dataset = dataset.with_options(options)
   ```
   """
@@ -260,6 +359,31 @@ class OptimizationOptions(options_lib.OptionsBase):
       docstring=
       "Whether to fuse filter transformations. If None, defaults to False.")
 
+  filter_parallelization = options_lib.create_option(
+      name="filter_parallelization",
+      ty=bool,
+      docstring=
+      "Whether to parallelize stateless filter transformations. If None, "
+      "defaults to False.")
+
+  inject_prefetch = options_lib.create_option(
+      name="inject_prefetch",
+      ty=bool,
+      docstring=
+      "Whether to inject prefetch transformation as the last transformation "
+      "when the last transformation is a synchronous transformation. If None, "
+      "defaults to True.")
+
+  seq_interleave_prefetch = options_lib.create_option(
+      name="seq_interleave_prefetch",
+      ty=bool,
+      docstring=(
+          "Whether to replace parallel interleave using a sequential interleave"
+          " that prefetches elements from its input iterators. If None,"
+          " defaults to False."
+      ),
+  )
+
   map_and_batch_fusion = options_lib.create_option(
       name="map_and_batch_fusion",
       ty=bool,
@@ -277,8 +401,12 @@ class OptimizationOptions(options_lib.OptionsBase):
   map_fusion = options_lib.create_option(
       name="map_fusion",
       ty=bool,
-      docstring="Whether to fuse map transformations. If None, defaults to "
-      "False.")
+      docstring=(
+          "Whether to fuse map transformations with `num_parallel_calls` set to"
+          " `tf.data.AUTOTUNE`, no captured inputs and same `deterministic`"
+          " value. If None, defaults to False."
+      ),
+  )
 
   map_parallelization = options_lib.create_option(
       name="map_parallelization",
@@ -296,13 +424,8 @@ class OptimizationOptions(options_lib.OptionsBase):
   parallel_batch = options_lib.create_option(
       name="parallel_batch",
       ty=bool,
-      docstring="Whether to parallelize copying of batch elements. This "
-      "optimization is highly experimental and can cause performance "
-      "degradation (e.g. when the parallelization overhead exceeds the "
-      "benefits of performing the data copies in parallel). You should only "
-      "enable this optimization if a) your input pipeline is bottlenecked on "
-      "batching and b) you have validated that this optimization improves "
-      "performance. If None, defaults to False.")
+      docstring="Whether to parallelize copying of batch elements. If None, "
+      "defaults to True.")
 
   shuffle_and_repeat_fusion = options_lib.create_option(
       name="shuffle_and_repeat_fusion",
@@ -316,6 +439,12 @@ class OptimizationOptions(options_lib.OptionsBase):
       pb.apply_default_optimizations = self.apply_default_optimizations
     if self.filter_fusion is not None:
       pb.filter_fusion = self.filter_fusion
+    if self.filter_parallelization is not None:
+      pb.filter_parallelization = self.filter_parallelization
+    if self.inject_prefetch is not None:
+      pb.inject_prefetch = self.inject_prefetch
+    if self.seq_interleave_prefetch is not None:
+      pb.seq_interleave_prefetch = self.seq_interleave_prefetch
     if self.map_and_batch_fusion is not None:
       pb.map_and_batch_fusion = self.map_and_batch_fusion
     if self.map_and_filter_fusion is not None:
@@ -337,6 +466,12 @@ class OptimizationOptions(options_lib.OptionsBase):
       self.apply_default_optimizations = pb.apply_default_optimizations
     if pb.WhichOneof("optional_filter_fusion") is not None:
       self.filter_fusion = pb.filter_fusion
+    if pb.WhichOneof("optional_filter_parallelization") is not None:
+      self.filter_parallelization = pb.filter_parallelization
+    if pb.WhichOneof("optional_inject_prefetch") is not None:
+      self.inject_prefetch = pb.inject_prefetch
+    if pb.WhichOneof("optional_seq_interleave_prefetch") is not None:
+      self.seq_interleave_prefetch = pb.seq_interleave_prefetch
     if pb.WhichOneof("optional_map_and_batch_fusion") is not None:
       self.map_and_batch_fusion = pb.map_and_batch_fusion
     if pb.WhichOneof("optional_map_and_filter_fusion") is not None:
@@ -358,13 +493,51 @@ class OptimizationOptions(options_lib.OptionsBase):
     object.__setattr__(self, "_mutable", mutable)
 
 
+@tf_export("data.experimental.ServiceOptions")
+class ServiceOptions(options_lib.OptionsBase):
+  """Represents options for tf.data service.
+
+  You can set the service options of a dataset through the
+  `experimental_service` property of `tf.data.Options`; the property is an
+  instance of `tf.data.experimental.ServiceOptions`.
+
+  ```python
+  options = tf.data.Options()
+  options.experimental_service.pinned = True
+  dataset = dataset.with_options(options)
+  ```
+  """
+
+  pinned = options_lib.create_option(
+      name="pinned",
+      ty=bool,
+      docstring=(
+          "If true, the tf.data service client allocates data to pinned memory,"
+          " which facilitates more efficient copying from host memory to GPU"
+          " memory downstream. For gRPC, compression must be disabled for this"
+          " to take effect. For alternative data transfer protocols, this may"
+          " or may not take effect, depending on the implementation."
+      ),
+  )
+
+  def _to_proto(self):
+    pb = dataset_options_pb2.ServiceOptions()
+    if self.pinned is not None:
+      pb.pinned = self.pinned
+    return pb
+
+  def _from_proto(self, pb):
+    if pb.WhichOneof("optional_pinned") is not None:
+      self.pinned = pb.pinned
+
+
 @deprecation.deprecated_endpoints("data.experimental.ThreadingOptions")
 @tf_export("data.experimental.ThreadingOptions", "data.ThreadingOptions")
 class ThreadingOptions(options_lib.OptionsBase):
   """Represents options for dataset threading.
 
   You can set the threading options of a dataset through the
-  `experimental_threading` property of `tf.data.Options`; the property is
+  `threading` property of `tf.data.Options`; the property is
   an instance of `tf.data.ThreadingOptions`.
 
   ```python
@@ -486,10 +659,56 @@ class Options(options_lib.OptionsBase):
       "frequency is determined by the number of devices attached to this "
       "input pipeline. If None, defaults to False.")
 
+  experimental_symbolic_checkpoint = options_lib.create_option(
+      name="experimental_symbolic_checkpoint",
+      ty=bool,
+      docstring="Whether to checkpoint internal input pipeline state "
+      "maintaining cursors into data sources that identify last "
+      "element(s) produced as output to the tf.data consumer. This "
+      "is alternative to the default 'explicit' checkpointing which "
+      "stores the internal input pipeline state in the checkpoint. "
+      "Note that symbolic checkpointing is not supported for "
+      "transformations that can reorder elements.")
+
+  experimental_service = options_lib.create_option(
+      name="experimental_service",
+      ty=ServiceOptions,
+      docstring=(
+          "The tf.data service options associated with the dataset. See "
+          "`tf.data.experimental.ServiceOptions` for more details."
+      ),
+      default_factory=ServiceOptions,
+  )
+
   experimental_threading = options_lib.create_option(
       name="experimental_threading",
       ty=ThreadingOptions,
       docstring="DEPRECATED. Use `threading` instead.")
+
+  experimental_warm_start = options_lib.create_option(
+      name="experimental_warm_start",
+      ty=bool,
+      docstring=(
+          "Whether to start background threads of asynchronous transformations "
+          "upon iterator creation, as opposed to during the first call to "
+          "`next()`. Defaults to `False`. "
+          "This improves the latency of the initial 'next()' calls at "
+          "the expense of requiring more memory to hold prefetched elements "
+          "between the time of iterator construction and usage."
+      ),
+      default_factory=lambda: True if test_mode.TEST_MODE else None,
+  )
+
+  dataset_name = options_lib.create_option(
+      name="dataset_name",
+      ty=str,
+      docstring="A name for the dataset, to help in debugging.")
+
+  framework_type = options_lib.create_option(
+      name="framework_type",
+      ty=list,
+      docstring="The list of frameworks that are used to generate this "
+      "pipeline, used for telemetry.")
 
   threading = options_lib.create_option(
       name="threading",
@@ -522,6 +741,11 @@ class Options(options_lib.OptionsBase):
       #                 "Use options.deterministic instead.")
       super(Options, self).__setattr__("deterministic", value)
       return
+    if name == "experimental_symbolic_checkpoint":
+      # TODO(b/276269493): Add support for MacOS.
+      if platform.system() == "Darwin":
+        logging.warning("Symbolic checkpointing is not supported on MacOS.")
+        return
     super(Options, self).__setattr__(name, value)
 
   def _to_proto(self):
@@ -537,6 +761,16 @@ class Options(options_lib.OptionsBase):
     pb.optimization_options.CopyFrom(self.experimental_optimization._to_proto())  # pylint: disable=protected-access
     if self.experimental_slack is not None:
       pb.slack = self.experimental_slack
+    if self.experimental_symbolic_checkpoint is not None:
+      pb.symbolic_checkpoint = self.experimental_symbolic_checkpoint
+    if self.experimental_warm_start is not None:
+      pb.warm_start = self.experimental_warm_start
+    if self.dataset_name is not None:
+      pb.dataset_name = self.dataset_name
+    if self.framework_type:
+      for framework_type in self.framework_type:
+        pb.framework_type.append(framework_type)
+    pb.service_options.CopyFrom(self.experimental_service._to_proto())  # pylint: disable=protected-access
     pb.threading_options.CopyFrom(self.threading._to_proto())  # pylint: disable=protected-access
     return pb
 
@@ -552,6 +786,17 @@ class Options(options_lib.OptionsBase):
     self.experimental_optimization._from_proto(pb.optimization_options)  # pylint: disable=protected-access
     if pb.WhichOneof("optional_slack") is not None:
       self.experimental_slack = pb.slack
+    if pb.WhichOneof("optional_symbolic_checkpoint") is not None:
+      self.experimental_symbolic_checkpoint = pb.symbolic_checkpoint
+    if pb.WhichOneof("optional_warm_start") is not None:
+      self.experimental_warm_start = pb.warm_start
+    if pb.WhichOneof("optional_dataset_name") is not None:
+      self.dataset_name = pb.dataset_name
+    if pb.framework_type:
+      self.framework_type = []
+      for framework_type in pb.framework_type:
+        self.framework_type.append(framework_type)
+    self.experimental_service._from_proto(pb.service_options)  # pylint: disable=protected-access
     self.threading._from_proto(pb.threading_options)  # pylint: disable=protected-access
 
   def _set_mutable(self, mutable):

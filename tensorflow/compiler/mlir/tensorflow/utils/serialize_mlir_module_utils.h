@@ -18,21 +18,15 @@ limitations under the License.
 
 #include <string>
 
-#include "llvm/ADT/StringRef.h"
+#include "absl/status/statusor.h"
 #include "mlir/IR/BuiltinOps.h"  // from @llvm-project
-#include "mlir/IR/MLIRContext.h"  // from @llvm-project
-#include "tensorflow/core/platform/status.h"
 
 namespace tensorflow {
-
+// Serializes a MLIR module `module_op` to a compressed bytecode string.
+absl::StatusOr<std::string> SerializeMlirModuleToCompressedBytecode(
+    mlir::ModuleOp module_op);
 // Prints a MLIR module `module_op` and returns it as a string.
 std::string SerializeMlirModule(mlir::ModuleOp module_op);
-
-// Parses a MLIR module from `mlir_module_string` into `mlir_module` with
-// context `mlir_context`.
-Status DeserializeMlirModule(llvm::StringRef serialized_mlir_module,
-                             mlir::MLIRContext* mlir_context,
-                             mlir::OwningModuleRef* mlir_module);
 
 }  // namespace tensorflow
 

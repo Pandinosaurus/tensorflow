@@ -13,17 +13,24 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "pybind11/pybind11.h"
+#include <Python.h>
+
+#include <string>
+
+#include "absl/status/status.h"
+#include "pybind11/pybind11.h"  // from @pybind11
 #include "tensorflow/core/common_runtime/quantize_training.h"
+#include "tensorflow/core/platform/errors.h"
+#include "tensorflow/core/platform/types.h"
 #include "tensorflow/python/lib/core/pybind11_lib.h"
 #include "tensorflow/python/lib/core/pybind11_status.h"
 
 namespace py = pybind11;
 
 namespace tensorflow {
-static PyObject* DoQuantizeTrainingOnGraphDefHelper(const string& input_graph,
-                                                    int num_bits) {
-  string result;
+static PyObject* DoQuantizeTrainingOnGraphDefHelper(
+    const std::string& input_graph, int num_bits) {
+  std::string result;
   // TODO(suharshs): Make the QuantizeAndDequantizeV2 configurable.
   tensorflow::MaybeRaiseFromStatus(
       tensorflow::DoQuantizeTrainingOnSerializedGraphDef(
@@ -31,7 +38,7 @@ static PyObject* DoQuantizeTrainingOnGraphDefHelper(const string& input_graph,
 
   PyObject* py_str = PyBytes_FromStringAndSize(result.data(), result.size());
   if (!py_str) {
-    tensorflow::MaybeRaiseFromStatus(tensorflow::errors::Internal(
+    tensorflow::MaybeRaiseFromStatus(absl::InternalError(
         "Failed to generate serialized string of the rewritten graph."));
   }
   return py_str;

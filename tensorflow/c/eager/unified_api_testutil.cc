@@ -15,6 +15,7 @@ limitations under the License.
 #include "tensorflow/c/eager/unified_api_testutil.h"
 
 #include "absl/container/flat_hash_set.h"
+#include "absl/types/span.h"
 #include "tensorflow/c/eager/c_api_experimental.h"
 #include "tensorflow/c/eager/c_api_test_util.h"
 #include "tensorflow/c/eager/c_api_unified_experimental.h"
@@ -34,9 +35,9 @@ AbstractContext* BuildFunction(const char* fn_name) {
   return unwrap(graph_ctx);
 }
 
-Status CreateParamsForInputs(AbstractContext* ctx,
-                             absl::Span<AbstractTensorHandle* const> inputs,
-                             std::vector<AbstractTensorHandle*>* params) {
+absl::Status CreateParamsForInputs(
+    AbstractContext* ctx, absl::Span<AbstractTensorHandle* const> inputs,
+    std::vector<AbstractTensorHandle*>* params) {
   tracing::TracingTensorHandle* handle = nullptr;
   for (auto input : inputs) {
     PartialTensorShape shape;
@@ -45,13 +46,14 @@ Status CreateParamsForInputs(AbstractContext* ctx,
         input->DataType(), shape, &handle));
     params->emplace_back(handle);
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 // Runs `model` maybe wrapped in a function.
-Status RunModel(Model model, AbstractContext* ctx,
-                absl::Span<AbstractTensorHandle* const> inputs,
-                absl::Span<AbstractTensorHandle*> outputs, bool use_function) {
+absl::Status RunModel(Model model, AbstractContext* ctx,
+                      absl::Span<AbstractTensorHandle* const> inputs,
+                      absl::Span<AbstractTensorHandle*> outputs,
+                      bool use_function) {
   if (use_function) {
     const char* fn_name = "test_fn";
     core::RefCountPtr<AbstractFunction> scoped_func;
@@ -101,9 +103,7 @@ Status RunModel(Model model, AbstractContext* ctx,
     }
     int retvals = outputs.size() - null_indices.size();
     std::vector<AbstractTensorHandle*> fn_outputs(retvals);
-    TF_RETURN_IF_ERROR(fn_op->Execute(
-        absl::Span<AbstractTensorHandle*>(fn_outputs.data(), fn_outputs.size()),
-        &retvals));
+    TF_RETURN_IF_ERROR(fn_op->Execute(absl::MakeSpan(fn_outputs), &retvals));
     int skipped_indices = 0;
     for (int i = 0; i < outputs.size(); i++) {
       if (!null_indices.contains(i)) {
@@ -113,13 +113,14 @@ Status RunModel(Model model, AbstractContext* ctx,
       }
     }
     TF_RETURN_IF_ERROR(ctx->RemoveFunction(fn_name));
-    return Status::OK();
+    return absl::OkStatus();
   } else {
     return model(ctx, inputs, outputs);
   }
 }
 
-Status BuildImmediateExecutionContext(bool use_tfrt, AbstractContext** ctx) {
+absl::Status BuildImmediateExecutionContext(bool use_tfrt,
+                                            AbstractContext** ctx) {
   std::unique_ptr<TF_Status, decltype(&TF_DeleteStatus)> status(
       TF_NewStatus(), TF_DeleteStatus);
   TFE_ContextOptions* opts = TFE_NewContextOptions();
@@ -127,10 +128,10 @@ Status BuildImmediateExecutionContext(bool use_tfrt, AbstractContext** ctx) {
   *ctx = unwrap(TF_NewEagerExecutionContext(opts, status.get()));
   TF_RETURN_IF_ERROR(StatusFromTF_Status(status.get()));
   TFE_DeleteContextOptions(opts);
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-Status GetValue(AbstractTensorHandle* t, TF_Tensor** result_tensor) {
+absl::Status GetValue(AbstractTensorHandle* t, TF_Tensor** result_tensor) {
   std::unique_ptr<TF_Status, decltype(&TF_DeleteStatus)> status(
       TF_NewStatus(), TF_DeleteStatus);
   TFE_TensorHandle* result_t =

@@ -14,21 +14,19 @@
 # ==============================================================================
 """Tests for Adam."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import numpy as np
 
-from tensorflow.compiler.xla.experimental.xla_sharding import xla_sharding
 from tensorflow.python.client import session
+from tensorflow.python.compiler.xla.experimental import xla_sharding
 from tensorflow.python.eager import context
 from tensorflow.python.framework import constant_op
 from tensorflow.python.framework import dtypes
+from tensorflow.python.framework import indexed_slices
 from tensorflow.python.framework import ops
 from tensorflow.python.framework import test_util
 from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import math_ops
+from tensorflow.python.ops import ref_variable
 from tensorflow.python.ops import resource_variable_ops
 from tensorflow.python.ops import variables
 from tensorflow.python.platform import test
@@ -69,14 +67,14 @@ class AdamOptimizerTest(test.TestCase):
           var0 = resource_variable_ops.ResourceVariable(var0_np)
           var1 = resource_variable_ops.ResourceVariable(var1_np)
         else:
-          var0 = variables.RefVariable(var0_np)
-          var1 = variables.RefVariable(var1_np)
+          var0 = ref_variable.RefVariable(var0_np)
+          var1 = ref_variable.RefVariable(var1_np)
         grads0_np_indices = np.array([0, 1], dtype=np.int32)
-        grads0 = ops.IndexedSlices(
+        grads0 = indexed_slices.IndexedSlices(
             constant_op.constant(grads0_np),
             constant_op.constant(grads0_np_indices), constant_op.constant([2]))
         grads1_np_indices = np.array([0, 1], dtype=np.int32)
-        grads1 = ops.IndexedSlices(
+        grads1 = indexed_slices.IndexedSlices(
             constant_op.constant(grads1_np),
             constant_op.constant(grads1_np_indices), constant_op.constant([2]))
         opt = adam.AdamOptimizer()
@@ -125,6 +123,20 @@ class AdamOptimizerTest(test.TestCase):
           self.evaluate(variables.global_variables_initializer())
           minimize_op.run()
 
+  def testGatherGradientWithBadIndicesPolicy(self):
+    with ops.Graph().as_default():
+      with self.cached_session(force_gpu=test.is_gpu_available()):
+        var = variables.Variable([1.0, 2.0])
+        indices = constant_op.constant([[1], [-1], [0]], dtype=dtypes.int32)
+        out = array_ops.gather_nd(var,
+                                  array_ops.expand_dims(indices, axis=-1),
+                                  batch_dims=0,
+                                  bad_indices_policy="IGNORE")
+        optimizer = adam.AdamOptimizer(2.0, 0.0, 1.0)
+        minimize_op = optimizer.minimize(out)
+        self.evaluate(variables.global_variables_initializer())
+        minimize_op.run()
+
   def testSparseRepeatedIndices(self):
     with ops.Graph().as_default():
       for dtype in [dtypes.half, dtypes.float32, dtypes.float64]:
@@ -133,12 +145,12 @@ class AdamOptimizerTest(test.TestCase):
               [[1.0], [2.0]], dtype=dtype)
           aggregated_update_var = variables.Variable(
               [[1.0], [2.0]], dtype=dtype)
-          grad_repeated_index = ops.IndexedSlices(
+          grad_repeated_index = indexed_slices.IndexedSlices(
               constant_op.constant(
                   [0.1, 0.1], shape=[2, 1], dtype=dtype),
               constant_op.constant([1, 1]),
               constant_op.constant([2, 1]))
-          grad_aggregated = ops.IndexedSlices(
+          grad_aggregated = indexed_slices.IndexedSlices(
               constant_op.constant(
                   [0.2], shape=[1, 1], dtype=dtype),
               constant_op.constant([1]),
@@ -175,8 +187,8 @@ class AdamOptimizerTest(test.TestCase):
           var1 = resource_variable_ops.ResourceVariable(
               var1_np, name="var1_%d" % i)
         else:
-          var0 = variables.RefVariable(var0_np)
-          var1 = variables.RefVariable(var1_np)
+          var0 = ref_variable.RefVariable(var0_np)
+          var1 = ref_variable.RefVariable(var1_np)
         grads0 = constant_op.constant(grads0_np)
         grads1 = constant_op.constant(grads1_np)
 

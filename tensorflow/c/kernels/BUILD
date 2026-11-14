@@ -1,15 +1,24 @@
-# buildifier: disable=same-origin-load
-load("//tensorflow:tensorflow.bzl", "filegroup")
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
 
-# buildifier: disable=same-origin-load
-load("//tensorflow:tensorflow.bzl", "tf_gen_op_libs")
-
-# buildifier: disable=same-origin-load
-load("//tensorflow:tensorflow.bzl", "tf_kernel_library")
 load("//tensorflow:tensorflow.bzl", "tf_cc_test")
+load("//tensorflow:tensorflow.default.bzl", "filegroup", "tf_gen_op_libs", "tf_kernel_library")
 load("//tensorflow/core/platform:rules_cc.bzl", "cc_library")
 
 package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
     default_visibility = ["//visibility:public"],
     licenses = ["notice"],
 )
@@ -25,6 +34,7 @@ tf_kernel_library(
         "//tensorflow/c:tf_tensor",
         "//tensorflow/core:framework",
         "//tensorflow/core:lib",
+        "@com_google_absl//absl/log:check",
     ],
 )
 
@@ -32,14 +42,17 @@ tf_kernel_library(
     name = "summary_op",
     prefix = "summary_op",
     deps = [
+        ":tensor_shape_utils",
         "//tensorflow/c:kernels",
+        "//tensorflow/c:tf_datatype_hdrs",
         "//tensorflow/c:tf_status",
         "//tensorflow/c:tf_tensor",
-        "//tensorflow/c/kernels:tensor_shape_utils",
         "//tensorflow/core:framework",
         "//tensorflow/core:lib",
         "//tensorflow/core:protos_all_cc",
-        "//third_party/eigen3",
+        "@com_google_absl//absl/log:check",
+        "@com_google_absl//absl/strings",
+        "@eigen_archive//:eigen3",
     ],
 )
 
@@ -53,7 +66,8 @@ tf_kernel_library(
         "//tensorflow/core:framework",
         "//tensorflow/core:lib",
         "//tensorflow/core:protos_all_cc",
-        "//third_party/eigen3",
+        "@com_google_absl//absl/log:check",
+        "@eigen_archive//:eigen3",
     ],
 )
 
@@ -67,6 +81,7 @@ tf_kernel_library(
         "//tensorflow/core:framework",
         "//tensorflow/core:lib",
         "//tensorflow/core:protos_all_cc",
+        "@com_google_absl//absl/log:check",
     ],
 )
 
@@ -118,6 +133,10 @@ tf_cc_test(
         "//tensorflow/core:test",
         "//tensorflow/core:test_main",
         "//tensorflow/core:testlib",
+        "@com_google_absl//absl/container:inlined_vector",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings",
+        "@xla//xla/tsl/protobuf:error_codes_proto_impl_cc",
     ],
 )
 
@@ -161,6 +180,8 @@ cc_library(
     deps = [
         "//tensorflow/c:tf_tensor",
         "//tensorflow/core:lib",
+        "@com_google_absl//absl/log:check",
+        "@com_google_absl//absl/strings",
     ],
 )
 
@@ -172,8 +193,10 @@ tf_cc_test(
         "//tensorflow/c:tf_tensor_internal",
         "//tensorflow/core:framework",
         "//tensorflow/core:lib",
+        "//tensorflow/core:protos_all_cc",
         "//tensorflow/core:test",
         "//tensorflow/core:test_main",
+        "@com_google_absl//absl/status",
     ],
 )
 
@@ -183,11 +206,25 @@ tf_cc_test(
 filegroup(
     name = "portable_all_op_kernels",
     srcs = [
+        ":portable_all_op_kernel_hdrs",
+        ":portable_all_op_kernel_srcs",
+    ],
+)
+
+filegroup(
+    name = "portable_all_op_kernel_srcs",
+    srcs = [
         "bitcast_op.cc",
         "histogram_summary_op.cc",
         "merge_summary_op.cc",
         "summary_op.cc",
         "tensor_shape_utils.cc",
+    ],
+)
+
+filegroup(
+    name = "portable_all_op_kernel_hdrs",
+    srcs = [
         "tensor_shape_utils.h",
     ],
 )

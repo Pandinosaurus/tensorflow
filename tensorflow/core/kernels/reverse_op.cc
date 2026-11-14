@@ -16,9 +16,17 @@ limitations under the License.
 // See docs in ../ops/array_ops.cc
 #define EIGEN_USE_THREADS
 
+#if !defined(PLUGGABLE_DEVICE_SUPPORTED_MACOS) && defined(__APPLE__) && \
+    !defined(ANDROID) && !defined(__ANDROID__) &&                       \
+    (!defined(TARGET_OS_IOS) || !TARGET_OS_IOS)
+#define PLUGGABLE_DEVICE_SUPPORTED_MACOS 1
+#endif
+
 #include "tensorflow/core/kernels/reverse_op.h"
+
 #include <memory>
-#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
+
+#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
 #include "tensorflow/core/framework/bounds_check.h"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/register_types.h"
@@ -82,10 +90,11 @@ void ReverseRows(OpKernelContext* context, const Tensor& input,
 template <typename T>
 struct data_type_can_memcpy {
   static constexpr bool value =
-      std::is_same<T, uint8>::value || std::is_same<T, int8>::value ||
-      std::is_same<T, bool>::value || std::is_same<T, uint16>::value ||
-      std::is_same<T, int16>::value || std::is_same<T, Eigen::half>::value ||
-      std::is_same<T, int32>::value || std::is_same<T, float>::value ||
+      std::is_same<T, uint8_t>::value || std::is_same<T, int8_t>::value ||
+      std::is_same<T, bool>::value || std::is_same<T, uint16_t>::value ||
+      std::is_same<T, int16_t>::value || std::is_same<T, Eigen::half>::value ||
+      std::is_same<T, Eigen::bfloat16>::value ||
+      std::is_same<T, int32_t>::value || std::is_same<T, float>::value ||
       std::is_same<T, int64_t>::value || std::is_same<T, double>::value ||
       std::is_same<T, complex64>::value || std::is_same<T, complex128>::value;
 };
@@ -95,24 +104,24 @@ typename std::enable_if<data_type_can_memcpy<T>::value>::type
 DoHandleReverseCase(OpKernelContext* context, const Tensor& input,
                     Tensor* result) {
   if (sizeof(T) == 1) {
-    static_assert(sizeof(uint8) == 1, "uint8 must be 1 byte.");
-    ReverseRows<uint8, NUM_CHANNELS>(context, input, result);
+    static_assert(sizeof(uint8_t) == 1, "uint8 must be 1 byte.");
+    ReverseRows<uint8_t, NUM_CHANNELS>(context, input, result);
   } else if (sizeof(T) == 2) {
-    static_assert(sizeof(uint16) == 2, "uint16 must be 2 bytes");
-    ReverseRows<uint16, NUM_CHANNELS>(context, input, result);
+    static_assert(sizeof(uint16_t) == 2, "uint16 must be 2 bytes");
+    ReverseRows<uint16_t, NUM_CHANNELS>(context, input, result);
   } else if (sizeof(T) == 4) {
-    static_assert(sizeof(uint32) == 4, "uint32 must be 4 bytes");
-    ReverseRows<uint32, NUM_CHANNELS>(context, input, result);
+    static_assert(sizeof(uint32_t) == 4, "uint32 must be 4 bytes");
+    ReverseRows<uint32_t, NUM_CHANNELS>(context, input, result);
   } else if (sizeof(T) == 8) {
-    static_assert(sizeof(uint64) == 8, "uint64 must be 8 bytes");
-    ReverseRows<uint64, NUM_CHANNELS>(context, input, result);
+    static_assert(sizeof(uint64_t) == 8, "uint64 must be 8 bytes");
+    ReverseRows<uint64_t, NUM_CHANNELS>(context, input, result);
   } else if (sizeof(T) == 16) {
     static_assert(sizeof(complex128) == 16, "complex128 must be 16 bytes");
     ReverseRows<complex128, NUM_CHANNELS>(context, input, result);
   } else {
-    context->CtxFailure(errors::InvalidArgument(DataTypeString(input.dtype()),
-                                                " has unexpected size of ",
-                                                sizeof(T), " bytes"));
+    context->CtxFailure(absl::InvalidArgumentError(
+        absl::StrCat(DataTypeString(input.dtype()), " has unexpected size of ",
+                     sizeof(T), " bytes")));
   }
 }
 
@@ -157,9 +166,9 @@ class ReverseOp : public OpKernel {
     const Tensor& input = context->input(0);
     // If input is provided, check to make sure the first dimension is valid.
     if (input.dims() > 0) {
-      OP_REQUIRES(
-          context, input.dim_size(0) != 0,
-          errors::InvalidArgument("Invalid input first dimension. Found 0."));
+      OP_REQUIRES(context, input.dim_size(0) != 0,
+                  absl::InvalidArgumentError(
+                      "Invalid input first dimension. Found 0."));
     }
     const Tensor& dims = context->input(1);
 
@@ -168,17 +177,17 @@ class ReverseOp : public OpKernel {
     } else {
       const int input_dims = input.dims();
       OP_REQUIRES(context, TensorShapeUtils::IsVector(dims.shape()),
-                  errors::InvalidArgument("'dims' must be 1-dimension, not ",
-                                          dims.dims()));
+                  absl::InvalidArgumentError(absl::StrCat(
+                      "'dims' must be 1-dimension, not ", dims.dims())));
 
       OP_REQUIRES(
           context, input_dims == dims.dim_size(0),
-          errors::InvalidArgument(
+          absl::InvalidArgumentError(absl::StrCat(
               "'dims' must have the same number of values as 'input' has "
               "dimensions. 'input' has ",
-              input_dims, "'dims' has ", dims.dim_size(0), " values"));
+              input_dims, "'dims' has ", dims.dim_size(0), " values")));
       OP_REQUIRES(context, input_dims <= 8,
-                  errors::Unimplemented(
+                  absl::UnimplementedError(
                       "reverse is not implemented for tensors of rank > 8."));
 
       Tensor* output = nullptr;
@@ -208,7 +217,7 @@ class ReverseOp : public OpKernel {
 
 template <typename Device, typename T, int NDIMS>
 void HandleReverseV2Case(OpKernelContext* context,
-                         const gtl::ArraySlice<bool> axes, Tensor* result) {
+                         const absl::Span<const bool> axes, Tensor* result) {
   const Tensor& input = context->input(0);
 
   // Use optimized reverse if possible.
@@ -240,61 +249,68 @@ class ReverseV2Op : public OpKernel {
     const Tensor& input = context->input(0);
     const Tensor& sparse_dims = context->input(1);
 
+    const int input_dims = input.dims();
+    const TensorShape& sparse_dims_shape = sparse_dims.shape();
+    const auto& axes_sparse_flat = sparse_dims.flat<Tidx>();
+
+    // The axes are validated before the shortcut for scalar and empty inputs
+    // below. Those inputs have nothing to reverse, but their axes can still be
+    // out of range, and shape inference already rejects them in graph mode.
+    // Validating here keeps eager execution consistent with that. Note that a
+    // scalar has no valid axis at all, so any axis is rejected for it, while
+    // an empty axis list stays valid for every input.
+    OP_REQUIRES(context, TensorShapeUtils::IsVector(sparse_dims_shape),
+                absl::InvalidArgumentError(absl::StrCat(
+                    "'dims' must be 1-dimension, not ", sparse_dims.dims())));
+    absl::InlinedVector<bool, 8> axes_dense(input_dims, false);
+    for (int dummy = 0; dummy < axes_sparse_flat.size(); dummy++) {
+      Tidx axis = internal::SubtleMustCopy<Tidx>(axes_sparse_flat(dummy));
+      Tidx canonical_axis = axis < 0 ? input_dims + axis : axis;
+      OP_REQUIRES(context, canonical_axis >= 0 && canonical_axis < input_dims,
+                  errors::InvalidArgument("'axis'[", dummy, "] = ", axis,
+                                          " is out of valid range [", 0, ", ",
+                                          input_dims - 1));
+      OP_REQUIRES(context, !axes_dense[canonical_axis],
+                  errors::InvalidArgument("axis ", canonical_axis,
+                                          " specified more than once."));
+      axes_dense[canonical_axis] = true;
+    }
+
     if (TensorShapeUtils::IsScalar(input.shape()) || input.NumElements() == 0) {
       context->set_output(0, input);
-    } else {
-      const int input_dims = input.dims();
-      const TensorShape& sparse_dims_shape = sparse_dims.shape();
-      const auto& axes_sparse_flat = sparse_dims.flat<Tidx>();
+      return;
+    }
 
-      OP_REQUIRES(context, TensorShapeUtils::IsVector(sparse_dims_shape),
-                  errors::InvalidArgument("'dims' must be 1-dimension, not ",
-                                          sparse_dims.dims()));
-      gtl::InlinedVector<bool, 8> axes_dense(input_dims, false);
-      for (int dummy = 0; dummy < axes_sparse_flat.size(); dummy++) {
-        Tidx axis = internal::SubtleMustCopy<Tidx>(axes_sparse_flat(dummy));
-        Tidx canonical_axis = axis < 0 ? input_dims + axis : axis;
-        OP_REQUIRES(context, canonical_axis >= 0 && canonical_axis < input_dims,
-                    errors::InvalidArgument("'axis'[", dummy, "] = ", axis,
-                                            " is out of valid range [", 0, ", ",
-                                            input_dims - 1));
-        OP_REQUIRES(context, !axes_dense[canonical_axis],
-                    errors::InvalidArgument("axis ", canonical_axis,
-                                            " specified more than once."));
-        axes_dense[canonical_axis] = true;
-      }
+    OP_REQUIRES(context, input_dims <= 8,
+                absl::UnimplementedError(
+                    "reverse is not implemented for tensors of rank > 8."));
 
-      OP_REQUIRES(context, input_dims <= 8,
-                  errors::Unimplemented(
-                      "reverse is not implemented for tensors of rank > 8."));
+    Tensor* output = nullptr;
+    OP_REQUIRES_OK(context,
+                   context->allocate_output(0, input.shape(), &output));
 
-      Tensor* output = nullptr;
-      OP_REQUIRES_OK(context,
-                     context->allocate_output(0, input.shape(), &output));
-
-      // TODO(cwhipkey): we can do dimension folding to reduce, e.g., a reverse
-      // of a single dimension to the dims=3 or dims=2 case, regardless of the
-      // number of dimensions in the tensor. This would let some ops use faster
-      // lower-dimension code (and use optimized versions).
+    // TODO(cwhipkey): we can do dimension folding to reduce, e.g., a reverse
+    // of a single dimension to the dims=3 or dims=2 case, regardless of the
+    // number of dimensions in the tensor. This would let some ops use faster
+    // lower-dimension code (and use optimized versions).
 
 #define HANDLE_REVERSE(NDIMS)                                           \
   case NDIMS:                                                           \
     HandleReverseV2Case<Device, T, NDIMS>(context, axes_dense, output); \
     return;
 
-      switch (input_dims) {
-        HANDLE_REVERSE(0);
-        HANDLE_REVERSE(1);
-        HANDLE_REVERSE(2);
-        HANDLE_REVERSE(3);
-        HANDLE_REVERSE(4);
-        HANDLE_REVERSE(5);
-        HANDLE_REVERSE(6);
-        HANDLE_REVERSE(7);
-        HANDLE_REVERSE(8);
-      }
-#undef HANDLE_REVERSE
+    switch (input_dims) {
+      HANDLE_REVERSE(0);
+      HANDLE_REVERSE(1);
+      HANDLE_REVERSE(2);
+      HANDLE_REVERSE(3);
+      HANDLE_REVERSE(4);
+      HANDLE_REVERSE(5);
+      HANDLE_REVERSE(6);
+      HANDLE_REVERSE(7);
+      HANDLE_REVERSE(8);
     }
+#undef HANDLE_REVERSE
   }
 };
 
@@ -379,27 +395,61 @@ TF_CALL_GPU_ALL_TYPES(REGISTER_GPU_KERNELS);
 // registration requires all int32 inputs and outputs to be in host memory.
 REGISTER_KERNEL_BUILDER(Name("Reverse")
                             .Device(DEVICE_GPU)
-                            .TypeConstraint<int32>("T")
+                            .TypeConstraint<int32_t>("T")
                             .HostMemory("tensor")
                             .HostMemory("dims")
                             .HostMemory("output"),
-                        ReverseOp<CPUDevice, int32>);
+                        ReverseOp<CPUDevice, int32_t>);
 REGISTER_KERNEL_BUILDER(Name("ReverseV2")
                             .Device(DEVICE_GPU)
-                            .TypeConstraint<int32>("T")
-                            .TypeConstraint<int32>("Tidx")
+                            .TypeConstraint<int32_t>("T")
+                            .TypeConstraint<int32_t>("Tidx")
                             .HostMemory("tensor")
                             .HostMemory("axis")
                             .HostMemory("output"),
-                        ReverseV2Op<CPUDevice, int32, int32>);
+                        ReverseV2Op<CPUDevice, int32_t, int32_t>);
 REGISTER_KERNEL_BUILDER(Name("ReverseV2")
                             .Device(DEVICE_GPU)
-                            .TypeConstraint<int32>("T")
+                            .TypeConstraint<int32_t>("T")
                             .TypeConstraint<int64_t>("Tidx")
                             .HostMemory("tensor")
                             .HostMemory("axis")
                             .HostMemory("output"),
-                        ReverseV2Op<CPUDevice, int32, int64>);
+                        ReverseV2Op<CPUDevice, int32_t, int64_t>);
 #endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM
+
+#if defined(PLUGGABLE_DEVICE_SUPPORTED_MACOS)
+#define REGISTER_DEFAULT_KERNELS(T)                          \
+  REGISTER_KERNEL_BUILDER(Name("Reverse")                    \
+                              .Device(DEVICE_DEFAULT)        \
+                              .TypeConstraint<T>("T")        \
+                              .HostMemory("tensor")          \
+                              .HostMemory("dims")            \
+                              .HostMemory("output"),         \
+                          ReverseOp<CPUDevice, T>)           \
+  REGISTER_KERNEL_BUILDER(Name("ReverseV2")                  \
+                              .Device(DEVICE_DEFAULT)        \
+                              .TypeConstraint<T>("T")        \
+                              .TypeConstraint<int32>("Tidx") \
+                              .HostMemory("tensor")          \
+                              .HostMemory("axis")            \
+                              .HostMemory("output"),         \
+                          ReverseV2Op<CPUDevice, T, int32>)  \
+  REGISTER_KERNEL_BUILDER(Name("ReverseV2")                  \
+                              .Device(DEVICE_DEFAULT)        \
+                              .TypeConstraint<T>("T")        \
+                              .TypeConstraint<int64>("Tidx") \
+                              .HostMemory("tensor")          \
+                              .HostMemory("axis")            \
+                              .HostMemory("output"),         \
+                          ReverseV2Op<CPUDevice, T, int64>)
+TF_CALL_uint8(REGISTER_DEFAULT_KERNELS);
+TF_CALL_int8(REGISTER_DEFAULT_KERNELS);
+TF_CALL_int16(REGISTER_DEFAULT_KERNELS);
+TF_CALL_uint32(REGISTER_DEFAULT_KERNELS);
+TF_CALL_int32(REGISTER_DEFAULT_KERNELS);
+TF_CALL_GPU_ALL_TYPES(REGISTER_DEFAULT_KERNELS);
+#undef REGISTER_DEFAULT_KERNELS
+#endif
 
 }  // namespace tensorflow

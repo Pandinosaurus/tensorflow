@@ -16,10 +16,12 @@ limitations under the License.
 #ifndef TENSORFLOW_COMPILER_MLIR_TENSORFLOW_TRANSFORMS_CLUSTER_OPS_BY_POLICY_H_
 #define TENSORFLOW_COMPILER_MLIR_TENSORFLOW_TRANSFORMS_CLUSTER_OPS_BY_POLICY_H_
 
+#include <optional>
 #include <type_traits>
 
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallVector.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"  // from @llvm-project
 #include "mlir/IR/Attributes.h"  // from @llvm-project
 #include "mlir/IR/BuiltinOps.h"  // from @llvm-project
 #include "mlir/IR/Operation.h"  // from @llvm-project
@@ -91,7 +93,7 @@ class ValuesConstraintSet {
   void Walk(llvm::function_ref<void(Value, ValueConstraint)> walk) const;
 
   // Returns the constraint of the value if it exists, or None otherwise.
-  Optional<ValueConstraint> GetConstraint(Value value) const;
+  std::optional<ValueConstraint> GetConstraint(Value value) const;
   bool HasConstraint(Value value) const;
 
   // Merges all constrains from the other constraints set into this one.
@@ -198,7 +200,7 @@ class ClusteringPolicySet {
  private:
   template <typename T, typename... Args>
   void AddImpl(Args&&... args) {
-    static_assert(std::is_base_of<ClusteringPolicy, T>::value,
+    static_assert(std::is_base_of_v<ClusteringPolicy, T>,
                   "T must implement ClusteringPolicy");
     policies_.emplace_back(std::make_unique<T>(std::forward<Args>(args)...));
   }
@@ -247,6 +249,9 @@ tf_device::ClusterOp CreateClusterOp(Cluster& cluster, StringAttr policy = {});
 // Optionally resolve constraints that can be statically satisfied by the
 // value type, and stop constraints propagation early.
 //
+// Optionally emits remarks attached to operation that failed to propagate
+// results constraints to its operands (for testing purpose).
+//
 // Returns failure if constraints can't be propagated through some of the
 // operations accepted by the filter (there is no clustering policy for an
 // operation, or constraints can't be satisfied by the policy), and attaches
@@ -254,20 +259,21 @@ tf_device::ClusterOp CreateClusterOp(Cluster& cluster, StringAttr policy = {});
 mlir::LogicalResult PropagateValuesConstraints(
     llvm::ArrayRef<Operation*> root, std::function<bool(Operation*)> filter,
     const ClusteringPolicySet& policies, ValuesConstraintSet& constraints,
-    bool resolve = false);
+    bool resolve = false, bool emit_remarks = false);
 
 // Propagates initial constraints on the values in the `region` to the other
 // values in the same region, using user provided set of clustering policies.
 mlir::LogicalResult PropagateValuesConstraints(
     mlir::Region& region, const ClusteringPolicySet& policies,
-    ValuesConstraintSet& constraints, bool resolve = false);
+    ValuesConstraintSet& constraints, bool resolve = false,
+    bool emit_remarks = false);
 
 // Emits constraints remarks for all operations that use constrained values.
 void EmitValueConstraintsRemarks(const ValuesConstraintSet& constraints);
 
 // Emits constraints remarks for function inputs that are in the constraints
 // set (entry block arguments have constraints).
-void EmitInputsConstraintsRemarks(FuncOp func,
+void EmitInputsConstraintsRemarks(func::FuncOp func,
                                   const ValuesConstraintSet& constraints);
 
 // Infers constraints for the values in the function body from the function
@@ -280,7 +286,7 @@ void EmitInputsConstraintsRemarks(FuncOp func,
 //     return %v : tensor<?x?xf32>
 //   }
 LogicalResult InferFunctionBodyValuesConstraints(
-    FuncOp func, ValuesConstraintSet& constraints);
+    func::FuncOp func, ValuesConstraintSet& constraints);
 
 }  // namespace TFDevice
 }  // namespace mlir

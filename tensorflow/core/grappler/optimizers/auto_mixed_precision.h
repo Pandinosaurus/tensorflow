@@ -17,35 +17,52 @@ limitations under the License.
 #define TENSORFLOW_CORE_GRAPPLER_OPTIMIZERS_AUTO_MIXED_PRECISION_H_
 
 #include "tensorflow/core/grappler/optimizers/graph_optimizer.h"
+#include "tensorflow/core/platform/cpu_info.h"
 #include "tensorflow/core/protobuf/rewriter_config.pb.h"
 
 namespace tensorflow {
 namespace grappler {
 
-enum class AutoMixedPrecisionMode { CUDA, MKL };
+// CUDA: convert to float16 on GPU
+// BF16: convert to bfloat16 on CPU
+// CPU: emulate float16 on CPU without changing operator kernel
+// FP16_CPU : convert to float16 on CPU
+enum class AutoMixedPrecisionMode { CUDA, BF16, CPU, FP16_CPU };
 
 // Convert data types to float16 or bfloat16 where appropriate to improve
 // performance on GPUs or CPUs.
 class AutoMixedPrecision : public GraphOptimizer {
  public:
-  // If 'mode' is CUDA, converts nodes to float16 on Nvidia GPUs. If MKL,
-  // converts nodes to bfloat16 on CPUs in order to take advantage of MKL
-  // performance improvements with bfloat16.
+  // If 'mode' is CUDA, converts nodes to float16 on Nvidia GPUs. If BF16 or
+  // FP16_CPU, converts nodes to bfloat16/fp16 on CPUs in order to take
+  // advantage of oneDNN performance improvements with bfloat16/fp16.
   explicit AutoMixedPrecision(
       AutoMixedPrecisionMode mode = AutoMixedPrecisionMode::CUDA)
       : mode_(mode) {}
 
-  ~AutoMixedPrecision() override {}
+  ~AutoMixedPrecision() override = default;
 
-  string name() const override {
-    return mode_ == AutoMixedPrecisionMode::CUDA ? "auto_mixed_precision_cuda"
-                                                 : "auto_mixed_precision_mkl";
+  std::string name() const override {
+    switch (mode_) {
+      case AutoMixedPrecisionMode::CUDA:
+        return "auto_mixed_precision";
+      case AutoMixedPrecisionMode::BF16:
+        return "auto_mixed_precision_onednn_bfloat16";
+      case AutoMixedPrecisionMode::CPU:
+        return "auto_mixed_precision_cpu";
+      case AutoMixedPrecisionMode::FP16_CPU:
+        // Note: using different name than GPU for ease of debugging.
+        return "auto_mixed_precision_onednn_float16";
+      default:
+        LOG(FATAL) << "Invalid value for AutoMixedPrecisionMode: "  // Crash Ok
+                   << static_cast<int>(mode_);
+    }
   };
 
   bool UsesFunctionLibrary() const override { return false; }
 
-  Status Optimize(Cluster* cluster, const GrapplerItem& item,
-                  GraphDef* output) override;
+  absl::Status Optimize(Cluster* cluster, const GrapplerItem& item,
+                        GraphDef* output) override;
 
  private:
   const AutoMixedPrecisionMode mode_;

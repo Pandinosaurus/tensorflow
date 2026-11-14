@@ -1,13 +1,30 @@
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+load("@xla//third_party/rules_python/python:py_binary.bzl", "py_binary")
+
 package(
-    default_visibility = ["//tensorflow:internal"],
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
     licenses = ["notice"],
 )
 
 py_binary(
     name = "debug_fibonacci",
     srcs = ["debug_fibonacci.py"],
-    python_version = "PY3",
-    srcs_version = "PY3",
+    strict_deps = True,
     deps = [
         "//tensorflow:tensorflow_py",
         "//tensorflow/python/debug:debug_py",
@@ -18,20 +35,7 @@ py_binary(
 py_binary(
     name = "debug_errors",
     srcs = ["debug_errors.py"],
-    python_version = "PY3",
-    srcs_version = "PY3",
-    deps = [
-        "//tensorflow:tensorflow_py",
-        "//tensorflow/python/debug:debug_py",
-        "//third_party/py/numpy",
-    ],
-)
-
-py_binary(
-    name = "debug_tflearn_iris",
-    srcs = ["debug_tflearn_iris.py"],
-    python_version = "PY3",
-    srcs_version = "PY3",
+    strict_deps = True,
     deps = [
         "//tensorflow:tensorflow_py",
         "//tensorflow/python/debug:debug_py",
@@ -42,8 +46,7 @@ py_binary(
 py_binary(
     name = "debug_keras",
     srcs = ["debug_keras.py"],
-    python_version = "PY3",
-    srcs_version = "PY3",
+    strict_deps = True,
     deps = [
         "//tensorflow:tensorflow_py",
         "//tensorflow/python/debug:debug_py",
@@ -55,12 +58,10 @@ py_binary(
     name = "debug_mnist",
     srcs = ["debug_mnist_v1.py"],
     main = "debug_mnist_v1.py",
-    python_version = "PY3",
-    srcs_version = "PY3",
+    strict_deps = True,
     deps = [
         "//tensorflow:tensorflow_py",
         "//tensorflow/python/debug:debug_py",
-        "//third_party/py/numpy",
     ],
 )
 
@@ -112,18 +113,6 @@ sh_test(
     tags = [
         "no_windows",
         "noasan",  # TODO(b/193153560)
-        "v1only",
-    ],
-)
-
-sh_test(
-    name = "examples_v1_debug_tflearn_iris_test",
-    srcs = ["examples_v1_debug_tflearn_iris_test.sh"],
-    data = [
-        ":debug_tflearn_iris",
-    ],
-    tags = [
-        "no_windows",
         "v1only",
     ],
 )

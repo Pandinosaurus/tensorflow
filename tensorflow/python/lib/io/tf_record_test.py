@@ -14,10 +14,6 @@
 # ==============================================================================
 """Tests for tf_record.TFRecordWriter and tf_record.tf_record_iterator."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import gzip
 import os
 import random
@@ -268,7 +264,7 @@ class TFRecordWriterTest(TFCompressionTestCase):
     records = [random_record, repeated_record, random_record]
 
     tests = [
-        ("compression_level", 2, -1),  # Lower compression is worse.
+        ("compression_level", 2, "LE"),  # Lower compression is worse or equal.
         ("compression_level", 6, 0),  # Default compression_level is equal.
         ("flush_mode", zlib.Z_FULL_FLUSH, 1),  # A few less bytes.
         ("flush_mode", zlib.Z_NO_FLUSH, 0),  # NO_FLUSH is the default.
@@ -276,7 +272,7 @@ class TFRecordWriterTest(TFCompressionTestCase):
         ("output_buffer_size", 4096, 0),  # Increases time not size.
         ("window_bits", 8, -1),  # Smaller than default window increases size.
         ("compression_strategy", zlib.Z_HUFFMAN_ONLY, -1),  # Worse.
-        ("compression_strategy", zlib.Z_FILTERED, -1),  # Worse.
+        ("compression_strategy", zlib.Z_FILTERED, "LE"),  # Worse or equal.
     ]
 
     compression_type = tf_record.TFRecordCompressionType.ZLIB
@@ -285,10 +281,66 @@ class TFRecordWriterTest(TFCompressionTestCase):
       options_b = tf_record.TFRecordOptions(
           compression_type=compression_type, **{prop: value})
       delta = self._CompressionSizeDelta(records, options_a, options_b)
-      self.assertTrue(
-          delta == 0 if delta_sign == 0 else delta // delta_sign > 0,
-          "Setting {} = {}, file was {} smaller didn't match sign of {}".format(
-              prop, value, delta, delta_sign))
+      if delta_sign == "LE":
+        self.assertLessEqual(
+            delta, 0,
+            "Setting {} = {}, file was {} smaller didn't match sign of {}"
+            .format(prop, value, delta, delta_sign))
+      else:
+        self.assertTrue(
+            delta == 0 if delta_sign == 0 else delta // delta_sign > 0,
+            "Setting {} = {}, file was {} smaller didn't match sign of {}"
+            .format(prop, value, delta, delta_sign))
+
+  def testInvalidZlibOptionsRaiseError(self):
+    """Invalid ZLIB and GZIP options raise an error instead of aborting."""
+    tests = [
+        ("ZLIB", {"compression_method": 3}, r"compression_method=3,"),
+        ("ZLIB", {"window_bits": -8}, r"\(window_bits=-8,"),
+        ("ZLIB", {"compression_level": -9}, r"compression_level=-9,"),
+        ("ZLIB", {"mem_level": -10}, r"mem_level=-10,"),
+        ("ZLIB", {"compression_strategy": -2}, r"compression_strategy=-2,"),
+        ("GZIP", {"window_bits": 7}, r"\(window_bits=7,"),
+        ("ZLIB", {"output_buffer_size": 1}, r"output_buffer_size=1\)"),
+        (
+            "ZLIB",
+            {"input_buffer_size": -1},
+            r"between 0 and 2147483647 .*input_buffer_size=-1,",
+        ),
+        (
+            "ZLIB",
+            {"input_buffer_size": 2**31},
+            r"between 0 and 2147483647 .*input_buffer_size=2147483648,",
+        ),
+        (
+            "ZLIB",
+            {"output_buffer_size": 2**32 + 2},
+            r"between 0 and 2147483647 .*output_buffer_size=4294967298\)",
+        ),
+    ]
+    for i, (compression_type, kwargs, regex) in enumerate(tests):
+      options = tf_record.TFRecordOptions(
+          compression_type=compression_type, **kwargs
+      )
+      fn = os.path.join(self.get_temp_dir(), "invalid_options_%d" % i)
+      with self.assertRaisesRegex(
+          errors_impl.InvalidArgumentError,
+          "Invalid TFRecordWriter options.*" + regex,
+      ):
+        tf_record.TFRecordWriter(fn, options=options)
+      self.assertFalse(os.path.exists(fn))
+
+  def testInvalidZlibOptionsIgnoredWithoutCompression(self):
+    """ZLIB options are not used when the records are not compressed."""
+    options = tf_record.TFRecordOptions(
+        compression_type=TFRecordCompressionType.NONE,
+        window_bits=-8,
+        compression_level=-9,
+    )
+    fn = self._WriteRecordsToFile([b"record"], "uncompressed", options=options)
+    self.assertEqual(
+        [b"record"], list(tf_record.tf_record_iterator(fn, options=options))
+    )
 
 
 class TFRecordWriterZlibTest(TFCompressionTestCase):
@@ -473,6 +525,58 @@ class TFRecordIteratorTest(TFCompressionTestCase):
       self.assertEqual(b"truncated", next(iterator))
       with self.assertRaises(StopIteration):
         next(iterator)
+
+  def testReadReplacedFile_preservesReadOffset_afterReopen(self):
+    """Verify that tf_record_iterator allows reopening at the same read offset.
+
+    In some cases, data will be logically "appended" to a file by replacing the
+    entire file with a new version that includes the additional data. For
+    example, this can happen with certain GCS implementations (since GCS has no
+    true append operation), or when using rsync without the `--inplace` option
+    to transfer snapshots of a growing file. Since the iterator retains a handle
+    to a stale version of the file, it won't return any of the new data.
+
+    To force this to happen, callers can check for a replaced file (e.g. via a
+    stat call that reflects an increased file size) and opt to close and reopen
+    the iterator. When iteration is next attempted, this should result in
+    reading from the newly opened file, while preserving the read offset. This
+    behavior is required by TensorBoard.
+    """
+    def write_records_to_file(filename, records):
+      writer = tf_record.TFRecordWriter(filename)
+      for record in records:
+        writer.write(record)
+      writer.close()
+
+    fn = os.path.join(self.get_temp_dir(), "orig_file")
+    write_records_to_file(fn, [b"one", b"two"])
+    iterator = tf_record.tf_record_iterator(fn)
+    self.assertEqual(b"one", next(iterator))
+    self.assertEqual(b"two", next(iterator))
+    # Iterating at EOF results in StopIteration repeatedly.
+    with self.assertRaises(StopIteration):
+      next(iterator)
+    with self.assertRaises(StopIteration):
+      next(iterator)
+    # Add a new record to the end of the file by overwriting it.
+    fn2 = os.path.join(self.get_temp_dir(), "new_file")
+    write_records_to_file(fn2, [b"one", b"two", b"three"])
+    # Windows disallows replacing files while in use, so close iterator early.
+    if os.name == "nt":
+      iterator.close()
+    os.replace(fn2, fn)
+    # Iterating at EOF still results in StopIteration; new data is not shown.
+    with self.assertRaises(StopIteration):
+      next(iterator)
+    with self.assertRaises(StopIteration):
+      next(iterator)
+    # Retrying after close and reopen successfully returns the new record,
+    # preserving the prior read offset.
+    iterator.close()
+    iterator.reopen()
+    self.assertEqual(b"three", next(iterator))
+    with self.assertRaises(StopIteration):
+      next(iterator)
 
 
 class TFRecordRandomReaderTest(TFCompressionTestCase):

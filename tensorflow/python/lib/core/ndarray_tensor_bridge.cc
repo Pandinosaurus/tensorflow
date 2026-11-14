@@ -13,16 +13,21 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+// clang-format off
 // Must be included first.
-#include "tensorflow/python/lib/core/numpy.h"
+#include "tensorflow/c/tf_datatype.h"
+#include "xla/tsl/python/lib/core/numpy.h"
+// clang-format on
+
+#include "tensorflow/python/lib/core/ndarray_tensor_bridge.h"
 
 #include <vector>
 
 #include "tensorflow/c/c_api.h"
+#include "xla/tsl/python/lib/core/ml_dtypes.h"
 #include "tensorflow/core/lib/core/errors.h"
 #include "tensorflow/core/platform/mutex.h"
-#include "tensorflow/python/lib/core/bfloat16.h"
-#include "tensorflow/python/lib/core/ndarray_tensor_bridge.h"
+#include "tensorflow/python/lib/core/py_util.h"
 
 namespace tensorflow {
 
@@ -79,6 +84,7 @@ static void TensorReleaser_dealloc(PyObject* pself) {
   TensorReleaserType.tp_free(pself);
 }
 
+// clang-format off
 PyTypeObject TensorReleaserType = {
     PyVarObject_HEAD_INIT(nullptr, 0) /* head init */
     "tensorflow_wrapper",             /* tp_name */
@@ -86,7 +92,11 @@ PyTypeObject TensorReleaserType = {
     0,                                /* tp_itemsize */
     /* methods */
     TensorReleaser_dealloc,      /* tp_dealloc */
-    0,                           /* tp_print */
+#if PY_VERSION_HEX < 0x03080000
+    nullptr,                     /* tp_print */
+#else
+    0,                           /* tp_vectorcall_offset */
+#endif
     nullptr,                     /* tp_getattr */
     nullptr,                     /* tp_setattr */
     nullptr,                     /* tp_compare */
@@ -106,9 +116,22 @@ PyTypeObject TensorReleaserType = {
     nullptr,                     /* tp_clear */
     nullptr,                     /* tp_richcompare */
 };
+// clang-format on
 
-Status TF_DataType_to_PyArray_TYPE(TF_DataType tf_datatype,
-                                   int* out_pyarray_type) {
+// Readies `TensorReleaserType` once, in a thread-safe way.
+//
+// `PyType_Ready()` modifies the type object. Calling it on every conversion
+// races with other threads under free-threaded (no-GIL) Python. A
+// function-local static runs the initialization only once, so there is no race.
+static bool EnsureTensorReleaserTypeReady() {
+  static const bool is_ready = PyType_Ready(&TensorReleaserType) != -1;
+  return is_ready;
+}
+
+absl::Status TF_DataType_to_PyArray_TYPE(TF_DataType tf_datatype,
+                                         int* out_pyarray_type) {
+  const tsl::ml_dtypes::NumpyDtypes& custom_dtypes =
+      tsl::ml_dtypes::GetNumpyDtypes();
   switch (tf_datatype) {
     case TF_HALF:
       *out_pyarray_type = NPY_FLOAT16;
@@ -177,34 +200,88 @@ Status TF_DataType_to_PyArray_TYPE(TF_DataType tf_datatype,
       *out_pyarray_type = NPY_INT32;
       break;
     case TF_BFLOAT16:
-      *out_pyarray_type = Bfloat16NumpyType();
+      *out_pyarray_type = custom_dtypes.bfloat16;
+      break;
+    case TF_FLOAT8_E5M2:
+      *out_pyarray_type = custom_dtypes.float8_e5m2;
+      break;
+    case TF_FLOAT8_E4M3FN:
+      *out_pyarray_type = custom_dtypes.float8_e4m3fn;
+      break;
+    case TF_FLOAT8_E4M3FNUZ:
+      *out_pyarray_type = custom_dtypes.float8_e4m3fnuz;
+      break;
+    case TF_FLOAT8_E4M3B11FNUZ:
+      *out_pyarray_type = custom_dtypes.float8_e4m3b11fnuz;
+      break;
+    case TF_FLOAT8_E5M2FNUZ:
+      *out_pyarray_type = custom_dtypes.float8_e5m2fnuz;
+      break;
+    case TF_FLOAT8_E8M0FNU:
+      *out_pyarray_type = custom_dtypes.float8_e8m0fnu;
+      break;
+    case TF_FLOAT4_E2M1FN:
+      *out_pyarray_type = custom_dtypes.float4_e2m1fn;
+      break;
+    case TF_INT4:
+      *out_pyarray_type = custom_dtypes.int4;
+      break;
+    case TF_UINT4:
+      *out_pyarray_type = custom_dtypes.uint4;
+      break;
+    case TF_INT2:
+      *out_pyarray_type = custom_dtypes.int2;
+      break;
+    case TF_UINT2:
+      *out_pyarray_type = custom_dtypes.uint2;
       break;
     default:
-      return errors::Internal("Tensorflow type ", tf_datatype,
-                              " not convertible to numpy dtype.");
+      return absl::InternalError(absl::StrCat(
+          "Tensorflow type ", tf_datatype, " not convertible to numpy dtype."));
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-Status ArrayFromMemory(int dim_size, npy_intp* dims, void* data, DataType dtype,
-                       std::function<void()> destructor, PyObject** result) {
+absl::Status ArrayFromMemory(int dim_size, npy_intp* dims, void* data,
+                             DataType dtype, std::function<void()> destructor,
+                             PyObject** result) {
   if (dtype == DT_STRING || dtype == DT_RESOURCE) {
-    return errors::FailedPrecondition(
+    return absl::FailedPreconditionError(
         "Cannot convert string or resource Tensors.");
   }
 
   int type_num = -1;
-  Status s =
+  absl::Status s =
       TF_DataType_to_PyArray_TYPE(static_cast<TF_DataType>(dtype), &type_num);
   if (!s.ok()) {
     return s;
   }
 
+  if (dim_size > NPY_MAXDIMS) {
+    return absl::InvalidArgumentError(absl::StrCat(
+        "Cannot convert tensor with ", dim_size,
+        " dimensions to NumPy array. NumPy arrays can have at most ",
+        NPY_MAXDIMS, " dimensions"));
+  }
   auto* np_array = reinterpret_cast<PyArrayObject*>(
       PyArray_SimpleNewFromData(dim_size, dims, type_num, data));
+  if (np_array == nullptr) {
+    std::string shape_str = absl::StrJoin(
+        absl::Span<npy_intp>{dims, static_cast<size_t>(dim_size)}, ", ");
+    if (PyErr_Occurred()) {
+      std::string exception_str = PyExceptionFetch();
+      PyErr_Clear();
+      return absl::InvalidArgumentError(
+          absl::StrCat("Failed to create numpy array from tensor of shape [",
+                       shape_str, "]. Numpy error: ", exception_str));
+    }
+    return absl::InternalError(absl::StrCat(
+        "Failed to create numpy array from tensor of shape [", shape_str, "]"));
+  }
+
   PyArray_CLEARFLAGS(np_array, NPY_ARRAY_OWNDATA);
-  if (PyType_Ready(&TensorReleaserType) == -1) {
-    return errors::Unknown("Python type initialization failed.");
+  if (!EnsureTensorReleaserTypeReady()) {
+    return absl::UnknownError("Python type initialization failed.");
   }
   auto* releaser = reinterpret_cast<TensorReleaser*>(
       TensorReleaserType.tp_alloc(&TensorReleaserType, 0));
@@ -212,10 +289,10 @@ Status ArrayFromMemory(int dim_size, npy_intp* dims, void* data, DataType dtype,
   if (PyArray_SetBaseObject(np_array, reinterpret_cast<PyObject*>(releaser)) ==
       -1) {
     Py_DECREF(releaser);
-    return errors::Unknown("Python array refused to use memory.");
+    return absl::UnknownError("Python array refused to use memory.");
   }
   *result = reinterpret_cast<PyObject*>(np_array);
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 }  // namespace tensorflow

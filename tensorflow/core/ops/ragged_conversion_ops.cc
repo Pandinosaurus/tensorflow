@@ -25,7 +25,7 @@ using shape_inference::InferenceContext;
 using shape_inference::ShapeHandle;
 
 namespace {
-tensorflow::Status ValidateRowPartitionTypesAndShapes(
+absl::Status ValidateRowPartitionTypesAndShapes(
     const std::vector<RowPartitionType>& row_partition_types,
     InferenceContext* c) {
   // Note: the allowed types may be extended in the future.
@@ -36,36 +36,39 @@ tensorflow::Status ValidateRowPartitionTypesAndShapes(
       case RowPartitionType::ROW_SPLITS:
         break;
       default:
-        return InvalidArgument("Unsupported partition type: ",
-                               RowPartitionTypeToString(row_partition_type));
+        return absl::InvalidArgumentError(
+            absl::StrCat("Unsupported partition type: ",
+                         RowPartitionTypeToString(row_partition_type)));
     }
   }
 
   if (row_partition_types.empty()) {
-    return InvalidArgument("Partition info types should not be empty");
+    return absl::InvalidArgumentError(
+        "Partition info types should not be empty");
   }
   for (int i = 1; i < row_partition_types.size(); ++i) {
     if (row_partition_types[i] == RowPartitionType::FIRST_DIM_SIZE) {
-      return InvalidArgument("FIRST_DIM_SIZE must be first");
+      return absl::InvalidArgumentError("FIRST_DIM_SIZE must be first");
     }
   }
   if (row_partition_types[0] == RowPartitionType::FIRST_DIM_SIZE &&
       (row_partition_types.size() < 2 ||
        row_partition_types[1] != RowPartitionType::VALUE_ROWIDS)) {
-    return InvalidArgument("FIRST_DIM_SIZE must be followed by VALUE_ROWIDS");
+    return absl::InvalidArgumentError(
+        "FIRST_DIM_SIZE must be followed by VALUE_ROWIDS");
   }
   if (row_partition_types[0] == RowPartitionType::VALUE_ROWIDS) {
-    return InvalidArgument("VALUE_ROWIDS cannot be first");
+    return absl::InvalidArgumentError("VALUE_ROWIDS cannot be first");
   }
 
   int num_row_partition_tensors;
   TF_RETURN_IF_ERROR(
       c->GetAttr("num_row_partition_tensors", &num_row_partition_tensors));
   if (num_row_partition_tensors != row_partition_types.size()) {
-    return InvalidArgument(
+    return absl::InvalidArgumentError(absl::StrCat(
         "Number of row partition tensors (", num_row_partition_tensors,
         ") does not equal the number of row partition types(",
-        row_partition_types.size(), ").");
+        row_partition_types.size(), ")."));
   }
 
   for (int i = 0; i < num_row_partition_tensors; ++i) {
@@ -76,24 +79,24 @@ tensorflow::Status ValidateRowPartitionTypesAndShapes(
     }
     if (row_partition_types[i] == RowPartitionType::FIRST_DIM_SIZE) {
       if (partition_shape.dim_size() != 0) {
-        return InvalidArgument("FIRST_DIM_SIZE must be a scalar.");
+        return absl::InvalidArgumentError("FIRST_DIM_SIZE must be a scalar.");
       }
     } else {
       if (partition_shape.dim_size() != 1) {
-        return InvalidArgument("Row partition must be a vector.");
+        return absl::InvalidArgumentError("Row partition must be a vector.");
       }
     }
   }
-  return tensorflow::Status::OK();
+  return absl::OkStatus();
 }
 
 }  // namespace
 
-Status RaggedTensorToSparseShapeFn(InferenceContext* c);
-Status RaggedTensorToVariantShapeFn(InferenceContext* c);
-Status RaggedTensorFromVariantShapeFn(InferenceContext* c);
-Status RaggedTensorToVariantGradientShapeFn(InferenceContext* c);
-Status RaggedTensorToTensorShapeFn(InferenceContext* c);
+absl::Status RaggedTensorToSparseShapeFn(InferenceContext* c);
+absl::Status RaggedTensorToVariantShapeFn(InferenceContext* c);
+absl::Status RaggedTensorFromVariantShapeFn(InferenceContext* c);
+absl::Status RaggedTensorToVariantGradientShapeFn(InferenceContext* c);
+absl::Status RaggedTensorToTensorShapeFn(InferenceContext* c);
 
 //==============================================================================
 // Registered Ops
@@ -118,6 +121,7 @@ REGISTER_OP("RaggedTensorToVariant")
     .Attr("Tvalues: type")
     .Attr("Tsplits: {int32, int64} = DT_INT64")
     .Attr("batched_input: bool")
+    .SetTypeConstructor(full_type::Unary(TFT_RAGGED, "Tvalues"))
     .SetShapeFn(RaggedTensorToVariantShapeFn);
 
 REGISTER_OP("RaggedTensorFromVariant")
@@ -156,12 +160,12 @@ REGISTER_OP("RaggedTensorToTensor")
 // Shape Functions
 //==============================================================================
 
-Status RaggedTensorToSparseShapeFn(InferenceContext* c) {
+absl::Status RaggedTensorToSparseShapeFn(InferenceContext* c) {
   int64_t num_splits;
   TF_RETURN_IF_ERROR(c->GetAttr<int64_t>("RAGGED_RANK", &num_splits));
   // TODO(b/112274756): Allow ragged_rank to be 0.
   if (num_splits < 1) {
-    return errors::InvalidArgument("Requires RAGGED_RANK>0");
+    return absl::InvalidArgumentError("Requires RAGGED_RANK>0");
   }
   ShapeHandle rt_dense_values = c->input(num_splits);
   TF_RETURN_IF_ERROR(c->WithRankAtLeast(rt_dense_values, 1, &rt_dense_values));
@@ -182,10 +186,10 @@ Status RaggedTensorToSparseShapeFn(InferenceContext* c) {
   c->set_output(1, c->Vector(num_values));              // values
   c->set_output(2, c->Vector(dense_dims));              // dense_shape
 
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-Status RaggedTensorToVariantShapeFn(InferenceContext* c) {
+absl::Status RaggedTensorToVariantShapeFn(InferenceContext* c) {
   int64_t num_splits;
   TF_RETURN_IF_ERROR(c->GetAttr<int64_t>("RAGGED_RANK", &num_splits));
   bool batched;
@@ -204,22 +208,18 @@ Status RaggedTensorToVariantShapeFn(InferenceContext* c) {
   } else {
     c->set_output(0, c->Scalar());
   }
-  if (batched && num_splits == 0) {
-    return errors::InvalidArgument(
-        "ragged_rank=0 is not currently supported when batched_input=true.");
-  }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-Status RaggedTensorToVariantGradientShapeFn(InferenceContext* c) {
+absl::Status RaggedTensorToVariantGradientShapeFn(InferenceContext* c) {
   ShapeHandle shape;
   TF_RETURN_IF_ERROR(
       c->MakeShapeFromShapeTensorTreatScalarAsUnknownShape(2, &shape));
   c->set_output(0, shape);
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-Status RaggedTensorFromVariantShapeFn(InferenceContext* c) {
+absl::Status RaggedTensorFromVariantShapeFn(InferenceContext* c) {
   int64_t input_ragged_rank;
   TF_RETURN_IF_ERROR(
       c->GetAttr<int64_t>("input_ragged_rank", &input_ragged_rank));
@@ -236,10 +236,10 @@ Status RaggedTensorFromVariantShapeFn(InferenceContext* c) {
     c->set_output(i, c->UnknownShapeOfRank(1));
   }
   c->set_output(output_ragged_rank, c->UnknownShape());
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-tensorflow::Status RaggedTensorToTensorShapeFn(InferenceContext* c) {
+absl::Status RaggedTensorToTensorShapeFn(InferenceContext* c) {
   TensorShapeProto shape;
   {
     ShapeHandle shape_handle;
@@ -279,7 +279,7 @@ tensorflow::Status RaggedTensorToTensorShapeFn(InferenceContext* c) {
   TF_RETURN_IF_ERROR(
       c->MakeShapeFromShapeProto(output_shape, &output_shape_handle));
   c->set_output(0, output_shape_handle);
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 }  // namespace tensorflow

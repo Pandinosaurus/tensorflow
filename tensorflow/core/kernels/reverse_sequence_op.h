@@ -17,7 +17,7 @@ limitations under the License.
 #define TENSORFLOW_CORE_KERNELS_REVERSE_SEQUENCE_OP_H_
 // Generator definition for ReverseSequenceOp, must be compilable by nvcc.
 
-#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
+#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
 #include "tensorflow/core/framework/tensor_types.h"
 #include "tensorflow/core/platform/types.h"
 
@@ -49,8 +49,8 @@ class ReverseGenerator {
 
  private:
   typename TTypes<T, Dims>::ConstTensor input_;
-  int32 batch_dim_;
-  int32 seq_dim_;
+  int32_t batch_dim_;
+  int32_t seq_dim_;
   typename TTypes<Tlen>::ConstVec seq_lengths_;
 };
 

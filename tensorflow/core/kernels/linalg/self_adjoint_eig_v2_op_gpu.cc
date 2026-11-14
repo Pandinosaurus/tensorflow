@@ -15,13 +15,13 @@ limitations under the License.
 
 // See docs in ../ops/linalg_ops.cc.
 
-#if GOOGLE_CUDA
+#if GOOGLE_CUDA || TENSORFLOW_USE_ROCM && TF_ROCM_VERSION >= 40500
 
 #include <numeric>
 #include <type_traits>
 
 #define EIGEN_USE_GPU
-#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
+#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
 #include "tensorflow/core/framework/kernel_def_builder.h"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/tensor_shape.h"
@@ -48,16 +48,16 @@ class SelfAdjointEigV2OpGpu : public AsyncOpKernel {
   void ComputeAsync(OpKernelContext* context, DoneCallback done) final {
     const Tensor& input = context->input(0);
     const int ndims = input.dims();
-    OP_REQUIRES_ASYNC(
-        context, ndims >= 2,
-        errors::InvalidArgument("Input must have rank >= 2, got ", ndims),
-        done);
+    OP_REQUIRES_ASYNC(context, ndims >= 2,
+                      absl::InvalidArgumentError(absl::StrCat(
+                          "Input must have rank >= 2, got ", ndims)),
+                      done);
     const int64_t n = input.dim_size(ndims - 1);
-    OP_REQUIRES_ASYNC(
-        context, input.dim_size(ndims - 2) == n,
-        errors::InvalidArgument("Input matrices must be squares, got",
-                                input.dim_size(ndims - 2), " != ", n),
-        done);
+    OP_REQUIRES_ASYNC(context, input.dim_size(ndims - 2) == n,
+                      absl::InvalidArgumentError(
+                          absl::StrCat("Input matrices must be squares, got",
+                                       input.dim_size(ndims - 2), " != ", n)),
+                      done);
     const int64_t batch_size =
         input.template flat_inner_dims<Scalar, 3>().dimension(0);
 
@@ -121,6 +121,16 @@ class SelfAdjointEigV2OpGpu : public AsyncOpKernel {
            input.flat<Scalar>() /*in*/);
     }
 
+#if GOOGLE_CUDA
+    cublasFillMode_t fill = CUBLAS_FILL_MODE_UPPER;
+    cusolverEigMode_t jobz =
+        compute_v_ ? CUSOLVER_EIG_MODE_VECTOR : CUSOLVER_EIG_MODE_NOVECTOR;
+#elif TENSORFLOW_USE_ROCM
+    hipsolverFillMode_t fill = HIPSOLVER_FILL_MODE_UPPER;
+    hipsolverEigMode_t jobz =
+        compute_v_ ? HIPSOLVER_EIG_MODE_VECTOR : HIPSOLVER_EIG_MODE_NOVECTOR;
+#endif
+
     // Compute eigen decomposition in-place in input_copy.
     std::vector<DeviceLapackInfo> dev_info;
     dev_info.push_back(solver->GetDeviceLapackInfo(batch_size, "heevd"));
@@ -130,10 +140,7 @@ class SelfAdjointEigV2OpGpu : public AsyncOpKernel {
     for (int batch = 0; batch < batch_size; ++batch) {
       OP_REQUIRES_OK_ASYNC(
           context,
-          solver->Heevd(compute_v_ ? CUSOLVER_EIG_MODE_VECTOR
-                                   : CUSOLVER_EIG_MODE_NOVECTOR,
-                        CUBLAS_FILL_MODE_UPPER, n,
-                        &input_copy_reshaped(batch, 0, 0), n,
+          solver->Heevd(jobz, fill, n, &input_copy_reshaped(batch, 0, 0), n,
                         &eigenvalues_real_reshaped(batch, 0),
                         dev_info.back().mutable_data() + batch),
           done);
@@ -160,7 +167,8 @@ class SelfAdjointEigV2OpGpu : public AsyncOpKernel {
  private:
   bool compute_v_;
 
-  TF_DISALLOW_COPY_AND_ASSIGN(SelfAdjointEigV2OpGpu);
+  SelfAdjointEigV2OpGpu(const SelfAdjointEigV2OpGpu&) = delete;
+  void operator=(const SelfAdjointEigV2OpGpu&) = delete;
 };
 
 #define REGISTER(Scalar)                                                       \

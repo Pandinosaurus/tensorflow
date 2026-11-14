@@ -16,8 +16,12 @@ limitations under the License.
 #ifndef TENSORFLOW_COMPILER_TF2XLA_KERNELS_WHILE_OP_H_
 #define TENSORFLOW_COMPILER_TF2XLA_KERNELS_WHILE_OP_H_
 
+#include <vector>
+
 #include "tensorflow/compiler/tf2xla/xla_op_kernel.h"
 #include "tensorflow/core/framework/attr_value.pb.h"
+#include "tensorflow/core/framework/op_kernel.h"
+#include "tensorflow/core/platform/types.h"
 
 namespace tensorflow {
 
@@ -57,14 +61,15 @@ class XlaWhileOp : public XlaOpKernel {
   NameAttrList cond_name_attr_;
   NameAttrList body_name_attr_;
   bool has_token_input_output_;
-  std::vector<string> token_input_nodes_;
-  string original_node_name_;
+  std::vector<std::string> token_input_nodes_;
+  std::string original_node_name_;
   // Whether to propagate compile time consts into the loop body.
   // This is not supported by default now since it may cause HBM memory
   // overheads.
   bool propagate_compile_time_consts_ = false;
 
-  TF_DISALLOW_COPY_AND_ASSIGN(XlaWhileOp);
+  XlaWhileOp(const XlaWhileOp&) = delete;
+  void operator=(const XlaWhileOp&) = delete;
 };
 
 }  // namespace tensorflow

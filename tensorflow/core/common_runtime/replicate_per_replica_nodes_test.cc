@@ -15,14 +15,24 @@ limitations under the License.
 
 #include "tensorflow/core/common_runtime/replicate_per_replica_nodes.h"
 
+#include <cstdint>
+#include <map>
+#include <string>
+#include <vector>
+
+#include "absl/container/flat_hash_map.h"
+#include "absl/status/status.h"
 #include "absl/strings/match.h"
 #include "tensorflow/cc/ops/const_op.h"
 #include "tensorflow/cc/ops/function_ops.h"
 #include "tensorflow/cc/ops/resource_variable_ops.h"
 #include "tensorflow/cc/ops/standard_ops.h"
+#include "tensorflow/core/framework/function.pb.h"
 #include "tensorflow/core/framework/graph_to_functiondef.h"
+#include "tensorflow/core/framework/node_def.pb.h"
 #include "tensorflow/core/framework/node_def_util.h"
 #include "tensorflow/core/framework/op.h"
+#include "tensorflow/core/framework/types.pb.h"
 #include "tensorflow/core/lib/core/status_test_util.h"
 #include "tensorflow/core/platform/test.h"
 
@@ -37,7 +47,7 @@ class GraphHelper {
     }
   }
 
-  Node* GetNodeByName(const string& name) {
+  Node* GetNodeByName(const std::string& name) {
     const auto it = nodes_by_name_.find(name);
     if (it != nodes_by_name_.end()) {
       return it->second;
@@ -50,7 +60,8 @@ class GraphHelper {
     return nullptr;
   }
 
-  void SetAssignedDevice(const string& node_name, const string& device_name) {
+  void SetAssignedDevice(const std::string& node_name,
+                         const std::string& device_name) {
     CHECK_NOTNULL(GetNodeByName(node_name))
         ->set_assigned_device_name(device_name);
   }
@@ -65,30 +76,39 @@ class GraphHelper {
     EXPECT_EQ(arg_num, expected_num);
   }
 
-  void CheckAssignedDevice(const string& node_name,
-                           const string& expected_device_name) {
+  void CheckAssignedDevice(const std::string& node_name,
+                           const std::string& expected_device_name) {
     EXPECT_EQ(expected_device_name,
               CHECK_NOTNULL(GetNodeByName(node_name))->assigned_device_name());
   }
 
+  void CheckAssignedDevicePrefix(const std::string& node_name,
+                                 const std::string& expected_device_name) {
+    auto assigned =
+        CHECK_NOTNULL(GetNodeByName(node_name))->assigned_device_name();
+    EXPECT_EQ(assigned.rfind(expected_device_name, 0), 0);
+  }
+
  private:
   const Graph& graph_;
-  // Maps from a node name to a Node* in the graph.
-  absl::flat_hash_map<string, Node*> nodes_by_name_;
+  // Maps from a node name to a Node* in the graph. We use an ordered map here
+  // to ensure stability of GetNodeByName().
+  std::map<std::string, Node*> nodes_by_name_;
 };
 
 TEST(ReplicatePerReplicaNodesTest, SingleCompositeDevice) {
   tensorflow::Scope scope = tensorflow::Scope::NewRootScope();
   Output arg = ops::_Arg(scope.WithOpName("arg"), DT_RESOURCE, 0);
   auto read = ops::ReadVariableOp(scope.WithOpName("read"), arg, DT_INT32);
-  auto one = ops::Const<int32>(scope.WithOpName("one"), 1);
+  auto one = ops::Const<int32_t>(scope.WithOpName("one"), 1);
   auto write = ops::AssignVariableOp(scope.WithOpName("write"), arg, one);
   auto ret = ops::_Retval(
       scope.WithOpName("ret").WithControlDependencies({write}), read, 0);
 
-  const std::vector<string> underlying_devices = {"TPU:0", "TPU:1"};
-  const absl::flat_hash_map<string, const std::vector<string>*>
-      composite_devices = {{"TPU_COMPOSITE:0", &underlying_devices}};
+  const std::vector<std::string> underlying_devices = {"/device:TPU:0",
+                                                       "/device:TPU:1"};
+  const absl::flat_hash_map<std::string, const std::vector<std::string>*>
+      composite_devices = {{"/device:TPU_COMPOSITE:0", &underlying_devices}};
 
   Graph graph(OpRegistry::Global());
   TF_ASSERT_OK(scope.ToGraph(&graph));
@@ -98,11 +118,11 @@ TEST(ReplicatePerReplicaNodesTest, SingleCompositeDevice) {
     // ReadVariableOp(TPU:0) -> _Retval(CPU:0)
     ASSERT_EQ(graph.num_op_nodes(), 5);
     GraphHelper helper(graph);
-    helper.SetAssignedDevice("arg", "TPU_COMPOSITE:0");
-    helper.SetAssignedDevice("read", "TPU:0");
-    helper.SetAssignedDevice("one", "CPU:0");
-    helper.SetAssignedDevice("write", "TPU_COMPOSITE:0");
-    helper.SetAssignedDevice("ret", "CPU:0");
+    helper.SetAssignedDevice("arg", "/device:TPU_COMPOSITE:0");
+    helper.SetAssignedDevice("read", "/device:TPU:0");
+    helper.SetAssignedDevice("one", "/device:CPU:0");
+    helper.SetAssignedDevice("write", "/device:TPU_COMPOSITE:0");
+    helper.SetAssignedDevice("ret", "/device:CPU:0");
   }
 
   TF_EXPECT_OK(
@@ -112,16 +132,16 @@ TEST(ReplicatePerReplicaNodesTest, SingleCompositeDevice) {
     // _Arg(TPU:0, TPU:1) -> ReadVariableOp(TPU:0);
     // Const(CPU:0) -> AssignVariableOp(TPU:0, TPU:1);
     // ReadVariableOp(TPU:0) -> _Retval(CPU:0)
-    EXPECT_EQ(graph.num_op_nodes(), 7);
+    EXPECT_EQ(graph.num_op_nodes(), 9);
     GraphHelper helper(graph);
     helper.CheckArgNum(2);
-    helper.CheckAssignedDevice("arg/R0", "TPU:0");
-    helper.CheckAssignedDevice("arg/R1", "TPU:1");
-    helper.CheckAssignedDevice("read", "TPU:0");
-    helper.CheckAssignedDevice("one", "CPU:0");
-    helper.CheckAssignedDevice("write/R0", "TPU:0");
-    helper.CheckAssignedDevice("write/R1", "TPU:1");
-    helper.CheckAssignedDevice("ret", "CPU:0");
+    helper.CheckAssignedDevicePrefix("arg/R0", "/device:TPU");
+    helper.CheckAssignedDevicePrefix("arg/R1", "/device:TPU");
+    helper.CheckAssignedDevicePrefix("write/R0", "/device:TPU");
+    helper.CheckAssignedDevicePrefix("write/R1", "/device:TPU");
+    helper.CheckAssignedDevice("read", "/device:TPU:0");
+    helper.CheckAssignedDevice("one", "/device:CPU:0");
+    helper.CheckAssignedDevice("ret", "/device:CPU:0");
   }
 }
 
@@ -131,9 +151,9 @@ TEST(ReplicatePerReplicaNodesTest, SingleCompositeDeviceToSingleDevice) {
   auto read = ops::ReadVariableOp(scope.WithOpName("read"), arg, DT_INT32);
   auto ret = ops::_Retval(scope.WithOpName("ret"), read, 0);
 
-  const std::vector<string> underlying_devices = {"TPU:0"};
-  const absl::flat_hash_map<string, const std::vector<string>*>
-      composite_devices = {{"TPU_COMPOSITE:0", &underlying_devices}};
+  const std::vector<std::string> underlying_devices = {"/device:TPU:0"};
+  const absl::flat_hash_map<std::string, const std::vector<std::string>*>
+      composite_devices = {{"/device:TPU_COMPOSITE:0", &underlying_devices}};
 
   Graph graph(OpRegistry::Global());
   TF_ASSERT_OK(scope.ToGraph(&graph));
@@ -141,9 +161,9 @@ TEST(ReplicatePerReplicaNodesTest, SingleCompositeDeviceToSingleDevice) {
     // _Arg(TPU_COMPOSITE:0) -> ReadVariableOp(TPU:0) -> _Retval(CPU:0)
     ASSERT_EQ(graph.num_op_nodes(), 3);
     GraphHelper helper(graph);
-    helper.SetAssignedDevice("arg", "TPU_COMPOSITE:0");
-    helper.SetAssignedDevice("read", "TPU:0");
-    helper.SetAssignedDevice("ret", "CPU:0");
+    helper.SetAssignedDevice("arg", "/device:TPU_COMPOSITE:0");
+    helper.SetAssignedDevice("read", "/device:TPU:0");
+    helper.SetAssignedDevice("ret", "/device:CPU:0");
   }
 
   TF_EXPECT_OK(
@@ -154,9 +174,9 @@ TEST(ReplicatePerReplicaNodesTest, SingleCompositeDeviceToSingleDevice) {
     EXPECT_EQ(graph.num_op_nodes(), 3);
     GraphHelper helper(graph);
     helper.CheckArgNum(1);
-    helper.CheckAssignedDevice("arg", "TPU:0");
-    helper.CheckAssignedDevice("read", "TPU:0");
-    helper.CheckAssignedDevice("ret", "CPU:0");
+    helper.CheckAssignedDevice("arg", "/device:TPU:0");
+    helper.CheckAssignedDevice("read", "/device:TPU:0");
+    helper.CheckAssignedDevice("ret", "/device:CPU:0");
   }
 }
 
@@ -171,11 +191,13 @@ TEST(ReplicatePerReplicaNodesTest, MultipleCompositeDevices) {
   auto add = ops::Add(scope.WithOpName("add"), identity0, identity1);
   auto ret = ops::_Retval(scope.WithOpName("ret"), add, 0);
 
-  const std::vector<string> underlying_devices_0 = {"TPU:0", "TPU:1"};
-  const std::vector<string> underlying_devices_1 = {"TPU:2", "TPU:3"};
-  const absl::flat_hash_map<string, const std::vector<string>*>
-      composite_devices = {{"TPU_COMPOSITE:0", &underlying_devices_0},
-                           {"TPU_COMPOSITE:1", &underlying_devices_1}};
+  const std::vector<std::string> underlying_devices_0 = {"/device:TPU:0",
+                                                         "/device:TPU:1"};
+  const std::vector<std::string> underlying_devices_1 = {"/device:TPU:2",
+                                                         "/device:TPU:3"};
+  const absl::flat_hash_map<std::string, const std::vector<std::string>*>
+      composite_devices = {{"/device:TPU_COMPOSITE:0", &underlying_devices_0},
+                           {"/device:TPU_COMPOSITE:1", &underlying_devices_1}};
 
   Graph graph(OpRegistry::Global());
   TF_ASSERT_OK(scope.ToGraph(&graph));
@@ -187,14 +209,14 @@ TEST(ReplicatePerReplicaNodesTest, MultipleCompositeDevices) {
     // Identity(TPU:1), Identity(TPU:3) -> Add(TPU:0)-> _Retval(CPU:0)
     ASSERT_EQ(graph.num_op_nodes(), 8);
     GraphHelper helper(graph);
-    helper.SetAssignedDevice("arg0", "TPU_COMPOSITE:0");
-    helper.SetAssignedDevice("read0", "TPU_COMPOSITE:0");
-    helper.SetAssignedDevice("identity0", "TPU:1");
-    helper.SetAssignedDevice("arg1", "TPU_COMPOSITE:1");
-    helper.SetAssignedDevice("read1", "TPU_COMPOSITE:1");
-    helper.SetAssignedDevice("identity1", "TPU:3");
-    helper.SetAssignedDevice("add", "TPU:0");
-    helper.SetAssignedDevice("ret", "CPU:0");
+    helper.SetAssignedDevice("arg0", "/device:TPU_COMPOSITE:0");
+    helper.SetAssignedDevice("read0", "/device:TPU_COMPOSITE:0");
+    helper.SetAssignedDevice("identity0", "/device:TPU:1");
+    helper.SetAssignedDevice("arg1", "/device:TPU_COMPOSITE:1");
+    helper.SetAssignedDevice("read1", "/device:TPU_COMPOSITE:1");
+    helper.SetAssignedDevice("identity1", "/device:TPU:3");
+    helper.SetAssignedDevice("add", "/device:TPU:0");
+    helper.SetAssignedDevice("ret", "/device:CPU:0");
   }
 
   TF_EXPECT_OK(
@@ -206,21 +228,22 @@ TEST(ReplicatePerReplicaNodesTest, MultipleCompositeDevices) {
     EXPECT_EQ(graph.num_op_nodes(), 8);
     GraphHelper helper(graph);
     helper.CheckArgNum(2);
-    helper.CheckAssignedDevice("arg0/R1", "TPU:1");
-    helper.CheckAssignedDevice("arg1/R1", "TPU:3");
-    helper.CheckAssignedDevice("read0/R1", "TPU:1");
-    helper.CheckAssignedDevice("read1/R1", "TPU:3");
-    helper.CheckAssignedDevice("identity0", "TPU:1");
-    helper.CheckAssignedDevice("identity1", "TPU:3");
-    helper.CheckAssignedDevice("add", "TPU:0");
-    helper.CheckAssignedDevice("ret", "CPU:0");
+    helper.CheckAssignedDevice("arg0/R1", "/device:TPU:1");
+    helper.CheckAssignedDevice("arg1/R1", "/device:TPU:3");
+    helper.CheckAssignedDevice("read0/R1", "/device:TPU:1");
+    helper.CheckAssignedDevice("read1/R1", "/device:TPU:3");
+    helper.CheckAssignedDevice("identity0", "/device:TPU:1");
+    helper.CheckAssignedDevice("identity1", "/device:TPU:3");
+    helper.CheckAssignedDevice("add", "/device:TPU:0");
+    helper.CheckAssignedDevice("ret", "/device:CPU:0");
   }
 }
 
 TEST(ReplicatePerReplicaNodesTest, NestedFunctions) {
-  const std::vector<string> underlying_devices = {"TPU:0", "TPU:1"};
-  const absl::flat_hash_map<string, const std::vector<string>*>
-      composite_devices = {{"TPU_COMPOSITE:0", &underlying_devices}};
+  const std::vector<std::string> underlying_devices = {"/device:TPU:0",
+                                                       "/device:TPU:1"};
+  const absl::flat_hash_map<std::string, const std::vector<std::string>*>
+      composite_devices = {{"/device:TPU_COMPOSITE:0", &underlying_devices}};
 
   FunctionDefLibrary fdef_lib;
   FunctionLibraryDefinition flib_def(OpRegistry::Global(), fdef_lib);
@@ -232,9 +255,9 @@ TEST(ReplicatePerReplicaNodesTest, NestedFunctions) {
     Graph graph(OpRegistry::Global());
     TF_ASSERT_OK(scope.ToGraph(&graph));
     GraphHelper helper(graph);
-    helper.SetAssignedDevice("arg", "TPU_COMPOSITE:0");
-    helper.SetAssignedDevice("read", "TPU:0");
-    helper.SetAssignedDevice("ret", "CPU:0");
+    helper.SetAssignedDevice("arg", "/device:TPU_COMPOSITE:0");
+    helper.SetAssignedDevice("read", "/device:TPU:0");
+    helper.SetAssignedDevice("ret", "/device:CPU:0");
     FunctionDef fdef;
     TF_ASSERT_OK(GraphToFunctionDef(graph, "Func", &fdef));
     *fdef_lib.add_function() = fdef;
@@ -248,7 +271,7 @@ TEST(ReplicatePerReplicaNodesTest, NestedFunctions) {
   TF_ASSERT_OK(NodeDefBuilder("func", "Func", &flib_def)
                    .Input(arg.name(), 0, DT_RESOURCE)
                    .Finalize(&def));
-  Status status;
+  absl::Status status;
   Node* func = scope.graph()->AddNode(def, &status);
   TF_ASSERT_OK(status);
   scope.graph()->AddEdge(arg.node(), 0, func, 0);
@@ -259,9 +282,9 @@ TEST(ReplicatePerReplicaNodesTest, NestedFunctions) {
     // _Arg(TPU_COMPOSITE:0) -> Func(CPU:0) -> _Retval(CPU:0)
     GraphHelper helper(graph);
     EXPECT_EQ(graph.num_op_nodes(), 3);
-    helper.SetAssignedDevice("arg", "TPU_COMPOSITE:0");
-    helper.SetAssignedDevice("func", "CPU:0");
-    helper.SetAssignedDevice("ret", "CPU:0");
+    helper.SetAssignedDevice("arg", "/device:TPU_COMPOSITE:0");
+    helper.SetAssignedDevice("func", "/device:CPU:0");
+    helper.SetAssignedDevice("ret", "/device:CPU:0");
   }
 
   TF_EXPECT_OK(
@@ -272,11 +295,11 @@ TEST(ReplicatePerReplicaNodesTest, NestedFunctions) {
     EXPECT_EQ(graph.num_op_nodes(), 5);
     GraphHelper helper(graph);
     helper.CheckArgNum(2);
-    helper.CheckAssignedDevice("arg/R0", "TPU:0");
-    helper.CheckAssignedDevice("arg/R1", "TPU:1");
-    helper.CheckAssignedDevice("arg/Packed", "CPU:0");
-    helper.CheckAssignedDevice("func", "CPU:0");
-    helper.CheckAssignedDevice("ret", "CPU:0");
+    helper.CheckAssignedDevice("arg/R0", "/device:TPU:0");
+    helper.CheckAssignedDevice("arg/R1", "/device:TPU:1");
+    helper.CheckAssignedDevice("arg/Packed", "/device:CPU:0");
+    helper.CheckAssignedDevice("func", "/device:CPU:0");
+    helper.CheckAssignedDevice("ret", "/device:CPU:0");
     const EdgeSet& packed_in_edges =
         helper.GetNodeByName("arg/Packed")->in_edges();
     EXPECT_EQ(packed_in_edges.size(), 2);
@@ -296,9 +319,10 @@ TEST(ReplicatePerReplicaNodesTest, DeadArgNodes) {
   auto read = ops::ReadVariableOp(scope.WithOpName("read"), arg, DT_INT32);
   auto ret = ops::_Retval(scope.WithOpName("ret"), read, 0);
 
-  const std::vector<string> underlying_devices = {"TPU:0", "TPU:1"};
-  const absl::flat_hash_map<string, const std::vector<string>*>
-      composite_devices = {{"TPU_COMPOSITE:0", &underlying_devices}};
+  const std::vector<std::string> underlying_devices = {"/device:TPU:0",
+                                                       "/device:TPU:1"};
+  const absl::flat_hash_map<std::string, const std::vector<std::string>*>
+      composite_devices = {{"/device:TPU_COMPOSITE:0", &underlying_devices}};
 
   Graph graph(OpRegistry::Global());
   TF_ASSERT_OK(scope.ToGraph(&graph));
@@ -306,9 +330,9 @@ TEST(ReplicatePerReplicaNodesTest, DeadArgNodes) {
     // _Arg(TPU_COMPOSITE:0) -> ReadVariableOp(TPU:0) -> _Retval(CPU:0)
     ASSERT_EQ(graph.num_op_nodes(), 3);
     GraphHelper helper(graph);
-    helper.SetAssignedDevice("arg", "TPU_COMPOSITE:0");
-    helper.SetAssignedDevice("read", "TPU:0");
-    helper.SetAssignedDevice("ret", "CPU:0");
+    helper.SetAssignedDevice("arg", "/device:TPU_COMPOSITE:0");
+    helper.SetAssignedDevice("read", "/device:TPU:0");
+    helper.SetAssignedDevice("ret", "/device:CPU:0");
   }
 
   TF_EXPECT_OK(
@@ -320,9 +344,9 @@ TEST(ReplicatePerReplicaNodesTest, DeadArgNodes) {
     EXPECT_EQ(graph.num_op_nodes(), 3);
     GraphHelper helper(graph);
     helper.CheckArgNum(1);
-    helper.CheckAssignedDevice("arg/R0", "TPU:0");
-    helper.CheckAssignedDevice("read", "TPU:0");
-    helper.CheckAssignedDevice("ret", "CPU:0");
+    helper.CheckAssignedDevice("arg/R0", "/device:TPU:0");
+    helper.CheckAssignedDevice("read", "/device:TPU:0");
+    helper.CheckAssignedDevice("ret", "/device:CPU:0");
   }
 }
 

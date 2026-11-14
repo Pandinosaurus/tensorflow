@@ -13,11 +13,22 @@
 # limitations under the License.
 # ==============================================================================
 
+load("@xla//third_party/rules_python/python:py_binary.bzl", "py_binary")
+load("@xla//third_party/rules_python/python:py_library.bzl", "py_library")
+load("//tensorflow/core/platform:build_config_root.bzl", "if_pywrap")
+
 # Building blocks for generating accuracy validation metric graphs.
 load("//tensorflow/lite/experimental/acceleration/mini_benchmark:build_defs.bzl", "validation_model", "validation_test")
+load("//tensorflow/lite/experimental/acceleration/mini_benchmark:special_rules.bzl", "minibenchmark_visibility_allowlist")
+
+default_visibility_group = [
+    "//tensorflow/lite/experimental/acceleration/mini_benchmark:__subpackages__",
+    "//tensorflow/lite/tools/benchmark:__subpackages__",
+] + minibenchmark_visibility_allowlist()
 
 package(
-    default_visibility = ["//visibility:public"],
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:LICENSE"],
+    default_visibility = default_visibility_group,
     licenses = ["notice"],
 )
 
@@ -26,7 +37,7 @@ py_library(
     srcs = [
         "kl_divergence.py",
     ],
-    srcs_version = "PY3",
+    strict_deps = True,
     visibility = ["//visibility:public"],
     deps = [
         "//tensorflow:tensorflow_py",
@@ -36,12 +47,15 @@ py_library(
 py_binary(
     name = "mobilenet",
     srcs = ["mobilenet.py"],
-    python_version = "PY3",
-    srcs_version = "PY3",
+    strict_deps = True,
     deps = [
+        ":kl_divergence",
         "//tensorflow:tensorflow_py",
-        "//tensorflow/lite/experimental/acceleration/mini_benchmark/metrics:kl_divergence",
-    ],
+        "//tensorflow/lite/python:lite",
+        "//tensorflow/lite/tools:flatbuffer_utils",
+    ] + if_pywrap(
+        if_true = ["//tensorflow/python:_pywrap_tensorflow"],
+    ),
 )
 
 genrule(
@@ -80,12 +94,15 @@ validation_test(
 py_binary(
     name = "blazeface_metrics",
     srcs = ["blazeface_metrics.py"],
-    python_version = "PY3",
-    srcs_version = "PY3",
+    strict_deps = True,
     deps = [
+        ":kl_divergence",
         "//tensorflow:tensorflow_py",
-        "//tensorflow/lite/experimental/acceleration/mini_benchmark/metrics:kl_divergence",
-    ],
+        "//tensorflow/lite/python:lite",
+        "//tensorflow/lite/tools:flatbuffer_utils",
+    ] + if_pywrap(
+        if_true = ["//tensorflow/python:_pywrap_tensorflow"],
+    ),
 )
 
 genrule(

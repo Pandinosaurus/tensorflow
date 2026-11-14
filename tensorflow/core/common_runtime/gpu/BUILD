@@ -1,37 +1,55 @@
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
+load("@local_config_cuda//cuda:build_defs.bzl", "if_cuda")
+load("@local_config_rocm//rocm:build_defs.bzl", "if_rocm")
+load("@xla//xla/tsl:tsl.default.bzl", "if_cuda_libs")
 load(
     "//tensorflow:tensorflow.bzl",
+    "if_cuda_or_rocm",
+    "if_google",
     "tf_cc_test",
     "tf_copts",
     "tf_cuda_library",
 )
-
-# buildifier: disable=same-origin-load
-load("//tensorflow:tensorflow.bzl", "tf_cuda_cc_test")
-
-# buildifier: disable=same-origin-load
-load("//tensorflow:tensorflow.bzl", "filegroup")
-
-# For platform specific build config
 load(
-    "//tensorflow/core/platform:build_config.bzl",
-    "tf_kernel_tests_linkstatic",
-)
-load(
-    "//tensorflow/core/platform:rules_cc.bzl",
-    "cc_library",
+    "//tensorflow:tensorflow.default.bzl",
+    "filegroup",
+    "tf_cuda_cc_test",
 )
 load(
     "//tensorflow/core/platform:build_config_root.bzl",
     "if_static",
     "tf_cuda_tests_tags",
 )
+load(
+    "//tensorflow/core/platform:rules_cc.bzl",
+    "cc_library",
+)
 
 package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
     default_visibility = [
         "//tensorflow:internal",
         "//tensorflow_models:__subpackages__",
     ],
-    features = ["-layering_check"],
+    features = if_google(
+        [
+            "-parse_headers",
+        ],
+    ),
     licenses = ["notice"],
 )
 
@@ -61,16 +79,9 @@ cc_library(
 )
 
 cc_library(
-    name = "cuda",
-    deps = [
-        "//tensorflow/core/platform/default/build_config:cuda",
-    ],
-)
-
-cc_library(
     name = "rocm",
     deps = [
-        "//tensorflow/core/platform/default/build_config:rocm",
+        "@local_config_rocm//rocm:rocm_rpath",
     ],
 )
 
@@ -83,6 +94,7 @@ cc_library(
     deps = [
         "//tensorflow/core:lib",
         "//tensorflow/core/common_runtime/device:device_id",
+        "@com_google_absl//absl/status",
     ] + if_static([
         ":gpu_id_impl",
     ]),
@@ -95,10 +107,34 @@ cc_library(
         "gpu_id.h",
         "gpu_id_manager.h",
     ],
+    features = ["-layering_check"],
     deps = [
         "//tensorflow/core:framework",
         "//tensorflow/core:lib",
         "//tensorflow/core/common_runtime/device:device_id_impl",
+        "@com_google_absl//absl/status",
+    ],
+)
+
+# For a more maintainable build this target should not exist and the headers
+# should  be split into the existing cc_library targets, but this change was
+# automatically  done so that we can remove long standing issues and complexity
+# in the build system. It's up to the OWNERS of this package to get rid of it or
+# not. The use of the textual_hdrs attribute is discouraged, use hdrs instead.
+# Here it is used to avoid header parsing errors in packages where the feature
+# parse_headers was enabled since loose headers were not being parsed. See
+# go/loose-lsc-one-target-approach for more details.
+cc_library(
+    name = "loose_headers",
+    tags = ["avoid_dep"],
+    textual_hdrs = [
+        "gpu_event_mgr.h",
+        "gpu_managed_allocator.h",
+    ],
+    visibility = [
+        "//tensorflow/core/kernels:__pkg__",
+        "//tensorflow/core/kernels/image:__pkg__",
+        "//tensorflow/core/kernels/sparse:__pkg__",
     ],
 )
 
@@ -107,27 +143,37 @@ filegroup(
     srcs = [
         "gpu_bfc_allocator.h",
         "gpu_cudamalloc_allocator.h",
-        "gpu_cudamallocasync_allocator.h",
         "gpu_debug_allocator.h",
         "gpu_device.h",
         "gpu_id.h",
         "gpu_id_manager.h",
-        "gpu_init.h",
         "gpu_managed_allocator.h",
         "gpu_process_state.h",
         "gpu_util.h",
-        "gpu_virtual_mem_allocator.h",
         "//tensorflow/core/common_runtime:gpu_runtime_headers",
         "//tensorflow/core/common_runtime/device:device_runtime_headers",
+        "@xla//xla/tsl/framework:bfc_allocator.h",
     ],
     visibility = ["//visibility:private"],
+)
+
+cc_library(
+    name = "gpu_runtime_hermetic_cuda_deps",
+    visibility = ["//visibility:public"],
+    deps = if_cuda_libs([
+        "@xla//xla/tsl/cuda:cudart",
+        "@xla//xla/tsl/cuda:cublas",
+        "@xla//xla/tsl/cuda:cufft",
+        "@xla//xla/tsl/cuda:cusolver",
+        "@xla//xla/tsl/cuda:cusparse",
+        "@xla//xla/tsl/cuda:cudnn",
+    ]),
 )
 
 tf_cuda_library(
     name = "gpu_runtime_impl",
     srcs = [
         "gpu_cudamalloc_allocator.cc",
-        "gpu_cudamallocasync_allocator.cc",
         "gpu_debug_allocator.cc",
         "gpu_device.cc",
         "gpu_device_factory.cc",
@@ -140,14 +186,20 @@ tf_cuda_library(
     copts = tf_copts(),
     cuda_deps = [
         "@local_config_cuda//cuda:cudnn_header",
-        "//tensorflow/stream_executor/cuda:cuda_platform",
-        ":gpu_virtual_mem_allocator",
+        "@xla//xla/stream_executor/cuda:cuda_platform",
+        "@xla//xla/stream_executor/gpu:gpu_cudamallocasync_allocator",
+        ":gpu_runtime_hermetic_cuda_deps",
+    ],
+    features = ["-layering_check"],
+    visibility = [
+        "//tensorflow:internal",
+        "//tensorflow_models:__subpackages__",
     ],
     deps = [
         ":gpu_bfc_allocator",
         ":gpu_id_impl",
-        ":gpu_init_impl",
         ":gpu_lib",
+        "//tensorflow/compiler/tf2xla:common",
         "//tensorflow/core:core_cpu_lib",
         "//tensorflow/core:framework",
         "//tensorflow/core:framework_internal",
@@ -155,18 +207,72 @@ tf_cuda_library(
         "//tensorflow/core:lib",
         "//tensorflow/core:lib_internal",
         "//tensorflow/core:protos_all_cc",
+        "//tensorflow/core:session_options",
         "//tensorflow/core/common_runtime:core_cpu_impl",
+        "//tensorflow/core/common_runtime:device_id_utils",
         "//tensorflow/core/common_runtime:node_file_writer",
+        "//tensorflow/core/framework:device_attributes_proto_cc",
+        "//tensorflow/core/framework:types_proto_cc",
+        "//tensorflow/core/platform:hash",
         "//tensorflow/core/platform:stream_executor",
         "//tensorflow/core/platform:tensor_float_32_utils",
         "//tensorflow/core/profiler/lib:annotated_traceme",
         "//tensorflow/core/profiler/lib:scoped_annotation",
         "//tensorflow/core/profiler/lib:scoped_memory_debug_annotation",
-        "//third_party/eigen3",
+        "@com_google_absl//absl/base",
+        "@com_google_absl//absl/base:core_headers",
+        "@com_google_absl//absl/container:btree",
+        "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/container:flat_hash_set",
+        "@com_google_absl//absl/log",
+        "@com_google_absl//absl/log:check",
+        "@com_google_absl//absl/memory",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
-        "@com_google_absl//absl/types:optional",
-    ],
+        "@com_google_absl//absl/strings:str_format",
+        "@com_google_absl//absl/strings:string_view",
+        "@com_google_absl//absl/synchronization",
+        "@eigen_archive//:eigen3",
+        "@tsl//tsl/platform:mutex",
+        "@tsl//tsl/platform:numbers",
+        "@tsl//tsl/platform:strcat",
+        "@tsl//tsl/profiler/lib:scoped_annotation",
+        "@tsl//tsl/profiler/lib:traceme",
+        "@xla//xla:future",
+        "@xla//xla:literal",
+        "@xla//xla:shape_util",
+        "@xla//xla/client:client_library",
+        "@xla//xla/pjrt:host_memory_allocator",
+        "@xla//xla/pjrt:local_device_state",
+        "@xla//xla/pjrt:pjrt_client",
+        "@xla//xla/stream_executor:device_memory",
+        "@xla//xla/stream_executor:memory_space",
+        "@xla//xla/stream_executor:stream_executor_h",
+        "@xla//xla/stream_executor/gpu:gpu_init_impl",
+        "@xla//xla/stream_executor/integrations:stream_executor_allocator",
+        "@xla//xla/tsl/framework:device_id_utils",
+        "@xla//xla/tsl/framework:scoped_allocation_trace",
+        "@xla//xla/tsl/platform:logging",
+        "@xla//xla/tsl/platform:types",
+    ] + if_cuda_or_rocm([
+        "//tensorflow/compiler/tf2xla:layout_util",
+        "//tensorflow/compiler/jit:flags",
+        "//tensorflow/compiler/jit:pjrt_device_context",
+        "//tensorflow/compiler/jit:pjrt_tensor_buffer",
+        "//tensorflow/compiler/jit:pjrt_tensor_buffer_util",
+        "@xla//xla/pjrt/gpu:gpu_helpers",
+        "@xla//xla/pjrt/gpu:se_gpu_pjrt_client",
+        "@xla//xla/service:gpu_plugin_impl",  # for registering cuda compiler.
+        "@xla//xla/stream_executor/integrations:tf_allocator_adapter",
+        "//tensorflow/core/tfrt/common:global_state",
+        "//tensorflow/core/tfrt/common:pjrt_util",
+        "@tsl//tsl/platform:dso_loader",
+    ]) + if_cuda([
+        "@xla//xla/stream_executor/cuda:all_runtime",
+    ]) + if_rocm([
+        "@xla//xla/stream_executor/rocm:all_runtime",
+    ]),
     alwayslink = 1,
 )
 
@@ -174,16 +280,38 @@ tf_cuda_library(
     name = "gpu_runtime",
     hdrs = [":gpu_runtime_headers"],
     linkstatic = 1,
+    visibility = ["//visibility:public"],
     deps = [
+        "//tensorflow/compiler/tf2xla:layout_util",
         "//tensorflow/core:core_cpu_lib",
         "//tensorflow/core:framework",
         "//tensorflow/core:framework_internal",
+        "//tensorflow/core:gpu_headers_lib",
         "//tensorflow/core:lib",
         "//tensorflow/core:lib_internal",
         "//tensorflow/core:protos_all_cc",
+        "//tensorflow/core:session_options",
         "//tensorflow/core/platform:stream_executor",
-        "//third_party/eigen3",
-    ] + if_static([":gpu_runtime_impl"]),
+        "@com_google_absl//absl/base",
+        "@com_google_absl//absl/base:core_headers",
+        "@com_google_absl//absl/container:btree",
+        "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/container:flat_hash_set",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/strings:string_view",
+        "@com_google_absl//absl/synchronization",
+        "@eigen_archive//:eigen3",
+        "@tsl//tsl/platform:numbers",
+        "@xla//xla/pjrt:local_device_state",
+        "@xla//xla/stream_executor:stream_executor_h",
+        "@xla//xla/stream_executor/integrations:tf_allocator_adapter",
+        "@xla//xla/tsl/framework:scoped_allocation_trace",
+        "@xla//xla/tsl/platform:logging",
+        "@xla//xla/tsl/platform:types",
+    ] + if_static([":gpu_runtime_impl"]) + if_cuda_or_rocm([
+        "//tensorflow/compiler/jit:pjrt_device_context",
+    ]),
 )
 
 # This is redundant with the "gpu_runtime_*" targets above. It's useful for
@@ -194,78 +322,18 @@ tf_cuda_library(
         "gpu_bfc_allocator.cc",
     ],
     hdrs = ["gpu_bfc_allocator.h"],
-    features = ["parse_headers"],
+    features = [
+        "-layering_check",
+        "parse_headers",
+    ],
     visibility = ["//visibility:public"],
     deps = [
-        ":gpu_virtual_mem_allocator",
         "//tensorflow/core:lib",
         "//tensorflow/core:lib_internal",
         "//tensorflow/core:protos_all_cc",
         "//tensorflow/core/common_runtime:bfc_allocator",
         "//tensorflow/core/common_runtime/device:device_mem_allocator",
     ],
-)
-
-tf_cuda_library(
-    name = "gpu_virtual_mem_allocator",
-    srcs = [
-        "gpu_virtual_mem_allocator.cc",
-    ],
-    hdrs = [
-        "gpu_virtual_mem_allocator.h",
-    ],
-    copts = tf_copts(),
-    features = ["parse_headers"],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":gpu_id",
-        "//tensorflow/core:framework",
-        "//tensorflow/core:framework_internal",
-        "//tensorflow/core:lib",
-        "//tensorflow/core:lib_internal",
-        "//tensorflow/core/framework:allocator",
-        "//tensorflow/core/platform:stream_executor",
-        "//tensorflow/stream_executor:platform",
-        "//tensorflow/stream_executor:stream_executor_headers",
-        "//tensorflow/stream_executor/lib",
-        "@com_google_absl//absl/strings:str_format",
-    ],
-)
-
-tf_cuda_library(
-    name = "gpu_init",
-    hdrs = [
-        "gpu_init.h",
-    ],
-    deps = [
-        "//tensorflow/core:framework",
-        "//tensorflow/core:framework_internal",
-        "//tensorflow/core:lib",
-        "//tensorflow/core:lib_internal",
-        "//tensorflow/core/platform:stream_executor",
-    ] + if_static(
-        [":gpu_init_impl"],
-    ),
-)
-
-tf_cuda_library(
-    name = "gpu_init_impl",
-    srcs = [
-        "gpu_init.cc",
-    ],
-    hdrs = [
-        "gpu_init.h",
-    ],
-    copts = tf_copts(),
-    linkstatic = 1,
-    deps = [
-        "//tensorflow/core:framework",
-        "//tensorflow/core:framework_internal",
-        "//tensorflow/core:lib",
-        "//tensorflow/core:lib_internal",
-        "//tensorflow/core/platform:stream_executor",
-    ],
-    alwayslink = 1,
 )
 
 # -----------------------------------------------------------------------------
@@ -275,7 +343,7 @@ tf_cc_test(
     name = "gpu_device_on_non_gpu_machine_test",
     size = "small",
     srcs = ["gpu_device_on_non_gpu_machine_test.cc"],
-    linkstatic = tf_kernel_tests_linkstatic(),
+    features = ["-layering_check"],
     deps = [
         ":gpu_headers_lib",
         ":gpu_id",
@@ -286,11 +354,11 @@ tf_cc_test(
 
 tf_cuda_cc_test(
     name = "gpu_bfc_allocator_test",
-    size = "small",
+    size = "medium",
     srcs = [
         "gpu_bfc_allocator_test.cc",
     ],
-    linkstatic = tf_kernel_tests_linkstatic(),
+    features = ["-layering_check"],
     tags = tf_cuda_tests_tags(),
     deps = [
         ":gpu_id",
@@ -307,6 +375,10 @@ tf_cuda_cc_test(
         "//tensorflow/core/common_runtime:core_cpu_internal",
         "//tensorflow/core/common_runtime:direct_session_internal",
         "//tensorflow/core/kernels:ops_util",
+        "@com_google_absl//absl/memory",
+        "@com_google_absl//absl/synchronization",
+        "@xla//xla/stream_executor/integrations:device_mem_allocator",
+        "@xla//xla/tsl/protobuf:bfc_memory_map_proto_cc",
     ],
 )
 
@@ -316,25 +388,46 @@ tf_cuda_cc_test(
     srcs = [
         "gpu_device_test.cc",
     ],
-    linkstatic = tf_kernel_tests_linkstatic(),
-    tags = tf_cuda_tests_tags(),
+    features = ["-layering_check"],
+    tags = [
+        "multi_and_single_gpu",
+        "no_cuda_on_cpu_tap",
+    ],
     deps = [
-        ":gpu_id",
         ":gpu_runtime",
         "//tensorflow/cc:cc_ops",
         "//tensorflow/core:framework",
         "//tensorflow/core:framework_internal",
+        "//tensorflow/core:framework_types_hdr",
         "//tensorflow/core:lib",
         "//tensorflow/core:lib_internal",
-        "//tensorflow/core:protos_all_cc",
+        "//tensorflow/core:session_options",
         "//tensorflow/core:test",
         "//tensorflow/core:test_main",
-        "//tensorflow/core:testlib",
-        "//tensorflow/core/common_runtime:core_cpu",
         "//tensorflow/core/common_runtime:core_cpu_internal",
         "//tensorflow/core/common_runtime:direct_session_internal",
-        "//tensorflow/core/kernels:ops_util",
-    ],
+        "//tensorflow/core/framework:allocator",
+        "//tensorflow/core/framework:tensor",
+        "//tensorflow/core/framework:tensor_shape",
+        "//tensorflow/core/tfrt/common:pjrt_util",
+        "@com_google_absl//absl/log",
+        "@com_google_absl//absl/log:check",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/strings:string_view",
+        "@com_google_absl//absl/synchronization",
+        "@com_google_googletest//:gtest_main",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@xla//xla/client:client_library",
+        "@xla//xla/client:local_client",
+        "@xla//xla/pjrt:pjrt_client",
+        "@xla//xla/stream_executor:stream_executor_h",
+        "@xla//xla/stream_executor/cuda:cuda_compute_capability",
+        "@xla//xla/stream_executor/gpu:gpu_init_impl",
+        "@xla//xla/tsl/framework:device_id",
+    ] + if_cuda([
+        "@xla//xla/stream_executor/gpu:gpu_cudamallocasync_allocator",
+    ]),
 )
 
 tf_cuda_cc_test(
@@ -343,7 +436,7 @@ tf_cuda_cc_test(
     srcs = [
         "pool_allocator_test.cc",
     ],
-    linkstatic = tf_kernel_tests_linkstatic(),
+    features = ["-layering_check"],
     tags = tf_cuda_tests_tags(),
     deps = [
         ":gpu_id",
@@ -360,6 +453,9 @@ tf_cuda_cc_test(
         "//tensorflow/core/common_runtime:core_cpu_internal",
         "//tensorflow/core/common_runtime:direct_session_internal",
         "//tensorflow/core/kernels:ops_util",
+        "@xla//xla/stream_executor:platform_manager",
+        "@xla//xla/stream_executor/gpu:gpu_init",
+        "@xla//xla/stream_executor/integrations:stream_executor_allocator",
     ],
 )
 
@@ -369,50 +465,67 @@ tf_cuda_cc_test(
     srcs = [
         "gpu_device_test.cc",
     ],
-    linkstatic = tf_kernel_tests_linkstatic(),
+    features = ["-layering_check"],
     # Runs test on a Guitar cluster that uses P100s to test unified memory
     # allocations.
     tags = tf_cuda_tests_tags() + [
         "guitar",
-        "multi_gpu",
+        # "multi_gpu", # TODO(b/287692888): re-enable once the 2gpu test passes.
+        "nobuilder",
     ],
     deps = [
-        ":gpu_id",
+        ":gpu_runtime",
         "//tensorflow/cc:cc_ops",
         "//tensorflow/core:framework",
         "//tensorflow/core:framework_internal",
+        "//tensorflow/core:framework_types_hdr",
         "//tensorflow/core:lib",
         "//tensorflow/core:lib_internal",
-        "//tensorflow/core:protos_all_cc",
+        "//tensorflow/core:session_options",
         "//tensorflow/core:test",
         "//tensorflow/core:test_main",
-        "//tensorflow/core:testlib",
-        "//tensorflow/core/common_runtime:core_cpu",
         "//tensorflow/core/common_runtime:core_cpu_internal",
         "//tensorflow/core/common_runtime:direct_session_internal",
-        "//tensorflow/core/kernels:ops_util",
-    ],
+        "//tensorflow/core/framework:allocator",
+        "//tensorflow/core/framework:tensor",
+        "//tensorflow/core/framework:tensor_shape",
+        "//tensorflow/core/tfrt/common:pjrt_util",
+        "@com_google_absl//absl/log",
+        "@com_google_absl//absl/log:check",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/strings:string_view",
+        "@com_google_absl//absl/synchronization",
+        "@com_google_googletest//:gtest_main",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@xla//xla/client:client_library",
+        "@xla//xla/client:local_client",
+        "@xla//xla/pjrt:pjrt_client",
+        "@xla//xla/stream_executor:stream_executor_h",
+        "@xla//xla/stream_executor/cuda:cuda_compute_capability",
+        "@xla//xla/stream_executor/gpu:gpu_init_impl",
+        "@xla//xla/tsl/framework:device_id_impl",
+    ] + if_cuda([
+        "@xla//xla/stream_executor/gpu:gpu_cudamallocasync_allocator",
+    ]),
 )
 
 tf_cuda_cc_test(
     name = "gpu_allocator_retry_test",
     size = "medium",
     srcs = ["gpu_allocator_retry_test.cc"],
-    linkstatic = tf_kernel_tests_linkstatic(),
     tags = tf_cuda_tests_tags(),
     deps = [
         "//tensorflow/cc:cc_ops",
-        "//tensorflow/core:framework",
         "//tensorflow/core:framework_internal",
         "//tensorflow/core:lib",
         "//tensorflow/core:lib_internal",
-        "//tensorflow/core:protos_all_cc",
         "//tensorflow/core:test",
         "//tensorflow/core:test_main",
-        "//tensorflow/core:testlib",
-        "//tensorflow/core/common_runtime:core_cpu",
         "//tensorflow/core/common_runtime:core_cpu_internal",
         "//tensorflow/core/common_runtime:direct_session_internal",
+        "@com_google_absl//absl/log",
+        "@com_google_absl//absl/synchronization",
     ],
 )
 
@@ -421,7 +534,7 @@ tf_cuda_cc_test(
     size = "medium",
     srcs = ["gpu_debug_allocator_test.cc"],
     args = ["--gtest_death_test_style=threadsafe"],
-    linkstatic = tf_kernel_tests_linkstatic(),
+    features = ["-layering_check"],
     tags = tf_cuda_tests_tags(),
     deps = [
         ":gpu_id",
@@ -438,24 +551,51 @@ tf_cuda_cc_test(
         "//tensorflow/core/common_runtime:core_cpu_internal",
         "//tensorflow/core/common_runtime:direct_session_internal",
         "//tensorflow/core/kernels:ops_util",
-        "//tensorflow/stream_executor:platform",
+        "@com_google_absl//absl/memory",
+        "@xla//xla/stream_executor:platform",
+        "@xla//xla/stream_executor/integrations:device_mem_allocator",
+    ],
+)
+
+cc_library(
+    name = "gpu_serving_device_selector",
+    srcs = ["gpu_serving_device_selector.cc"],
+    hdrs = ["gpu_serving_device_selector.h"],
+    features = ["-layering_check"],
+    deps = [
+        ":gpu_scheduling_metrics_storage",
+        "//tensorflow/core/framework:resource_base",
+        "@com_google_absl//absl/base:core_headers",
+        "@com_google_absl//absl/container:fixed_array",
+        "@com_google_absl//absl/container:node_hash_map",
+        "@com_google_absl//absl/log",
+        "@com_google_absl//absl/log:check",
+        "@com_google_absl//absl/strings:string_view",
+        "@com_google_absl//absl/synchronization",
+        "@com_google_absl//absl/time",
+        "@com_google_absl//absl/types:span",
+        "@xla//xla/tsl/framework:serving_device_selector",
     ],
 )
 
 tf_cc_test(
-    name = "gpu_virtual_mem_allocator_test",
+    name = "gpu_serving_device_selector_test",
     size = "small",
-    srcs = ["gpu_virtual_mem_allocator_test.cc"],
-    linkstatic = tf_kernel_tests_linkstatic(),
-    tags = tf_cuda_tests_tags(),
+    srcs = ["gpu_serving_device_selector_test.cc"],
     deps = [
-        ":gpu_init",
-        ":gpu_virtual_mem_allocator",
-        "//tensorflow/core:test",
-        "//tensorflow/core:test_main",
-        "//tensorflow/core:testlib",
-        "//tensorflow/core/framework:allocator",
-        "//tensorflow/core/platform:stream_executor",
-        "//tensorflow/stream_executor/lib",
+        ":gpu_scheduling_metrics_storage",
+        ":gpu_serving_device_selector",
+        "@com_google_absl//absl/time",
+        "@com_google_googletest//:gtest_main",
+        "@xla//xla/tsl/framework:serving_device_selector",
+        "@xla//xla/tsl/framework:serving_device_selector_policies",
     ],
+)
+
+cc_library(
+    name = "gpu_scheduling_metrics_storage",
+    srcs = ["gpu_scheduling_metrics_storage.cc"],
+    hdrs = ["gpu_scheduling_metrics_storage.h"],
+    visibility = ["//visibility:public"],
+    deps = ["@xla//xla/tsl/framework:real_time_in_memory_metric"],
 )

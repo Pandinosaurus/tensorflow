@@ -15,12 +15,18 @@ limitations under the License.
 
 // XLA-specific Fill Op.
 
+#include <cstdint>
+#include <vector>
+
+#include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
 #include "tensorflow/compiler/tf2xla/type_util.h"
 #include "tensorflow/compiler/tf2xla/xla_helpers.h"
 #include "tensorflow/compiler/tf2xla/xla_op_kernel.h"
 #include "tensorflow/compiler/tf2xla/xla_op_registry.h"
-#include "tensorflow/compiler/xla/client/value_inference.h"
-#include "tensorflow/compiler/xla/client/xla_builder.h"
+#include "xla/hlo/builder/value_inference.h"
+#include "xla/hlo/builder/xla_builder.h"
+#include "xla/xla_data.pb.h"
 #include "tensorflow/core/framework/kernel_def_builder.h"
 #include "tensorflow/core/framework/register_types.h"
 #include "tensorflow/core/framework/tensor_shape.h"
@@ -37,13 +43,14 @@ class FillOp : public XlaOpKernel {
     // element set to the scalar 'dims_literal'.
     const TensorShape dims_shape = ctx->InputShape("dims");
     const TensorShape value_shape = ctx->InputShape("value");
+    OP_REQUIRES(ctx, TensorShapeUtils::IsVector(dims_shape),
+                absl::InvalidArgumentError(
+                    absl::StrCat("dims must be a vector of int32, got shape ",
+                                 dims_shape.DebugString())));
     OP_REQUIRES(
-        ctx, TensorShapeUtils::IsVector(dims_shape),
-        errors::InvalidArgument("dims must be a vector of int32, got shape ",
-                                dims_shape.DebugString()));
-    OP_REQUIRES(ctx, TensorShapeUtils::IsScalar(value_shape),
-                errors::InvalidArgument("value must be a scalar, got shape ",
-                                        value_shape.DebugString()));
+        ctx, TensorShapeUtils::IsScalar(value_shape),
+        absl::InvalidArgumentError(absl::StrCat(
+            "value must be a scalar, got shape ", value_shape.DebugString())));
 
     std::vector<int64_t> dims;
     OP_REQUIRES_OK(ctx,

@@ -37,9 +37,9 @@ namespace {
 bool NotBackedge(const Edge& edge) { return !edge.src()->IsNextIteration(); }
 
 namespace reduce_device_to_host_copies {
-Status FindNodesToDecluster(const Graph& graph,
-                            absl::flat_hash_set<Node*>* result,
-                            absl::Span<Node* const> post_order) {
+absl::Status FindNodesToDecluster(const Graph& graph,
+                                  absl::flat_hash_set<Node*>* result,
+                                  absl::Span<Node* const> post_order) {
   // Find nodes that have at least one user outside their cluster that expects
   // hostmem output.  These nodes should be cloned to outside the cluster to
   // avoid the device-host copy we'd otherwise need.
@@ -47,7 +47,7 @@ Status FindNodesToDecluster(const Graph& graph,
   MemoryTypeVector input_mtypes, output_mtypes;
 
   for (Node* n : post_order) {
-    absl::optional<absl::string_view> from_cluster = GetXlaClusterForNode(*n);
+    std::optional<absl::string_view> from_cluster = GetXlaClusterForNode(*n);
     if (!from_cluster) {
       continue;
     }
@@ -105,18 +105,18 @@ Status FindNodesToDecluster(const Graph& graph,
       // Check if `dst` is in a different cluster, unclustered, or about to be
       // partially declustered (here we rely on the post-order traversal order).
       // If yes, decluster `n` to avoid the device-to-host memcpy.
-      absl::optional<absl::string_view> dst_cluster =
-          result->count(dst) ? absl::nullopt : GetXlaClusterForNode(*dst);
+      std::optional<absl::string_view> dst_cluster =
+          result->count(dst) ? std::nullopt : GetXlaClusterForNode(*dst);
       if (from_cluster != dst_cluster) {
         CHECK(result->insert(n).second);
         break;
       }
     }
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-Status PartiallyDeclusterNode(Graph* graph, Node* n) {
+absl::Status PartiallyDeclusterNode(Graph* graph, Node* n) {
   absl::string_view cluster_name = *GetXlaClusterForNode(*n);
   absl::InlinedVector<const Edge*, 6> out_edges_to_clone;
   for (const Edge* out_edge : n->out_edges()) {
@@ -125,7 +125,7 @@ Status PartiallyDeclusterNode(Graph* graph, Node* n) {
     }
 
     Node* dst = out_edge->dst();
-    absl::optional<absl::string_view> dst_cluster_name =
+    std::optional<absl::string_view> dst_cluster_name =
         GetXlaClusterForNode(*dst);
     if (dst_cluster_name != cluster_name) {
       out_edges_to_clone.push_back(out_edge);
@@ -138,10 +138,8 @@ Status PartiallyDeclusterNode(Graph* graph, Node* n) {
   ndef.set_name(absl::StrCat(n->name(), "/declustered"));
   MergeDebugInfo(NodeDebugInfo(n->def()), &ndef);
   RemoveFromXlaCluster(&ndef);
-  Status s;
-  Node* cloned_node = graph->AddNode(ndef, &s);
+  TF_ASSIGN_OR_RETURN(Node * cloned_node, graph->AddNode(ndef));
   cloned_node->set_assigned_device_name(n->assigned_device_name());
-  TF_RETURN_IF_ERROR(s);
 
   for (const Edge* in_edge : n->in_edges()) {
     graph->AddEdge(in_edge->src(), in_edge->src_output(), cloned_node,
@@ -158,7 +156,7 @@ Status PartiallyDeclusterNode(Graph* graph, Node* n) {
     graph->RemoveNode(n);
   }
 
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 // Clones nodes to outside their cluster to avoid device-to-host copies.  For
@@ -187,7 +185,7 @@ Status PartiallyDeclusterNode(Graph* graph, Node* n) {
 // where the ===> arrow has a hostmem source and destination and would entail a
 // device to host copy if the source and destination were not in the same XLA
 // cluster.
-Status PartiallyDeclusterGraph(Graph* graph) {
+absl::Status PartiallyDeclusterGraph(Graph* graph) {
   // When deciding whether to decluster a particular node, we base our decision
   // on if we've decided that some of its consumers have to be declustered too.
   // Iterating the graph in post-order guarantees that consumers have been
@@ -223,15 +221,15 @@ Status PartiallyDeclusterGraph(Graph* graph) {
       FindNodesToDecluster(*graph, &nodes_to_partially_decluster, post_order));
   CHECK(nodes_to_partially_decluster.empty());
 
-  return Status::OK();
+  return absl::OkStatus();
 }
 }  // namespace reduce_device_to_host_copies
 
 namespace reduce_recompilation {
 bool IsIntraClusterEdge(const Edge& edge) {
-  absl::optional<absl::string_view> src_cluster_name =
+  std::optional<absl::string_view> src_cluster_name =
       GetXlaClusterForNode(*edge.src());
-  absl::optional<absl::string_view> dst_cluster_name =
+  std::optional<absl::string_view> dst_cluster_name =
       GetXlaClusterForNode(*edge.dst());
   return src_cluster_name.has_value() && src_cluster_name == dst_cluster_name;
 }
@@ -246,19 +244,19 @@ bool IsMustCompileDevice(const DeviceType& device_type) {
   return false;
 }
 
-Status MustCompileNode(const Node* n, bool* must_compile) {
+absl::Status MustCompileNode(const Node* n, bool* must_compile) {
   DeviceType device_type("");
   TF_RETURN_IF_ERROR(
       DeviceNameToDeviceType(n->assigned_device_name(), &device_type));
 
   if (IsMustCompileDevice(device_type)) {
     *must_compile = true;
-    return Status::OK();
+    return absl::OkStatus();
   }
 
   // We must compile `n` if it does not have a TensorFlow kernel.
   *must_compile = !FindKernelDef(device_type, n->def(), nullptr, nullptr).ok();
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 // Declusters nodes to reduce the number of times we think we need to recompile
@@ -290,12 +288,12 @@ Status MustCompileNode(const Node* n, bool* must_compile) {
 // regress performance in any significant manner.  We will have to revisit this
 // algorithm with a more complex cost model if this assumption turns out to be
 // incorrect.
-Status PartiallyDeclusterGraph(Graph* graph,
-                               const FunctionLibraryDefinition* flib_def,
-                               Env* env) {
+absl::Status PartiallyDeclusterGraph(Graph* graph,
+                                     const FunctionLibraryDefinition* flib_def,
+                                     Env* env) {
   std::vector<bool> compile_time_const_nodes(graph->num_node_ids());
   OptimizerOptions opts;
-  auto pflr = absl::make_unique<ProcessFunctionLibraryRuntime>(
+  auto pflr = std::make_unique<ProcessFunctionLibraryRuntime>(
       nullptr, env, /*config=*/nullptr, TF_GRAPH_DEF_VERSION, flib_def, opts);
   FunctionLibraryRuntime* lib_runtime =
       pflr->GetFLR(ProcessFunctionLibraryRuntime::kDefaultFLRDevice);
@@ -314,7 +312,7 @@ Status PartiallyDeclusterGraph(Graph* graph,
     absl::string_view cluster_name = *GetXlaClusterForNode(*n);
     bool node_on_cluster_edge =
         absl::c_all_of(n->in_edges(), [&](const Edge* e) {
-          absl::optional<absl::string_view> incoming_cluster =
+          std::optional<absl::string_view> incoming_cluster =
               GetXlaClusterForNode(*e->src());
           return !incoming_cluster || *incoming_cluster != cluster_name;
         });
@@ -333,7 +331,7 @@ Status PartiallyDeclusterGraph(Graph* graph,
     // remove Input, OP, Shape and F from the cluster, if F is a many-to-one
     // function.
     //
-    // Note that we do do the right thing for graphs like:
+    // Note that we do the right thing for graphs like:
     //
     //   Input -> F0 -> F1 -> Reshape
     //
@@ -343,19 +341,35 @@ Status PartiallyDeclusterGraph(Graph* graph,
       bool must_compile_node;
       TF_RETURN_IF_ERROR(MustCompileNode(n, &must_compile_node));
       if (!must_compile_node) {
-        VLOG(3) << "Declustering must-be-constant node " << n->name();
-        RemoveFromXlaCluster(n);
+        if (n->IsConstant()) {
+          // We must decluster Const nodes that have an input control edge from
+          // a different device, because this node may be part of the
+          // co-ordination of while loops between devices.
+          for (auto it : n->in_edges()) {
+            if (!it->src()->assigned_device_name().empty() &&
+                it->src()->assigned_device_name() !=
+                    n->assigned_device_name()) {
+              VLOG(3) << "Declustering Const with cross-device control input "
+                      << n->name();
+              RemoveFromXlaCluster(n);
+              break;
+            }
+          }
+        } else {
+          VLOG(3) << "Declustering must-be-constant node " << n->name();
+          RemoveFromXlaCluster(n);
+        }
       }
     }
   }
 
-  return Status::OK();
+  return absl::OkStatus();
 }
 }  // namespace reduce_recompilation
 
 namespace decluster_root_shape_consumers {
 
-Status PartiallyDeclusterGraph(Graph* graph) {
+absl::Status PartiallyDeclusterGraph(Graph* graph) {
   std::vector<Node*> reverse_post_order;
   GetReversePostOrder(*graph, &reverse_post_order,
                       /*stable_comparator=*/NodeComparatorName(),
@@ -366,7 +380,7 @@ Status PartiallyDeclusterGraph(Graph* graph) {
       continue;
     }
 
-    absl::optional<absl::string_view> cluster = GetXlaClusterForNode(*n);
+    std::optional<absl::string_view> cluster = GetXlaClusterForNode(*n);
     if (!cluster.has_value()) {
       continue;
     }
@@ -383,12 +397,12 @@ Status PartiallyDeclusterGraph(Graph* graph) {
             << " because it is a root shape consumer";
     RemoveFromXlaCluster(n);
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 }  // namespace decluster_root_shape_consumers
 }  // namespace
 
-Status PartiallyDeclusterPass::Run(
+absl::Status PartiallyDeclusterPass::Run(
     const GraphOptimizationPassOptions& options) {
   // NB!  In this pass we assume the only XLA-auto-clusterable operations that
   // may have side effects are resource variable operations so we don't cluster
@@ -400,13 +414,13 @@ Status PartiallyDeclusterPass::Run(
   TF_RETURN_IF_ERROR(
       reduce_device_to_host_copies::PartiallyDeclusterGraph(graph));
   if (options.flib_def == nullptr) {
-    return errors::InvalidArgument(
+    return absl::InvalidArgumentError(
         "GraphOptimizationPassOptions::flib_def must be set for "
         "PartiallyDeclusterPass.");
   }
   if (options.session_options == nullptr ||
       options.session_options->env == nullptr) {
-    return errors::InvalidArgument(
+    return absl::InvalidArgumentError(
         "GraphOptimizationPassOptions::session_options::env must be set for "
         "PartiallyDeclusterPass.");
   }
@@ -416,6 +430,6 @@ Status PartiallyDeclusterPass::Run(
   TF_RETURN_IF_ERROR(
       decluster_root_shape_consumers::PartiallyDeclusterGraph(graph));
 
-  return Status::OK();
+  return absl::OkStatus();
 }
 }  // namespace tensorflow

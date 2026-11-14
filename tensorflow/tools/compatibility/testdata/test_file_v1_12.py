@@ -14,10 +14,6 @@
 # ==============================================================================
 """Tests for tf upgrader."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import tensorflow.compat.v1 as tf
 from tensorflow.python.framework import test_util
 from tensorflow.python.platform import test as test_lib
@@ -79,13 +75,6 @@ class TestUpgrade(test_util.TensorFlowTestCase):
     out = tf.nn.softmax_cross_entropy_with_logits_v2(
         logits=[0.1, 0.8], labels=[0, 1])
     self.assertAllClose(out, 0.40318608)
-
-  def testUniformUnitScalingInitializer(self):
-    init = tf.initializers.uniform_unit_scaling(0.5, seed=1)
-    self.assertArrayNear(
-        [-0.45200047, 0.72815341],
-        init((2,)).numpy(),
-        err=1e-6)
 
 
 if __name__ == "__main__":

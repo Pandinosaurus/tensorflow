@@ -14,10 +14,6 @@
 # ==============================================================================
 """Tests for tensorflow.python.framework._py_context_manager."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 from tensorflow.python.framework import _py_context_manager
 from tensorflow.python.framework import test_util
 from tensorflow.python.platform import googletest
@@ -74,7 +70,7 @@ class OpDefUtilTest(test_util.TensorFlowTestCase):
       cm.log.append("body(%r)" % var)
       raise ValueError("Foo")
 
-    with self.assertRaisesRegexp(ValueError, "Foo"):
+    with self.assertRaisesRegex(ValueError, "Foo"):
       _py_context_manager.test_py_context_manager(cm, body)
     self.assertRegex("\n".join(cm.log), EXCEPTION_LOG)
 
@@ -84,7 +80,7 @@ class OpDefUtilTest(test_util.TensorFlowTestCase):
     def body(var):
       cm.log.append("body(%r)" % var)
 
-    with self.assertRaisesRegexp(ValueError, "exception in __enter__"):
+    with self.assertRaisesRegex(ValueError, "exception in __enter__"):
       _py_context_manager.test_py_context_manager(cm, body)
     self.assertEqual("\n".join(cm.log), "__enter__()")
 
@@ -107,7 +103,7 @@ class OpDefUtilTest(test_util.TensorFlowTestCase):
       cm.log.append("body(%r)" % var)
       raise ValueError("Foo")
 
-    with self.assertRaisesRegexp(
+    with self.assertRaisesRegex(
         ValueError, "tensorflow::PyContextManager::Enter does not support "
         "context managers that suppress exception"):
       _py_context_manager.test_py_context_manager(cm, body)

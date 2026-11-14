@@ -15,6 +15,8 @@ limitations under the License.
 
 #include "tensorflow/core/lib/gif/gif_io.h"
 
+#include <memory>
+
 #include "tensorflow/core/lib/png/png_io.h"
 #include "tensorflow/core/platform/env.h"
 #include "tensorflow/core/platform/test.h"
@@ -26,33 +28,71 @@ namespace {
 const char kTestData[] = "tensorflow/core/lib/gif/testdata/";
 
 struct DecodeGifTestCase {
-  const string filepath;
+  const std::string filepath;
   const int num_frames;
   const int width;
   const int height;
   const int channels;
 };
 
-void ReadFileToStringOrDie(Env* env, const string& filename, string* output) {
+// Builds a minimal single-frame GIF89a with the given logical screen size and
+// a 1x1 frame using a 2-entry global color table.
+std::string MakeGifWithLogicalScreen(int screen_w, int screen_h) {
+  std::string gif = "GIF89a";
+  auto put16 = [&gif](int v) {
+    gif.push_back(static_cast<char>(v & 0xff));
+    gif.push_back(static_cast<char>((v >> 8) & 0xff));
+  };
+  put16(screen_w);
+  put16(screen_h);
+  gif += std::string("\x80\x00\x00", 3);  // GCT flag, 2 colors; bg; aspect.
+  gif += std::string("\x00\x00\x00\xff\xff\xff", 6);  // Color table.
+  gif.push_back('\x2c');                              // Image descriptor.
+  put16(0);                                           // Left.
+  put16(0);                                           // Top.
+  put16(1);                                           // Width.
+  put16(1);                                           // Height.
+  gif.push_back('\x00');                              // No local table.
+  gif += std::string("\x02\x02\x44\x01\x00", 5);      // LZW data for 1 pixel.
+  gif.push_back('\x3b');                              // Trailer.
+  return gif;
+}
+
+uint8_t* DecodeInMemory(const std::string& gif, std::string* error_string,
+                        std::unique_ptr<uint8_t[]>* holder) {
+  uint8_t* data = gif::Decode(
+      gif.data(), gif.size(),
+      [&](int frame_cnt, int width, int height, int channels) -> uint8_t* {
+        return new uint8_t[static_cast<int64_t>(frame_cnt) * height * width *
+                           channels];
+      },
+      error_string);
+  holder->reset(data);
+  return data;
+}
+
+void ReadFileToStringOrDie(Env* env, const std::string& filename,
+                           std::string* output) {
   TF_CHECK_OK(ReadFileToString(env, filename, output));
 }
 
 void TestDecodeGif(Env* env, DecodeGifTestCase testcase) {
-  string gif;
+  std::string gif;
   ReadFileToStringOrDie(env, testcase.filepath, &gif);
 
   // Decode gif image data.
-  std::unique_ptr<uint8[]> imgdata;
+  std::unique_ptr<uint8_t[]> imgdata;
   int nframes, w, h, c;
-  string error_string;
+  std::string error_string;
   imgdata.reset(gif::Decode(
       gif.data(), gif.size(),
-      [&](int frame_cnt, int width, int height, int channels) -> uint8* {
+      [&](int frame_cnt, int width, int height, int channels) -> uint8_t* {
         nframes = frame_cnt;
         w = width;
         h = height;
         c = channels;
-        return new uint8[frame_cnt * height * width * channels];
+        return new uint8_t[static_cast<int64_t>(frame_cnt) * height * width *
+                           channels];
       },
       &error_string));
   ASSERT_NE(imgdata, nullptr);
@@ -65,23 +105,43 @@ void TestDecodeGif(Env* env, DecodeGifTestCase testcase) {
 
 TEST(GifTest, Gif) {
   Env* env = Env::Default();
-  const string testdata_path = kTestData;
+  const std::string testdata_path = kTestData;
   std::vector<DecodeGifTestCase> testcases(
       {// file_path, num_of_channels, width, height, channels
        {testdata_path + "lena.gif", 1, 51, 26, 3},
        {testdata_path + "optimized.gif", 12, 20, 40, 3},
        {testdata_path + "red_black.gif", 1, 16, 16, 3},
        {testdata_path + "scan.gif", 12, 20, 40, 3},
-       {testdata_path + "squares.gif", 2, 16, 16, 3}});
+       {testdata_path + "squares.gif", 2, 16, 16, 3},
+       {testdata_path + "3g_multiframe.gif", 519, 1920, 1080, 3}});
 
   for (const auto& tc : testcases) {
     TestDecodeGif(env, tc);
   }
 }
 
-void TestDecodeAnimatedGif(Env* env, const uint8* gif_data,
-                           const string& png_filepath, int frame_idx) {
-  string png;  // ground-truth
+TEST(GifTest, HugeLogicalScreenRejectedBeforeSlurp) {
+  std::string error_string;
+  std::unique_ptr<uint8_t[]> holder;
+  EXPECT_EQ(DecodeInMemory(MakeGifWithLogicalScreen(32767, 32767),
+                           &error_string, &holder),
+            nullptr);
+  EXPECT_NE(error_string.find("too large"), std::string::npos) << error_string;
+}
+
+TEST(GifTest, ZeroLogicalScreenStillDecodes) {
+  // A 0x0 logical screen is valid; the output is sized from the frames.
+  std::string error_string;
+  std::unique_ptr<uint8_t[]> holder;
+  EXPECT_NE(
+      DecodeInMemory(MakeGifWithLogicalScreen(0, 0), &error_string, &holder),
+      nullptr)
+      << error_string;
+}
+
+void TestDecodeAnimatedGif(Env* env, const uint8_t* gif_data,
+                           const std::string& png_filepath, int frame_idx) {
+  std::string png;  // ground-truth
   ReadFileToStringOrDie(env, png_filepath, &png);
 
   // Compare decoded gif to ground-truth image frames in png format.
@@ -89,10 +149,10 @@ void TestDecodeAnimatedGif(Env* env, const uint8* gif_data,
   png::CommonInitDecode(png, 3, 8, &decode);
   const int width = static_cast<int>(decode.width);
   const int height = static_cast<int>(decode.height);
-  std::unique_ptr<uint8[]> png_imgdata(
-      new uint8[height * width * decode.channels]);
+  std::unique_ptr<uint8_t[]> png_imgdata(
+      new uint8_t[height * width * decode.channels]);
   png::CommonFinishDecode(reinterpret_cast<png_bytep>(png_imgdata.get()),
-                          decode.channels * width * sizeof(uint8), &decode);
+                          decode.channels * width * sizeof(uint8_t), &decode);
 
   int frame_len = width * height * decode.channels;
   int gif_idx = frame_len * frame_idx;
@@ -103,23 +163,23 @@ void TestDecodeAnimatedGif(Env* env, const uint8* gif_data,
 
 TEST(GifTest, AnimatedGif) {
   Env* env = Env::Default();
-  const string testdata_path = kTestData;
+  const std::string testdata_path = kTestData;
 
   // Read animated gif file once.
-  string gif;
+  std::string gif;
   ReadFileToStringOrDie(env, testdata_path + "pendulum_sm.gif", &gif);
 
-  std::unique_ptr<uint8[]> gif_imgdata;
+  std::unique_ptr<uint8_t[]> gif_imgdata;
   int nframes, w, h, c;
-  string error_string;
+  std::string error_string;
   gif_imgdata.reset(gif::Decode(
       gif.data(), gif.size(),
-      [&](int num_frames, int width, int height, int channels) -> uint8* {
+      [&](int num_frames, int width, int height, int channels) -> uint8_t* {
         nframes = num_frames;
         w = width;
         h = height;
         c = channels;
-        return new uint8[num_frames * height * width * channels];
+        return new uint8_t[num_frames * height * width * channels];
       },
       &error_string));
 
@@ -131,20 +191,20 @@ TEST(GifTest, AnimatedGif) {
                         testdata_path + "pendulum_sm_frame2.png", 2);
 }
 
-void TestExpandAnimations(Env* env, const string& filepath) {
-  string gif;
+void TestExpandAnimations(Env* env, const std::string& filepath) {
+  std::string gif;
   ReadFileToStringOrDie(env, filepath, &gif);
 
-  std::unique_ptr<uint8[]> imgdata;
-  string error_string;
+  std::unique_ptr<uint8_t[]> imgdata;
+  std::string error_string;
   int nframes;
   // `expand_animations` is set to true by default. Set to false.
   bool expand_animations = false;
   imgdata.reset(gif::Decode(
       gif.data(), gif.size(),
-      [&](int frame_cnt, int width, int height, int channels) -> uint8* {
+      [&](int frame_cnt, int width, int height, int channels) -> uint8_t* {
         nframes = frame_cnt;
-        return new uint8[frame_cnt * height * width * channels];
+        return new uint8_t[frame_cnt * height * width * channels];
       },
       &error_string, expand_animations));
 
@@ -154,7 +214,7 @@ void TestExpandAnimations(Env* env, const string& filepath) {
 
 TEST(GifTest, ExpandAnimations) {
   Env* env = Env::Default();
-  const string testdata_path = kTestData;
+  const std::string testdata_path = kTestData;
 
   // Test all animated gif test images.
   TestExpandAnimations(env, testdata_path + "scan.gif");
@@ -162,20 +222,20 @@ TEST(GifTest, ExpandAnimations) {
   TestExpandAnimations(env, testdata_path + "squares.gif");
 }
 
-void TestInvalidGifFormat(const string& header_bytes) {
-  std::unique_ptr<uint8[]> imgdata;
-  string error_string;
+void TestInvalidGifFormat(const std::string& header_bytes) {
+  std::unique_ptr<uint8_t[]> imgdata;
+  std::string error_string;
   int nframes;
   imgdata.reset(gif::Decode(
       header_bytes.data(), header_bytes.size(),
-      [&](int frame_cnt, int width, int height, int channels) -> uint8* {
+      [&](int frame_cnt, int width, int height, int channels) -> uint8_t* {
         nframes = frame_cnt;
-        return new uint8[frame_cnt * height * width * channels];
+        return new uint8_t[frame_cnt * height * width * channels];
       },
       &error_string));
 
   // Check that decoding image formats other than gif throws an error.
-  string err_msg = "failed to open gif file";
+  std::string err_msg = "failed to open gif file";
   ASSERT_EQ(error_string.substr(0, 23), err_msg);
 }
 
@@ -185,6 +245,73 @@ TEST(GifTest, BadGif) {
   TestInvalidGifFormat("\x42\x4d");                          // bmp
   TestInvalidGifFormat("\xff\xd8\xff");                      // jpeg
   TestInvalidGifFormat("\x49\x49\x2A\x00");                  // tiff
+}
+
+TEST(GifTest, TransparentIndexOutsideColorTable) {
+  // Given a GIF with a transparent index outside of its color table...
+  unsigned char encoded[43] = {
+      'G', 'I', 'F', '8', '9', 'a',  // Header.
+      3, 0, 1, 0,                    // Logical width = 3 and height = 1.
+      0b1'111'0'000,                 // Global color table present, (7 + 1) bit
+                                     // color, unsorted, 2^(0 + 1) palette size.
+      0,                             // Background index = 0
+      0,                             // Default aspect ratio.
+      0x80, 0x00, 0x00,              // Palette entry 0: red.
+      0xFF, 0xFF, 0xFF,              // Palette entry 1: white.
+      '!', 0xF9, 0x04,               // Graphic Control Extension.
+      1,                             // Transparent index is specified.
+      0, 0,                          // Delay of 0 seconds.
+      2,                             // Transparent index is 2.
+      0,                             // End GCE block.
+      ',', 0, 0, 0, 0,               // Image at logical (0, 0).
+      3, 0, 1, 0,                    // Width = 3, height = 1
+      0,                             // No local color table.
+      2,                             // Symbols need 2 bits to cover [0, 2].
+      2,                             // Two bytes of image data.
+      0b01'000'100,                  // Clear (100), 0, 1 (truncated).
+      0b0'101'010'0,                 // 1 (continued), 2, End (101), padding.
+      0, ';'                         // End of data, end of file.
+  };
+
+  // ...decoding that image...
+  std::unique_ptr<uint8_t[]> imgdata;
+  std::string error_string;
+  int nframes;
+  auto allocate_image_data = [&](int frame_cnt, int width, int height,
+                                 int channels) -> uint8_t* {
+    nframes = frame_cnt;
+    // Create the unique_ptr here, as gif::Decode does not return a pointer to
+    // the allocated array in the case of an error.
+    imgdata =
+        std::make_unique<uint8_t[]>(frame_cnt * height * width * channels);
+    return imgdata.get();
+  };
+  gif::Decode(encoded, sizeof(encoded), allocate_image_data, &error_string);
+
+  // ...should be successful and treat the pixels with the transparent index as
+  // transparent.
+  ASSERT_EQ(nframes, 1);
+  ASSERT_EQ(error_string, "");
+  uint8_t expected[9] = {
+      0x80, 0x00, 0x00,  // Red (palette entry 0).
+      0xFF, 0xFF, 0xFF,  // White (palette entry 1).
+      0x00, 0x00, 0x00,  // Transparent (not in palette, specified by Graphic
+                         // Control Extension), defaults to black.
+  };
+  for (int i = 0; i < 9; i++) {
+    ASSERT_EQ(imgdata[i], expected[i]) << "i=" << i;
+  }
+
+  // However, if there is an out-of-palette pixel that is not the transparent
+  // index...
+  encoded[40] = 0b0'101'011'0;  // The '011' is an out-of-palette color 3.
+
+  // ...decoding the image...
+  error_string.clear();
+  gif::Decode(encoded, sizeof(encoded), allocate_image_data, &error_string);
+
+  // ...should fail with an error about a color out of range.
+  ASSERT_EQ(error_string, "found color index 3 outside of color map range 2");
 }
 
 }  // namespace

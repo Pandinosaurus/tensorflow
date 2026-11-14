@@ -1,3 +1,17 @@
+// Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+// ==============================================================================
 // RUN: flatbuffer_translate -mlir-to-tflite-flatbuffer %s -o - | flatbuffer_to_string - | FileCheck %s
 
 // CHECK: {
@@ -25,14 +39,16 @@
 // CHECK-NEXT:       name: "arg0",
 // CHECK-NEXT:       quantization: {
 // CHECK-EMPTY:
-// CHECK-NEXT:       }
+// CHECK-NEXT:       },
+// CHECK-NEXT:       has_rank: true
 // CHECK-NEXT:     }, {
 // CHECK-NEXT:       shape: [ 1 ],
 // CHECK-NEXT:       buffer: 2,
 // CHECK-NEXT:       name: "arg1",
 // CHECK-NEXT:       quantization: {
 // CHECK-EMPTY:
-// CHECK-NEXT:       }
+// CHECK-NEXT:       },
+// CHECK-NEXT:       has_rank: true
 // CHECK-NEXT:     }, {
 // CHECK-NEXT:       shape: [  ],
 // CHECK-NEXT:       type: INT32,
@@ -40,14 +56,16 @@
 // CHECK-NEXT:       name: "WhileOp",
 // CHECK-NEXT:       quantization: {
 // CHECK-EMPTY:
-// CHECK-NEXT:       }
+// CHECK-NEXT:       },
+// CHECK-NEXT:       has_rank: true
 // CHECK-NEXT:     }, {
 // CHECK-NEXT:       shape: [ 1 ],
 // CHECK-NEXT:       buffer: 4,
 // CHECK-NEXT:       name: "WhileOp1",
 // CHECK-NEXT:       quantization: {
 // CHECK-EMPTY:
-// CHECK-NEXT:       }
+// CHECK-NEXT:       },
+// CHECK-NEXT:       has_rank: true
 // CHECK-NEXT:     } ],
 // CHECK-NEXT:     inputs: [ 0, 1 ],
 // CHECK-NEXT:     outputs: [ 3 ],
@@ -66,14 +84,14 @@
 // CHECK-NEXT:       shape: [  ],
 // CHECK-NEXT:       type: INT32,
 // CHECK-NEXT:       buffer: 5,
-// CHECK-NEXT:       name: "arg0",
+// CHECK-NEXT:       name: "WhileOp_cond_arg0",
 // CHECK-NEXT:       quantization: {
 // CHECK-EMPTY:
 // CHECK-NEXT:       }
 // CHECK-NEXT:     }, {
 // CHECK-NEXT:       shape: [  ],
 // CHECK-NEXT:       buffer: 6,
-// CHECK-NEXT:       name: "arg1",
+// CHECK-NEXT:       name: "WhileOp_cond_arg1",
 // CHECK-NEXT:       quantization: {
 // CHECK-EMPTY:
 // CHECK-NEXT:       }
@@ -84,7 +102,8 @@
 // CHECK-NEXT:       name: "Const",
 // CHECK-NEXT:       quantization: {
 // CHECK-EMPTY:
-// CHECK-NEXT:       }
+// CHECK-NEXT:       },
+// CHECK-NEXT:       has_rank: true
 // CHECK-NEXT:     }, {
 // CHECK-NEXT:       shape: [  ],
 // CHECK-NEXT:       type: BOOL,
@@ -92,7 +111,8 @@
 // CHECK-NEXT:       name: "tfl.greater",
 // CHECK-NEXT:       quantization: {
 // CHECK-EMPTY:
-// CHECK-NEXT:       }
+// CHECK-NEXT:       },
+// CHECK-NEXT:       has_rank: true
 // CHECK-NEXT:     } ],
 // CHECK-NEXT:     inputs: [ 0, 1 ],
 // CHECK-NEXT:     outputs: [ 3 ],
@@ -107,14 +127,14 @@
 // CHECK-NEXT:       shape: [  ],
 // CHECK-NEXT:       type: INT32,
 // CHECK-NEXT:       buffer: 9,
-// CHECK-NEXT:       name: "arg0",
+// CHECK-NEXT:       name: "WhileOp_body_arg0",
 // CHECK-NEXT:       quantization: {
 // CHECK-EMPTY:
 // CHECK-NEXT:       }
 // CHECK-NEXT:     }, {
 // CHECK-NEXT:       shape: [  ],
 // CHECK-NEXT:       buffer: 10,
-// CHECK-NEXT:       name: "arg1",
+// CHECK-NEXT:       name: "WhileOp_body_arg1",
 // CHECK-NEXT:       quantization: {
 // CHECK-EMPTY:
 // CHECK-NEXT:       }
@@ -125,7 +145,8 @@
 // CHECK-NEXT:       name: "Const1",
 // CHECK-NEXT:       quantization: {
 // CHECK-EMPTY:
-// CHECK-NEXT:       }
+// CHECK-NEXT:       },
+// CHECK-NEXT:       has_rank: true
 // CHECK-NEXT:     }, {
 // CHECK-NEXT:       shape: [  ],
 // CHECK-NEXT:       type: INT32,
@@ -202,28 +223,28 @@
 // CHECK-NEXT:  signature_defs: [ ]
 // CHECK-NEXT: }
 
-func @WhileOp_cond(%arg0: tensor<*xi32>, %arg1: tensor<*xf32>) -> tensor<i1> {
-  %cst = constant dense<0> : tensor<i32> loc("Const")
+func.func @WhileOp_cond(%arg0: tensor<*xi32>, %arg1: tensor<*xf32>) -> tensor<i1> {
+  %cst = arith.constant dense<0> : tensor<i32> loc("Const")
   %0 = "tfl.greater"(%arg0, %cst) : (tensor<*xi32>, tensor<i32>) -> tensor<i1>
-  return %0 : tensor<i1>
+  func.return %0 : tensor<i1>
 }
 
-func @WhileOp_body(%arg0: tensor<*xi32>, %arg1: tensor<*xf32>) -> (tensor<*xi32>, tensor<*xf32>) {
-  %cst = constant dense<1> : tensor<i32> loc("Const1")
+func.func @WhileOp_body(%arg0: tensor<*xi32>, %arg1: tensor<*xf32>) -> (tensor<*xi32>, tensor<*xf32>) {
+  %cst = arith.constant dense<1> : tensor<i32> loc("Const1")
   %0 = "tfl.sub"(%arg0, %cst) {fused_activation_function = "NONE"} : (tensor<*xi32>, tensor<i32>) -> tensor<*xi32>
   %1 = tfl.add %arg1, %arg1 {fused_activation_function = "NONE"} : tensor<*xf32>
-  return %0, %1 : tensor<*xi32>, tensor<*xf32>
+  func.return %0, %1 : tensor<*xi32>, tensor<*xf32>
 }
 
-func @main(%arg0: tensor<i32>, %arg1: tensor<1xf32>) -> tensor<1xf32> {
-  %0:2 = "tfl.while"(%arg0, %arg1) ( {
-  ^bb0(%arg2: tensor<*xi32>, %arg3: tensor<*xf32>):  // no predecessors
-    %1 = call @WhileOp_cond(%arg2, %arg3) : (tensor<*xi32>, tensor<*xf32>) -> tensor<i1>
+func.func @main(%arg0: tensor<i32>, %arg1: tensor<1xf32>) -> tensor<1xf32> {
+  %0:2 = "tfl.while"(%arg0, %arg1) ({
+  ^bb0(%arg2: tensor<*xi32>, %arg3: tensor<*xf32>):
+    %1 = func.call @WhileOp_cond(%arg2, %arg3) : (tensor<*xi32>, tensor<*xf32>) -> tensor<i1>
     "tfl.yield"(%1) : (tensor<i1>) -> ()
   },  {
-  ^bb0(%arg2: tensor<*xi32>, %arg3: tensor<*xf32>):  // no predecessors
-    %1:2 = call @WhileOp_body(%arg2, %arg3) : (tensor<*xi32>, tensor<*xf32>) -> (tensor<*xi32>, tensor<*xf32>)
+  ^bb0(%arg2: tensor<*xi32>, %arg3: tensor<*xf32>):
+    %1:2 = func.call @WhileOp_body(%arg2, %arg3) : (tensor<*xi32>, tensor<*xf32>) -> (tensor<*xi32>, tensor<*xf32>)
     "tfl.yield"(%1#0, %1#1) : (tensor<*xi32>, tensor<*xf32>) -> ()
   }) : (tensor<i32>, tensor<1xf32>) -> (tensor<i32>, tensor<1xf32>) loc("WhileOp")
-  return %0#1 : tensor<1xf32>
+  func.return %0#1 : tensor<1xf32>
 }

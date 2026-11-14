@@ -15,6 +15,9 @@ limitations under the License.
 
 #include "tensorflow/core/common_runtime/eager/attr_builder.h"
 
+#include <memory>
+
+#include "absl/status/status.h"
 #include "tensorflow/core/common_runtime/device_factory.h"
 #include "tensorflow/core/common_runtime/rendezvous_mgr.h"
 #include "tensorflow/core/framework/allocator.h"
@@ -32,13 +35,14 @@ namespace {
 
 mutex g_op_name_to_attr_type_map_lock(LINKER_INITIALIZED);
 
-tensorflow::gtl::FlatMap<string, const AttrTypeMap*>* OpNameToAttrTypeMap() {
+tensorflow::gtl::FlatMap<std::string, const AttrTypeMap*>*
+OpNameToAttrTypeMap() {
   static auto* const m =
-      new tensorflow::gtl::FlatMap<string, const AttrTypeMap*>;
+      new tensorflow::gtl::FlatMap<std::string, const AttrTypeMap*>;
   return m;
 }
 
-const uint32 kIsList = 1U << 31;
+const uint32_t kIsList = 1U << 31;
 
 AttrTypeMap* DefaultFunctionAttrTypeMap() {
   AttrTypeMap* map = new AttrTypeMap();
@@ -54,22 +58,22 @@ const AttrTypeMap* GetDefaultFunctionAttrTypeMap() {
 
 }  // namespace
 
-Status OpDefForOp(const string& op_name, const OpDef** op_def) {
+absl::Status OpDefForOp(const std::string& op_name, const OpDef** op_def) {
   const OpRegistrationData* op_reg_data = nullptr;
-  Status s = OpRegistry::Global()->LookUp(op_name, &op_reg_data);
+  absl::Status s = OpRegistry::Global()->LookUp(op_name, &op_reg_data);
   if (s.ok()) {
     *op_def = &op_reg_data->op_def;
   }
   return s;
 }
 
-Status AttrTypeMapForOp(const char* op_name, const AttrTypeMap** out,
-                        bool* is_function) {
+absl::Status AttrTypeMapForOp(const char* op_name, const AttrTypeMap** out,
+                              bool* is_function) {
   {
     tf_shared_lock l(g_op_name_to_attr_type_map_lock);
     *is_function = false;
     *out = gtl::FindPtrOrNull(*OpNameToAttrTypeMap(), op_name);
-    if (*out != nullptr) return Status::OK();
+    if (*out != nullptr) return absl::OkStatus();
   }
 
   mutex_lock l(g_op_name_to_attr_type_map_lock);
@@ -78,11 +82,11 @@ Status AttrTypeMapForOp(const char* op_name, const AttrTypeMap** out,
   // may insert this map after the tf_shared_lock is released but before the
   // mutex_lock is acquired.
   *out = gtl::FindPtrOrNull(*OpNameToAttrTypeMap(), op_name);
-  if (*out != nullptr) return Status::OK();
+  if (*out != nullptr) return absl::OkStatus();
 
   const OpDef* op_def = nullptr;
-  Status s = OpDefForOp(op_name, &op_def);
-  if (errors::IsNotFound(s)) {
+  absl::Status s = OpDefForOp(op_name, &op_def);
+  if (absl::IsNotFound(s)) {
     // If we did not find the op def, we assume `op_name` is a function.
     // If it is actually a misspelled op, user will get another error when
     // trying to run it.
@@ -91,7 +95,7 @@ Status AttrTypeMapForOp(const char* op_name, const AttrTypeMap** out,
     // function def to retrieve their types.
     *out = GetDefaultFunctionAttrTypeMap();
     *is_function = true;
-    return Status::OK();
+    return absl::OkStatus();
   } else if (!s.ok()) {
     return s;
   }
@@ -99,12 +103,12 @@ Status AttrTypeMapForOp(const char* op_name, const AttrTypeMap** out,
   // TODO(agarwal): Avoid having to create this "registry" at runtime,
   // perhaps can be done at op registration time?
   for (const auto& attr : op_def->attr()) {
-    string type = attr.type();
+    std::string type = attr.type();
     const bool is_list = (type.length() > 6 && type.compare(0, 4, "list") == 0);
     if (is_list) {
       type = type.substr(5, type.length() - 6);
     }
-    uint32 t = is_list ? kIsList : 0;
+    uint32_t t = is_list ? kIsList : 0;
     if (type == "string") {
       t |= TF_ATTR_STRING;
     } else if (type == "int") {
@@ -122,9 +126,9 @@ Status AttrTypeMapForOp(const char* op_name, const AttrTypeMap** out,
     } else if (type == "func") {
       t |= TF_ATTR_FUNC;
     } else {
-      return errors::Unimplemented(
+      return absl::UnimplementedError(absl::StrCat(
           "TODO(agarwal): Enable support for ops with attributes of type '",
-          type, "'");
+          type, "'"));
     }
     gtl::InsertIfNotPresent(m.get(), attr.name(), t);
   }
@@ -132,7 +136,7 @@ Status AttrTypeMapForOp(const char* op_name, const AttrTypeMap** out,
   auto r = OpNameToAttrTypeMap()->emplace(op_name, m.release());
   DCHECK(r.second) << "AttrTypeMap already exists for " << op_name;
 
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 #define DEFINE_GET_ATTR(TYPE, FIELD, ATTR_TYPE)                         \
@@ -146,7 +150,7 @@ Status AttrTypeMapForOp(const char* op_name, const AttrTypeMap** out,
     attr_tmp_.ParseFromString(it->second);                              \
     TF_RETURN_IF_ERROR(AttrValueHasType(attr_tmp_, ATTR_TYPE));         \
     *value = attr_tmp_.FIELD();                                         \
-    return Status::OK();                                                \
+    return OkStatus();                                                  \
   }
 
 DEFINE_GET_ATTR(float, f, "float");
@@ -158,24 +162,24 @@ DEFINE_GET_ATTR(tensorflow::DataType, type, "type");
 #undef DEFINE_GET_ATTR
 
 template <>
-Status AttrBuilder::Get(StringPiece attr_name,
-                        absl::InlinedVector<DataType, 4>* value) const {
-  auto it = encoded_attrs_.find(string(attr_name));
+absl::Status AttrBuilder::Get(absl::string_view attr_name,
+                              absl::InlinedVector<DataType, 4>* value) const {
+  auto it = encoded_attrs_.find(std::string(attr_name));
   if (it == encoded_attrs_.end()) {
-    return errors::NotFound("No attr named '", attr_name,
-                            "' found in AttrBuilder for ", op_name_);
+    return absl::NotFoundError(absl::StrCat(
+        "No attr named '", attr_name, "' found in AttrBuilder for ", op_name_));
   }
   attr_tmp_.ParseFromString(it->second);
   TF_RETURN_IF_ERROR(AttrValueHasType(attr_tmp_, "list(type)"));
   for (size_t i = 0; i < attr_tmp_.list().type_size(); i++) {
     value->push_back(attr_tmp_.list().type(i));
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 AttrBuilder& AttrBuilder::NumInputs(int n) {
-  DCHECK(!node_def_finalized_) << "Calling NumInputs after BuildNodeDef.";
   num_inputs_ = n;
+  node_def_finalized_ = false;
   return *this;
 }
 
@@ -189,7 +193,7 @@ void AttrBuilder::FillAttrValueMap(AttrValueMap* m) const {
   // specify all the default attr values (e.g. for matmul, the `transpose_a`
   // attr defaults to false).
   const OpDef* op_def = nullptr;
-  Status s = OpDefForOp(op_name().c_str(), &op_def);
+  absl::Status s = OpDefForOp(op_name().c_str(), &op_def);
   // This is expected, if this op is a custom function, and is therefore not
   // present in the op registry.
   if (!s.ok()) return;
@@ -204,7 +208,7 @@ void AttrBuilder::FillAttrValueMap(AttrValueMap* m) const {
 
 namespace {
 
-bool ValueMatchesDefault(const OpDef* op_def, const string& attr_name,
+bool ValueMatchesDefault(const OpDef* op_def, const std::string& attr_name,
                          const AttrValue& attr_value) {
   // TODO(iga): It might make sense to augment OpRegistrationData with a
   // {attr_name -> default_attr_value} FlatMap to avoid the loop here.
@@ -221,7 +225,7 @@ bool ValueMatchesDefault(const OpDef* op_def, const string& attr_name,
 
 void AttrBuilder::FillAttrValueMapWithoutDefaults(AttrValueMap* m) const {
   const OpDef* op_def = nullptr;
-  Status s = OpDefForOp(op_name().c_str(), &op_def);
+  absl::Status s = OpDefForOp(op_name().c_str(), &op_def);
 
   for (auto& entry : encoded_attrs_) {
     attr_tmp_.ParseFromString(entry.second);
@@ -233,16 +237,17 @@ void AttrBuilder::FillAttrValueMapWithoutDefaults(AttrValueMap* m) const {
   }
 }
 
-void AttrBuilder::AddAttrIfNotPresent(StringPiece attr_name,
+void AttrBuilder::AddAttrIfNotPresent(absl::string_view attr_name,
                                       const AttrValue& value) {
-  encoded_attrs_.emplace(string(attr_name), value.SerializeAsString());
+  encoded_attrs_.emplace(std::string(attr_name), value.SerializeAsString());
 }
 
 const NodeDef& AttrBuilder::BuildNodeDef() {
   if (node_def_finalized_) return node_def_;
-  if (!node_def_initialized_) {
-    InitializeNodeDef();
-  }
+  node_def_.Clear();
+  node_def_.set_name(op_name_);
+  node_def_.set_op(op_name_);
+
   for (int i = 0; i < num_inputs_; ++i) {
     node_def_.add_input("dummy_input");
   }
@@ -256,12 +261,12 @@ void AttrBuilder::CopyAttributes(const AttrBuilder& other) {
                         other.encoded_attrs_.end());
 }
 
-Status AttrTypeByName(const AttrTypeMap& m, const string& attr_name,
-                      TF_AttrType* out, unsigned char* is_list) {
+absl::Status AttrTypeByName(const AttrTypeMap& m, const std::string& attr_name,
+                            TF_AttrType* out, unsigned char* is_list) {
   auto* t = gtl::FindOrNull(m, attr_name);
   if (t == nullptr) {
-    return errors::InvalidArgument("Attribute '", attr_name,
-                                   "' does not exist for this operation");
+    return absl::InvalidArgumentError(absl::StrCat(
+        "Attribute '", attr_name, "' does not exist for this operation"));
   }
   *out = static_cast<TF_AttrType>(*t & ~kIsList);
   if (*t & kIsList) {
@@ -269,15 +274,10 @@ Status AttrTypeByName(const AttrTypeMap& m, const string& attr_name,
   } else {
     *is_list = 0;
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 namespace {
-inline tensorflow::Fprint128 FingerprintCat128(const tensorflow::Fprint128& a,
-                                               const tensorflow::Fprint128& b) {
-  return {tensorflow::FingerprintCat64(a.low64, b.low64),
-          tensorflow::FingerprintCat64(a.high64, b.high64)};
-}
 
 void CombineUnordered(const tensorflow::Fprint128& a,
                       tensorflow::Fprint128* b) {
@@ -285,44 +285,36 @@ void CombineUnordered(const tensorflow::Fprint128& a,
   b->high64 += a.high64;
 }
 
-inline tensorflow::Fprint128 CacheKeyHelper(StringPiece s,
+inline tensorflow::Fprint128 CacheKeyHelper(absl::string_view s,
                                             const tensorflow::Fprint128& b) {
   tensorflow::Fprint128 a = tensorflow::Fingerprint128(s);
   return FingerprintCat128(a, b);
 }
 
-inline tensorflow::Fprint128 CacheKeyHelper(StringPiece s, uint64 b) {
+inline tensorflow::Fprint128 CacheKeyHelper(absl::string_view s, uint64_t b) {
   return CacheKeyHelper(s, {b, b});
 }
 
 }  // namespace
 
-tensorflow::Fprint128 AttrBuilder::CacheKey(const StringPiece device) {
+tensorflow::Fprint128 AttrBuilder::CacheKey(const absl::string_view device) {
   if (!cached_cache_key_ || device != device_for_cached_cache_key_) {
     cached_cache_key_ = BuildCacheKeyForDevice(device);
-    device_for_cached_cache_key_ = string(device);
+    device_for_cached_cache_key_ = std::string(device);
   }
 
   return *cached_cache_key_;
 }
 
 tensorflow::Fprint128 AttrBuilder::BuildCacheKeyForDevice(
-    const StringPiece device) const {
+    const absl::string_view device) const {
   tensorflow::Fprint128 f = tensorflow::Fingerprint128(op_name());
-  f = tensorflow::FingerprintCat128(f, tensorflow::Fingerprint128(device));
+  f = tsl::FingerprintCat128(f, tensorflow::Fingerprint128(device));
   for (const auto& p : encoded_attrs_) {
     CombineUnordered(
         CacheKeyHelper(p.first, tensorflow::Fingerprint128(p.second)), &f);
   }
   return f;
-}
-
-void AttrBuilder::InitializeNodeDef() {
-  DCHECK(!node_def_initialized_);
-  node_def_.Clear();
-  node_def_.set_name(op_name_);
-  node_def_.set_op(op_name_);
-  node_def_initialized_ = true;
 }
 
 void AttrBuilder::GetNameAttrList(
@@ -331,28 +323,28 @@ void AttrBuilder::GetNameAttrList(
   name_and_attrs->set_name(op_name());
 }
 
-Status AttrBuilder::GetTypeList(
+absl::Status AttrBuilder::GetTypeList(
     absl::string_view attr_name,
     absl::InlinedVector<DataType, 4>* type_list) const {
   return Get(attr_name, type_list);
 }
 
 bool AttrBuilder::GetInt(absl::string_view attr_name, int64_t* result) const {
-  Status s = Get(attr_name, result);
+  absl::Status s = Get(attr_name, result);
   return s.ok();
 }
 bool AttrBuilder::GetFloat(absl::string_view attr_name, float* result) const {
-  Status s = Get(attr_name, result);
+  absl::Status s = Get(attr_name, result);
   return s.ok();
 }
 bool AttrBuilder::GetBool(absl::string_view attr_name, bool* result) const {
-  Status s = Get(attr_name, result);
+  absl::Status s = Get(attr_name, result);
   return s.ok();
 }
 
 bool AttrBuilder::GetType(absl::string_view attr_name,
                           tensorflow::DataType* result) const {
-  Status s = Get(attr_name, result);
+  absl::Status s = Get(attr_name, result);
   return s.ok();
 }
 

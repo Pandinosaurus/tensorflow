@@ -65,7 +65,7 @@ class ShapeRefinerTest : public ::testing::Test {
                         int end, int stride, const char* expected,
                         int begin_mask = 0, int end_mask = 0,
                         int ellipsis_mask = 0, int shrink_axis_mask = 0,
-                        StringPiece test_op = "TensorAsShapeInt32") {
+                        absl::string_view test_op = "TensorAsShapeInt32") {
     Scope root = Scope::DisabledShapeInferenceScope();
     auto placeholder =
         ops::Placeholder(root, DT_INT32, ops::Placeholder::Shape(input_shape));
@@ -162,9 +162,9 @@ TEST_F(ShapeRefinerTest, BadShapes) {
   TF_ASSERT_OK(m.AddNode(b.node()));
   // The shape of the inputs are not compatible, so we should expect
   // an error.
-  Status s = m.AddNode(mm.node());
+  absl::Status s = m.AddNode(mm.node());
   ASSERT_FALSE(s.ok());
-  ASSERT_TRUE(absl::StrContains(s.error_message(),
+  ASSERT_TRUE(absl::StrContains(s.message(),
                                 "Dimensions must be equal, but are 1 and 2"));
 }
 
@@ -281,9 +281,10 @@ TEST_F(ShapeRefinerTest, ExtractConstantSubgraphMultiOutput) {
   // input_tensor from the shape function.
   {
     Scope root = Scope::NewRootScope();
-    auto small = ops::Const(root, {static_cast<int32>(1), TensorShape({1, 1})});
+    auto small =
+        ops::Const(root, {static_cast<int32_t>(1), TensorShape({1, 1})});
     auto large = ops::Const(
-        root, {static_cast<int32>(2), TensorShape({4, kMaxTensorSize / 2})});
+        root, {static_cast<int32_t>(2), TensorShape({4, kMaxTensorSize / 2})});
     Node* multi;
     TF_ASSERT_OK(NodeBuilder("MI", "MultiIdentity")
                      .Input(std::vector<NodeBuilder::NodeOut>{small.node(),
@@ -313,7 +314,7 @@ TEST_F(ShapeRefinerTest, ExtractConstantSubgraphMultiOutput) {
     // The add adds 1 and 2 together, and its output has kMaxTensorSize*2
     // elements.
     shape_inference::InferenceContext* ctx = m.GetContext(shape_v2);
-    EXPECT_EQ(strings::StrCat("[", kMaxTensorSize * 2 * 3, "]"),
+    EXPECT_EQ(absl::StrCat("[", kMaxTensorSize * 2 * 3, "]"),
               ctx->DebugString(ctx->output(0)));
   }
 }
@@ -330,7 +331,7 @@ REGISTER_OP("TestOp")
       if (c->input_tensor(0)) {
         if (c->input_tensor(1)) {
           c->set_output(0, c->Matrix(10, 10));
-          return Status::OK();
+          return absl::OkStatus();
         }
         return shape_inference::ScalarShape(c);
       }
@@ -380,11 +381,11 @@ REGISTER_OP("ShapeData")
       std::vector<shape_inference::DimensionHandle> dims;
       dims.reserve(shape_data->NumElements());
       for (int i = 0; i < shape_data->NumElements(); ++i) {
-        dims.emplace_back(c->MakeDim(shape_data->flat<int32>()(i)));
+        dims.emplace_back(c->MakeDim(shape_data->flat<int32_t>()(i)));
       }
 
       c->set_output(0, c->MakeShape(dims));
-      return Status::OK();
+      return absl::OkStatus();
     });
 
 REGISTER_OP("ShapeDataInt64")
@@ -399,11 +400,11 @@ REGISTER_OP("ShapeDataInt64")
       std::vector<shape_inference::DimensionHandle> dims;
       dims.reserve(shape_data->NumElements());
       for (int i = 0; i < shape_data->NumElements(); ++i) {
-        dims.emplace_back(c->MakeDim(shape_data->flat<int64>()(i)));
+        dims.emplace_back(c->MakeDim(shape_data->flat<int64_t>()(i)));
       }
 
       c->set_output(0, c->MakeShape(dims));
-      return Status::OK();
+      return absl::OkStatus();
     });
 
 // An op with a shape function that looks at its input tensor
@@ -418,11 +419,11 @@ REGISTER_OP("ShapeVectorForAllElements")
       }
       int64_t total = 0;
       for (int i = 0; i < shape_data->NumElements(); ++i) {
-        total += shape_data->flat<int32>()(i);
+        total += shape_data->flat<int32_t>()(i);
       }
 
       c->set_output(0, c->Vector(total));
-      return Status::OK();
+      return absl::OkStatus();
     });
 
 REGISTER_OP("MultiIdentity")
@@ -433,7 +434,7 @@ REGISTER_OP("MultiIdentity")
       for (int i = 0; i < c->num_inputs(); ++i) {
         c->set_output(i, c->input(i));
       }
-      return Status::OK();
+      return absl::OkStatus();
     });
 
 class MultiIdentity : public OpKernel {
@@ -487,7 +488,8 @@ TEST_F(ShapeRefinerTest, PropagateShapeAcrossTensorContentInt64) {
 
   // Create variable 2x4 tensor.
   auto input = ops::Variable(
-      root, {2, 4, static_cast<int64_t>(std::numeric_limits<int32>::max()) * 2},
+      root,
+      {2, 4, static_cast<int64_t>(std::numeric_limits<int32_t>::max()) * 2},
       DT_INT64);
 
   // Shape is a vector of 2 elements (2,4)
@@ -521,7 +523,8 @@ TEST_F(ShapeRefinerTest, PropagateShapeAcrossTensorContentInt32Overflow) {
 
   // Create variable 2x4 tensor.
   auto input = ops::Variable(
-      root, {2, 4, static_cast<int64_t>(std::numeric_limits<int32>::max()) * 2},
+      root,
+      {2, 4, static_cast<int64_t>(std::numeric_limits<int32_t>::max()) * 2},
       DT_INT32);
 
   // Shape is a vector of 2 elements (2,4)
@@ -607,7 +610,7 @@ TEST_F(ShapeRefinerTest, PropagateSizeAcrossTensorContentInt64) {
   auto input = ops::Variable(
       root,
       {1, 2, 3, 4, 5,
-       static_cast<int64_t>(std::numeric_limits<int32>::max()) * 2},
+       static_cast<int64_t>(std::numeric_limits<int32_t>::max()) * 2},
       DT_INT64);
 
   // 5! * int32_max_value * 2.
@@ -638,7 +641,7 @@ TEST_F(ShapeRefinerTest, PropagateSizeAcrossTensorContentInt32Overflow) {
   auto input = ops::Variable(
       root,
       {1, 2, 3, 4, 5,
-       static_cast<int64_t>(std::numeric_limits<int32>::max()) * 2},
+       static_cast<int64_t>(std::numeric_limits<int32_t>::max()) * 2},
       DT_INT32);
 
   // 5!.
@@ -830,24 +833,24 @@ TEST_F(ShapeRefinerTest, ConstantValueVisitNodeTwice) {
 
 namespace {
 
-Status TensorAsShapeShapeFn(shape_inference::InferenceContext* c) {
+absl::Status TensorAsShapeShapeFn(shape_inference::InferenceContext* c) {
   shape_inference::ShapeHandle out;
   TF_RETURN_IF_ERROR(c->MakeShapeFromShapeTensor(0 /* input_idx */, &out));
   c->set_output(0, out);
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-Status PartialTensorAsShapeShapeFn(shape_inference::InferenceContext* c) {
+absl::Status PartialTensorAsShapeShapeFn(shape_inference::InferenceContext* c) {
   shape_inference::ShapeHandle out;
   const Tensor* t = c->input_tensor(0);
   if (t == nullptr || t->NumElements() != 1) {
     c->set_output(0, c->UnknownShape());
-    return Status::OK();
+    return absl::OkStatus();
   }
   TF_RETURN_IF_ERROR(
-      c->MakeShapeFromTensorShape(TensorShape({t->flat<int32>()(0)}), &out));
+      c->MakeShapeFromTensorShape(TensorShape({t->flat<int32_t>()(0)}), &out));
   c->set_output(0, out);
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 // Register ops used by the ConstantValueAsShape* tests.
@@ -881,7 +884,7 @@ REGISTER_OP("WithEmptyVectorShape")
     .SetDoNotOptimize()
     .SetShapeFn([](shape_inference::InferenceContext* c) {
       c->set_output(0, c->Vector(0));
-      return Status::OK();
+      return absl::OkStatus();
     });
 
 REGISTER_OP("WithPartialShape")
@@ -891,7 +894,7 @@ REGISTER_OP("WithPartialShape")
       c->set_output(
           0, c->MakeShape({1, shape_inference::InferenceContext::kUnknownDim, 3,
                            shape_inference::InferenceContext::kUnknownDim, 5}));
-      return Status::OK();
+      return absl::OkStatus();
     });
 
 REGISTER_OP("WithPartialShape2")
@@ -901,7 +904,7 @@ REGISTER_OP("WithPartialShape2")
       c->set_output(
           0,
           c->MakeShape({6, shape_inference::InferenceContext::kUnknownDim, 8}));
-      return Status::OK();
+      return absl::OkStatus();
     });
 
 REGISTER_OP("WithUnknownShape")
@@ -909,7 +912,7 @@ REGISTER_OP("WithUnknownShape")
     .SetDoNotOptimize()
     .SetShapeFn([](shape_inference::InferenceContext* c) {
       c->set_output(0, c->UnknownShape());
-      return Status::OK();
+      return absl::OkStatus();
     });
 
 }  // namespace
@@ -967,10 +970,10 @@ TEST_F(ShapeRefinerTest, ConstantValueAsShape_PackInt32) {
 
   InputList inputs{
       // clang-format off
-      Input(ops::Const<int32>(root, 10)),
-      Input(ops::Const<int32>(root, 20)),
+      Input(ops::Const<int32_t>(root, 10)),
+      Input(ops::Const<int32_t>(root, 20)),
       Input(Output(scalar_non_const)),
-      Input(ops::Const<int32>(root, 40)),
+      Input(ops::Const<int32_t>(root, 40)),
   };  // clang-format on
   auto pack = ops::Stack(root, inputs);
   TF_ASSERT_OK(root.status());
@@ -1070,8 +1073,7 @@ TEST_F(ShapeRefinerTest, ConstantValueAsShape_PackInvalidInput) {
     TF_ASSERT_OK(m.AddNode(input.node()));
   }
   TF_ASSERT_OK(m.AddNode(pack.node()));
-  EXPECT_TRUE(
-      absl::StrContains(m.AddNode(result).error_message(), "but is rank 2"));
+  EXPECT_TRUE(absl::StrContains(m.AddNode(result).message(), "but is rank 2"));
 }
 
 TEST_F(ShapeRefinerTest, ConstantValueAsShape_Concat) {
@@ -1190,7 +1192,7 @@ TEST_F(ShapeRefinerTest, ConstantValueAsShape_ConcatInvalidDimValue) {
   TF_ASSERT_OK(m.AddNode(concat_dim.node()));
   TF_ASSERT_OK(m.AddNode(concat.node()));
   EXPECT_EQ("Invalid value in tensor used for shape: -2",
-            m.AddNode(result).error_message());
+            m.AddNode(result).message());
 }
 
 TEST_F(ShapeRefinerTest, ConstantValueAsShape_StridedSlice) {

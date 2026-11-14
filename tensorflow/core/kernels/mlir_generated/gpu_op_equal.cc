@@ -13,9 +13,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include <complex>
-
-#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
+#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
+#include "tensorflow/core/framework/types.pb.h"
 #include "tensorflow/core/kernels/mlir_generated/base_gpu_op.h"
 
 namespace tensorflow {
@@ -25,11 +24,18 @@ GENERATE_AND_REGISTER_BINARY_GPU_KERNEL2(Equal, DT_FLOAT, DT_BOOL);
 GENERATE_AND_REGISTER_BINARY_GPU_KERNEL2(Equal, DT_DOUBLE, DT_BOOL);
 GENERATE_AND_REGISTER_BINARY_GPU_KERNEL2(Equal, DT_BOOL, DT_BOOL);
 GENERATE_AND_REGISTER_BINARY_GPU_KERNEL2(Equal, DT_INT8, DT_BOOL);
-GENERATE_AND_REGISTER_BINARY_GPU_KERNEL3(Equal, DT_INT8, DT_BOOL, DT_UINT8,
-                                         DT_BOOL);
 GENERATE_AND_REGISTER_BINARY_GPU_KERNEL2(Equal, DT_INT16, DT_BOOL);
 // TODO(b/25387198): We cannot use a regular GPU kernel for int32.
 GENERATE_AND_REGISTER_BINARY_GPU_KERNEL2(Equal, DT_INT64, DT_BOOL);
+GENERATE_AND_REGISTER_BINARY_GPU_KERNEL3(Equal, DT_INT8, DT_BOOL, DT_UINT8,
+                                         DT_BOOL);
+GENERATE_AND_REGISTER_BINARY_GPU_KERNEL3(Equal, DT_INT16, DT_BOOL, DT_UINT16,
+                                         DT_BOOL);
+GENERATE_AND_REGISTER_BINARY_GPU_KERNEL3(Equal, DT_INT32, DT_BOOL, DT_UINT32,
+                                         DT_BOOL);
+GENERATE_AND_REGISTER_BINARY_GPU_KERNEL3(Equal, DT_INT64, DT_BOOL, DT_UINT64,
+                                         DT_BOOL);
+
 GENERATE_AND_REGISTER_BINARY_GPU_KERNEL2(Equal, DT_COMPLEX64, DT_BOOL);
 GENERATE_AND_REGISTER_BINARY_GPU_KERNEL2(Equal, DT_COMPLEX128, DT_BOOL);
 

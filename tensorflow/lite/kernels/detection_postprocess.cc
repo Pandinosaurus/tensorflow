@@ -22,7 +22,7 @@ limitations under the License.
 #include <vector>
 
 #include "flatbuffers/flexbuffers.h"  // from @flatbuffers
-#include "tensorflow/lite/c/common.h"
+#include "tensorflow/lite/core/c/common.h"
 #include "tensorflow/lite/kernels/internal/compatibility.h"
 #include "tensorflow/lite/kernels/internal/optimized/optimized_ops.h"
 #include "tensorflow/lite/kernels/internal/reference/reference_ops.h"
@@ -55,8 +55,8 @@ constexpr int kBatchSize = 1;
 constexpr int kNumDetectionsPerClass = 100;
 
 // Object Detection model produces axis-aligned boxes in two formats:
-// BoxCorner represents the lower left corner (xmin, ymin) and
-// the upper right corner (xmax, ymax).
+// BoxCorner represents the upper left corner (xmin, ymin) and
+// the lower right corner (xmax, ymax).
 // CenterSize represents the center (xcenter, ycenter), height and width.
 // BoxCornerEncoding and CenterSizeEncoding are related as follows:
 // ycenter = y / y_scale * anchor.h + anchor.y;
@@ -517,7 +517,7 @@ void InplaceMergeBoxInfo(std::vector<BoxInfo>& boxes, int mid_index,
                          int end_index) {
   std::inplace_merge(
       boxes.begin(), boxes.begin() + mid_index, boxes.begin() + end_index,
-      [](const BoxInfo& a, const BoxInfo& b) { return a.score >= b.score; });
+      [](const BoxInfo& a, const BoxInfo& b) { return a.score > b.score; });
 }
 
 TfLiteStatus ComputeNMSResult(const NMSTaskParam& nms_task_param, int col_begin,
@@ -645,8 +645,15 @@ TfLiteStatus NonMaxSuppressionMultiClassRegularHelper(TfLiteContext* context,
   TF_LITE_ENSURE(context, num_detections_per_class > 0);
 
   int sorted_indices_size = 0;
+  // In the multi-threaded path, both the accumulated result
+  // (`sorted_indices_size`) and each task's result
+  // (`tasks[j].sorted_indices_size`) can hold up to `max_detections` entries
+  // before they are merged and truncated, so the buffer must hold
+  // `2 * max_detections` entries. The single-threaded path needs at most
+  // `max_detections + num_detections_per_class`, which is no larger because
+  // `num_detections_per_class <= max_detections`.
   std::vector<BoxInfo> box_info_after_regular_non_max_suppression(
-      max_detections + num_detections_per_class);
+      2 * max_detections);
   std::vector<int> num_selected(num_classes);
 
   NMSTaskParam nms_task_param{context,
@@ -785,12 +792,11 @@ TfLiteStatus NonMaxSuppressionMultiClassFastHelper(TfLiteContext* context,
   std::vector<float> max_scores;
   max_scores.resize(num_boxes);
   std::vector<int> sorted_class_indices;
-  sorted_class_indices.resize(num_boxes * num_categories_per_anchor);
+  sorted_class_indices.resize(num_boxes * num_classes);
   for (int row = 0; row < num_boxes; row++) {
     const float* box_scores =
         scores + row * num_classes_with_background + label_offset;
-    int* class_indices =
-        sorted_class_indices.data() + row * num_categories_per_anchor;
+    int* class_indices = sorted_class_indices.data() + row * num_classes;
     DecreasingPartialArgSort(box_scores, num_classes, num_categories_per_anchor,
                              class_indices);
     max_scores[row] = box_scores[class_indices[0]];
@@ -804,8 +810,8 @@ TfLiteStatus NonMaxSuppressionMultiClassFastHelper(TfLiteContext* context,
   for (const auto& selected_index : selected) {
     const float* box_scores =
         scores + selected_index * num_classes_with_background + label_offset;
-    const int* class_indices = sorted_class_indices.data() +
-                               selected_index * num_categories_per_anchor;
+    const int* class_indices =
+        sorted_class_indices.data() + selected_index * num_classes;
 
     for (int col = 0; col < num_categories_per_anchor; ++col) {
       int box_offset = max_categories_per_anchor * output_box_index + col;

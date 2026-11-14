@@ -17,18 +17,19 @@ limitations under the License.
 
 namespace tensorflow {
 
-REGISTER8(BinaryOp, CPU, "FloorDiv", functor::safe_floor_div, uint8, uint16,
-          uint32, uint64, int8, int16, int32, int64_t);
+REGISTER8(BinaryOp, CPU, "FloorDiv", functor::safe_floor_div, uint8_t, uint16_t,
+          uint32_t, uint64_t, int8_t, int16_t, int32_t, int64_t);
 REGISTER4(BinaryOp, CPU, "FloorDiv", functor::floor_div_real, float,
           Eigen::half, bfloat16, double);
 
 #if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
+#if !defined(MLIR_GENERATED_GPU_KERNELS_ENABLED)
 REGISTER4(BinaryOp, GPU, "FloorDiv", functor::floor_div, uint8, uint16, int16,
           int64_t);
-#if !defined(MLIR_GENERATED_GPU_KERNELS_ENABLED)
 REGISTER3(BinaryOp, GPU, "FloorDiv", functor::floor_div_real, float,
           Eigen::half, double);
 #endif
+REGISTER(BinaryOp, GPU, "FloorDiv", functor::floor_div_real, bfloat16);
 #endif
 
 #if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
@@ -40,15 +41,15 @@ REGISTER_KERNEL_BUILDER(Name("FloorDiv")
                             .HostMemory("x")
                             .HostMemory("y")
                             .HostMemory("z")
-                            .TypeConstraint<int32>("T"),
-                        BinaryOp<CPUDevice, functor::safe_floor_div<int32>>);
+                            .TypeConstraint<int32_t>("T"),
+                        BinaryOp<CPUDevice, functor::safe_floor_div<int32_t>>);
 #endif
 REGISTER_KERNEL_BUILDER(Name("FloorDiv")
                             .Device(DEVICE_DEFAULT)
                             .HostMemory("x")
                             .HostMemory("y")
                             .HostMemory("z")
-                            .TypeConstraint<int32>("T"),
-                        BinaryOp<CPUDevice, functor::safe_floor_div<int32>>);
+                            .TypeConstraint<int32_t>("T"),
+                        BinaryOp<CPUDevice, functor::safe_floor_div<int32_t>>);
 
 }  // namespace tensorflow

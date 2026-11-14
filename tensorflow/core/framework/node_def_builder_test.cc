@@ -43,7 +43,7 @@ class NodeDefBuilderTest : public ::testing::Test {
   // to Op() above.
   NodeDefBuilder& Builder() {
     EXPECT_FALSE(op_def_.name().empty()) << "Must call Op() before Builder()";
-    builder_.reset(new NodeDefBuilder("n", &op_def_));
+    builder_ = std::make_unique<NodeDefBuilder>("n", &op_def_);
     return *builder_;
   }
 
@@ -51,13 +51,14 @@ class NodeDefBuilderTest : public ::testing::Test {
   // expectations.
   void ExpectSuccess(NodeDefBuilder& builder,  // NOLINT
                      DataTypeSlice expected_in_types,
-                     DataTypeSlice expected_out_types, StringPiece proto) {
+                     DataTypeSlice expected_out_types,
+                     absl::string_view proto) {
     NodeDef node_def;
-    Status status = builder.Finalize(&node_def);
+    absl::Status status = builder.Finalize(&node_def);
     TF_EXPECT_OK(status);
     if (!status.ok()) return;
     NodeDef expected;
-    protobuf::TextFormat::ParseFromString(strings::StrCat("name: 'n' ", proto),
+    protobuf::TextFormat::ParseFromString(absl::StrCat("name: 'n' ", proto),
                                           &expected);
     EXPECT_EQ(node_def.DebugString(), expected.DebugString());
 
@@ -78,13 +79,13 @@ class NodeDefBuilderTest : public ::testing::Test {
   // Calls Finalize() and verifies it returns an error.
   // Each message must appear as a substring of the error.
   void ExpectFailures(NodeDefBuilder& builder,  // NOLINT
-                      const std::vector<string>& messages) {
+                      const std::vector<std::string>& messages) {
     NodeDef node_def;
-    Status status = builder.Finalize(&node_def);
+    absl::Status status = builder.Finalize(&node_def);
     EXPECT_FALSE(status.ok()) << SummarizeNodeDef(node_def);
     if (status.ok()) return;
-    for (const string& message : messages) {
-      EXPECT_TRUE(absl::StrContains(status.error_message(), message))
+    for (const std::string& message : messages) {
+      EXPECT_TRUE(absl::StrContains(status.message(), message))
           << status << ", " << message;
     }
   }
@@ -92,23 +93,23 @@ class NodeDefBuilderTest : public ::testing::Test {
   // Calls Finalize() and verifies it returns an error.
   // Message must appear as a substring of the error.
   void ExpectFailure(NodeDefBuilder& builder,  // NOLINT
-                     const string& message) {
+                     const std::string& message) {
     ExpectFailures(builder, {message});
   }
 
   // Like ExpectFailure(), except that the error can come from
   // ValidateNodeDef().
   void ExpectInvalid(NodeDefBuilder& builder,  // NOLINT
-                     const string& message) {
+                     const std::string& message) {
     NodeDef node_def;
-    Status status = builder.Finalize(&node_def);
+    absl::Status status = builder.Finalize(&node_def);
     if (status.ok()) {
       status = ValidateNodeDef(node_def, op_def_);
     }
     EXPECT_FALSE(status.ok()) << SummarizeNodeDef(node_def);
     if (status.ok()) return;
-    EXPECT_TRUE(absl::StrContains(status.error_message(), message))
-        << "Actual error: " << status.error_message()
+    EXPECT_TRUE(absl::StrContains(status.message(), message))
+        << "Actual error: " << status.message()
         << "\nDoes not contain: " << message;
   }
 
@@ -821,9 +822,9 @@ TEST_F(NodeDefBuilderTest, AttrManyDefault) {
                     .Input(FakeInput(DT_FLOAT))
                     .Attr("a", "foo")
                     .Attr("e", "foo")
-                    .Attr("b", std::vector<string>({"bar", "baz"}))
+                    .Attr("b", std::vector<std::string>({"bar", "baz"}))
                     .Attr("f", 1.0f),
-                {DT_FLOAT}, {}, R"proto(
+                {DT_FLOAT}, {}, R"pb(
     op: "AttrManyDefaultAndInferred"
     input: "a"
     attr {
@@ -853,7 +854,7 @@ TEST_F(NodeDefBuilderTest, AttrManyDefault) {
     attr {
       key: "d"
       value { f: 0.3 }
-    })proto");
+    })pb");
 }
 
 TEST_F(NodeDefBuilderTest, AttrListDefault) {

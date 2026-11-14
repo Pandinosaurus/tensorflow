@@ -34,28 +34,50 @@ limitations under the License.
 // Note that, for GIF inputs, to reuse existing code, only single-frame ones
 // are supported.
 
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
 #include <fstream>
+#include <memory>
+#include <string>
 #include <utility>
 #include <vector>
 
+#include "absl/log/log.h"
+#include "absl/status/status.h"
+#include "absl/strings/match.h"
+#include "absl/strings/str_cat.h"
+#include "absl/strings/string_view.h"
+#include "absl/types/span.h"
+#include "tensorflow/cc/framework/ops.h"
+#include "tensorflow/cc/framework/scope.h"
+#include "tensorflow/cc/ops/array_ops.h"
 #include "tensorflow/cc/ops/const_op.h"
 #include "tensorflow/cc/ops/image_ops.h"
-#include "tensorflow/cc/ops/standard_ops.h"
+#include "tensorflow/cc/ops/math_ops.h"
+#include "tensorflow/cc/ops/nn_ops.h"
+#include "xla/tsl/platform/env.h"
+#include "xla/tsl/platform/errors.h"
+#include "xla/tsl/platform/status.h"
+#include "xla/tsl/platform/types.h"
+#include "xla/tsl/util/command_line_flags.h"
 #include "tensorflow/core/framework/graph.pb.h"
 #include "tensorflow/core/framework/tensor.h"
-#include "tensorflow/core/graph/default_device.h"
-#include "tensorflow/core/graph/graph_def_builder.h"
+#include "tensorflow/core/framework/tensor_shape.h"
+#include "tensorflow/core/framework/tensor_types.h"
+#include "tensorflow/core/framework/types.pb.h"
 #include "tensorflow/core/lib/core/errors.h"
 #include "tensorflow/core/lib/core/stringpiece.h"
-#include "tensorflow/core/lib/core/threadpool.h"
-#include "tensorflow/core/lib/io/path.h"
 #include "tensorflow/core/lib/strings/str_util.h"
-#include "tensorflow/core/lib/strings/stringprintf.h"
 #include "tensorflow/core/platform/env.h"
+#include "tensorflow/core/platform/file_system.h"
 #include "tensorflow/core/platform/init_main.h"
 #include "tensorflow/core/platform/logging.h"
+#include "tensorflow/core/platform/path.h"
+#include "tensorflow/core/platform/tstring.h"
 #include "tensorflow/core/platform/types.h"
 #include "tensorflow/core/public/session.h"
+#include "tensorflow/core/public/session_options.h"
 #include "tensorflow/core/util/command_line_flags.h"
 
 // These are all common classes it's handy to reference with no namespace.
@@ -73,8 +95,8 @@ Status ReadLabelsFile(const string& file_name, std::vector<string>* result,
                       size_t* found_label_count) {
   std::ifstream file(file_name);
   if (!file) {
-    return tensorflow::errors::NotFound("Labels file ", file_name,
-                                        " not found.");
+    return absl::NotFoundError(
+        absl::StrCat("Labels file ", file_name, " not found."));
   }
   result->clear();
   string line;
@@ -86,12 +108,12 @@ Status ReadLabelsFile(const string& file_name, std::vector<string>* result,
   while (result->size() % padding) {
     result->emplace_back();
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 static Status ReadEntireFile(tensorflow::Env* env, const string& filename,
                              Tensor* output) {
-  tensorflow::uint64 file_size = 0;
+  uint64_t file_size = 0;
   TF_RETURN_IF_ERROR(env->GetFileSize(filename, &file_size));
 
   string contents;
@@ -100,15 +122,16 @@ static Status ReadEntireFile(tensorflow::Env* env, const string& filename,
   std::unique_ptr<tensorflow::RandomAccessFile> file;
   TF_RETURN_IF_ERROR(env->NewRandomAccessFile(filename, &file));
 
-  tensorflow::StringPiece data;
-  TF_RETURN_IF_ERROR(file->Read(0, file_size, &data, &(contents)[0]));
+  absl::string_view data;
+  TF_RETURN_IF_ERROR(
+      file->Read(0, data, absl::MakeSpan(&contents[0], file_size)));
   if (data.size() != file_size) {
-    return tensorflow::errors::DataLoss("Truncated read of '", filename,
-                                        "' expected ", file_size, " got ",
-                                        data.size());
+    return absl::DataLossError(absl::StrCat("Truncated read of '", filename,
+                                            "' expected ", file_size, " got ",
+                                            data.size()));
   }
   output->scalar<tstring>()() = tstring(data);
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 // Given an image file name, read in the data, try to decode it as an image,
@@ -139,15 +162,15 @@ Status ReadTensorFromImageFile(const string& file_name, const int input_height,
   // Now try to figure out what kind of file it is and decode it.
   const int wanted_channels = 3;
   tensorflow::Output image_reader;
-  if (tensorflow::str_util::EndsWith(file_name, ".png")) {
+  if (absl::EndsWith(file_name, ".png")) {
     image_reader = DecodePng(root.WithOpName("png_reader"), file_reader,
                              DecodePng::Channels(wanted_channels));
-  } else if (tensorflow::str_util::EndsWith(file_name, ".gif")) {
+  } else if (absl::EndsWith(file_name, ".gif")) {
     // gif decoder returns 4-D tensor, remove the first dim
     image_reader =
         Squeeze(root.WithOpName("squeeze_first_dim"),
                 DecodeGif(root.WithOpName("gif_reader"), file_reader));
-  } else if (tensorflow::str_util::EndsWith(file_name, ".bmp")) {
+  } else if (absl::EndsWith(file_name, ".bmp")) {
     image_reader = DecodeBmp(root.WithOpName("bmp_reader"), file_reader);
   } else {
     // Assume if it's neither a PNG nor a GIF then it must be a JPEG.
@@ -167,8 +190,8 @@ Status ReadTensorFromImageFile(const string& file_name, const int input_height,
       root, dims_expander,
       Const(root.WithOpName("size"), {input_height, input_width}));
   // Subtract the mean and divide by the scale.
-  Div(root.WithOpName(output_name), Sub(root, resized, {input_mean}),
-      {input_std});
+  Div output_op(root.WithOpName(output_name), Sub(root, resized, {input_mean}),
+                {input_std});
 
   // This runs the GraphDef network definition that we've just constructed, and
   // returns the results in the output tensor.
@@ -179,7 +202,7 @@ Status ReadTensorFromImageFile(const string& file_name, const int input_height,
       tensorflow::NewSession(tensorflow::SessionOptions()));
   TF_RETURN_IF_ERROR(session->Create(graph));
   TF_RETURN_IF_ERROR(session->Run({inputs}, {output_name}, {}, out_tensors));
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 // Reads a model graph definition from disk, and creates a session object you
@@ -190,15 +213,15 @@ Status LoadGraph(const string& graph_file_name,
   Status load_graph_status =
       ReadBinaryProto(tensorflow::Env::Default(), graph_file_name, &graph_def);
   if (!load_graph_status.ok()) {
-    return tensorflow::errors::NotFound("Failed to load compute graph at '",
-                                        graph_file_name, "'");
+    return absl::NotFoundError(absl::StrCat("Failed to load compute graph at '",
+                                            graph_file_name, "'"));
   }
   session->reset(tensorflow::NewSession(tensorflow::SessionOptions()));
   Status session_create_status = (*session)->Create(graph_def);
   if (!session_create_status.ok()) {
     return session_create_status;
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 // Analyzes the output of the Inception graph to retrieve the highest scores and
@@ -209,7 +232,7 @@ Status GetTopLabels(const std::vector<Tensor>& outputs, int how_many_labels,
   using namespace ::tensorflow::ops;  // NOLINT(build/namespaces)
 
   string output_name = "top_k";
-  TopK(root.WithOpName(output_name), outputs[0], how_many_labels);
+  TopK top_k(root.WithOpName(output_name), outputs[0], how_many_labels);
   // This runs the GraphDef network definition that we've just constructed, and
   // returns the results in the output tensors.
   tensorflow::GraphDef graph;
@@ -225,7 +248,7 @@ Status GetTopLabels(const std::vector<Tensor>& outputs, int how_many_labels,
                                   {}, &out_tensors));
   *scores = out_tensors[0];
   *indices = out_tensors[1];
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 // Given the output of a model run, and the name of a file containing the labels
@@ -251,7 +274,7 @@ Status PrintTopLabels(const std::vector<Tensor>& outputs,
     const float score = scores_flat(pos);
     LOG(INFO) << labels[label_index] << " (" << label_index << "): " << score;
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 // This is a testing function that returns whether the top label index is the
@@ -271,7 +294,7 @@ Status CheckTopLabel(const std::vector<Tensor>& outputs, int expected,
   } else {
     *is_expected = true;
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 int main(int argc, char* argv[]) {

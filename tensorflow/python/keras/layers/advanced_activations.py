@@ -24,14 +24,12 @@ from tensorflow.python.keras.engine.base_layer import Layer
 from tensorflow.python.keras.engine.input_spec import InputSpec
 from tensorflow.python.keras.utils import tf_utils
 from tensorflow.python.ops import math_ops
-from tensorflow.python.util.tf_export import keras_export
 
 
 def get_globals():
   return globals()
 
 
-@keras_export('keras.layers.LeakyReLU')
 class LeakyReLU(Layer):
   """Leaky version of a Rectified Linear Unit.
 
@@ -72,6 +70,10 @@ class LeakyReLU(Layer):
       raise ValueError('The alpha value of a Leaky ReLU layer '
                        'cannot be None, needs a float. '
                        'Got %s' % alpha)
+    if alpha < 0:
+      raise ValueError(
+          'The alpha value of a Leaky ReLU layer should be >= 0, got %s' % alpha
+      )
     self.supports_masking = True
     self.alpha = backend.cast_to_floatx(alpha)
 
@@ -88,7 +90,6 @@ class LeakyReLU(Layer):
     return input_shape
 
 
-@keras_export('keras.layers.PReLU')
 class PReLU(Layer):
   """Parametric Rectified Linear Unit.
 
@@ -182,7 +183,6 @@ class PReLU(Layer):
     return input_shape
 
 
-@keras_export('keras.layers.ELU')
 class ELU(Layer):
   """Exponential Linear Unit.
 
@@ -226,7 +226,6 @@ class ELU(Layer):
     return input_shape
 
 
-@keras_export('keras.layers.ThresholdedReLU')
 class ThresholdedReLU(Layer):
   """Thresholded Rectified Linear Unit.
 
@@ -291,7 +290,6 @@ def _large_compatible_negative(tensor_type):
   return -1e9
 
 
-@keras_export('keras.layers.Softmax')
 class Softmax(Layer):
   """Softmax activation function.
 
@@ -359,7 +357,6 @@ class Softmax(Layer):
     return input_shape
 
 
-@keras_export('keras.layers.ReLU')
 class ReLU(Layer):
   """Rectified Linear Unit activation function.
 

@@ -13,11 +13,25 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 #include <atomic>
+#include <cstddef>
+#include <cstdint>
 #include <deque>
+#include <functional>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
 
+#include "absl/log/check.h"
+#include "absl/log/log.h"
+#include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
+#include "absl/synchronization/notification.h"
+#include "absl/time/time.h"
 #include "tensorflow/core/common_runtime/input_colocation_exemption_registry.h"
 #include "tensorflow/core/common_runtime/process_function_library_runtime.h"
 #include "tensorflow/core/data/dataset_utils.h"
+#include "tensorflow/core/data/metric_utils.h"
 #include "tensorflow/core/data/root_dataset.h"
 #include "tensorflow/core/data/unbounded_thread_pool.h"
 #include "tensorflow/core/framework/cancellation.h"
@@ -25,26 +39,36 @@ limitations under the License.
 #include "tensorflow/core/framework/function.h"
 #include "tensorflow/core/framework/function_handle_cache.h"
 #include "tensorflow/core/framework/op_kernel.h"
+#include "tensorflow/core/framework/resource_handle.h"
+#include "tensorflow/core/framework/resource_mgr.h"
 #include "tensorflow/core/framework/resource_op_kernel.h"
+#include "tensorflow/core/framework/tensor_shape.h"
+#include "tensorflow/core/framework/types.h"
+#include "tensorflow/core/framework/types.pb.h"
 #include "tensorflow/core/kernels/data/iterator_ops.h"
 #include "tensorflow/core/kernels/ops_util.h"
 #include "tensorflow/core/lib/core/refcount.h"
 #include "tensorflow/core/lib/gtl/cleanup.h"
 #include "tensorflow/core/lib/random/random.h"
+#include "tensorflow/core/platform/env.h"
 #include "tensorflow/core/platform/refcount.h"
 #include "tensorflow/core/util/device_name_utils.h"
+#include "tsl/platform/context.h"
+#include "tsl/profiler/lib/traceme.h"
+#include "tsl/profiler/lib/traceme_encode.h"
 
 namespace tensorflow {
 namespace data {
 namespace {
 
 const char kAnonymousMultiDeviceIterator[] = "AnonymousMultiDeviceIterator";
+const char kAnonymousMultiDeviceIteratorV3[] = "AnonymousMultiDeviceIteratorV3";
 const char kDevices[] = "devices";
 const char kOutputShapes[] = "output_shapes";
 const char kOutputTypes[] = "output_types";
 
 struct HostBufferElement {
-  Status status;
+  absl::Status status;
   bool end_of_sequence;
   std::vector<Tensor> value;
 };
@@ -69,12 +93,14 @@ class MultiDeviceIterator : public ResourceBase {
   MultiDeviceIterator(
       Env* env, const DataTypeVector& output_types,
       const std::vector<PartialTensorShape>& output_shapes,
-      const std::vector<string>& devices,
+      const std::vector<std::string>& devices,
       std::unique_ptr<FunctionLibraryDefinition> flib_def,
       std::unique_ptr<ProcessFunctionLibraryRuntime> pflr,
       FunctionLibraryRuntime* flr,
       std::unique_ptr<FunctionHandleCache> function_handle_cache)
-      : unbounded_thread_pool_(env, "tf_data_multi_device_iterator_resource"),
+      : metrics_collector_(flr ? flr->device()->device_type() : DEVICE_DEFAULT,
+                           *env),
+        unbounded_thread_pool_(env, "tf_data_multi_device_iterator_resource"),
         output_types_(output_types),
         output_shapes_(output_shapes),
         devices_(devices),
@@ -83,15 +109,21 @@ class MultiDeviceIterator : public ResourceBase {
         pflr_(std::move(pflr)),
         function_handle_cache_(std::move(function_handle_cache)) {
     DCHECK(flr_ != nullptr);
+    VLOG(2) << "Creating multi-device iterator.";
   }
 
-  string DebugString() const override {
-    return strings::StrCat("MultiDeviceIterator for ", devices_.size(),
-                           " devices");
+  ~MultiDeviceIterator() override {
+    VLOG(2) << "Destroying multi-device iterator.";
   }
 
-  Status Init(std::unique_ptr<IteratorBase> iterator, int64_t max_buffer_size,
-              int64_t* incarnation_id) {
+  std::string DebugString() const override {
+    return absl::StrCat("MultiDeviceIterator for ", devices_.size(),
+                        " devices");
+  }
+
+  absl::Status Init(std::unique_ptr<IteratorBase> iterator,
+                    int64_t max_buffer_size, int64_t* incarnation_id,
+                    DatasetBase* dataset) {
     if (iterator) {
       TF_RETURN_IF_ERROR(
           VerifyTypesMatch(output_types_, iterator->output_dtypes()));
@@ -103,20 +135,34 @@ class MultiDeviceIterator : public ResourceBase {
     if (multi_device_buffer_) {
       multi_device_buffer_->Reset();
     }
+    dataset->Ref();
+    dataset_.reset(dataset);
 
     ++incarnation_id_;
     *incarnation_id = incarnation_id_;
 
-    multi_device_buffer_ = absl::make_unique<MultiDeviceBuffer>(
+    multi_device_buffer_ = std::make_unique<MultiDeviceBuffer>(
         devices_.size(), max_buffer_size, incarnation_id_, std::move(iterator),
         this);
-    return Status::OK();
+    return absl::OkStatus();
   }
 
-  Status GetNextFromShard(OpKernelContext* ctx, int shard_num,
-                          int64_t incarnation_id,
-                          MultiDeviceIteratorCallback callback) {
+  absl::Status GetNextFromShard(OpKernelContext* ctx, int shard_num,
+                                int64_t incarnation_id,
+                                MultiDeviceIteratorCallback callback) {
+    tsl::profiler::TraceMe traceme([&] {
+      return tsl::profiler::TraceMeEncode(
+          absl::StrCat("GetNextFromShard", shard_num),
+          {{"shard_num", shard_num}});
+    });
     tf_shared_lock l(mu_);
+    if (!multi_device_buffer_) {
+      return absl::FailedPreconditionError(
+          "GetNextFromShard() failed because the MultiDeviceIterator "
+          "has not been initialized. Ensure that you have run the initializer "
+          "operation for this MultiDeviceIterator before getting the next "
+          "element.");
+    }
     IteratorContext::Params params(ctx);
     params.flr = flr_;
     params.function_handle_cache = function_handle_cache_.get();
@@ -127,7 +173,7 @@ class MultiDeviceIterator : public ResourceBase {
     IteratorContext iter_ctx(std::move(params));
     multi_device_buffer_->GetNextFromShard(&iter_ctx, shard_num, incarnation_id,
                                            std::move(callback));
-    return Status::OK();
+    return absl::OkStatus();
   }
 
   const DataTypeVector& output_types() const { return output_types_; }
@@ -148,6 +194,8 @@ class MultiDeviceIterator : public ResourceBase {
   ResourceMgr* resource_mgr() { return &resource_mgr_; }
 
   CancellationManager* cancellation_manager() { return &cancellation_manager_; }
+
+  IteratorMetricsCollector& metrics_collector() { return metrics_collector_; }
 
  private:
   // A private class that uses a background thread to keep a per device buffer
@@ -196,10 +244,17 @@ class MultiDeviceIterator : public ResourceBase {
                           int64_t incarnation_id,
                           MultiDeviceIteratorCallback callback) {
       HostBufferElement elem;
+      if (shard_num < 0 || shard_num >= buffer_.size()) {
+        elem.status = absl::InvalidArgumentError(
+            absl::StrCat("Invalid shard_num. Provided: ", shard_num,
+                         "; Expected 0 <= shard_num < buffer_.size();"));
+        callback(elem);
+        return;
+      }
       if (incarnation_id_ != incarnation_id) {
-        elem.status = errors::InvalidArgument(
-            "Invalid incarnation id. Provided: ", incarnation_id,
-            "; Expected: ", incarnation_id_);
+        elem.status = absl::InvalidArgumentError(
+            absl::StrCat("Invalid incarnation id. Provided: ", incarnation_id,
+                         "; Expected: ", incarnation_id_));
         callback(elem);
         return;
       }
@@ -208,7 +263,7 @@ class MultiDeviceIterator : public ResourceBase {
       {
         mutex_lock l(mu_);
         if (cancellation_manager_.IsCancelled()) {
-          elem.status = errors::Cancelled("Cancelled Multidevice iterator");
+          elem.status = absl::CancelledError("Cancelled Multidevice iterator");
           callback(elem);
           return;
         }
@@ -239,7 +294,7 @@ class MultiDeviceIterator : public ResourceBase {
                   }
                   HostBufferElement elem;
                   elem.status =
-                      errors::Cancelled("GetNextFromShard was cancelled");
+                      absl::CancelledError("GetNextFromShard was cancelled");
                   callback_container->callback(elem);
                 },
                 &callback_container->deregister_cancellation);
@@ -266,13 +321,11 @@ class MultiDeviceIterator : public ResourceBase {
       if (!background_thread_) {
         IteratorContext::Params params(ctx);
         params.cancellation_manager = &cancellation_manager_;
-        background_thread_ =
-            parent_->unbounded_thread_pool_.get_thread_factory()->StartThread(
-                "tf_data_multi_device_iterator",
-                std::bind(
-                    &MultiDeviceIterator::MultiDeviceBuffer::BackgroundThread,
-                    this,
-                    std::make_shared<IteratorContext>(std::move(params))));
+        background_thread_.reset(Env::Default()->StartThread(
+            /*thread_options=*/{}, "tf_data_multi_device_iterator",
+            tsl::WithCurrentContext(std::bind(
+                &MultiDeviceIterator::MultiDeviceBuffer::BackgroundThread, this,
+                std::make_shared<IteratorContext>(std::move(params))))));
       }
     }
 
@@ -297,7 +350,7 @@ class MultiDeviceIterator : public ResourceBase {
                 elem.end_of_sequence = true;
               } else {
                 elem.status =
-                    errors::Cancelled("Cancelled and buffer not filled.");
+                    absl::CancelledError("Cancelled and buffer not filled.");
               }
               cancellation_elements.push_back(std::move(elem));
             } else {
@@ -419,7 +472,6 @@ class MultiDeviceIterator : public ResourceBase {
     };
 
     mutex mu_;
-    std::unique_ptr<Thread> background_thread_ TF_GUARDED_BY(mu_);
     bool background_thread_finished_ TF_GUARDED_BY(mu_) = false;
     bool background_thread_started_ TF_GUARDED_BY(mu_) = false;
     bool end_of_iterator_ TF_GUARDED_BY(mu_) = false;
@@ -430,16 +482,19 @@ class MultiDeviceIterator : public ResourceBase {
     const size_t size_;
     const int64_t max_buffer_size_;
     const int64_t incarnation_id_;
-    const std::unique_ptr<IteratorBase> host_iterator_;
     CancellationManager cancellation_manager_;
+    const std::unique_ptr<IteratorBase> host_iterator_;
     MultiDeviceIterator* const parent_;  // Not owned.
+    std::unique_ptr<Thread> background_thread_ TF_GUARDED_BY(mu_);
   };
 
+  IteratorMetricsCollector metrics_collector_;
   UnboundedThreadPool unbounded_thread_pool_;
+
   mutex mu_;
   const DataTypeVector output_types_;
   const std::vector<PartialTensorShape> output_shapes_;
-  const std::vector<string> devices_;
+  const std::vector<std::string> devices_;
   const std::unique_ptr<FunctionLibraryDefinition> flib_def_;
   FunctionLibraryRuntime* const flr_ = nullptr;  // not owned.
   const std::unique_ptr<ProcessFunctionLibraryRuntime> pflr_;
@@ -449,6 +504,7 @@ class MultiDeviceIterator : public ResourceBase {
 
   int64_t incarnation_id_ TF_GUARDED_BY(mu_) = 0;
   std::unique_ptr<MultiDeviceBuffer> multi_device_buffer_ TF_GUARDED_BY(mu_);
+  core::RefCountPtr<DatasetBase> dataset_;
 };
 
 // Used to generate unique names for anonymous multi device iterators.
@@ -483,8 +539,8 @@ class MultiDeviceIteratorHandleOp : public OpKernel {
   }
 
   void Compute(OpKernelContext* context) override TF_LOCKS_EXCLUDED(mu_) {
-    string unique_name = cinfo_.name();
-    string container_name = cinfo_.container();
+    std::string unique_name = cinfo_.name();
+    std::string container_name = cinfo_.container();
     {
       mutex_lock l(mu_);
       if (resource_ == nullptr) {
@@ -493,16 +549,15 @@ class MultiDeviceIteratorHandleOp : public OpKernel {
         std::unique_ptr<ProcessFunctionLibraryRuntime> pflr(nullptr);
         OP_REQUIRES_OK(context, context->function_library()->Clone(
                                     &flib_def, &pflr, &flr));
-        auto function_handle_cache =
-            absl::make_unique<FunctionHandleCache>(flr);
+        auto function_handle_cache = std::make_unique<FunctionHandleCache>(flr);
         ResourceMgr* mgr = context->resource_manager();
         OP_REQUIRES_OK(context, cinfo_.Init(mgr, def()));
 
         MultiDeviceIterator* resource;
 
         if (name_ == ResourceHandle::ANONYMOUS_NAME) {
-          unique_name = strings::StrCat("_AnonymousMultiDeviceIterator",
-                                        current_id_.fetch_add(1));
+          unique_name = absl::StrCat("_AnonymousMultiDeviceIterator",
+                                     current_id_.fetch_add(1));
           container_name = kAnonymousMultiDeviceIterator;
           resource = new MultiDeviceIterator(
               context->env(), output_types_, output_shapes_, devices_,
@@ -526,9 +581,9 @@ class MultiDeviceIteratorHandleOp : public OpKernel {
                                        output_shapes_, devices_,
                                        std::move(flib_def), std::move(pflr),
                                        flr, std::move(function_handle_cache));
-                                   return Status::OK();
+                                   return absl::OkStatus();
                                  }));
-          Status s = VerifyResource(resource);
+          absl::Status s = VerifyResource(resource);
           if (TF_PREDICT_FALSE(!s.ok())) {
             resource->Unref();
             context->SetStatus(s);
@@ -549,12 +604,12 @@ class MultiDeviceIteratorHandleOp : public OpKernel {
   // it is compatible with this op's configuration. The verification may fail in
   // cases such as two graphs asking queues of the same shared name to have
   // inconsistent capacities.
-  Status VerifyResource(MultiDeviceIterator* resource) {
+  absl::Status VerifyResource(MultiDeviceIterator* resource) {
     TF_RETURN_IF_ERROR(
         VerifyTypesMatch(output_types_, resource->output_types()));
     TF_RETURN_IF_ERROR(
         VerifyShapesCompatible(output_shapes_, resource->output_shapes()));
-    return Status::OK();
+    return absl::OkStatus();
   }
 
   mutex mu_;
@@ -563,9 +618,9 @@ class MultiDeviceIteratorHandleOp : public OpKernel {
   DataTypeVector output_types_;
   std::vector<PartialTensorShape> output_shapes_;
   const int graph_def_version_;
-  string name_;
-  string container_;
-  std::vector<string> devices_;
+  std::string name_;
+  std::string container_;
+  std::vector<std::string> devices_;
 };
 
 REGISTER_KERNEL_BUILDER(Name("MultiDeviceIterator").Device(DEVICE_CPU),
@@ -575,37 +630,42 @@ class AnonymousMultiDeviceIteratorOp
     : public AnonymousResourceOp<MultiDeviceIterator> {
  public:
   explicit AnonymousMultiDeviceIteratorOp(OpKernelConstruction* ctx)
-      : AnonymousResourceOp<MultiDeviceIterator>(ctx,
-                                                 /* ref_counting */ false,
-                                                 /* return_deleter */ true) {
+      : AnonymousResourceOp<MultiDeviceIterator>(
+            ctx,
+            /* ref_counting */ true,
+            /* Only V1 returns a deleter */
+            /* return_deleter */
+            ctx->def().op() == kAnonymousMultiDeviceIterator) {
     OP_REQUIRES_OK(ctx, ctx->GetAttr(kDevices, &devices_));
     OP_REQUIRES_OK(ctx, ctx->GetAttr(kOutputTypes, &output_dtypes_));
     OP_REQUIRES_OK(ctx, ctx->GetAttr(kOutputShapes, &output_shapes_));
   }
 
  private:
-  string name() override { return kAnonymousMultiDeviceIterator; }
+  std::string name() override { return kAnonymousMultiDeviceIterator; }
 
-  Status CreateResource(OpKernelContext* ctx,
-                        std::unique_ptr<FunctionLibraryDefinition> flib_def,
-                        std::unique_ptr<ProcessFunctionLibraryRuntime> pflr,
-                        FunctionLibraryRuntime* lib,
-                        MultiDeviceIterator** resource) override {
-    auto function_handle_cache = absl::make_unique<FunctionHandleCache>(lib);
+  absl::Status CreateResource(
+      OpKernelContext* ctx, std::unique_ptr<FunctionLibraryDefinition> flib_def,
+      std::unique_ptr<ProcessFunctionLibraryRuntime> pflr,
+      FunctionLibraryRuntime* lib, MultiDeviceIterator** resource) override {
+    auto function_handle_cache = std::make_unique<FunctionHandleCache>(lib);
     *resource =
         new MultiDeviceIterator(ctx->env(), output_dtypes_, output_shapes_,
                                 devices_, std::move(flib_def), std::move(pflr),
                                 lib, std::move(function_handle_cache));
-    return Status::OK();
+    return absl::OkStatus();
   }
 
-  std::vector<string> devices_;
+  std::vector<std::string> devices_;
   DataTypeVector output_dtypes_;
   std::vector<PartialTensorShape> output_shapes_;
 };
 
 REGISTER_KERNEL_BUILDER(Name(kAnonymousMultiDeviceIterator).Device(DEVICE_CPU),
                         AnonymousMultiDeviceIteratorOp);
+REGISTER_KERNEL_BUILDER(
+    Name(kAnonymousMultiDeviceIteratorV3).Device(DEVICE_CPU),
+    AnonymousMultiDeviceIteratorOp);
 
 // Calls init on the MultiDeviceIterator.
 class MultiDeviceIteratorInitOp : public OpKernel {
@@ -616,13 +676,17 @@ class MultiDeviceIteratorInitOp : public OpKernel {
   void Compute(OpKernelContext* ctx) override {
     const Tensor* tensor_max_buffer_size;
     OP_REQUIRES_OK(ctx, ctx->input("max_buffer_size", &tensor_max_buffer_size));
+    OP_REQUIRES(ctx,
+                TensorShapeUtils::IsScalar(tensor_max_buffer_size->shape()),
+                absl::InvalidArgumentError("max_buffer_size must be a scalar"));
     int64_t max_buffer_size = tensor_max_buffer_size->scalar<int64_t>()();
 
     DatasetBase* dataset;
     OP_REQUIRES_OK(ctx, GetDatasetFromVariantTensor(ctx->input(0), &dataset));
     core::RefCountPtr<MultiDeviceIterator> resource;
-    OP_REQUIRES_OK(ctx,
-                   LookupResource(ctx, HandleFromInput(ctx, 1), &resource));
+    ResourceHandle handle;
+    OP_REQUIRES_OK(ctx, HandleFromInput(ctx, 1, &handle));
+    OP_REQUIRES_OK(ctx, LookupResource(ctx, handle, &resource));
 
     IteratorContext::Params params(ctx);
     params.flr = resource->flr();
@@ -647,7 +711,7 @@ class MultiDeviceIteratorInitOp : public OpKernel {
     core::ScopedUnref unref(finalized_dataset);
     int64_t incarnation_id;
     OP_REQUIRES_OK(ctx, resource->Init(std::move(iterator), max_buffer_size,
-                                       &incarnation_id));
+                                       &incarnation_id, dataset));
     Tensor tensor_incarnation_id(DT_INT64, TensorShape({}));
     tensor_incarnation_id.scalar<int64_t>()() = incarnation_id;
     OP_REQUIRES_OK(ctx,
@@ -669,27 +733,37 @@ class MultiDeviceIteratorGetNextFromShardOp : public AsyncOpKernel {
   void ComputeAsync(OpKernelContext* ctx, DoneCallback done) override {
     const Tensor* tensor_shard_num;
     OP_REQUIRES_OK_ASYNC(ctx, ctx->input("shard_num", &tensor_shard_num), done);
-    int32_t shard_num = tensor_shard_num->scalar<int32>()();
+    OP_REQUIRES_ASYNC(
+        ctx, TensorShapeUtils::IsScalar(tensor_shard_num->shape()),
+        absl::InvalidArgumentError("shard_num must be a scalar"), done);
+    int32_t shard_num = tensor_shard_num->scalar<int32_t>()();
 
     const Tensor* tensor_incarnation_id;
     OP_REQUIRES_OK_ASYNC(
         ctx, ctx->input("incarnation_id", &tensor_incarnation_id), done);
+    OP_REQUIRES_ASYNC(
+        ctx, TensorShapeUtils::IsScalar(tensor_incarnation_id->shape()),
+        absl::InvalidArgumentError("incarnation_id must be a scalar"), done);
     int64_t incarnation_id = tensor_incarnation_id->scalar<int64_t>()();
 
     MultiDeviceIterator* iterator;
-    OP_REQUIRES_OK_ASYNC(
-        ctx, LookupResource(ctx, HandleFromInput(ctx, 0), &iterator), done);
+    ResourceHandle handle;
+    OP_REQUIRES_OK_ASYNC(ctx, HandleFromInput(ctx, 0, &handle), done);
+    OP_REQUIRES_OK_ASYNC(ctx, LookupResource(ctx, handle, &iterator), done);
 
     background_worker_.Schedule(std::bind(
         [ctx, iterator, shard_num, incarnation_id](DoneCallback done) {
-          Notification n;
+          absl::Notification n;
+          absl::Time start_time = iterator->metrics_collector().RecordStart();
           MultiDeviceIteratorCallback callback = std::bind(
-              [ctx, &n](const HostBufferElement& elem) {
-                Status s = elem.status;
+              [ctx, iterator, start_time, &n](const HostBufferElement& elem) {
+                iterator->metrics_collector().RecordStop(start_time,
+                                                         elem.value);
+                absl::Status s = elem.status;
                 if (!s.ok()) {
                   ctx->SetStatus(s);
                 } else if (elem.end_of_sequence) {
-                  ctx->SetStatus(errors::OutOfRange("End of sequence"));
+                  ctx->SetStatus(absl::OutOfRangeError("End of sequence"));
                 } else {
                   for (int i = 0; i < elem.value.size(); ++i) {
                     ctx->set_output(i, elem.value[i]);
@@ -699,8 +773,8 @@ class MultiDeviceIteratorGetNextFromShardOp : public AsyncOpKernel {
               },
               std::placeholders::_1);
 
-          Status s = iterator->GetNextFromShard(ctx, shard_num, incarnation_id,
-                                                std::move(callback));
+          absl::Status s = iterator->GetNextFromShard(
+              ctx, shard_num, incarnation_id, std::move(callback));
           if (!s.ok()) {
             ctx->SetStatus(s);
             iterator->Unref();
@@ -730,13 +804,14 @@ class MultiDeviceIteratorToStringHandleOp : public OpKernel {
   void Compute(OpKernelContext* ctx) override {
     const Tensor& resource_handle_t = ctx->input(0);
     OP_REQUIRES(ctx, TensorShapeUtils::IsScalar(resource_handle_t.shape()),
-                errors::InvalidArgument("resource_handle must be a scalar"));
+                absl::InvalidArgumentError("resource_handle must be a scalar"));
 
     // Validate that the handle corresponds to a real resource, and
     // that it is an MultiDeviceIterator.
     core::RefCountPtr<MultiDeviceIterator> resource;
-    OP_REQUIRES_OK(ctx,
-                   LookupResource(ctx, HandleFromInput(ctx, 0), &resource));
+    ResourceHandle handle;
+    OP_REQUIRES_OK(ctx, HandleFromInput(ctx, 0, &handle));
+    OP_REQUIRES_OK(ctx, LookupResource(ctx, handle, &resource));
 
     Tensor* string_handle_t;
     OP_REQUIRES_OK(ctx,
@@ -760,28 +835,29 @@ class MultiDeviceIteratorFromStringHandleOp : public OpKernel {
         ctx,
         output_types_.empty() || output_shapes_.empty() ||
             output_types_.size() == output_shapes_.size(),
-        errors::InvalidArgument("If both 'output_types' and 'output_shapes' "
-                                "are set, they must have the same length."));
+        absl::InvalidArgumentError("If both 'output_types' and 'output_shapes' "
+                                   "are set, they must have the same length."));
   }
 
   void Compute(OpKernelContext* ctx) override {
     const Tensor& string_handle_t = ctx->input(0);
     OP_REQUIRES(ctx, TensorShapeUtils::IsScalar(string_handle_t.shape()),
-                errors::InvalidArgument("string_handle must be a scalar"));
+                absl::InvalidArgumentError("string_handle must be a scalar"));
 
     ResourceHandle resource_handle;
     OP_REQUIRES(
         ctx,
         resource_handle.ParseFromString(string_handle_t.scalar<tstring>()()),
-        errors::InvalidArgument(
+        absl::InvalidArgumentError(
             "Could not parse string_handle as a valid ResourceHandle"));
 
-    OP_REQUIRES(
-        ctx, resource_handle.device() == ctx->device()->attributes().name(),
-        errors::InvalidArgument("Attempted create an iterator on device \"",
-                                ctx->device()->attributes().name(),
-                                "\" from handle defined on device \"",
-                                resource_handle.device(), "\""));
+    OP_REQUIRES(ctx,
+                resource_handle.device() == ctx->device()->attributes().name(),
+                absl::InvalidArgumentError(
+                    absl::StrCat("Attempted create an iterator on device \"",
+                                 ctx->device()->attributes().name(),
+                                 "\" from handle defined on device \"",
+                                 resource_handle.device(), "\"")));
 
     // Validate that the handle corresponds to a real resource, and
     // that it is an MultiDeviceIterator.
@@ -817,11 +893,12 @@ class DeleteMultiDeviceIteratorOp : public OpKernel {
       : OpKernel(ctx) {}
 
   void Compute(OpKernelContext* ctx) override {
-    ResourceHandle handle = ctx->input(0).flat<ResourceHandle>()(0);
-    // The iterator resource is guaranteed to exist because the variant tensor
-    // wrapping the deleter is provided as an unused input to this op, which
-    // guarantees that it has not run yet.
-    OP_REQUIRES_OK(ctx, ctx->resource_manager()->Delete(handle));
+    ResourceHandle handle;
+    OP_REQUIRES_OK(ctx, HandleFromInput(ctx, 0, &handle));
+    // The iterator resource is guaranteed to
+    // exist because the variant tensor wrapping the deleter is provided as an
+    // unused input to this op, which guarantees that it has not run yet.
+    OP_REQUIRES_OK(ctx, DeleteResource(ctx, handle));
   }
 };
 

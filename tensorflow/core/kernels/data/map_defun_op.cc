@@ -14,7 +14,16 @@ limitations under the License.
 ==============================================================================*/
 #include "tensorflow/core/kernels/data/map_defun_op.h"
 
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <utility>
+#include <vector>
+
+#include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
 #include "tensorflow/core/data/dataset_utils.h"
+#include "tensorflow/core/framework/attr_value.pb.h"
 #include "tensorflow/core/framework/function.h"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/tensor.h"
@@ -92,17 +101,18 @@ class MapDefunOp::MapFunctionCallFrame : public CallFrameInterface {
     return static_cast<size_t>(kernel_->num_outputs());
   }
 
-  Status GetArg(int index, const Tensor** val) override {
+  absl::Status GetArg(int index, const Tensor** val) override {
     if (index < 0 || index >= compute_opts_->args.size() +
                                   compute_opts_->captured_inputs.size()) {
-      return errors::InvalidArgument("Mismatch in number of function inputs.");
+      return absl::InvalidArgumentError(
+          "Mismatch in number of function inputs.");
     }
 
     if (index >= compute_opts_->args.size()) {
       // The function is calling for a captured input
       *val =
           &compute_opts_->captured_inputs[index - compute_opts_->args.size()];
-      return Status::OK();
+      return absl::OkStatus();
     }
 
     // NOTE: If contention on mu_ becomes problematic, we could create a vector
@@ -112,25 +122,26 @@ class MapDefunOp::MapFunctionCallFrame : public CallFrameInterface {
         compute_opts_->args[index].Slice(iter_, iter_ + 1),
         compute_opts_->arg_shapes.at(index));
     if (!result) {
-      return errors::Internal("GetArg failed.");
+      return absl::InternalError("GetArg failed.");
     } else if (!sliced_args_[index].IsAligned()) {
       // Ensure alignment
       sliced_args_[index] = tensor::DeepCopy(sliced_args_[index]);
     }
     *val = &sliced_args_[index];
-    return Status::OK();
+    return absl::OkStatus();
   }
 
-  Status SetRetval(int index, const Tensor& val) override {
+  absl::Status SetRetval(int index, const Tensor& val) override {
     if (index < 0 || index >= kernel_->num_outputs()) {
-      return errors::InvalidArgument("Mismatch in number of function outputs.");
+      return absl::InvalidArgumentError(
+          "Mismatch in number of function outputs.");
     }
 
     if (val.dtype() != kernel_->output_type(index)) {
-      return errors::InvalidArgument(
+      return absl::InvalidArgumentError(absl::StrCat(
           "Mismatch in function return type and expected output type for "
           "output: ",
-          index);
+          index));
     }
     Tensor* out;
     {  // Locking scope
@@ -169,7 +180,7 @@ class MapDefunOp::MapFunctionCallFrame : public CallFrameInterface {
 MapDefunOp::MapDefunOp(OpKernelConstruction* ctx) : AsyncOpKernel(ctx) {
   auto func_lib = ctx->function_library();
   OP_REQUIRES(ctx, func_lib != nullptr,
-              errors::Internal("No function library."));
+              absl::InternalError("No function library."));
   const NameAttrList* func;
   OP_REQUIRES_OK(ctx, ctx->GetAttr(kFunc, &func));
   OP_REQUIRES_OK(ctx,
@@ -180,11 +191,11 @@ MapDefunOp::MapDefunOp(OpKernelConstruction* ctx) : AsyncOpKernel(ctx) {
       ctx, ctx->GetAttr(kMaxIntraOpParallelism, &max_intra_op_parallelism_));
 
   OP_REQUIRES(ctx, ctx->num_inputs() >= 0,
-              errors::InvalidArgument("Must have at least one input."));
+              absl::InvalidArgumentError("Must have at least one input."));
   OP_REQUIRES(ctx, ctx->num_outputs() >= 0,
-              errors::InvalidArgument("Must have at least one output."));
+              absl::InvalidArgumentError("Must have at least one output."));
   OP_REQUIRES(ctx, ctx->num_outputs() == output_shapes_.size(),
-              errors::InvalidArgument(
+              absl::InvalidArgumentError(
                   "Length of output_shapes and output_types must match."));
 }
 
@@ -193,7 +204,7 @@ void MapDefunOp::ComputeAsync(OpKernelContext* ctx, DoneCallback done) {
 
   OP_REQUIRES_OK_ASYNC(ctx, SetupArgs(ctx, &compute_opts), done);
 
-  Status s = SetupOutputs(ctx, compute_opts);
+  absl::Status s = SetupOutputs(ctx, compute_opts);
   if (!s.ok()) delete compute_opts;
   OP_REQUIRES_OK_ASYNC(ctx, s, done);
 
@@ -203,7 +214,7 @@ void MapDefunOp::ComputeAsync(OpKernelContext* ctx, DoneCallback done) {
   // Run loop
   StatusCallback callback = std::bind(
       [](OpKernelContext* ctx, ComputeOptions* compute_opts, DoneCallback& done,
-         const Status& status) {
+         const absl::Status& status) {
         delete compute_opts;
         ctx->SetStatus(status);
         done();
@@ -226,7 +237,7 @@ void MapDefunOp::ComputeAsync(OpKernelContext* ctx, DoneCallback done) {
     refcounted->Ref();
     ctx->function_library()->Run(
         opts, func_handle_, call_frame,
-        [call_frame, refcounted, c_mgr](const Status& func_status) {
+        [call_frame, refcounted, c_mgr](const absl::Status& func_status) {
           delete c_mgr;
           delete call_frame;
           refcounted->UpdateStatus(func_status);
@@ -254,8 +265,8 @@ void MapDefunOp::SetRunOptions(OpKernelContext* ctx,
   opts->run_all_kernels_inline = ctx->run_all_kernels_inline();
 }
 
-Status MapDefunOp::SetupArgs(OpKernelContext* ctx,
-                             ComputeOptions** compute_opts) {
+absl::Status MapDefunOp::SetupArgs(OpKernelContext* ctx,
+                                   ComputeOptions** compute_opts) {
   OpInputList arguments;
   TF_RETURN_IF_ERROR(ctx->input_list(kArguments, &arguments));
   OpInputList captured_inputs;
@@ -265,14 +276,14 @@ Status MapDefunOp::SetupArgs(OpKernelContext* ctx,
 
   for (size_t i = 0; i < arguments.size(); ++i) {
     if (arguments[i].dims() == 0) {
-      return errors::InvalidArgument(
-          "All inputs must have rank at least 1. Input ", i,
-          " has a rank of 0.");
+      return absl::InvalidArgumentError(
+          absl::StrCat("All inputs must have rank at least 1. Input ", i,
+                       " has a rank of 0."));
     } else if (arguments[i].dim_size(0) != batch_size) {
-      return errors::InvalidArgument(
+      return absl::InvalidArgumentError(absl::StrCat(
           "All inputs must have the same dimension 0. Input ", i,
           " has leading dimension ", ctx->input(i).dim_size(0),
-          ", while all previous inputs have leading dimension ", batch_size);
+          ", while all previous inputs have leading dimension ", batch_size));
     }
   }
 
@@ -287,10 +298,11 @@ Status MapDefunOp::SetupArgs(OpKernelContext* ctx,
   *compute_opts =
       new ComputeOptions(ctx, arguments, captured_inputs, std::move(arg_shapes),
                          batch_size, output_shapes_, max_intra_op_parallelism_);
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-Status MapDefunOp::SetupOutputs(OpKernelContext* ctx, ComputeOptions* opts) {
+absl::Status MapDefunOp::SetupOutputs(OpKernelContext* ctx,
+                                      ComputeOptions* opts) {
   mutex_lock l(opts->mu);
   TF_RETURN_IF_ERROR(ctx->output_list(kOutput, &opts->output));
 
@@ -303,7 +315,7 @@ Status MapDefunOp::SetupOutputs(OpKernelContext* ctx, ComputeOptions* opts) {
       TF_RETURN_IF_ERROR(opts->output.allocate(i, output_shape, &out));
     }
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 namespace {

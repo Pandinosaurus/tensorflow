@@ -14,14 +14,11 @@
 # ==============================================================================
 """Implementation of Loss operations for use in neural networks."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 from tensorflow.python.eager import context
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import ops
 from tensorflow.python.ops import array_ops
+from tensorflow.python.ops import cond
 from tensorflow.python.ops import confusion_matrix
 from tensorflow.python.ops import control_flow_ops
 from tensorflow.python.ops import math_ops
@@ -36,7 +33,7 @@ from tensorflow.python.util.tf_export import tf_export
 
 
 @tf_export(v1=["losses.Reduction"])
-class Reduction(object):
+class Reduction:
   """Types of loss reduction.
 
   Contains the following values:
@@ -1038,7 +1035,7 @@ def _remove_squeezable_dimensions(
     rank_diff = array_ops.rank(weights) - array_ops.rank(labels)
     if (weights_rank is None) or (
         weights_rank > 0 and weights_shape.dims[-1].is_compatible_with(1)):
-      weights = control_flow_ops.cond(
+      weights = cond.cond(
           math_ops.equal(1, rank_diff),
           lambda: array_ops.squeeze(weights, [-1]),
           lambda: weights)

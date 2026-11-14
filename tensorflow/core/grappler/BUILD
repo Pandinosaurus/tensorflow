@@ -1,8 +1,24 @@
-load("//tensorflow:tensorflow.bzl", "filegroup")
-load("//tensorflow/core/platform:rules_cc.bzl", "cc_library")
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
 load("//tensorflow:tensorflow.bzl", "tf_cc_test", "tf_cuda_library")
+load("//tensorflow:tensorflow.default.bzl", "filegroup")
+load("//tensorflow/core/platform:rules_cc.bzl", "cc_library")
 
 package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
     licenses = ["notice"],
 )
 
@@ -28,6 +44,7 @@ cc_library(
         "//tensorflow/core:framework",
         "//tensorflow/core:lib",
         "//tensorflow/core:protos_all_cc",
+        "@com_google_absl//absl/strings",
     ],
 )
 
@@ -42,11 +59,16 @@ cc_library(
         "//tensorflow/core:lib",
         "//tensorflow/core:lib_internal",
         "//tensorflow/core:protos_all_cc",
-        "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/container:flat_hash_set",
         "@com_google_absl//absl/container:node_hash_map",
+        "@com_google_absl//absl/log",
+        "@com_google_absl//absl/log:check",
+        "@com_google_absl//absl/status",
         "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/synchronization",
+        "@com_google_absl//absl/time",
         "@com_google_absl//absl/types:span",
+        "@eigen_archive//:eigen3",
     ],
 )
 
@@ -65,6 +87,7 @@ tf_cc_test(
         "//tensorflow/core:testlib",
         "//tensorflow/core/framework:tensor_testutil",
         "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/synchronization",
     ],
 )
 
@@ -73,13 +96,14 @@ tf_cuda_library(
     srcs = ["devices.cc"],
     hdrs = ["devices.h"],
     cuda_deps = [
-        "//tensorflow/core/common_runtime/gpu:gpu_init",
+        "@xla//xla/stream_executor/gpu:gpu_init",
         "//tensorflow/core/platform:stream_executor",
     ],
     visibility = ["//visibility:public"],
     deps = [
         "//tensorflow/core:lib",
         "//tensorflow/core:lib_internal",
+        "@com_google_absl//absl/log",
     ],
 )
 
@@ -119,6 +143,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":utils",
+        "//tensorflow/core:framework",
         "//tensorflow/core:graph",
         "//tensorflow/core:lib",
         "//tensorflow/core:lib_internal",
@@ -126,6 +151,7 @@ cc_library(
         "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/container:flat_hash_set",
         "@com_google_absl//absl/hash",
+        "@com_google_absl//absl/status",
         "@com_google_absl//absl/strings",
     ],
 )
@@ -162,6 +188,7 @@ cc_library(
         "//tensorflow/core/grappler/utils:transitive_fanin",
         "@com_google_absl//absl/container:flat_hash_set",
         "@com_google_absl//absl/strings",
+        "@tsl//tsl/platform:platform_port",
     ],
 )
 
@@ -185,6 +212,8 @@ cc_library(
         "//tensorflow/core:protos_all_cc",
         "//tensorflow/core/grappler/inputs:utils",
         "//tensorflow/core/grappler/optimizers:model_pruner",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings",
     ],
 )
 

@@ -16,8 +16,18 @@ limitations under the License.
 #include "tensorflow/core/grappler/graph_analyzer/sig_node.h"
 
 #include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <ios>
+#include <map>
+#include <string>
 
+#include "absl/log/check.h"
+#include "absl/log/log.h"
+#include "absl/status/status.h"
 #include "absl/strings/str_format.h"
+#include "tensorflow/core/framework/node_def.pb.h"
 
 namespace tensorflow {
 namespace grappler {
@@ -90,7 +100,7 @@ void SigNode::ComputeTopoHash0() {
   last_hashed_nodes_ = next_hashed_nodes_ = node_mask_;
 
   // TODO(babkin): include the attributes too, as an option.
-  size_t hval = std::hash<string>()(opcode());
+  size_t hval = std::hash<std::string>()(opcode());
 
   // Getting the topology of the links in to the hash early should get more
   // conflicts resolved early.
@@ -199,8 +209,8 @@ bool SigNode::operator==(const SigNode& other) const {
 
 constexpr int Signature::kMaxGraphSize;
 
-string Signature::ToString() const {
-  string result;
+std::string Signature::ToString() const {
+  std::string result;
   for (size_t n = 0; n < nodes.size(); ++n) {
     // TODO(babkin): add attributes too.
     result += absl::StrFormat("%d:%s", n, nodes[n]->opcode());
@@ -210,9 +220,9 @@ string Signature::ToString() const {
       // The link entries are already sorted, by tags and then by the
       // node ranks.
       if (link.tag.local.IsInbound()) {
-        result +=
-            absl::StrFormat("[%s:%s:%d]", string(link.tag.local),
-                            string(link.tag.remote), entry.peer->unique_rank_);
+        result += absl::StrFormat("[%s:%s:%d]", std::string(link.tag.local),
+                                  std::string(link.tag.remote),
+                                  entry.peer->unique_rank_);
       }
     }
     result.push_back(',');
@@ -220,10 +230,10 @@ string Signature::ToString() const {
   return result;
 }
 
-Status Signature::Compute() {
+absl::Status Signature::Compute() {
   if (map.size() > kMaxGraphSize) {
-    return Status(
-        error::INVALID_ARGUMENT,
+    return absl::Status(
+        absl::StatusCode::kInvalidArgument,
         absl::StrFormat(
             "A graph of %d nodes is too big for signature computation, "
             "the maximal supported node count is %d.",
@@ -248,7 +258,7 @@ Status Signature::Compute() {
 
   OrderLinks();
 
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 void Signature::PrepareNodes() {

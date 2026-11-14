@@ -1,11 +1,26 @@
-load("//tensorflow/core/platform:rules_cc.bzl", "cc_library")
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
 
 # Experimental filesystem C APIs for TensorFlow.
 # Will be moved in proper place once all filesystems are converted to the
 # modular framework.
 load("//tensorflow:tensorflow.bzl", "tf_cc_test")
+load("//tensorflow/core/platform:rules_cc.bzl", "cc_library")
 
 package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
     licenses = ["notice"],
 )
 
@@ -31,17 +46,28 @@ cc_library(
         "modular_filesystem.h",
         "modular_filesystem_registration.h",
     ],
-    # TODO(mihaimaruseac): Visibility should be more restrictive once we
+    # TODO(b/139060984): Visibility should be more restrictive once we
     # convert to modular filesystems everywhere
     visibility = ["//visibility:public"],
     deps = [
         ":filesystem_interface",
+        "//tensorflow/c:tf_file_statistics",
         "//tensorflow/c:tf_status_helper",
         "//tensorflow/c:tf_status_internal",
-        "//tensorflow/core:ptr_util",
+        "//tensorflow/core:portable_gif_internal",
         "//tensorflow/core/platform:env",
         "//tensorflow/core/platform:errors",
+        "//tensorflow/core/platform:file_statistics",
         "//tensorflow/core/platform:status",
+        "//tensorflow/core/platform:strcat",
+        "//tensorflow/core/platform:stringpiece",
+        "@com_google_absl//absl/algorithm:container",
+        "@com_google_absl//absl/log",
+        "@com_google_absl//absl/log:check",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings:string_view",
+        "@xla//xla/tsl/platform:env",
+        "@xla//xla/tsl/platform:errors",
     ],
 )
 
@@ -60,8 +86,22 @@ tf_cc_test(
         "//tensorflow/core:framework_internal",
         "//tensorflow/core/lib/io:path",
         "//tensorflow/core/platform:env",
-        "//tensorflow/core/platform:error",
+        "//tensorflow/core/platform:errors",
         "//tensorflow/core/platform:stacktrace_handler",
         "//tensorflow/core/platform:test",
+    ],
+)
+
+# Unit tests for ModularFileSystem that don't need plugin DSOs.
+tf_cc_test(
+    name = "modular_filesystem_unit_test",
+    size = "small",
+    srcs = ["modular_filesystem_unit_test.cc"],
+    deps = [
+        ":filesystem_interface",
+        ":modular_filesystem",
+        "//tensorflow/c:tf_status",
+        "@com_google_absl//absl/status:status_matchers",
+        "@com_google_googletest//:gtest_main",
     ],
 )

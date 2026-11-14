@@ -17,8 +17,8 @@ limitations under the License.
 
 #include <memory>
 #include <string>
+#include <utility>
 
-#include "absl/memory/memory.h"
 #include "tensorflow/lite/delegates/gpu/common/status.h"
 #include "tensorflow/lite/delegates/gpu/common/types.h"
 #include "tensorflow/lite/delegates/gpu/gl/node_shader.h"
@@ -87,7 +87,7 @@ class LstmNodeShader : public NodeShader {
 }  // namespace
 
 std::unique_ptr<NodeShader> NewLstmNodeShader() {
-  return absl::make_unique<LstmNodeShader>();
+  return std::make_unique<LstmNodeShader>();
 }
 
 }  // namespace gl

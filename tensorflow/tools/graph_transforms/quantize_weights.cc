@@ -31,39 +31,39 @@ namespace graph_transforms {
 // Converts any large float constants into eight-bit equivalents, with a
 // Dequantize op so that subsequent nodes can still access the results in a
 // float form.
-Status QuantizeWeights(const GraphDef& input_graph_def,
-                       const TransformFuncContext& context,
-                       GraphDef* output_graph_def) {
+absl::Status QuantizeWeights(const GraphDef& input_graph_def,
+                             const TransformFuncContext& context,
+                             GraphDef* output_graph_def) {
   int32_t minimum_size;
   TF_RETURN_IF_ERROR(
       context.GetOneInt32Parameter("minimum_size", 1024, &minimum_size));
   TF_RETURN_IF_ERROR(ReplaceMatchingOpTypes(
       input_graph_def, {"Const"},
       [minimum_size](const NodeMatch& match,
-                     const std::set<string>& input_nodes,
-                     const std::set<string>& output_nodes,
+                     const std::set<std::string>& input_nodes,
+                     const std::set<std::string>& output_nodes,
                      std::vector<NodeDef>* new_nodes) {
         const NodeDef& old_const_node = match.node;
         if (!old_const_node.attr().count("dtype")) {
-          return errors::InvalidArgument("No 'dtype' attribute for Const node ",
-                                         old_const_node.name());
+          return absl::InvalidArgumentError(absl::StrCat(
+              "No 'dtype' attribute for Const node ", old_const_node.name()));
         }
         if (!old_const_node.attr().count("value")) {
-          return errors::InvalidArgument("No 'value' attribute for Const node ",
-                                         old_const_node.name());
+          return absl::InvalidArgumentError(absl::StrCat(
+              "No 'value' attribute for Const node ", old_const_node.name()));
         }
         const DataType old_dtype = old_const_node.attr().at("dtype").type();
         Tensor old_tensor;
         if (!old_tensor.FromProto(old_const_node.attr().at("value").tensor())) {
-          return errors::InvalidArgument("Decoding Tensor failed for node",
-                                         old_const_node.name());
+          return absl::InvalidArgumentError(absl::StrCat(
+              "Decoding Tensor failed for node", old_const_node.name()));
         }
         const size_t num_elements = old_tensor.NumElements();
         // If this isn't a float constant, or it's too small, then reuse the
         // same node with no changes.
         if ((old_dtype != DT_FLOAT) || (num_elements < minimum_size)) {
           new_nodes->push_back(old_const_node);
-          return Status::OK();
+          return absl::OkStatus();
         }
         const float* old_values = old_tensor.flat<float>().data();
         float min = std::numeric_limits<float>::max();
@@ -133,11 +133,11 @@ Status QuantizeWeights(const GraphDef& input_graph_def,
         AddNodeInput(max_node.name(), &dequantize_node);
         new_nodes->push_back(dequantize_node);
 
-        return Status::OK();
+        return absl::OkStatus();
       },
       {}, output_graph_def));
 
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 REGISTER_GRAPH_TRANSFORM("quantize_weights", QuantizeWeights);

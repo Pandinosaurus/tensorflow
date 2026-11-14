@@ -46,7 +46,7 @@ class GetSessionHandleOp : public OpKernel {
     const Tensor& val = ctx->input(0);
     auto session_state = ctx->session_state();
     OP_REQUIRES(ctx, session_state != nullptr,
-                errors::FailedPrecondition(
+                absl::FailedPreconditionError(
                     "GetSessionHandle called on null session state"));
     int64_t id = session_state->GetNewId();
     TensorStore::TensorAndKey tk{val, id, requested_device()};
@@ -67,7 +67,8 @@ class GetSessionHandleOp : public OpKernel {
     }
   }
 
-  TF_DISALLOW_COPY_AND_ASSIGN(GetSessionHandleOp);
+  GetSessionHandleOp(const GetSessionHandleOp&) = delete;
+  void operator=(const GetSessionHandleOp&) = delete;
 };
 
 REGISTER_KERNEL_BUILDER(Name("GetSessionHandle").Device(DEVICE_CPU),
@@ -98,17 +99,20 @@ class GetSessionTensorOp : public OpKernel {
 
   void Compute(OpKernelContext* ctx) override {
     const Tensor& handle = ctx->input(0);
-    const string& name = handle.scalar<tstring>()();
+    OP_REQUIRES(ctx, TensorShapeUtils::IsScalar(handle.shape()),
+                absl::InvalidArgumentError("handle must be scalar"));
+    const std::string& name = handle.scalar<tstring>()();
     Tensor val;
     auto session_state = ctx->session_state();
     OP_REQUIRES(ctx, session_state != nullptr,
-                errors::FailedPrecondition(
+                absl::FailedPreconditionError(
                     "GetSessionTensor called on null session state"));
     OP_REQUIRES_OK(ctx, session_state->GetTensor(name, &val));
     ctx->set_output(0, val);
   }
 
-  TF_DISALLOW_COPY_AND_ASSIGN(GetSessionTensorOp);
+  GetSessionTensorOp(const GetSessionTensorOp&) = delete;
+  void operator=(const GetSessionTensorOp&) = delete;
 };
 
 REGISTER_KERNEL_BUILDER(Name("GetSessionTensor").Device(DEVICE_CPU),
@@ -132,15 +136,18 @@ class DeleteSessionTensorOp : public OpKernel {
 
   void Compute(OpKernelContext* ctx) override {
     const Tensor& handle = ctx->input(0);
-    const string& name = handle.scalar<tstring>()();
+    OP_REQUIRES(ctx, TensorShapeUtils::IsScalar(handle.shape()),
+                absl::InvalidArgumentError("`handle` must be scalar"));
+    const std::string& name = handle.scalar<tstring>()();
     auto session_state = ctx->session_state();
     OP_REQUIRES(ctx, session_state != nullptr,
-                errors::FailedPrecondition(
+                absl::FailedPreconditionError(
                     "DeleteSessionTensor called on null session state"));
     OP_REQUIRES_OK(ctx, session_state->DeleteTensor(name));
   }
 
-  TF_DISALLOW_COPY_AND_ASSIGN(DeleteSessionTensorOp);
+  DeleteSessionTensorOp(const DeleteSessionTensorOp&) = delete;
+  void operator=(const DeleteSessionTensorOp&) = delete;
 };
 
 REGISTER_KERNEL_BUILDER(Name("DeleteSessionTensor").Device(DEVICE_CPU),

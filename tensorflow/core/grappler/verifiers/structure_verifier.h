@@ -29,12 +29,12 @@ namespace grappler {
 // Verifies the structure of a graph to ensure it is valid.
 class StructureVerifier : public GraphVerifier {
  public:
-  StructureVerifier() {}
-  ~StructureVerifier() override {}
+  StructureVerifier() = default;
+  ~StructureVerifier() override = default;
 
-  string name() const override { return "structure_verifier"; };
+  std::string name() const override { return "structure_verifier"; };
 
-  Status Verify(const GraphDef& graph) override;
+  absl::Status Verify(const GraphDef& graph) override;
 };
 
 }  // end namespace grappler

@@ -20,24 +20,24 @@ limitations under the License.
 namespace tensorflow {
 
 TEST(CompositeDeviceTest, Basic) {
-  const string host_name = "/job:localhost/replica:0/task:0/device:CPU:0";
+  const std::string host_name = "/job:localhost/replica:0/task:0/device:CPU:0";
   DeviceNameUtils::ParsedName parsed_host_name;
   EXPECT_TRUE(DeviceNameUtils::ParseFullName(host_name, &parsed_host_name));
-  std::vector<string> underlying_devices;
+  std::vector<std::string> underlying_devices;
   {
-    Status status;
+    absl::Status status;
     std::unique_ptr<CompositeDevice> composite_device =
         CompositeDevice::MakeDevice(underlying_devices, /*unique_device_id=*/0,
                                     parsed_host_name, &status);
     EXPECT_EQ(composite_device, nullptr);
     EXPECT_EQ(error::INVALID_ARGUMENT, status.code());
-    EXPECT_TRUE(absl::StrContains(status.error_message(),
+    EXPECT_TRUE(absl::StrContains(status.message(),
                                   "underlying_devices should not be empty"))
         << status.ToString();
   }
 
   {
-    Status status;
+    absl::Status status;
     underlying_devices.push_back(
         "/job:localhost/replica:0/task:0/device:CPU:0");
     underlying_devices.push_back(
@@ -51,7 +51,7 @@ TEST(CompositeDeviceTest, Basic) {
   }
 
   {
-    Status status;
+    absl::Status status;
     underlying_devices.push_back(
         "/job:localhost/replica:0/task:0/device:GPU:0");
     std::unique_ptr<CompositeDevice> composite_device =
@@ -59,19 +59,19 @@ TEST(CompositeDeviceTest, Basic) {
                                     parsed_host_name, &status);
     EXPECT_EQ(composite_device, nullptr);
     EXPECT_EQ(error::INVALID_ARGUMENT, status.code());
-    EXPECT_TRUE(absl::StrContains(status.error_message(),
+    EXPECT_TRUE(absl::StrContains(status.message(),
                                   "Expect device type CPU; but got type GPU"))
         << status.ToString();
   }
 }
 
 TEST(CompositeDeviceTest, DeviceName) {
-  const string composite_device_name =
+  const std::string composite_device_name =
       "/job:localhost/replica:0/task:0/device:CPU:10";
-  std::vector<string> underlying_devices;
+  std::vector<std::string> underlying_devices;
   underlying_devices.push_back("/job:worker/replica:0/task:0/device:CPU:0");
   underlying_devices.push_back("/job:worker/replica:0/task:0/device:CPU:1");
-  Status status;
+  absl::Status status;
   std::unique_ptr<CompositeDevice> composite_device =
       CompositeDevice::MakeDevice(underlying_devices, composite_device_name,
                                   &status);

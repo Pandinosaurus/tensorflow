@@ -13,21 +13,27 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include <string>
+
+#include <gmock/gmock.h>
+#include "absl/status/status.h"
 #include "absl/strings/string_view.h"
 #include "absl/types/optional.h"
 #include "tensorflow/c/experimental/saved_model/core/saved_model_utils.h"
+#include "tensorflow/core/lib/gtl/flatmap.h"
 #include "tensorflow/core/platform/protobuf.h"
+#include "tensorflow/core/platform/status.h"
 #include "tensorflow/core/platform/stringpiece.h"
 #include "tensorflow/core/platform/test.h"
+#include "tensorflow/core/protobuf/error_codes.pb.h"
 #include "tensorflow/core/protobuf/saved_object_graph.pb.h"
 
 namespace tensorflow {
 namespace {
 
-SavedObjectGraph ParseSavedObjectGraph(StringPiece text_proto) {
+SavedObjectGraph ParseSavedObjectGraph(absl::string_view text_proto) {
   SavedObjectGraph value;
-  CHECK(tensorflow::protobuf::TextFormat::ParseFromString(string(text_proto),
-                                                          &value));
+  CHECK(tensorflow::protobuf::TextFormat::ParseFromString(text_proto, &value));
   return value;
 }
 
@@ -301,39 +307,79 @@ nodes {
 
 TEST(ObjectGraphTraversalTest, Success) {
   SavedObjectGraph object_graph = ParseSavedObjectGraph(kSingleChildFoo);
-  absl::optional<int> node = internal::FindNodeAtPath("foo", object_graph);
+  std::optional<int> node = internal::FindNodeAtPath("foo", object_graph);
   ASSERT_TRUE(node.has_value());
   EXPECT_EQ(*node, 1);
 }
 
 TEST(ObjectGraphTraversalTest, ObjectNotFound) {
   SavedObjectGraph object_graph = ParseSavedObjectGraph(kSingleChildFoo);
-  absl::optional<int> node = internal::FindNodeAtPath("bar", object_graph);
+  std::optional<int> node = internal::FindNodeAtPath("bar", object_graph);
+  EXPECT_FALSE(node.has_value());
+}
+
+TEST(ObjectGraphTraversalTest, NegativeChildNodeIdIsRejected) {
+  SavedObjectGraph object_graph = ParseSavedObjectGraph(R"(
+nodes {
+  children {
+    node_id: -1
+    local_name: "foo"
+  }
+  user_object {
+    identifier: "_generic_user_object"
+    version {
+      producer: 1
+      min_consumer: 1
+    }
+  }
+}
+)");
+  std::optional<int> node = internal::FindNodeAtPath("foo", object_graph);
+  EXPECT_FALSE(node.has_value());
+}
+
+TEST(ObjectGraphTraversalTest, OutOfRangeChildNodeIdIsRejected) {
+  SavedObjectGraph object_graph = ParseSavedObjectGraph(R"(
+nodes {
+  children {
+    node_id: 1
+    local_name: "foo"
+  }
+  user_object {
+    identifier: "_generic_user_object"
+    version {
+      producer: 1
+      min_consumer: 1
+    }
+  }
+}
+)");
+  std::optional<int> node = internal::FindNodeAtPath("foo", object_graph);
   EXPECT_FALSE(node.has_value());
 }
 
 TEST(ObjectGraphTraversalTest, CaseSensitiveMismatch) {
   SavedObjectGraph object_graph = ParseSavedObjectGraph(kSingleChildFoo);
-  absl::optional<int> node = internal::FindNodeAtPath("FOO", object_graph);
+  std::optional<int> node = internal::FindNodeAtPath("FOO", object_graph);
   EXPECT_FALSE(node.has_value());
 }
 
 TEST(ObjectGraphTraversalTest, NestedObjectFound) {
   SavedObjectGraph object_graph =
       ParseSavedObjectGraph(kSingleChildFooWithFuncBar);
-  absl::optional<int> node = internal::FindNodeAtPath("foo.bar", object_graph);
+  std::optional<int> node = internal::FindNodeAtPath("foo.bar", object_graph);
   ASSERT_TRUE(node.has_value());
   EXPECT_EQ(*node, 2);
 }
 
 TEST(ObjectGraphTraversalTest, MultiplePathsAliasSameObject) {
   SavedObjectGraph object_graph = ParseSavedObjectGraph(kMultiplePathsToChild);
-  absl::optional<int> foo_baz_node =
+  std::optional<int> foo_baz_node =
       internal::FindNodeAtPath("foo.baz", object_graph);
   ASSERT_TRUE(foo_baz_node.has_value());
   EXPECT_EQ(*foo_baz_node, 4);
 
-  absl::optional<int> bar_wombat_node =
+  std::optional<int> bar_wombat_node =
       internal::FindNodeAtPath("bar.wombat", object_graph);
   ASSERT_TRUE(bar_wombat_node.has_value());
   EXPECT_EQ(*bar_wombat_node, 4);
@@ -344,27 +390,73 @@ TEST(ObjectGraphTraversalTest, MultiplePathsAliasSameObject) {
 TEST(ObjectGraphTraversalTest, CyclesAreOK) {
   SavedObjectGraph object_graph =
       ParseSavedObjectGraph(kCycleBetweenParentAndChild);
-  absl::optional<int> foo = internal::FindNodeAtPath("foo", object_graph);
+  std::optional<int> foo = internal::FindNodeAtPath("foo", object_graph);
   ASSERT_TRUE(foo.has_value());
   EXPECT_EQ(*foo, 1);
 
-  absl::optional<int> foo_bar =
+  std::optional<int> foo_bar =
       internal::FindNodeAtPath("foo.bar", object_graph);
   ASSERT_TRUE(foo_bar.has_value());
   EXPECT_EQ(*foo_bar, 3);
 
-  absl::optional<int> foo_bar_parent =
+  std::optional<int> foo_bar_parent =
       internal::FindNodeAtPath("foo.bar.parent", object_graph);
   ASSERT_TRUE(foo_bar_parent.has_value());
   EXPECT_EQ(*foo_bar_parent, 1);
 
-  absl::optional<int> foo_bar_parent_bar =
+  std::optional<int> foo_bar_parent_bar =
       internal::FindNodeAtPath("foo.bar.parent.bar", object_graph);
   ASSERT_TRUE(foo_bar_parent_bar.has_value());
   EXPECT_EQ(*foo_bar_parent_bar, 3);
 
   EXPECT_EQ(*foo, *foo_bar_parent);
   EXPECT_EQ(*foo_bar, *foo_bar_parent_bar);
+}
+
+TEST(GetSignaturesMapTest, NegativeSignaturesChildNodeIdIsRejected) {
+  SavedObjectGraph object_graph = ParseSavedObjectGraph(R"(
+nodes {
+  children {
+    node_id: -1
+    local_name: "signatures"
+  }
+  user_object {
+    identifier: "_generic_user_object"
+    version {
+      producer: 1
+      min_consumer: 1
+    }
+  }
+}
+)");
+  gtl::FlatMap<std::string, int> signatures_map;
+  absl::Status status =
+      internal::GetSignaturesMap(object_graph, &signatures_map);
+  EXPECT_EQ(status.code(), error::FAILED_PRECONDITION) << status.message();
+  EXPECT_THAT(status.message(), ::testing::HasSubstr("out of range"));
+}
+
+TEST(GetSignaturesMapTest, OutOfRangeSignaturesChildNodeIdIsRejected) {
+  SavedObjectGraph object_graph = ParseSavedObjectGraph(R"(
+nodes {
+  children {
+    node_id: 1
+    local_name: "signatures"
+  }
+  user_object {
+    identifier: "_generic_user_object"
+    version {
+      producer: 1
+      min_consumer: 1
+    }
+  }
+}
+)");
+  gtl::FlatMap<std::string, int> signatures_map;
+  absl::Status status =
+      internal::GetSignaturesMap(object_graph, &signatures_map);
+  EXPECT_EQ(status.code(), error::FAILED_PRECONDITION) << status.message();
+  EXPECT_THAT(status.message(), ::testing::HasSubstr("out of range"));
 }
 
 }  // namespace

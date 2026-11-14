@@ -14,10 +14,6 @@
 # ==============================================================================
 """Tests for remote execution."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import os
 import random
 import time
@@ -25,13 +21,13 @@ import time
 from absl.testing import parameterized
 import numpy as np
 import portpicker
-import six
 
 from tensorflow.python.data.ops import dataset_ops
 from tensorflow.python.distribute.cluster_resolver.cluster_resolver import SimpleClusterResolver
 from tensorflow.python.eager import cancellation
 from tensorflow.python.eager import context
 from tensorflow.python.eager import def_function
+from tensorflow.python.eager import executor
 from tensorflow.python.eager import remote
 from tensorflow.python.eager import test
 from tensorflow.python.framework import constant_op
@@ -42,13 +38,14 @@ from tensorflow.python.framework import tensor_spec
 from tensorflow.python.framework import test_ops
 from tensorflow.python.framework import test_util
 from tensorflow.python.ops import array_ops
-from tensorflow.python.ops import control_flow_ops
+from tensorflow.python.ops import array_ops_stack
 from tensorflow.python.ops import data_flow_ops
 from tensorflow.python.ops import functional_ops
 from tensorflow.python.ops import math_ops
 from tensorflow.python.ops import resource_variable_ops
 from tensorflow.python.ops import string_ops
 from tensorflow.python.ops import variables
+from tensorflow.python.ops import while_loop
 from tensorflow.python.training import server_lib
 from tensorflow.python.training.server_lib import ClusterSpec
 from tensorflow.python.util import compat
@@ -131,6 +128,34 @@ class SingleWorkerTest(test.TestCase, parameterized.TestCase):
     np.testing.assert_array_equal(
         [[num_iters, num_iters], [num_iters, num_iters]], y.numpy())
 
+  def testTwoExecutors(self):
+    # Run an op on the main executor that by default uses StreamingEnqueue to
+    # schedule the op to run on the remote async executor. This op produces an
+    # error, i.e., division by zero, but will not be immediately caught due to
+    # streaming enqueue.
+    with ops.device('job:worker/replica:0/task:0/device:CPU:0'):
+      a = constant_op.constant(3)
+      b = constant_op.constant(0)
+      math_ops.div(a, b)
+
+    # Run another op using another executor that disables streaming enqueue,
+    # which would run the op using the tf_compute thread pool in the remote
+    # worker. Since the op is not run in the same remotes async executor, it
+    # will not carry back that error produced by the op above, even though this
+    # op is executed synchronously.
+    with context.executor_scope(
+        executor.new_executor(
+            enable_async=False, enable_streaming_enqueue=False)):
+      with ops.device('job:worker/replica:0/task:0/device:CPU:0'):
+        c = constant_op.constant(4)
+        d = constant_op.constant(2)
+        self.assertEqual(math_ops.div(c, d).numpy(), 2)
+
+    # Sync on the context to force to catch the error produced by the first op.
+    with self.assertRaises(errors.InvalidArgumentError) as cm:
+      context.async_wait()
+    self.assertIn('division by zero', cm.exception.message)
+
   def testShapeError_OpByOp(self):
     with ops.device('job:worker/replica:0/task:0/device:CPU:0'):
       x = array_ops.ones([2, 3])
@@ -153,10 +178,7 @@ class SingleWorkerTest(test.TestCase, parameterized.TestCase):
       with self.assertRaises(ValueError) as cm:
         matmul_func(x, y)
 
-    if six.PY2:
-      self.assertIn('Dimensions must be equal', cm.exception.message)
-    else:
-      self.assertIn('Dimensions must be equal', cm.exception.args[0])
+    self.assertIn('Dimensions must be equal', cm.exception.args[0])
 
   def testClientVarible(self):
     var = variables.Variable(initial_value=0)
@@ -189,6 +211,24 @@ class SingleWorkerTest(test.TestCase, parameterized.TestCase):
 
     with ops.device('/job:localhost/task:0'):
       self.assertAllEqual(func(constant_op.constant(1)), [2])
+
+  def testOperationTimeout(self):
+    context._reset_context()
+    context.context().operation_timeout_in_ms = 10
+    workers, _ = test_util.create_local_cluster(1, 0)
+    remote.connect_to_remote_host(workers[0].target)
+
+    q = data_flow_ops.FIFOQueue(1, dtypes.int32)
+
+    @def_function.function
+    def f():
+      return q.dequeue()
+
+    with self.assertRaises(errors.DeadlineExceededError):
+      with ops.device('/job:worker/replica:0/task:0'):
+        f()
+      # If streaming RPC is enabled, fetch remote errors before end of execution
+      context.async_wait()
 
 
 class RemoteAsyncTest(test.TestCase):
@@ -531,7 +571,7 @@ class MultiWorkersTest(test.TestCase, parameterized.TestCase):
           a = i + variable_b
         return a + 1.0, 1
 
-      return control_flow_ops.while_loop_v2(lambda _, d: d < 1, body, [i, 0])[0]
+      return while_loop.while_loop_v2(lambda _, d: d < 1, body, [i, 0])[0]
 
     with ops.device('/job:worker/replica:0/task:0'):
       self.assertAllEqual(remote_function(constant_op.constant([1.0])), [3.0])
@@ -594,7 +634,7 @@ class MultiJobsTest(test.TestCase, parameterized.TestCase):
         # parent device scope should be picked.
         x = test_ops.device_placement_op()
         y = string_ops.string_upper(x)
-        packed_var_0 = array_ops.stack([x, y], 0)
+        packed_var_0 = array_ops_stack.stack([x, y], 0)
         return packed_var_0
 
     with ops.device('/job:my_worker/task:1'):
@@ -745,6 +785,19 @@ class MultiJobsTest(test.TestCase, parameterized.TestCase):
     v1 = variables.Variable(initial_value=0)
     v1.assign_add(1)
     self.assertAllEqual(v1.read_value(), 1)
+
+  # TODO(b/249134783): Add a test for task failures by introducing an Op for
+  # reporting errors.
+  def testGetTaskStatesAllOK(self):
+    context.context().configure_coordination_service(
+        service_type='standalone', service_leader='/job:my_ps/replica:0/task:0')
+    remote.connect_to_cluster(self._cluster)
+    context.context().ensure_initialized()
+
+    states = context.context().get_task_states([('my_worker', 2), ('my_ps', 2)])
+    self.assertLen(states, 4)
+    for state in states:
+      self.assertIsNone(state)
 
 
 def _strip_prefix(s, prefix):

@@ -14,19 +14,24 @@
 # ==============================================================================
 """Functional tests for Stack and ParallelStack Ops."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
+import warnings
 
 import numpy as np
 
+from tensorflow.python import tf2
 from tensorflow.python.eager import context
+from tensorflow.python.eager import def_function
 from tensorflow.python.framework import constant_op
 from tensorflow.python.framework import dtypes
+from tensorflow.python.framework import errors
 from tensorflow.python.framework import ops
 from tensorflow.python.framework import test_util
 from tensorflow.python.ops import array_ops
+from tensorflow.python.ops import array_ops_stack
+from tensorflow.python.ops import gen_array_ops
 from tensorflow.python.ops import gradient_checker_v2
+from tensorflow.python.ops import math_ops
+from tensorflow.python.ops.ragged import ragged_factory_ops
 from tensorflow.python.platform import test
 
 
@@ -53,13 +58,39 @@ class StackOpTest(test.TestCase):
     for shape in (2,), (3,), (2, 3), (3, 2), (8, 2, 10):
       rank = len(shape)
       for axis in range(-rank, rank):
-        for dtype in [np.bool_, np.float32, np.int32, np.int64]:
+        for dtype in [
+            np.bool_,
+            np.float32,
+            np.int32,
+            np.int64,
+            dtypes.float8_e5m2.as_numpy_dtype,
+            dtypes.float8_e4m3fn.as_numpy_dtype,
+        ]:
           data = self.randn(shape, dtype)
           xs = np_split_squeeze(data, axis)
           # Stack back into a single tensorflow tensor
           with self.subTest(shape=shape, axis=axis, dtype=dtype):
-            c = array_ops.stack(xs, axis=axis)
+            c = array_ops_stack.stack(xs, axis=axis)
             self.assertAllEqual(c, data)
+
+  @test_util.run_in_graph_and_eager_modes
+  def testPackAtMaxRank(self):
+    value = array_ops.fill(
+        [0] + [1] * 252, constant_op.constant(0.0, dtype=dtypes.float32)
+    )
+    packed = array_ops_stack.stack([value], axis=0)
+    self.assertEqual(254, self.evaluate(array_ops.rank(packed)))
+
+  @test_util.run_in_graph_and_eager_modes
+  def testPackExceedsMaxRank(self):
+    value = array_ops.fill(
+        [0] + [1] * 253, constant_op.constant(0.0, dtype=dtypes.float32)
+    )
+    with self.assertRaisesRegex(
+        (errors.InvalidArgumentError, ValueError),
+        "maximum supported rank|maximum allowed",
+    ):
+      self.evaluate(array_ops_stack.stack([value], axis=0))
 
   def testSimpleParallelCPU(self):
     # tf.parallel_stack is only supported in graph mode.
@@ -72,6 +103,36 @@ class StackOpTest(test.TestCase):
             xs = list(map(constant_op.constant, data))
             c = array_ops.parallel_stack(xs)
             self.assertAllEqual(c, data)
+
+  def testParallelConcatShapeZero(self):
+    if not tf2.enabled():
+      self.skipTest("only fails in TF2")
+
+    @def_function.function
+    def f():
+      y = gen_array_ops.parallel_concat(values=[["tf"]], shape=0)
+      return y
+
+    with self.assertRaisesRegex(
+        errors.InvalidArgumentError, r"0th dimension .* must be greater than"
+    ):
+      f()
+
+  def testParallelConcatShapeOverflow(self):
+    # Regression test for GitHub issue 108663: a shape whose element count
+    # overflows int64 used to abort the process with a fatal CHECK failure
+    # in the ParallelConcat rewrite pass instead of raising a catchable
+    # error. Only the eager path reaches the rewrite pass with the invalid
+    # shape; graph construction already rejects it at op-creation time.
+    if not context.executing_eagerly():
+      self.skipTest("Exercises the eager function-optimization path.")
+    with self.assertRaisesRegex(
+        errors.InvalidArgumentError, r"too large \(more than 2\*\*63 - 1"
+    ):
+      gen_array_ops.parallel_concat(
+          values=[array_ops.zeros([17, 5, 14], dtype=dtypes.int64)],
+          shape=[3037000500, 3037000500],
+      )
 
   def testSimpleParallelGPU(self):
     # tf.parallel_stack is only supported in graph mode.
@@ -89,7 +150,7 @@ class StackOpTest(test.TestCase):
     with test_util.use_gpu():
       # Verify that shape induction works with shapes produced via const stack
       a = constant_op.constant([1, 2, 3, 4, 5, 6])
-      b = array_ops.reshape(a, array_ops.stack([2, 3]))
+      b = array_ops.reshape(a, array_ops_stack.stack([2, 3]))
       self.assertAllEqual(b.get_shape(), [2, 3])
 
       # Check on a variety of shapes and types
@@ -98,7 +159,7 @@ class StackOpTest(test.TestCase):
           with self.subTest(shape=shape, dtype=dtype):
             data = self.randn(shape, dtype)
             # Stack back into a single tensorflow tensor directly using np array
-            c = array_ops.stack(data)
+            c = array_ops_stack.stack(data)
             if not context.executing_eagerly():
               # This is implemented via a Const:
               self.assertEqual(c.op.type, "Const")
@@ -107,7 +168,7 @@ class StackOpTest(test.TestCase):
             # Python lists also work for 1-D case:
             if len(shape) == 1:
               data_list = list(data)
-              cl = array_ops.stack(data_list)
+              cl = array_ops_stack.stack(data_list)
               if not context.executing_eagerly():
                 self.assertEqual(cl.op.type, "Const")
               self.assertAllEqual(cl, data)
@@ -154,7 +215,7 @@ class StackOpTest(test.TestCase):
         with self.cached_session():
 
           def func(*xs):
-            return array_ops.stack(xs)
+            return array_ops_stack.stack(xs)
           # TODO(irving): Remove list() once we handle maps correctly
           xs = list(map(constant_op.constant, data))
           theoretical, numerical = gradient_checker_v2.compute_gradient(
@@ -171,7 +232,7 @@ class StackOpTest(test.TestCase):
         with self.cached_session():
 
           def func(*inp):
-            return array_ops.stack(inp, axis=1)
+            return array_ops_stack.stack(inp, axis=1)
           # TODO(irving): Remove list() once we handle maps correctly
           xs = list(map(constant_op.constant, data))
           theoretical, numerical = gradient_checker_v2.compute_gradient(
@@ -186,7 +247,7 @@ class StackOpTest(test.TestCase):
         for shape in (0,), (3, 0), (0, 3):
           with self.subTest(shape=shape):
             x = np.zeros((2,) + shape).astype(np.int32)
-            p = self.evaluate(array_ops.stack(list(x)))
+            p = self.evaluate(array_ops_stack.stack(list(x)))
             self.assertAllEqual(p, x)
 
             p = self.evaluate(array_ops.parallel_stack(list(x)))
@@ -200,7 +261,7 @@ class StackOpTest(test.TestCase):
         for shape in (0,), (3, 0), (0, 3):
           with self.subTest(shape=shape):
             x = np.zeros((2,) + shape).astype(np.int32)
-            p = self.evaluate(array_ops.stack(list(x)))
+            p = self.evaluate(array_ops_stack.stack(list(x)))
             self.assertAllEqual(p, x)
 
             p = self.evaluate(array_ops.parallel_stack(list(x)))
@@ -211,7 +272,7 @@ class StackOpTest(test.TestCase):
     with ops.Graph().as_default():
       with test_util.device(use_gpu=False):
         t = [constant_op.constant([1, 2, 3]), constant_op.constant([4, 5, 6])]
-        stacked = self.evaluate(array_ops.stack(t))
+        stacked = self.evaluate(array_ops_stack.stack(t))
         parallel_stacked = self.evaluate(array_ops.parallel_stack(t))
 
       expected = np.array([[1, 2, 3], [4, 5, 6]])
@@ -223,7 +284,7 @@ class StackOpTest(test.TestCase):
     with ops.Graph().as_default():
       with test_util.device(use_gpu=True):
         t = [constant_op.constant([1, 2, 3]), constant_op.constant([4, 5, 6])]
-        stacked = self.evaluate(array_ops.stack(t))
+        stacked = self.evaluate(array_ops_stack.stack(t))
         parallel_stacked = self.evaluate(array_ops.parallel_stack(t))
 
       expected = np.array([[1, 2, 3], [4, 5, 6]])
@@ -242,11 +303,11 @@ class StackOpTest(test.TestCase):
 
           with self.cached_session():
             with self.subTest(shape=shape, dtype=dtype, axis=axis):
-              actual_pack = array_ops.stack(test_arrays, axis=axis)
+              actual_pack = array_ops_stack.stack(test_arrays, axis=axis)
               self.assertEqual(expected.shape, actual_pack.get_shape())
               actual_pack = self.evaluate(actual_pack)
 
-              actual_stack = array_ops.stack(test_arrays, axis=axis)
+              actual_stack = array_ops_stack.stack(test_arrays, axis=axis)
               self.assertEqual(expected.shape, actual_stack.get_shape())
               actual_stack = self.evaluate(actual_stack)
 
@@ -256,13 +317,13 @@ class StackOpTest(test.TestCase):
     t = [constant_op.constant([1, 2, 3]), constant_op.constant([4, 5, 6])]
     with self.assertRaisesRegex(ValueError,
                                 r"Argument `axis` = 2 not in range \[-2, 2\)"):
-      array_ops.stack(t, axis=2)
+      array_ops_stack.stack(t, axis=2)
 
   def testDimOutOfNegativeRange(self):
     t = [constant_op.constant([1, 2, 3]), constant_op.constant([4, 5, 6])]
     with self.assertRaisesRegex(ValueError,
                                 r"Argument `axis` = -3 not in range \[-2, 2\)"):
-      array_ops.stack(t, axis=-3)
+      array_ops_stack.stack(t, axis=-3)
 
   def testComplex(self):
     np.random.seed(7)
@@ -272,8 +333,32 @@ class StackOpTest(test.TestCase):
           with self.subTest(shape=shape, dtype=dtype):
             data = self.randn(shape, dtype)
             xs = list(map(constant_op.constant, data))
-            c = array_ops.stack(xs)
+            c = array_ops_stack.stack(xs)
             self.assertAllEqual(self.evaluate(c), data)
+
+  def testZeroDimUnmatch(self):
+    # Test case for GitHub issue 53300.
+    # Error message is `Shapes of all inputs must match` in eager mode,
+    # and `Shapes ...` in graph mode. Below is to capture both:
+    with self.assertRaisesRegex((errors.InvalidArgumentError, ValueError),
+                                r"Shapes"):
+      with self.session():
+        t = [array_ops.zeros([0, 3]), array_ops.zeros([1, 3])]
+        self.evaluate(array_ops_stack.stack(t))
+
+  def testQTypes(self):
+    np.random.seed(7)
+    with self.session(use_gpu=True):
+      shape = [2]
+      for dtype in [
+          dtypes.quint8, dtypes.quint16, dtypes.qint8, dtypes.qint16,
+          dtypes.qint32
+      ]:
+        with self.subTest(shape=shape, dtype=dtype):
+          data = self.randn(shape, dtype.as_numpy_dtype)
+          xs = list(map(constant_op.constant, data))
+          c = math_ops.equal(array_ops_stack.stack(xs), data)
+          self.assertAllEqual(self.evaluate(c), [True, True])
 
 
 class AutomaticStackingTest(test.TestCase):
@@ -347,6 +432,134 @@ class AutomaticStackingTest(test.TestCase):
 
     t_2 = ops.convert_to_tensor([t_0, t_0, t_1], dtype=dtypes.float64)
     self.assertEqual(dtypes.float64, t_2.dtype)
+
+  def testInvalidValuesTypeRaisesTypeError(self):
+    t = constant_op.constant([1, 2, 3])
+    with self.assertRaisesRegex(
+        TypeError, r"Argument `values` must be a sequence of Tensor objects"
+    ):
+      array_ops_stack.stack(t, axis=1)
+
+  def testInvalidNonSequenceTypeRaisesTypeError(self):
+    with self.assertRaisesRegex(
+        TypeError, r"Argument `values` must be a sequence of Tensor objects"
+    ):
+      array_ops_stack.stack(5, axis=0)
+
+    with self.assertRaisesRegex(
+        TypeError, r"Argument `values` must be a sequence of Tensor objects"
+    ):
+      array_ops_stack.stack(3.14, axis=1)
+
+    with self.assertRaisesRegex(
+        TypeError, r"Argument `values` must be a sequence of Tensor objects"
+    ):
+      array_ops_stack.stack("abc", axis=1)
+
+    with self.assertRaisesRegex(
+        TypeError, r"Argument `values` must be a sequence of Tensor objects"
+    ):
+      array_ops_stack.stack(b"abc", axis=1)
+
+    with self.assertRaisesRegex(
+        TypeError, r"Argument `values` must be a sequence of Tensor objects"
+    ):
+      array_ops_stack.stack(bytearray(b"abc"), axis=1)
+
+    with self.assertRaisesRegex(
+        TypeError, r"Argument `values` must be a sequence of Tensor objects"
+    ):
+      array_ops_stack.stack({1, 2}, axis=0)
+
+  def testMappingTypeRaisesTypeError(self):
+    t = constant_op.constant([1, 2, 3])
+    with self.assertRaisesRegex(
+        TypeError,
+        r"Argument `values` must be a sequence of Tensor objects, but got a"
+        r" mapping",
+    ):
+      array_ops_stack.stack({"a": t}, axis=1)
+
+  def testCompositeTensorRaisesTypeError(self):
+    ragged = ragged_factory_ops.constant([[1, 2], [3]])
+    with self.assertRaisesRegex(
+        TypeError, r"Argument `values` must be a sequence of Tensor objects"
+    ):
+      array_ops_stack.stack(ragged, axis=1)
+
+  def testEmptyValuesAxisNonZeroRaisesValueError(self):
+    with self.assertRaisesRegex(
+        ValueError, r"Argument `values` cannot be empty when axis != 0"
+    ):
+      array_ops_stack.stack([], axis=1)
+
+    with self.assertRaisesRegex(
+        ValueError, r"Argument `values` cannot be empty when axis != 0"
+    ):
+      array_ops_stack.stack((), axis=-1)
+
+    with self.assertRaisesRegex(
+        ValueError, r"Argument `values` cannot be empty when axis != 0"
+    ):
+      array_ops_stack.stack(np.array([]), axis=1)
+
+  def testNumpyArrayValues(self):
+    # 0-D numpy array should raise TypeError
+    with self.assertRaisesRegex(
+        TypeError, r"Argument `values` must be a sequence of Tensor objects"
+    ):
+      array_ops_stack.stack(np.array(5), axis=1)
+
+    # 1-D numpy array should be stacked properly
+    res = array_ops_stack.stack(np.array([1, 2, 3]), axis=0)
+    self.assertAllEqual(res, [1, 2, 3])
+
+    # 2-D numpy array with non-zero axis should be stacked properly
+    res_axis1 = array_ops_stack.stack(np.array([[1, 2], [3, 4]]), axis=1)
+    self.assertAllEqual(res_axis1, [[1, 3], [2, 4]])
+
+    # Non-list Sequence (range) should be stacked properly
+    res_range = array_ops_stack.stack(range(3), axis=0)
+    self.assertAllEqual(res_range, [0, 1, 2])
+
+  def testGeneratorValuesSupported(self):
+    gen = (constant_op.constant(i) for i in range(3))
+    res = array_ops_stack.stack(gen)
+    self.assertAllEqual(res, [0, 1, 2])
+
+  def testSingleTensorInGraphAndXlaModeRaisesTypeError(self):
+    t = constant_op.constant([[1.0, 2.0], [3.0, 4.0]])
+
+    @def_function.function
+    def graph_fn(x):
+      return array_ops_stack.stack(x, axis=1)
+
+    with self.assertRaisesRegex(
+        TypeError, r"Argument `values` must be a sequence of Tensor objects"
+    ):
+      graph_fn(t)
+
+    @def_function.function(jit_compile=True)
+    def xla_fn(x):
+      return array_ops_stack.stack(x, axis=1)
+
+    with self.assertRaisesRegex(
+        TypeError, r"Argument `values` must be a sequence of Tensor objects"
+    ):
+      xla_fn(t)
+
+  def testSingleTensorAxis0EmitsDeprecationWarning(self):
+    t = constant_op.constant([1, 2, 3])
+    with warnings.catch_warnings(record=True) as w:
+      warnings.simplefilter("always")
+      res = array_ops_stack.stack(t, axis=0)
+      self.assertLen(w, 1)
+      self.assertTrue(issubclass(w[-1].category, DeprecationWarning))
+      self.assertIn(
+          "Passing a single Tensor to tf.stack is deprecated",
+          str(w[-1].message),
+      )
+      self.assertAllEqual(res, t)
 
 
 if __name__ == "__main__":

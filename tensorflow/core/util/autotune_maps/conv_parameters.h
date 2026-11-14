@@ -22,6 +22,14 @@ limitations under the License.
 #include "tensorflow/core/util/autotune_maps/conv_parameters.pb.h"
 
 namespace tensorflow {
+
+// Returns a string that uniquely identifies the device model based on the
+// device identifier string from the stream executor. There are cases where
+// the same device model may have different identifiers (e.g. different RAM).
+// This function normalizes the identifier to make it comparable to other
+// autotuning results.
+std::string DeviceIdentifierForAutotuning(absl::string_view device_identifier);
+
 // Uniquely identifies a convolution operation that runs on a particular device
 // model.
 //
@@ -44,6 +52,7 @@ class ConvParameters {
     // to be used to distinguish different algorithms.
     double conv_scale;
     double side_input_scale;
+    double leakyrelu_alpha;
     stream_executor::dnn::ActivationMode activation_mode;
     bool is_contrib;
   };
@@ -52,7 +61,7 @@ class ConvParameters {
   // A positive number that denotes the version of this class. Should be
   // incremented everytime this class or ConvParametersProto are updated in a
   // way that may invalidate autotune results.
-  static constexpr int kVersion = 1;
+  static constexpr int kVersion = 3;
   // LINT.ThenChange()
 
   // We have three kinds of convolutions today.  Vanilla unfused convolutions,
@@ -60,34 +69,79 @@ class ConvParameters {
   // directory.  The two fused convolutions ultimately correspond to the same
   // cudnn calls, but have slightly different semantics (e.g. they interpret
   // padding differently).
-  ConvParameters(
-      int64_t batch, int64_t in_depths, absl::Span<const int64_t> in,
-      int data_format, int64_t out_depths, absl::Span<const int64_t> filter,
-      absl::Span<const int64_t> dilation, absl::Span<const int64_t> stride,
-      absl::Span<const int64_t> padding, DataType dtype, int device_id,
-      int group_count,
-      absl::optional<FusionInfo> fusion_info = absl::optional<FusionInfo>(),
-      // This argument should be set only for test use.
-      int version = kVersion);
+  ConvParameters(se::StreamExecutor* stream_exec, int64_t batch,
+                 int64_t in_depths, absl::Span<const int64_t> in,
+                 int data_format, int64_t out_depths,
+                 absl::Span<const int64_t> filter,
+                 absl::Span<const int64_t> dilation,
+                 absl::Span<const int64_t> stride,
+                 absl::Span<const int64_t> padding, DataType dtype,
+                 int group_count,
+                 std::optional<ConvParameters::FusionInfo> fusion_info =
+                     std::optional<ConvParameters::FusionInfo>(),
+                 // This argument should be set only for test use.
+                 int version = kVersion);
 
   ConvParameters(int device_id, const ConvParametersProto& proto);
+
+  ConvParameters(se::StreamExecutor* stream_exec,
+                 const ConvParametersProto& proto)
+      : ConvParameters(stream_exec->device_ordinal(), proto) {}
 
   bool operator==(const ConvParameters& other) const;
 
   bool operator!=(const ConvParameters& other) const {
     return !(*this == other);
   }
-  uint64 hash() const { return hash_code_; }
+  uint64_t hash() const { return hash_code_; }
 
-  string ToString() const;
+  std::string ToString() const;
 
   const ConvParametersProto& proto() const { return proto_; }
 
  private:
   int device_id_;
   ConvParametersProto proto_;
-  uint64 hash_code_;
+  uint64_t hash_code_;
 };
+
+class MatmulParameters {
+ public:
+  // LINT.IfChange(matmul_parameters_version)
+  // A positive number that denotes the version of this class. Should be
+  // incremented everytime this class or ConvParametersProto are updated in a
+  // way that may invalidate autotune results.
+  static constexpr int kVersion = 2;
+  // LINT.ThenChange()
+
+  MatmulParameters(se::StreamExecutor* stream_exec, DataType ab_dtype,
+                   DataType c_dtype, bool trans_a, bool trans_b, uint64_t m,
+                   uint64_t n, uint64_t k, int64_t lda, int64_t ldb,
+                   int64_t ldc,
+                   stream_executor::dnn::ActivationMode activation_mode,
+                   // This argument should be set only for test use.
+                   int version = kVersion);
+
+  MatmulParameters(se::StreamExecutor* stream_exec,
+                   const MatmulParametersProto& proto);
+
+  bool operator==(const MatmulParameters& other) const;
+
+  bool operator!=(const MatmulParameters& other) const {
+    return !(*this == other);
+  }
+  uint64_t hash() const { return hash_code_; }
+
+  std::string ToString() const;
+
+  const MatmulParametersProto& proto() const { return proto_; }
+
+ private:
+  int device_id_;
+  MatmulParametersProto proto_;
+  uint64_t hash_code_;
+};
+
 }  // namespace tensorflow
 #endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 

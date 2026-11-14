@@ -102,22 +102,21 @@ struct NodeItem {
   int input_start = 0;
 
   // Number of output edges, excluding control edges.
-  int32 num_output_edges;
+  int32_t num_output_edges;
 
   // Number of output control edges.
-  int32 num_output_control_edges;
+  int32_t num_output_control_edges;
 
   // If non-null, contains an array of num_outputs bools, where the ith bool
   // is true if and only if the ith output is consumed by another node.
   std::unique_ptr<bool[]> outputs_required;
 
-  gtl::MutableArraySlice<EdgeInfo> mutable_output_edges() {
-    return gtl::MutableArraySlice<EdgeInfo>(output_edge_base(),
-                                            num_output_edges);
+  absl::Span<EdgeInfo> mutable_output_edges() {
+    return absl::Span<EdgeInfo>(output_edge_base(), num_output_edges);
   }
 
-  gtl::ArraySlice<EdgeInfo> output_edges() const {
-    return gtl::ArraySlice<EdgeInfo>(output_edge_base(), num_output_edges);
+  absl::Span<const EdgeInfo> output_edges() const {
+    return absl::Span<const EdgeInfo>(output_edge_base(), num_output_edges);
   }
 
   gtl::ArraySlice<ControlEdgeInfo> output_control_edges() const {
@@ -144,12 +143,12 @@ struct NodeItem {
   // 0... for forward from that input.
   const int* forward_from() const { return forward_from_base(); }
 
-  string DebugString() const;
+  std::string DebugString() const;
 
  private:
   friend class GraphView;
 
-  NodeItem() {}
+  NodeItem() = default;
 
   // Variable length section starts immediately after *this
   // (uint8 is enough for DataType).
@@ -186,21 +185,22 @@ struct NodeItem {
                                       num_output_control_edges +
                                   sizeof(AllocatorAttributes) * num_outputs);
   }
-  uint8* input_type_base() const {
-    return reinterpret_cast<uint8*>(
+  uint8_t* input_type_base() const {
+    return reinterpret_cast<uint8_t*>(
         var() + sizeof(EdgeInfo) * num_output_edges +
         sizeof(ControlEdgeInfo) * num_output_control_edges +
         sizeof(AllocatorAttributes) * num_outputs + sizeof(int) * num_outputs);
   }
-  uint8* output_type_base() const {
-    return reinterpret_cast<uint8*>(
+  uint8_t* output_type_base() const {
+    return reinterpret_cast<uint8_t*>(
         var() + sizeof(EdgeInfo) * num_output_edges +
         sizeof(ControlEdgeInfo) * num_output_control_edges +
         sizeof(AllocatorAttributes) * num_outputs + sizeof(int) * num_outputs +
-        sizeof(uint8) * num_inputs);
+        sizeof(uint8_t) * num_inputs);
   }
 
-  TF_DISALLOW_COPY_AND_ASSIGN(NodeItem);
+  NodeItem(const NodeItem&) = delete;
+  void operator=(const NodeItem&) = delete;
 };
 
 // Immutable view of a Graph organized for efficient execution.
@@ -211,8 +211,8 @@ class GraphView {
   GraphView() : space_(nullptr) {}
   ~GraphView();
 
-  Status Initialize(const Graph* g);
-  Status SetAllocAttrs(const Graph* g, const Device* device);
+  absl::Status Initialize(const Graph* g);
+  absl::Status SetAllocAttrs(const Graph* g, const Device* device);
   void SetScopedAllocatorAttrs(const std::vector<const Node*>& sa_nodes);
 
   // Returns a mutable pointer to the `NodeItem` with the given `id` if it
@@ -220,8 +220,8 @@ class GraphView {
   NodeItem* node(int32_t id) const {
     DCHECK_GE(id, 0);
     DCHECK_LT(id, num_nodes_);
-    uint32 offset = node_offsets_[id];
-    return ((offset == kuint32max)
+    uint32_t offset = node_offsets_[id];
+    return ((offset == std::numeric_limits<uint32_t>::max())
                 ? nullptr
                 : reinterpret_cast<NodeItem*>(space_ + node_offsets_[id]));
   }
@@ -232,24 +232,25 @@ class GraphView {
   const NodeItem& node_ref(int32_t id) const {
     DCHECK_GE(id, 0);
     DCHECK_LT(id, num_nodes_);
-    uint32 offset = node_offsets_[id];
-    DCHECK_NE(offset, kuint32max);
+    uint32_t offset = node_offsets_[id];
+    DCHECK_NE(offset, std::numeric_limits<uint32_t>::max());
     return *reinterpret_cast<NodeItem*>(space_ + node_offsets_[id]);
   }
 
-  int32 num_nodes() const { return num_nodes_; }
+  int32_t num_nodes() const { return num_nodes_; }
 
  private:
   char* InitializeNode(char* ptr, const Node* n);
   size_t NodeItemBytes(const Node* n);
 
-  int32 num_nodes_ = 0;
-  uint32* node_offsets_ = nullptr;  // array of size "num_nodes_"
+  int32_t num_nodes_ = 0;
+  uint32_t* node_offsets_ = nullptr;  // array of size "num_nodes_"
   // node_offsets_[id] holds the byte offset for node w/ "id" in space_
 
   char* space_;  // NodeItem objects are allocated here
 
-  TF_DISALLOW_COPY_AND_ASSIGN(GraphView);
+  GraphView(const GraphView&) = delete;
+  void operator=(const GraphView&) = delete;
 };
 
 }  // namespace tensorflow

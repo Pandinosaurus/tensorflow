@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 // This provides utility macros and functions that are inherently platform
-// specific.
+// specific or shared across runtime & converter.
 #ifndef TENSORFLOW_LITE_CORE_MACROS_H_
 #define TENSORFLOW_LITE_CORE_MACROS_H_
 
@@ -32,6 +32,20 @@ limitations under the License.
 #define TFLITE_EXPECT_TRUE(cond) (cond)
 #endif
 
+#ifdef _WIN32
+#define TFLITE_NOINLINE __declspec(noinline)
+#else
+#ifdef __has_attribute
+#if __has_attribute(noinline)
+#define TFLITE_NOINLINE __attribute__((noinline))
+#else
+#define TFLITE_NOINLINE
+#endif  // __has_attribute(noinline)
+#else
+#define TFLITE_NOINLINE
+#endif  // __has_attribute
+#endif  // _WIN32
+
 // Normally we'd use ABSL_HAVE_ATTRIBUTE_WEAK and ABSL_ATTRIBUTE_WEAK, but
 // we avoid the absl dependency for binary size reasons.
 #ifdef __has_attribute
@@ -49,6 +63,17 @@ limitations under the License.
 #else
 #define TFLITE_ATTRIBUTE_WEAK
 #define TFLITE_HAS_ATTRIBUTE_WEAK 0
+#endif
+
+// Disables UBSan's integer-overflow checks for an annotated function. Only use
+// this where the overflow merely yields a wrong numeric result and poses no
+// safety risk. Expands to nothing on compilers without the attribute.
+#if TFLITE_HAS_ATTRIBUTE(no_sanitize)
+#define TFLITE_NO_SANITIZE_INTEGER_OVERFLOW \
+  __attribute__((                           \
+      no_sanitize("signed-integer-overflow", "unsigned-integer-overflow")))
+#else
+#define TFLITE_NO_SANITIZE_INTEGER_OVERFLOW
 #endif
 
 #endif  // TENSORFLOW_LITE_CORE_MACROS_H_

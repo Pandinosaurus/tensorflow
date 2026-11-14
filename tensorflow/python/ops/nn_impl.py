@@ -14,30 +14,31 @@
 # =============================================================================
 """Implementation of Neural Net (NN) functions."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import math
+import warnings
 
-from tensorflow.python.distribute import distribution_strategy_context as ds
+from tensorflow.python.eager import context
 from tensorflow.python.framework import constant_op
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import ops
+from tensorflow.python.framework import tensor
+from tensorflow.python.framework import tensor_util
+
 from tensorflow.python.ops import array_ops
+from tensorflow.python.ops import array_ops_stack
 from tensorflow.python.ops import candidate_sampling_ops
 from tensorflow.python.ops import check_ops
-from tensorflow.python.ops import control_flow_ops
+from tensorflow.python.ops import cond as tf_cond
+from tensorflow.python.ops import ctc_ops  # pylint: disable=unused-import
 from tensorflow.python.ops import custom_gradient
 from tensorflow.python.ops import embedding_ops
-from tensorflow.python.ops import gen_array_ops  # pylint: disable=unused-import
 from tensorflow.python.ops import gen_nn_ops
 from tensorflow.python.ops import gen_sparse_ops
 from tensorflow.python.ops import linalg_ops
 from tensorflow.python.ops import math_ops
+from tensorflow.python.ops import nn_fused_batch_norm_grad  # pylint: disable=unused-import
 from tensorflow.python.ops import nn_ops
 from tensorflow.python.ops import variables
-from tensorflow.python.ops.losses import util as losses_util
 from tensorflow.python.platform import device_context
 from tensorflow.python.util import dispatch
 from tensorflow.python.util.deprecation import deprecated_args
@@ -90,10 +91,11 @@ def log_poisson_loss(targets, log_input, compute_full_loss=False, name=None):
     targets = ops.convert_to_tensor(targets, name="targets")
     try:
       targets.get_shape().assert_is_compatible_with(log_input.get_shape())
-    except ValueError:
+    except ValueError as exc:
       raise ValueError(
           "`log_input` and `targets` must have the same shape, received "
-          f"({log_input.get_shape()} vs {targets.get_shape()}).")
+          f"({log_input.get_shape()} vs {targets.get_shape()})."
+      ) from exc
 
     result = math_ops.exp(log_input) - log_input * targets
     if compute_full_loss:
@@ -113,15 +115,13 @@ def log_poisson_loss(targets, log_input, compute_full_loss=False, name=None):
 
 @tf_export(v1=["nn.sigmoid_cross_entropy_with_logits"])
 @dispatch.add_dispatch_support
-def sigmoid_cross_entropy_with_logits(  # pylint: disable=invalid-name
-    _sentinel=None,
+def sigmoid_cross_entropy_with_logits(
     labels=None,
     logits=None,
     name=None):
   """See sigmoid_cross_entropy_with_logits_v2."""
   # pylint: disable=protected-access
-  nn_ops._ensure_xent_args("sigmoid_cross_entropy_with_logits", _sentinel,
-                           labels, logits)
+  nn_ops._ensure_xent_args("sigmoid_cross_entropy_with_logits", labels, logits)
   # pylint: enable=protected-access
 
   with ops.name_scope(name, "logistic_loss", [logits, labels]) as name:
@@ -129,10 +129,12 @@ def sigmoid_cross_entropy_with_logits(  # pylint: disable=invalid-name
     labels = ops.convert_to_tensor(labels, name="labels")
     try:
       labels.get_shape().assert_is_compatible_with(logits.get_shape())
-    except ValueError:
-      raise ValueError("`logits` and `labels` must have the same shape, "
-                       f"received ({logits.get_shape()} vs "
-                       f"{labels.get_shape()}).")
+    except ValueError as exc:
+      raise ValueError(
+          "`logits` and `labels` must have the same shape, "
+          f"received ({logits.get_shape()} vs "
+          f"{labels.get_shape()})."
+      ) from exc
 
     # The logistic loss formula from above is
     #   x - x * z + log(1 + exp(-x))
@@ -155,6 +157,7 @@ def sigmoid_cross_entropy_with_logits(  # pylint: disable=invalid-name
 # Note: intentionally calling this v2 to not allow existing code with indirect
 # imports to ignore the sentinel behavior.
 @tf_export("nn.sigmoid_cross_entropy_with_logits", v1=[])
+@dispatch.register_binary_elementwise_api
 @dispatch.add_dispatch_support
 def sigmoid_cross_entropy_with_logits_v2(  # pylint: disable=invalid-name
     labels=None,
@@ -325,10 +328,12 @@ def weighted_cross_entropy_with_logits_v2(labels, logits, pos_weight,
     labels = ops.convert_to_tensor(labels, name="labels")
     try:
       labels.get_shape().assert_is_compatible_with(logits.get_shape())
-    except ValueError:
-      raise ValueError("`logits` and `labels` must have the same shape, "
-                       f"received ({logits.get_shape()} vs "
-                       f"{labels.get_shape()}).")
+    except ValueError as exc:
+      raise ValueError(
+          "`logits` and `labels` must have the same shape, "
+          f"received ({logits.get_shape()} vs "
+          f"{labels.get_shape()})."
+      ) from exc
 
     # The logistic loss formula from above is
     #   (1 - z) * x + (1 + (q - 1) * z) * log(1 + exp(-x))
@@ -409,111 +414,6 @@ def weighted_cross_entropy_with_logits(labels=None,
   return weighted_cross_entropy_with_logits_v2(labels, logits, pos_weight, name)
 
 
-@tf_export("nn.compute_average_loss")
-@dispatch.add_dispatch_support
-def compute_average_loss(per_example_loss,
-                         sample_weight=None,
-                         global_batch_size=None):
-  """Scales per-example losses with sample_weights and computes their average.
-
-  Usage with distribution strategy and custom training loop:
-
-  ```python
-  with strategy.scope():
-    def compute_loss(labels, predictions, sample_weight=None):
-
-      # If you are using a `Loss` class instead, set reduction to `NONE` so that
-      # we can do the reduction afterwards and divide by global batch size.
-      per_example_loss = tf.keras.losses.sparse_categorical_crossentropy(
-          labels, predictions)
-
-      # Compute loss that is scaled by sample_weight and by global batch size.
-      return tf.nn.compute_average_loss(
-          per_example_loss,
-          sample_weight=sample_weight,
-          global_batch_size=GLOBAL_BATCH_SIZE)
-  ```
-
-  Args:
-    per_example_loss: Per-example loss.
-    sample_weight: Optional weighting for each example.
-    global_batch_size: Optional global batch size value. Defaults to (size of
-      first dimension of `losses`) * (number of replicas).
-
-  Returns:
-    Scalar loss value.
-  """  # pylint: disable=g-doc-exception
-  per_example_loss = ops.convert_to_tensor(per_example_loss)
-  input_dtype = per_example_loss.dtype
-
-  with losses_util.check_per_example_loss_rank(per_example_loss):
-    if sample_weight is not None:
-      sample_weight = ops.convert_to_tensor(sample_weight)
-      per_example_loss = losses_util.scale_losses_by_sample_weight(
-          per_example_loss, sample_weight)
-    per_example_loss = math_ops.cast(per_example_loss, input_dtype)
-
-    if global_batch_size is None:
-      if ds.has_strategy() and ds.in_cross_replica_context():
-        raise RuntimeError(
-            "You are calling `compute_average_loss` in cross replica context, "
-            "while it was expected to be called in replica context.")
-
-      num_replicas = ds.get_strategy().num_replicas_in_sync
-      per_replica_batch_size = array_ops.shape_v2(per_example_loss)[0]
-      global_batch_size = per_replica_batch_size * num_replicas
-
-    check_ops.assert_scalar_v2(
-        global_batch_size, message="global_batch_size must be scalar.")
-    check_ops.assert_integer_v2(
-        global_batch_size,
-        message="global_batch_size must be an integer.")
-    check_ops.assert_positive_v2(
-        global_batch_size, message="global_batch_size must be positive.")
-
-    global_batch_size = math_ops.cast(global_batch_size, input_dtype)
-    return math_ops.reduce_sum(per_example_loss) / global_batch_size
-
-
-@tf_export("nn.scale_regularization_loss")
-@dispatch.add_dispatch_support
-def scale_regularization_loss(regularization_loss):
-  """Scales the sum of the given regularization losses by number of replicas.
-
-  Usage with distribution strategy and custom training loop:
-
-  ```python
-  with strategy.scope():
-    def compute_loss(self, label, predictions):
-      per_example_loss = tf.keras.losses.sparse_categorical_crossentropy(
-          labels, predictions)
-
-      # Compute loss that is scaled by sample_weight and by global batch size.
-      loss = tf.nn.compute_average_loss(
-          per_example_loss,
-          sample_weight=sample_weight,
-          global_batch_size=GLOBAL_BATCH_SIZE)
-
-      # Add scaled regularization losses.
-      loss += tf.nn.scale_regularization_loss(tf.nn.l2_loss(weights))
-      return loss
-  ```
-
-  Args:
-    regularization_loss: Regularization loss.
-
-  Returns:
-    Scalar loss value.
-  """  # pylint: disable=g-doc-exception
-  if ds.has_strategy() and ds.in_cross_replica_context():
-    raise RuntimeError(
-        "You are calling `scale_regularization_loss` in cross replica context, "
-        "while it was expected to be called in replica context.")
-
-  num_replicas = ds.get_strategy().num_replicas_in_sync
-  return math_ops.reduce_sum(regularization_loss) / num_replicas
-
-
 @tf_export(v1=["nn.relu_layer"])
 @dispatch.add_dispatch_support
 def relu_layer(x, weights, biases, name=None):
@@ -539,11 +439,13 @@ def relu_layer(x, weights, biases, name=None):
 
 
 @tf_export("nn.silu", "nn.swish")
+@dispatch.register_unary_elementwise_api
 @dispatch.add_dispatch_support
-@custom_gradient.custom_gradient
-def swish(features):
+def swish(features, beta=1.0):
   # pylint: disable=g-doc-args
-  """Computes the SiLU or Swish activation function: `x * sigmoid(x)`.
+  """Computes the SiLU or Swish activation function: `x * sigmoid(beta * x)`.
+
+  beta : Hyperparameter for Swish activation function. Default value 1.0.
 
   The SiLU activation function was introduced in "Gaussian Error Linear Units
   (GELUs)" [Hendrycks et al. 2016](https://arxiv.org/abs/1606.08415) and
@@ -555,31 +457,89 @@ def swish(features):
 
   Args:
     features: A `Tensor` representing preactivation values.
+    beta: A `Tensor` representing value of beta hyperparameter, broadcastable to
+      `features`. Default value 1.0.
 
   Returns:
     The activation value.
   """
   # pylint: enable=g-doc-args
   features = ops.convert_to_tensor(features, name="features")
+  beta = ops.convert_to_tensor(beta, name="beta")
+  beta = math_ops.cast(beta, features.dtype)
 
-  def grad(dy):
-    """Gradient for the Swish activation function"""
-    # Naively, x * tf.nn.sigmoid(x) requires keeping both x and sigmoid(x)
-    # around for backprop, effectively doubling the tensor's memory consumption.
-    # We use a control dependency here so that sigmoid(features) is re-computed
-    # during backprop (the control dep prevents it being de-duped with the
-    # forward pass) and we can free the sigmoid(features) expression immediately
-    # after use during the forward pass.
-    with ops.control_dependencies([dy]):
-      sigmoid_features = math_ops.sigmoid(features)
-    activation_grad = (
-        sigmoid_features * (1.0 + features * (1.0 - sigmoid_features)))
-    return dy * activation_grad
+  @custom_gradient.custom_gradient
+  def swish_impl(features, beta):
 
-  return features * math_ops.sigmoid(features), grad
+    def grad(dy):
+      """Gradient for the Swish activation function."""
+      # Naively, x * tf.nn.sigmoid(x) requires keeping both x and sigmoid(x)
+      # around for backprop, effectively doubling the tensor's memory
+      # consumption. We use a control dependency here so that sigmoid(features)
+      # is re-computed during backprop (the control dep prevents it being
+      # de-duped with the forward pass) and we can free the sigmoid(features)
+      # expression immediately after use during the forward pass.
+      with ops.control_dependencies([dy]):
+        logits = beta * features
+        if features.dtype == dtypes.float64:
+          is_extreme_neg = logits <= -500.0
+          safe_logits = array_ops.where_v2(is_extreme_neg, logits, -500.0)
+          use_complement = logits >= 0.0
+          sigmoid_tail = math_ops.sigmoid(
+              array_ops.where_v2(use_complement, -logits, logits)
+          )
+          sigmoid_features = array_ops.where_v2(
+              use_complement, 1.0 - sigmoid_tail, sigmoid_tail
+          )
+          sigmoid_grad = sigmoid_tail * (1.0 - sigmoid_tail)
+          scaled_logits = safe_logits * 0.0625
+          half_exp = math_ops.exp(scaled_logits * 8.0)
+
+          standard_act_grad = sigmoid_features + logits * sigmoid_grad
+          extreme_neg_act_grad = (
+              ((0.0625 + scaled_logits) * half_exp) * half_exp
+          ) * 16.0
+          activation_grad = array_ops.where_v2(
+              is_extreme_neg, extreme_neg_act_grad, standard_act_grad
+          )
+
+          beta_common = dy * math_ops.square(features)
+          extreme_neg_beta_grad_terms = (beta_common * half_exp) * half_exp
+          standard_beta_grad_terms = beta_common * sigmoid_grad
+          beta_grad = array_ops.where_v2(
+              is_extreme_neg,
+              extreme_neg_beta_grad_terms,
+              standard_beta_grad_terms,
+          )
+        else:
+          sigmoid_features = math_ops.sigmoid(logits)
+          sigmoid_grad = sigmoid_features * (1.0 - sigmoid_features)
+          activation_grad = sigmoid_features + logits * sigmoid_grad
+          beta_grad = dy * math_ops.square(features) * sigmoid_grad
+
+      features_grad = dy * activation_grad
+
+      # Reduce each gradient back to its input shape after broadcasting.
+      features_shape = array_ops.shape(features)
+      beta_shape = array_ops.shape(beta)
+      features_axes, beta_axes = array_ops.broadcast_gradient_args(
+          features_shape, beta_shape
+      )
+      return (
+          array_ops.reshape(
+              math_ops.reduce_sum(features_grad, features_axes), features_shape
+          ),
+          array_ops.reshape(
+              math_ops.reduce_sum(beta_grad, beta_axes), beta_shape
+          ),
+      )
+
+    return features * math_ops.sigmoid(beta * features), grad
+
+  return swish_impl(features, beta)
 
 
-# pylint: disable=redefined-builtin
+# pylint: disable=redefined-builtin,redefined-outer-name
 @tf_export("linalg.normalize")
 @dispatch.add_dispatch_support
 def normalize(tensor, ord="euclidean", axis=None, name=None):
@@ -687,6 +647,19 @@ def l2_normalize(x, axis=None, epsilon=1e-12, name=None, dim=None):
       norm_real = math_ops.multiply(math_ops.real(x), x_inv_norm)
       norm_imag = math_ops.multiply(math_ops.imag(x), x_inv_norm)
       return math_ops.complex(norm_real, norm_imag, name=name)
+    if x.dtype.base_dtype in (dtypes.float16, dtypes.bfloat16):
+      # The sum of squares overflows float16 (and `epsilon` underflows it),
+      # and bfloat16 loses precision, so normalize in `float32`.
+      x32 = math_ops.cast(x, dtypes.float32)
+      square_sum = math_ops.reduce_sum(
+          math_ops.square(x32), axis, keepdims=True
+      )
+      x_inv_norm = math_ops.rsqrt(
+          math_ops.maximum(square_sum, math_ops.cast(epsilon, dtypes.float32))
+      )
+      return math_ops.cast(
+          math_ops.multiply(x32, x_inv_norm), x.dtype, name=name
+      )
     square_sum = math_ops.reduce_sum(math_ops.square(x), axis, keepdims=True)
     x_inv_norm = math_ops.rsqrt(math_ops.maximum(square_sum, epsilon))
     return math_ops.multiply(x, x_inv_norm, name=name)
@@ -738,7 +711,7 @@ def zero_fraction(value, name=None):
     value = ops.convert_to_tensor(value, name="value")
     size = array_ops.size(value, out_type=dtypes.int64)
     # If the count is small, we can save memory/CPU with an int32 reduction.
-    num_nonzero = control_flow_ops.cond(
+    num_nonzero = tf_cond.cond(
         size <= dtypes.int32.max,
         # pylint: disable=g-long-lambda
         true_fn=lambda: math_ops.cast(
@@ -753,6 +726,131 @@ def zero_fraction(value, name=None):
       zero_fraction_float32 = num_zero_float32 / size_float32
 
     return array_ops.identity(zero_fraction_float32, "fraction")
+
+
+def _check_dilated_depthwise_shapes(input, filter, rate, padding, data_format):
+  """Raises a descriptive error if a dilated depthwise conv has no window.
+
+  `with_space_to_batch` evaluates the dilated convolution densely over
+  space-to-batch blocks. When the input (plus any explicit padding) is smaller
+  than the dilated filter, no valid window exists: `tf.function` then fails
+  with an opaque negative-dimension error while eager silently returns a tensor
+  of the wrong shape. Validating the shapes up front gives both execution modes
+  the same descriptive error.
+
+  Shapes that are not statically known are left for the op to report at run
+  time. "SAME" padding always admits an output and is not checked.
+
+  Args:
+    input: The `input` argument of `depthwise_conv2d`.
+    filter: The `filter` argument of `depthwise_conv2d`.
+    rate: The dilation rate, a list of two positive ints.
+    padding: The `padding` argument of `depthwise_conv2d`.
+    data_format: The `data_format` argument of `depthwise_conv2d`.
+
+  Raises:
+    ValueError: If a dilated filter does not fit in the padded input.
+  """
+  if all(r == 1 for r in rate):
+    return
+
+  channels_first = (data_format or "").startswith("NC")
+  if isinstance(padding, str):
+    if padding == "SAME":
+      # `with_space_to_batch` pads enough for an output to always exist.
+      return
+    spatial_pads = [(0, 0), (0, 0)]
+  else:
+    # Drop the batch and channel dimensions, keep the two spatial ones.
+    spatial_pads = [list(p) for p in padding]
+    spatial_pads = spatial_pads[2:] if channels_first else spatial_pads[1:-1]
+
+  if input.shape.rank != 4 or filter.shape.rank != 4:
+    return
+  in_shape = input.shape.as_list()
+  f_shape = filter.shape.as_list()
+  if None in in_shape or None in f_shape:
+    return
+
+  in_spatial = in_shape[2:4] if channels_first else in_shape[1:3]
+  # The filter layout is `[height, width, in_channels, channel_multiplier]`
+  # regardless of `data_format`.
+  f_spatial = f_shape[0:2]
+
+  for i, dim_name in enumerate(("height", "width")):
+    available = in_spatial[i] + spatial_pads[i][0] + spatial_pads[i][1]
+    dilated = (f_spatial[i] - 1) * rate[i] + 1
+    if available < dilated:
+      raise ValueError(
+          f"Input {dim_name} ({in_spatial[i]}) plus padding "
+          f"({spatial_pads[i][0] + spatial_pads[i][1]}) is too small for "
+          f"dilation rate {rate[i]} with filter size {f_spatial[i]}: the "
+          f"dilated filter spans {dilated} values but only {available} are "
+          "available, so the convolution has no valid window."
+      )
+
+
+def _assert_dilated_depthwise_fits(input, filter, rate, padding, data_format):
+  """Guards a dilated depthwise conv whose spatial shapes are dynamic.
+
+  `_check_dilated_depthwise_shapes` cannot see shapes that are unknown at
+  tracing time (a `tf.function` accepting a `TensorSpec` with `None`
+  dimensions). Without a run-time check, an input too small for the dilated
+  filter makes the underlying op silently return a wrongly shaped result
+  instead of failing, which is the `tf.function` half of #113320.
+
+  Args:
+    input: The `input` argument of `depthwise_conv2d`.
+    filter: The `filter` argument of `depthwise_conv2d`.
+    rate: The dilation rate, a list of two positive ints.
+    padding: The `padding` argument of `depthwise_conv2d`.
+    data_format: The `data_format` argument of `depthwise_conv2d`.
+
+  Returns:
+    `input`, with a control dependency on the shape assertion.
+  """
+  # A rank other than 4 is invalid for the op itself; leave it to the op to
+  # report, rather than slicing `array_ops.shape` below on a rank we cannot
+  # interpret.
+  if (input.shape.rank is not None and input.shape.rank != 4) or (
+      filter.shape.rank is not None and filter.shape.rank != 4
+  ):
+    return input
+
+  channels_first = (data_format or "").startswith("NC")
+  if isinstance(padding, str):
+    pads = [0, 0]
+  else:
+    # Drop the batch and channel dimensions, keep the two spatial ones.
+    spatial_pads = [list(p) for p in padding]
+    spatial_pads = spatial_pads[2:] if channels_first else spatial_pads[1:-1]
+    pads = [
+        spatial_pads[0][0] + spatial_pads[0][1],
+        spatial_pads[1][0] + spatial_pads[1][1],
+    ]
+
+  in_shape = array_ops.shape(input)
+  f_shape = array_ops.shape(filter)
+  in_spatial = in_shape[2:4] if channels_first else in_shape[1:3]
+  # The filter layout is `[height, width, in_channels, channel_multiplier]`
+  # regardless of `data_format`.
+  f_spatial = f_shape[0:2]
+
+  pads_tensor = ops.convert_to_tensor(pads, dtype=in_spatial.dtype)
+  available = in_spatial + pads_tensor
+  dilated = (f_spatial - 1) * ops.convert_to_tensor(
+      rate, dtype=f_spatial.dtype
+  ) + 1
+  check = check_ops.assert_greater_equal(
+      available,
+      dilated,
+      message=(
+          "Dilated depthwise convolution: the input (plus padding) is "
+          "smaller than the dilated filter, so there is no valid window."
+      ),
+  )
+  with ops.control_dependencies([check]):
+    return array_ops.identity(input)
 
 
 # pylint: disable=redefined-builtin
@@ -852,6 +950,29 @@ def depthwise_conv2d(input,
     if rate is None:
       rate = [1, 1]
 
+    if any([_ > 1 for _ in rate]) and any([_ != 1 for _ in strides]):
+      warnings.warn(
+          "When dilation rate is greater than 1, "
+          "then all values of strides must be 1. "
+          f"Received: `dilation rate` {rate} and "
+          f"`strides` {strides}"
+      )
+
+    _check_dilated_depthwise_shapes(input, filter, rate, padding, data_format)
+
+    # The check above only sees static shapes. When tracing a `tf.function`
+    # whose spatial dimensions are unknown, fall back to a run-time assertion
+    # so that an oversized dilated filter fails instead of silently producing a
+    # wrongly shaped result. "SAME" padding always admits an output.
+    if any(_ > 1 for _ in rate) and not (
+        isinstance(padding, str) and padding == "SAME"
+    ):
+      in_shape = input.shape.as_list() if input.shape.rank == 4 else None
+      if in_shape is None or None in in_shape:
+        input = _assert_dilated_depthwise_fits(
+            input, filter, rate, padding, data_format
+        )
+
     # Use depthwise_conv2d_native if executing on TPU.
     if device_context.enclosing_tpu_context() is not None:
       if data_format == "NCHW":
@@ -906,15 +1027,17 @@ def depthwise_conv2d_v2(input,
 
   In detail, with the default NHWC format,
 
-      output[b, i, j, k * channel_multiplier + q] = sum_{di, dj}
-           filter[di, dj, k, q] * input[b, strides[1] * i + rate[0] * di,
-                                           strides[2] * j + rate[1] * dj, k]
+      output[b, i, j, k * channel_multiplier + q] =
+          sum_{di, dj} filter[di, dj, k, q] *
+                       input[b, strides[1] * i + dilations[0] * di,
+                                strides[2] * j + dilations[1] * dj, k]
 
   Must have `strides[0] = strides[3] = 1`.  For the most common case of the
   same horizontal and vertical strides, `strides = [1, stride, stride, 1]`.
-  If any value in `rate` is greater than 1, we perform atrous depthwise
+  If any value in `dilations` is greater than 1, we perform atrous depthwise
   convolution, in which case all values in the `strides` tensor must be equal
-  to 1.
+  to 1; a `ValueError` is raised otherwise. A dilated depthwise convolution is
+  evaluated with space-to-batch, which cannot express a stride.
 
   Usage Example:
 
@@ -948,15 +1071,17 @@ def depthwise_conv2d_v2(input,
 
   Args:
     input: 4-D with shape according to `data_format`.
-    filter: 4-D with shape
-      `[filter_height, filter_width, in_channels, channel_multiplier]`.
-    strides: 1-D of size 4.  The stride of the sliding window for each
-      dimension of `input`.
+    filter: 4-D with shape `[filter_height, filter_width, in_channels,
+      channel_multiplier]`.
+    strides: 1-D of size 4.  The stride of the sliding window for each dimension
+      of `input`.
     padding: Controls how to pad the image before applying the convolution. Can
       be the string `"SAME"` or `"VALID"` indicating the type of padding
       algorithm to use, or a list indicating the explicit paddings at the start
-      and end of each dimension. When explicit padding is used and data_format
-      is `"NHWC"`, this should be in the form `[[0, 0], [pad_top, pad_bottom],
+      and end of each dimension. See
+      [here](https://www.tensorflow.org/api_docs/python/tf/nn#notes_on_padding)
+      for more information. When explicit padding is used and data_format is
+      `"NHWC"`, this should be in the form `[[0, 0], [pad_top, pad_bottom],
       [pad_left, pad_right], [0, 0]]`. When explicit padding used and
       data_format is `"NCHW"`, this should be in the form `[[0, 0], [0, 0],
       [pad_top, pad_bottom], [pad_left, pad_right]]`.
@@ -1209,6 +1334,30 @@ def sufficient_statistics(x, axes, shift=None, keep_dims=None, name=None,
     * the (possibly shifted) sum of squares of the elements in the array.
     * the shift by which the mean must be corrected or None if `shift` is None.
   """
+  if isinstance(axes, (tensor.Tensor, variables.Variable)):
+    # A `Tensor` built inside an explicit `ops.Graph()` stays symbolic even when
+    # eager execution is active, and symbolic tensors have no `numpy()`.
+    if context.executing_eagerly() and hasattr(axes, "numpy"):
+      axes = axes.numpy().tolist()
+    else:
+      axes_const = tensor_util.constant_value(axes)
+      if axes_const is None:
+        raise ValueError(
+            "`axes` must be statically known when passed as a tensor in "
+            f"graph mode, got {axes}."
+        )
+      axes = axes_const.tolist()
+  elif hasattr(axes, "tolist"):
+    # NumPy arrays are a documented `axes` type ("array of ints"). Convert
+    # them to Python ints so that the `set()` below works on hashable values.
+    axes = axes.tolist()
+  # `tf.nn.moments` accepts a scalar `axes`, and a single axis is naturally
+  # spelled that way. After the conversions above a scalar is a Python int,
+  # which `set()` cannot iterate, so wrap it into a list of one element.
+  # `hasattr(axes, "__iter__")` is used instead of a list/tuple/set whitelist
+  # because `range` and generators are accepted today and must keep working.
+  if not hasattr(axes, "__iter__"):
+    axes = [axes]
   axes = list(set(axes))
   keep_dims = deprecated_argument_lookup(
       "keepdims", keepdims, "keep_dims", keep_dims)
@@ -1345,6 +1494,20 @@ def moments(
       "keepdims", keepdims, "keep_dims", keep_dims)
   if keep_dims is None:
     keep_dims = False
+  if isinstance(axes, (tensor.Tensor, variables.Variable)):
+    if context.executing_eagerly():
+      axes = axes.numpy().tolist()
+
+    else:
+      axes_const = tensor_util.constant_value(axes)
+      if axes_const is not None:
+        axes = axes_const.tolist()
+  elif hasattr(axes, "tolist"):
+    # `axes` is documented as an "array of ints", so NumPy arrays (and other
+    # array-likes) are legal inputs, but `tf.squeeze` only accepts a Python
+    # list or tuple in the `keepdims=False` path. Normalize them here, as
+    # `weighted_moments` already does (GitHub issues #129819, #101580).
+    axes = axes.tolist()
   with ops.name_scope(name, "moments", [x, axes]):
     # The dynamic range of fp16 is too limited to support the collection of
     # sufficient statistics. As a workaround we simply perform the operations
@@ -1356,11 +1519,16 @@ def moments(
     # Note: stop_gradient does not change the gradient that gets
     #       backpropagated to the mean from the variance calculation,
     #       because that gradient is zero
-    variance = math_ops.reduce_mean(
-        math_ops.squared_difference(y, array_ops.stop_gradient(mean)),
-        axes,
-        keepdims=True,
-        name="variance")
+    diff = math_ops.subtract(y, array_ops.stop_gradient(mean))
+    variance = math_ops.maximum(
+        math_ops.subtract(
+            math_ops.reduce_mean(math_ops.square(diff), axes, keepdims=True),
+            math_ops.square(math_ops.reduce_mean(diff, axes, keepdims=True)),
+        ),
+        math_ops.cast(0, y.dtype),
+        name="variance",
+    )
+
     if not keep_dims:
       mean = array_ops.squeeze(mean, axes)
       variance = array_ops.squeeze(variance, axes)
@@ -1431,6 +1599,14 @@ def weighted_moments(x, axes, frequency_weights, name=None, keep_dims=None,
       "keepdims", keepdims, "keep_dims", keep_dims)
   if keep_dims is None:
     keep_dims = False
+  if isinstance(axes, (tensor.Tensor, variables.Variable)):
+    if context.executing_eagerly():
+      axes = axes.numpy().tolist()
+
+    else:
+      axes_const = tensor_util.constant_value(axes)
+      if axes_const is not None:
+        axes = axes_const.tolist()
   with ops.name_scope(name, "weighted_moments", [x, frequency_weights, axes]):
     x = ops.convert_to_tensor(x, name="x")
     frequency_weights = ops.convert_to_tensor(
@@ -1462,9 +1638,7 @@ def weighted_moments(x, axes, frequency_weights, name=None, keep_dims=None,
     sum_of_weights = math_ops.reduce_sum(
         broadcasted_weights, axes, name="sum_of_weights", keepdims=True)
 
-    divisor = math_ops.reciprocal(sum_of_weights, name="inv_weight_sum")
-
-    weighted_mean = math_ops.multiply(weighted_input_sum, divisor)
+    weighted_mean = math_ops.div_no_nan(weighted_input_sum, sum_of_weights)
 
     # Have the weighted mean; now on to variance:
     weighted_distsq = math_ops.reduce_sum(
@@ -1473,12 +1647,25 @@ def weighted_moments(x, axes, frequency_weights, name=None, keep_dims=None,
         name="weighted_distsq",
         keepdims=True)
 
-    weighted_variance = math_ops.multiply(weighted_distsq, divisor)
+    weighted_variance = math_ops.div_no_nan(weighted_distsq, sum_of_weights)
 
     if not keep_dims:
-      weighted_mean = array_ops.squeeze(weighted_mean, axis=axes)
+      # `tf.squeeze` requires axis to be a Python list or tuple in eager mode.
+      # Normalize `axes` here so that callers can pass either a Python list, a
+      # numpy array, or a `tf.Tensor` (as documented in the function signature),
+      # matching the behavior of `tf.nn.moments()`. See GitHub issue #101580.
+      squeeze_axes = axes
+      if tensor_util.is_tf_type(squeeze_axes):
+        static_axes = tensor_util.constant_value(squeeze_axes)
+        if static_axes is not None:
+          squeeze_axes = static_axes.tolist()
+      elif hasattr(squeeze_axes, "tolist"):
+        # numpy array or similar - convert to Python list
+        squeeze_axes = squeeze_axes.tolist()
+      weighted_mean = array_ops.squeeze(weighted_mean, axis=squeeze_axes)
       weighted_variance = array_ops.squeeze(
-          weighted_variance, axis=axes)
+          weighted_variance, axis=squeeze_axes
+      )
 
     if needs_cast:
       weighted_mean = math_ops.cast(weighted_mean, dtypes.float16)
@@ -1577,10 +1764,25 @@ def batch_normalization(x,
     inv = math_ops.rsqrt(variance + variance_epsilon)
     if scale is not None:
       inv *= scale
-    # Note: tensorflow/contrib/quantize/python/fold_batch_norms.py depends on
-    # the precise order of ops that are generated by the expression below.
-    return x * math_ops.cast(inv, x.dtype) + math_ops.cast(
-        offset - mean * inv if offset is not None else -mean * inv, x.dtype)
+    if not ops.executing_eagerly_outside_functions():
+      # Graphs built outside eager/tf.function keep this exact expression,
+      # including its cancellation of `offset`, because graph rewrites and
+      # tests match its ops and names (for example
+      # tools/graph_transforms/fold_batch_norms.cc and
+      # python/grappler/layout_optimizer_test.py).
+      return x * math_ops.cast(inv, x.dtype) + math_ops.cast(
+          offset - mean * inv if offset is not None else -mean * inv, x.dtype
+      )
+    # Center first: `x * inv + (offset - mean * inv)` cancels `offset`
+    # against `mean * inv` once |mean * inv| >> |offset|. Stay in the input
+    # dtype so the batch tensor is not copied into a wider type.
+    x_dtype = dtypes.as_dtype(x.dtype).base_dtype
+    inv = math_ops.cast(inv, x_dtype)
+    centered = x - math_ops.cast(mean, x_dtype)
+    normalized = centered * inv
+    if offset is not None:
+      normalized += math_ops.cast(offset, x_dtype)
+    return normalized
 
 
 @tf_export(v1=["nn.fused_batch_norm"])
@@ -1671,11 +1873,6 @@ def fused_batch_norm(
     mean = constant_op.constant([])
   if variance is None:
     variance = constant_op.constant([])
-
-  # Set a minimum epsilon to 1.001e-5, which is a requirement by CUDNN to
-  # prevent exception (see cudnn.h).
-  min_epsilon = 1.001e-5
-  epsilon = epsilon if epsilon > min_epsilon else min_epsilon
 
   y, running_mean, running_var, _, _, _ = gen_nn_ops.fused_batch_norm_v3(
       x,
@@ -1806,7 +2003,7 @@ def _sum_rows(x):
   # we use _sum_rows(x) in the nce_loss() computation since the loss
   # is mostly used for training.
   cols = array_ops.shape(x)[1]
-  ones_shape = array_ops.stack([cols, 1])
+  ones_shape = array_ops_stack.stack([cols, 1])
   ones = array_ops.ones(ones_shape, x.dtype)
   return array_ops.reshape(math_ops.matmul(x, ones), [-1])
 
@@ -1915,11 +2112,12 @@ def _compute_sampled_logits(weights,
 
     # true_w shape is [batch_size * num_true, dim]
     true_w = array_ops.slice(all_w, [0, 0],
-                             array_ops.stack(
+                             array_ops_stack.stack(
                                  [array_ops.shape(labels_flat)[0], -1]))
 
     sampled_w = array_ops.slice(
-        all_w, array_ops.stack([array_ops.shape(labels_flat)[0], 0]), [-1, -1])
+        all_w,
+        array_ops_stack.stack([array_ops.shape(labels_flat)[0], 0]), [-1, -1])
     # inputs has shape [batch_size, dim]
     # sampled_w has shape [num_sampled, dim]
     # Apply X*W', which yields [batch_size, num_sampled]
@@ -2012,7 +2210,7 @@ def nce_loss_v2(weights,
 
   See [Noise-contrastive estimation: A new estimation principle for
   unnormalized statistical
-  models](http://www.jmlr.org/proceedings/papers/v9/gutmann10a/gutmann10a.pdf).
+  models](https://arxiv.org/abs/1806.03664).
   Also see our [Candidate Sampling Algorithms
   Reference](https://www.tensorflow.org/extras/candidate_sampling.pdf)
 
@@ -2330,7 +2528,9 @@ def sampled_softmax_loss(weights,
   A common use case is to use this method for training, and calculate the full
   softmax loss for evaluation or inference. In this case, you must set
   `partition_strategy="div"` for the two losses to be consistent, as in the
-  following example:
+  following example (the partition strategy only matters when `weights` is a
+  list of more than one shard; for a single `weights` tensor `"div"` and
+  `"mod"` give the same result):
 
   ```python
   if mode == "train":
@@ -2356,29 +2556,28 @@ def sampled_softmax_loss(weights,
 
   Args:
     weights: A `Tensor` of shape `[num_classes, dim]`, or a list of `Tensor`
-        objects whose concatenation along dimension 0 has shape
-        [num_classes, dim].  The (possibly-sharded) class embeddings.
+      objects whose concatenation along dimension 0 has shape [num_classes,
+      dim].  The (possibly-sharded) class embeddings.
     biases: A `Tensor` of shape `[num_classes]`.  The class biases.
-    labels: A `Tensor` of type `int64` and shape `[batch_size,
-        num_true]`. The target classes.  Note that this format differs from
-        the `labels` argument of `nn.softmax_cross_entropy_with_logits`.
-    inputs: A `Tensor` of shape `[batch_size, dim]`.  The forward
-        activations of the input network.
+    labels: A `Tensor` of type `int64` and shape `[batch_size, num_true]`. The
+      target classes.  Note that this format differs from the `labels` argument
+      of `nn.softmax_cross_entropy_with_logits`.
+    inputs: A `Tensor` of shape `[batch_size, dim]`.  The forward activations of
+      the input network.
     num_sampled: An `int`.  The number of classes to randomly sample per batch.
     num_classes: An `int`. The number of possible classes.
     num_true: An `int`.  The number of target classes per training example.
     sampled_values: a tuple of (`sampled_candidates`, `true_expected_count`,
-        `sampled_expected_count`) returned by a `*_candidate_sampler` function.
-        (if None, we default to `log_uniform_candidate_sampler`)
+      `sampled_expected_count`) returned by a `*_candidate_sampler` function.
+      (if None, we default to `log_uniform_candidate_sampler`)
     remove_accidental_hits:  A `bool`.  whether to remove "accidental hits"
-        where a sampled class equals one of the target classes.  Default is
-        True.
+      where a sampled class equals one of the target classes.  Default is True.
     partition_strategy: A string specifying the partitioning strategy, relevant
-        if `len(weights) > 1`. Currently `"div"` and `"mod"` are supported.
-        Default is `"mod"`. See `tf.nn.embedding_lookup` for more details.
+      if `len(weights) > 1`. Currently `"div"` and `"mod"` are supported.
+      Default is `"mod"`. See `tf.nn.embedding_lookup` for more details.
     name: A name for the operation (optional).
     seed: random seed for candidate sampling. Default to None, which doesn't set
-        the op-level random seed for candidate sampling.
+      the op-level random seed for candidate sampling.
 
   Returns:
     A `batch_size` 1-D tensor of per-example sampled softmax losses.

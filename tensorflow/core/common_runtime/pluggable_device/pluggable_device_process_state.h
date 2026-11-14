@@ -16,9 +16,12 @@ limitations under the License.
 #ifndef TENSORFLOW_CORE_COMMON_RUNTIME_PLUGGABLE_DEVICE_PLUGGABLE_DEVICE_PROCESS_STATE_H_
 #define TENSORFLOW_CORE_COMMON_RUNTIME_PLUGGABLE_DEVICE_PLUGGABLE_DEVICE_PROCESS_STATE_H_
 
+#include <cstddef>
 #include <functional>
 #include <map>
+#include <memory>
 #include <unordered_map>
+#include <vector>
 
 #include "tensorflow/core/common_runtime/device/device_id.h"
 #include "tensorflow/core/common_runtime/process_state.h"
@@ -31,7 +34,6 @@ limitations under the License.
 
 namespace tensorflow {
 
-class Allocator;
 class PluggableDeviceBFCAllocator;
 class PluggableDeviceSimpleAllocator;
 class PoolAllocator;
@@ -41,8 +43,8 @@ class PluggableDeviceProcessState {
  public:
   // Singleton that manages each platform's per-process state. e.g. allocation
   // of shared resource.
-  static PluggableDeviceProcessState* singleton(const string& device_type,
-                                                const string& platform_name);
+  static PluggableDeviceProcessState* singleton(
+      const std::string& device_type, const std::string& platform_name);
 
   // Query whether any PluggableDevice has been created so far.
   // Disable thread safety analysis since a race is benign here.
@@ -87,9 +89,13 @@ class PluggableDeviceProcessState {
  protected:
   // PluggableDeviceProcessState is a singleton that should not normally be
   // deleted except at process shutdown.
-  PluggableDeviceProcessState(const string& device_type,
-                              const string& platform_name);
-  virtual ~PluggableDeviceProcessState() {}
+  PluggableDeviceProcessState(const std::string& device_type,
+                              const std::string& platform_name);
+  virtual ~PluggableDeviceProcessState() = default;
+
+  // Helper method for unit tests to reset the ProcessState singleton by
+  // cleaning up everything. Never use in production.
+  virtual void TestOnlyReset();
 
   ProcessState::MDMap* mem_desc_map() {
     if (process_state_) return &process_state_->mem_desc_map_;
@@ -99,8 +105,8 @@ class PluggableDeviceProcessState {
   static PluggableDeviceProcessState* instance_;
   ProcessState* process_state_;  // Not owned.
   bool pluggable_device_enabled_;
-  const string device_type_;
-  const string platform_name_;
+  const std::string device_type_;
+  const std::string platform_name_;
   mutex mu_;
 
   struct AllocatorParts {
@@ -115,10 +121,6 @@ class PluggableDeviceProcessState {
 
   std::vector<AllocatorParts> pluggable_device_host_allocators_
       TF_GUARDED_BY(mu_);
-  std::vector<std::vector<SubAllocator::Visitor>>
-      pluggable_device_host_alloc_visitors_ TF_GUARDED_BY(mu_);
-  std::vector<std::vector<SubAllocator::Visitor>>
-      pluggable_device_host_free_visitors_ TF_GUARDED_BY(mu_);
 };
 
 }  // namespace tensorflow

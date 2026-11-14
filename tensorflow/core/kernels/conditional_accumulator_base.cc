@@ -19,8 +19,8 @@ limitations under the License.
 namespace tensorflow {
 
 ConditionalAccumulatorBase::ConditionalAccumulatorBase(
-    const DataType& dtype, const PartialTensorShape& shape, const string& name,
-    const string& reduction_type)
+    const DataType& dtype, const PartialTensorShape& shape,
+    const std::string& name, const std::string& reduction_type)
     : dtype_(dtype),
       shape_(shape),
       name_(name),
@@ -29,9 +29,10 @@ ConditionalAccumulatorBase::ConditionalAccumulatorBase(
   current_global_step_ = 0;
 }
 
-Status ConditionalAccumulatorBase::MatchesNodeDef(const NodeDef& node_def) {
+absl::Status ConditionalAccumulatorBase::MatchesNodeDef(
+    const NodeDef& node_def) {
   // TODO(xinghao@): implement the checks for the node definition
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 /**
@@ -39,7 +40,8 @@ Status ConditionalAccumulatorBase::MatchesNodeDef(const NodeDef& node_def) {
  * step. Logs warning if the accumulator's time step is already larger than the
  * provided time step.
  */
-Status ConditionalAccumulatorBase::SetGlobalStep(int64_t new_global_step) {
+absl::Status ConditionalAccumulatorBase::SetGlobalStep(
+    int64_t new_global_step) {
   mutex_lock lock(mu_);
   if (new_global_step < current_global_step_) {
     LOG(WARNING) << "Attempt to set current_global_step_ to smaller value: "
@@ -47,7 +49,7 @@ Status ConditionalAccumulatorBase::SetGlobalStep(int64_t new_global_step) {
                  << " >= " << new_global_step << " = new_global_step.";
   }
   current_global_step_ = new_global_step;
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 /**
@@ -65,8 +67,8 @@ void ConditionalAccumulatorBase::TryTakeGrad(int num_required,
                                              OpKernelContext* ctx,
                                              DoneCallback callback) {
   if (num_required <= 0) {
-    ctx->CtxFailureWithWarning(errors::InvalidArgument(
-        "Argument num_required must be positive, but was ", num_required));
+    ctx->CtxFailureWithWarning(absl::InvalidArgumentError(absl::StrCat(
+        "Argument num_required must be positive, but was ", num_required)));
     callback();
   } else {
     CancellationManager* cm = ctx->cancellation_manager();
@@ -83,7 +85,7 @@ void ConditionalAccumulatorBase::TryTakeGrad(int num_required,
               if (counter_ >= attempt->elements_requested) {
                 bool successful_take_grad = TakeGradLockedHelper(
                     attempt->context, attempt->done_callback);
-                if (successful_take_grad) {
+                if (successful_take_grad || !attempt->context->status().ok()) {
                   return kComplete;
                 } else {
                   // Try again
@@ -98,7 +100,7 @@ void ConditionalAccumulatorBase::TryTakeGrad(int num_required,
     if (!already_cancelled) {
       FlushUnlocked();
     } else {
-      ctx->SetStatus(errors::Cancelled("TakeGrad operation was cancelled"));
+      ctx->SetStatus(absl::CancelledError("TakeGrad operation was cancelled"));
       callback();
     }
   }
@@ -119,7 +121,7 @@ void ConditionalAccumulatorBase::Cancel(
         if (!attempt.is_cancelled) {
           attempt.is_cancelled = true;
           attempt.context->SetStatus(
-              errors::Cancelled("TakeGrad operation was cancelled"));
+              absl::CancelledError("TakeGrad operation was cancelled"));
           std::swap(callback, attempt.done_callback);
         }
         break;

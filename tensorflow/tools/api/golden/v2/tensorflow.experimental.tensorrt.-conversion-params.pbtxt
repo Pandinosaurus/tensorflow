@@ -2,33 +2,46 @@ path: "tensorflow.experimental.tensorrt.ConversionParams"
 tf_class {
   is_instance: "<class \'tensorflow.python.compiler.tensorrt.trt_convert.TrtConversionParams\'>"
   is_instance: "<class \'tensorflow.python.compiler.tensorrt.trt_convert.TrtConversionParams\'>"
-  is_instance: "<type \'tuple\'>"
+  is_instance: "<class \'tuple\'>"
   member {
     name: "allow_build_at_runtime"
-    mtype: "<type \'property\'>"
+    mtype: "<class \'collections._tuplegetter\'>"
   }
   member {
     name: "max_workspace_size_bytes"
-    mtype: "<type \'property\'>"
+    mtype: "<class \'collections._tuplegetter\'>"
   }
   member {
     name: "maximum_cached_engines"
-    mtype: "<type \'property\'>"
+    mtype: "<class \'collections._tuplegetter\'>"
   }
   member {
     name: "minimum_segment_size"
-    mtype: "<type \'property\'>"
+    mtype: "<class \'collections._tuplegetter\'>"
   }
   member {
     name: "precision_mode"
-    mtype: "<type \'property\'>"
+    mtype: "<class \'collections._tuplegetter\'>"
   }
   member {
     name: "use_calibration"
-    mtype: "<type \'property\'>"
+    mtype: "<class \'collections._tuplegetter\'>"
+  }
+  member_method {
+    name: "__getnewargs__"
+    argspec: "args=[\'self\'], varargs=None, keywords=None, defaults=None"
   }
   member_method {
     name: "__init__"
+  }
+  member_method {
+    name: "__new__"
+    argspec: "args=[\'cls\', \'max_workspace_size_bytes\', \'precision_mode\', \'minimum_segment_size\', \'maximum_cached_engines\', \'use_calibration\', \'allow_build_at_runtime\'], varargs=None, keywords=None, defaults=[\'1073741824\', \'FP32\', \'3\', \'1\', \'True\', \'True\'], "
+    method_kind: STATIC
+  }
+  member_method {
+    name: "__replace__"
+    argspec: "args=[\'self\'], varargs=None, keywords=kwds, defaults=None"
   }
   member_method {
     name: "count"

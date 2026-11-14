@@ -15,15 +15,28 @@ limitations under the License.
 
 #include "tensorflow/c/env.h"
 
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <vector>
+
+#include "absl/status/status.h"
+#include "absl/strings/string_view.h"
 #include "tensorflow/c/c_api_macros.h"
+#include "tensorflow/c/tf_file_statistics.h"
 #include "tensorflow/c/tf_status.h"
 #include "tensorflow/c/tf_status_helper.h"
 #include "tensorflow/core/platform/env.h"
+#include "tensorflow/core/platform/file_statistics.h"
+#include "tensorflow/core/platform/file_system.h"
 #include "tensorflow/core/platform/path.h"
+#include "tensorflow/core/platform/status.h"
+#include "tensorflow/core/platform/stringpiece.h"
 #include "tensorflow/core/platform/types.h"
 
 struct TF_StringStream {
-  std::vector<::tensorflow::string>* list;
+  std::vector<std::string>* list;
   size_t position;
 };
 
@@ -54,8 +67,7 @@ void TF_FileStat(const char* filename, TF_FileStatistics* stats,
                  TF_Status* status) {
   ::tensorflow::FileStatistics cc_stats;
   TF_SetStatus(status, TF_OK, "");
-  ::tensorflow::Status s =
-      ::tensorflow::Env::Default()->Stat(filename, &cc_stats);
+  absl::Status s = ::tensorflow::Env::Default()->Stat(filename, &cc_stats);
   ::tensorflow::Set_TF_Status_from_Status(status, s);
   if (s.ok()) {
     stats->length = cc_stats.length;
@@ -68,8 +80,7 @@ void TF_NewWritableFile(const char* filename, TF_WritableFileHandle** handle,
                         TF_Status* status) {
   std::unique_ptr<::tensorflow::WritableFile> f;
   TF_SetStatus(status, TF_OK, "");
-  ::tensorflow::Status s =
-      ::tensorflow::Env::Default()->NewWritableFile(filename, &f);
+  absl::Status s = ::tensorflow::Env::Default()->NewWritableFile(filename, &f);
   ::tensorflow::Set_TF_Status_from_Status(status, s);
 
   if (s.ok()) {
@@ -101,7 +112,7 @@ void TF_AppendWritableFile(TF_WritableFileHandle* handle, const char* data,
   auto* cc_file = reinterpret_cast<::tensorflow::WritableFile*>(handle);
   TF_SetStatus(status, TF_OK, "");
   ::tensorflow::Set_TF_Status_from_Status(
-      status, cc_file->Append(::tensorflow::StringPiece{data, length}));
+      status, cc_file->Append(absl::string_view{data, length}));
 }
 
 void TF_DeleteFile(const char* filename, TF_Status* status) {
@@ -125,7 +136,7 @@ void TF_StringStreamDone(TF_StringStream* list) {
   delete list;
 }
 TF_StringStream* TF_GetChildren(const char* dirname, TF_Status* status) {
-  auto* children = new std::vector<::tensorflow::string>;
+  auto* children = new std::vector<std::string>;
 
   TF_SetStatus(status, TF_OK, "");
   ::tensorflow::Set_TF_Status_from_Status(
@@ -138,7 +149,7 @@ TF_StringStream* TF_GetChildren(const char* dirname, TF_Status* status) {
 }
 
 TF_StringStream* TF_GetLocalTempDirectories() {
-  auto* tmpdirs = new std::vector<::tensorflow::string>;
+  auto* tmpdirs = new std::vector<std::string>;
 
   ::tensorflow::Env::Default()->GetLocalTempDirectories(tmpdirs);
 

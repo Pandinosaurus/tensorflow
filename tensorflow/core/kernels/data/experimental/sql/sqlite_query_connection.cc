@@ -14,6 +14,8 @@ limitations under the License.
 ==============================================================================*/
 #include "tensorflow/core/kernels/data/experimental/sql/sqlite_query_connection.h"
 
+#include <vector>
+
 #include "tensorflow/core/framework/dataset.h"
 #include "tensorflow/core/framework/register_types.h"
 #include "tensorflow/core/lib/strings/stringprintf.h"
@@ -29,30 +31,32 @@ SqliteQueryConnection::~SqliteQueryConnection() {
   if (db_ != nullptr) db_->Unref();
 }
 
-Status SqliteQueryConnection::Open(const string& data_source_name,
-                                   const string& query,
-                                   const DataTypeVector& output_types) {
+absl::Status SqliteQueryConnection::Open(const std::string& data_source_name,
+                                         const std::string& query,
+                                         const DataTypeVector& output_types) {
   if (db_ != nullptr) {
-    return errors::FailedPrecondition(
+    return absl::FailedPreconditionError(
         "Failed to open query connection: Connection already opened.");
   }
   TF_RETURN_IF_ERROR(Sqlite::Open(
       data_source_name, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, &db_));
   query_ = query;
   output_types_ = output_types;
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-Status SqliteQueryConnection::Close() {
+absl::Status SqliteQueryConnection::Close() {
   stmt_ = SqliteStatement();
-  db_->Unref();
-  db_ = nullptr;
-  return Status::OK();
+  if (db_ != nullptr) {
+    db_->Unref();
+    db_ = nullptr;
+  }
+  return absl::OkStatus();
 }
 
-Status SqliteQueryConnection::GetNext(IteratorContext* ctx,
-                                      std::vector<Tensor>* out_tensors,
-                                      bool* end_of_sequence) {
+absl::Status SqliteQueryConnection::GetNext(IteratorContext* ctx,
+                                            std::vector<Tensor>* out_tensors,
+                                            bool* end_of_sequence) {
   if (!stmt_) TF_RETURN_IF_ERROR(PrepareQuery());
   TF_RETURN_IF_ERROR(stmt_.Step(end_of_sequence));
   if (!*end_of_sequence) {
@@ -63,21 +67,21 @@ Status SqliteQueryConnection::GetNext(IteratorContext* ctx,
       FillTensorWithResultSetEntry(dt, i, &out_tensors->back());
     }
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-Status SqliteQueryConnection::PrepareQuery() {
+absl::Status SqliteQueryConnection::PrepareQuery() {
   TF_RETURN_IF_ERROR(db_->Prepare(query_, &stmt_));
   int column_count = stmt_.ColumnCount();
   if (column_count != static_cast<int>(output_types_.size())) {
     stmt_ = SqliteStatement();
-    return errors::InvalidArgument(tensorflow::strings::Printf(
+    return absl::InvalidArgumentError(absl::StrFormat(
         "The number of columns in query (%d) must match the number of "
         "elements in output_types (%zu).",
         column_count, output_types_.size()));
   }
   column_count_ = column_count;
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 void SqliteQueryConnection::FillTensorWithResultSetEntry(

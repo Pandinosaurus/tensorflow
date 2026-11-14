@@ -15,9 +15,16 @@ limitations under the License.
 #ifndef TENSORFLOW_LITE_NNAPI_NNAPI_HANDLER_H_
 #define TENSORFLOW_LITE_NNAPI_NNAPI_HANDLER_H_
 
-#include "tensorflow/core/platform/logging.h"
+#include <cstddef>
+#include <cstdint>
+#include <string>
+
+#include "absl/log/check.h"
 #include "tensorflow/lite/nnapi/NeuralNetworksTypes.h"
 #include "tensorflow/lite/nnapi/nnapi_implementation.h"
+
+// WARNING: this header file is DEPRECATED.
+// See https://developer.android.com/ndk/guides/neuralnetworks/migration-guide.
 
 namespace tflite {
 namespace nnapi {

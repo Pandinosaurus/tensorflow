@@ -1,10 +1,18 @@
 path: "tensorflow.name_scope"
 tf_class {
   is_instance: "<class \'tensorflow.python.framework.ops.name_scope_v2\'>"
-  is_instance: "<type \'object\'>"
+  is_instance: "<class \'contextlib.AbstractContextManager\'>"
   member {
     name: "name"
-    mtype: "<type \'property\'>"
+    mtype: "<class \'property\'>"
+  }
+  member_method {
+    name: "__enter__"
+    argspec: "args=[\'self\'], varargs=None, keywords=None, defaults=None"
+  }
+  member_method {
+    name: "__exit__"
+    argspec: "args=[\'self\', \'type_arg\', \'value_arg\', \'traceback_arg\'], varargs=None, keywords=None, defaults=None"
   }
   member_method {
     name: "__init__"

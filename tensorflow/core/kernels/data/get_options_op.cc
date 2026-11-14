@@ -14,7 +14,8 @@ limitations under the License.
 ==============================================================================*/
 #include "tensorflow/core/kernels/data/get_options_op.h"
 
-#include "absl/memory/memory.h"
+#include <string>
+
 #include "tensorflow/core/data/name_utils.h"
 #include "tensorflow/core/framework/dataset.h"
 #include "tensorflow/core/framework/dataset_options.pb.h"
@@ -36,9 +37,9 @@ void GetOptionsOp::Compute(OpKernelContext* ctx) {
   }
 }
 
-string GetOptionsOp::TraceString(const OpKernelContext& ctx,
-                                 bool verbose) const {
-  return profiler::TraceMeOp(name_view(), type_string_view());
+std::string GetOptionsOp::TraceString(const OpKernelContext& ctx,
+                                      bool verbose) const {
+  return tsl::profiler::TraceMeOp(name_view(), type_string_view());
 }
 
 namespace {

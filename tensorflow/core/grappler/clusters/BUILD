@@ -1,19 +1,29 @@
-load("//tensorflow:tensorflow.bzl", "filegroup")
-load("//tensorflow/core/platform:rules_cc.bzl", "cc_library")
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
 load("@local_config_cuda//cuda:build_defs.bzl", "if_cuda")
 load("//tensorflow:tensorflow.bzl", "tf_cc_test", "tf_cuda_library")
+load("//tensorflow:tensorflow.default.bzl", "filegroup")
 load(
     "//tensorflow/core/platform:build_config_root.bzl",
     "tf_cuda_tests_tags",
 )
+load("//tensorflow/core/platform:rules_cc.bzl", "cc_library")
 
 package(
-    licenses = ["notice"],
-)
-
-config_setting(
-    name = "xsmm",
-    define_values = {"tensorflow_xsmm": "1"},
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
     licenses = ["notice"],
 )
 
@@ -26,15 +36,12 @@ tf_cuda_library(
     ],
     visibility = ["//visibility:public"],
     deps = [
-        "//third_party/eigen3",
         "//tensorflow/core:framework",
-        "//tensorflow/core/common_runtime/gpu:gpu_id",
         "//tensorflow/core:lib",
         "//tensorflow/core:protos_all_cc",
-    ] + select({
-        ":xsmm": ["@libxsmm_archive//:xsmm_avx"],
-        "//conditions:default": [],
-    }),
+        "//tensorflow/core/common_runtime/gpu:gpu_id",
+        "@eigen_archive//:eigen3",
+    ],
 )
 
 tf_cc_test(
@@ -79,6 +86,8 @@ cc_library(
         "//tensorflow/core:protos_all_cc",
         "//tensorflow/core:session_options",
         "//tensorflow/core/grappler:grappler_item",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings",
     ],
 )
 
@@ -98,6 +107,9 @@ cc_library(
         "//tensorflow/core/grappler/costs:analytical_cost_estimator",
         "//tensorflow/core/grappler/costs:op_level_cost_estimator",
         "//tensorflow/core/grappler/costs:virtual_scheduler",
+        "//tensorflow/core/platform:mutex",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings",
     ],
 )
 
@@ -113,6 +125,9 @@ tf_cc_test(
         "//tensorflow/core:test_main",
         "//tensorflow/core/grappler:grappler_item",
         "//tensorflow/core/grappler/inputs:trivial_test_graph_input_yielder",
+        "@com_google_absl//absl/log:check",
+        "@com_google_absl//absl/status",
+        "@xla//xla/tsl/protobuf:error_codes_proto_impl_cc",
     ],
 )
 
@@ -134,8 +149,18 @@ cc_library(
         "//tensorflow/core/common_runtime:core_cpu_lib",
         "//tensorflow/core/common_runtime:direct_session_internal",
         "//tensorflow/core/common_runtime/gpu:gpu_id",
+        "//tensorflow/core/framework:cost_graph_proto_cc",
+        "//tensorflow/core/framework:graph_proto_cc",
         "//tensorflow/core/grappler:utils",
         "//tensorflow/core/kernels:ops_util",
+        "//tensorflow/core/protobuf:for_core_protos_cc",
+        "@com_google_absl//absl/log",
+        "@com_google_absl//absl/log:check",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/synchronization",
+        "@com_google_absl//absl/time",
+        "@com_google_absl//absl/types:optional",
     ],
     alwayslink = 1,
 )

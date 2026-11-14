@@ -20,12 +20,13 @@ limitations under the License.
 
 #include <memory>
 
-#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
+#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/register_types.h"
 #include "tensorflow/core/framework/tensor.h"
 #include "tensorflow/core/framework/tensor_shape.h"
 #include "tensorflow/core/framework/types.h"
+#include "tensorflow/core/kernels/fill_functor.h"
 #include "tensorflow/core/lib/core/status.h"
 #include "tensorflow/core/platform/logging.h"
 #include "tensorflow/core/util/determinism.h"
@@ -47,14 +48,16 @@ class ResizeNearestNeighborOp : public OpKernel {
   }
 
   void Compute(OpKernelContext* context) override {
-    ImageResizerState st(align_corners_, half_pixel_centers_);
+    ImageResizerState st(align_corners_, half_pixel_centers_,
+                         /*allow_empty=*/true);
     st.ValidateAndCreateOutput(context);
 
     if (!context->status().ok()) return;
 
-    OP_REQUIRES(context, st.in_height < (1 << 24) && st.in_width < (1 << 24),
-                errors::InvalidArgument("nearest neighbor requires max height "
-                                        "& width of 2^24"));
+    OP_REQUIRES(
+        context, st.in_height < (1 << 24) && st.in_width < (1 << 24),
+        absl::InvalidArgumentError("nearest neighbor requires max height "
+                                   "& width of 2^24"));
 
     // Return if the output is empty.
     if (st.output->NumElements() == 0) return;
@@ -95,7 +98,7 @@ class ResizeNearestNeighborOp : public OpKernel {
     }
     if (!status) {
       context->SetStatus(
-          errors::Internal("Failed launching ResizeNearestNeighbor"));
+          absl::InternalError("Failed launching ResizeNearestNeighbor"));
     }
   }
 
@@ -223,27 +226,36 @@ class ResizeNearestNeighborOpGrad : public OpKernel {
   void Compute(OpKernelContext* context) override {
     // Grab and validate the input:
     const Tensor& input = context->input(0);
-    OP_REQUIRES(context, input.dims() == 4,
-                errors::InvalidArgument("input must be 4-dimensional",
-                                        input.shape().DebugString()));
+    OP_REQUIRES(
+        context, input.dims() == 4,
+        absl::InvalidArgumentError(absl::StrCat("input must be 4-dimensional",
+                                                input.shape().DebugString())));
 
     // Grab and validate the output shape:
     const Tensor& shape_t = context->input(1);
-    OP_REQUIRES(context, shape_t.dims() == 1,
-                errors::InvalidArgument("shape_t must be 1-dimensional",
-                                        shape_t.shape().DebugString()));
-    OP_REQUIRES(context, shape_t.NumElements() == 2,
-                errors::InvalidArgument("shape_t must have two elements",
-                                        shape_t.shape().DebugString()));
+    OP_REQUIRES(
+        context, shape_t.dims() == 1,
+        absl::InvalidArgumentError(absl::StrCat(
+            "shape_t must be 1-dimensional", shape_t.shape().DebugString())));
+    OP_REQUIRES(
+        context, shape_t.NumElements() == 2,
+        absl::InvalidArgumentError(absl::StrCat(
+            "shape_t must have two elements", shape_t.shape().DebugString())));
 
-    auto sizes = shape_t.vec<int32>();
-    OP_REQUIRES(context, sizes(0) > 0 && sizes(1) > 0,
-                errors::InvalidArgument("shape_t's elements must be positive"));
+    auto sizes = shape_t.vec<int32_t>();
+    OP_REQUIRES(
+        context, sizes(0) >= 0 && sizes(1) >= 0,
+        absl::InvalidArgumentError("shape_t's elements must be non-negative"));
+    // An empty original image cannot have a non-empty forward resize.
+    OP_REQUIRES(context,
+                input.NumElements() == 0 || (sizes(0) > 0 && sizes(1) > 0),
+                absl::InvalidArgumentError(
+                    "shape_t's elements must be positive for non-empty grads"));
 
     if (std::is_same<Device, GPUDevice>::value) {
       OP_REQUIRES(
           context, !OpDeterminismRequired(),
-          errors::Unimplemented(
+          absl::UnimplementedError(
               "A deterministic GPU implementation of ResizeNearestNeighborGrad"
               " is not currently available."));
     }
@@ -257,15 +269,20 @@ class ResizeNearestNeighborOpGrad : public OpKernel {
     const int64_t out_width = sizes(1);
 
     Tensor* output = nullptr;
-    OP_REQUIRES_OK(
-        context,
-        context->allocate_output(
-            0, TensorShape({batch_size, out_height, out_width, channels}),
-            &output));
+    TensorShape shape;
+    OP_REQUIRES_OK(context,
+                   TensorShape::BuildTensorShape(
+                       {batch_size, out_height, out_width, channels}, &shape));
+    OP_REQUIRES_OK(context, context->allocate_output(0, shape, &output));
 
     // Return if the output is empty.
     if (output->NumElements() == 0) return;
 
+    if (input.NumElements() == 0) {
+      functor::SetZeroFunctor<Device, T>()(context->eigen_device<Device>(),
+                                           output->flat<T>());
+      return;
+    }
     typename TTypes<T, 4>::ConstTensor input_data(input.tensor<T, 4>());
     typename TTypes<T, 4>::Tensor output_data(output->tensor<T, 4>());
 
@@ -308,7 +325,7 @@ class ResizeNearestNeighborOpGrad : public OpKernel {
     }
     if (!status) {
       context->SetStatus(
-          errors::Internal("Failed launching ResizeNearestNeighborGrad"));
+          absl::InternalError("Failed launching ResizeNearestNeighborGrad"));
     }
   }
 

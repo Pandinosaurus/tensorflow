@@ -15,8 +15,9 @@ limitations under the License.
 #include "tensorflow/lite/testing/message.h"
 
 #include <map>
+#include <sstream>
+#include <string>
 
-#include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
 namespace tflite {
@@ -26,7 +27,7 @@ namespace {
 // A hierarchical, key-value store.
 class TestMessage : public Message {
  public:
-  TestMessage() {}
+  TestMessage() = default;
   explicit TestMessage(const std::string& text_to_parse) {
     std::stringstream ss(text_to_parse);
     finished_ = Message::Read(&ss, this);

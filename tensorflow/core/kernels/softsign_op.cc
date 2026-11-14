@@ -18,7 +18,8 @@ limitations under the License.
 #define EIGEN_USE_THREADS
 
 #include "tensorflow/core/kernels/softsign_op.h"
-#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
+
+#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
 #include "tensorflow/core/framework/numeric_op.h"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/register_types.h"
@@ -71,7 +72,7 @@ void SoftsignGradOp<Device, T>::OperateNoTemplate(OpKernelContext* context,
                                                   const Tensor& a,
                                                   Tensor* output) {
   OP_REQUIRES(context, a.IsSameSize(g),
-              errors::InvalidArgument("g and a must be the same size"));
+              absl::InvalidArgumentError("g and a must be the same size"));
   functor::SoftsignGrad<Device, T> functor;
   functor(context->eigen_device<Device>(), g.flat<T>(), a.flat<T>(),
           output->flat<T>());
@@ -127,7 +128,6 @@ TF_CALL_GPU_NUMBER_TYPES(DECLARE_SOFTSIGN_GRAD_GPU_SPEC);
 TF_CALL_GPU_NUMBER_TYPES(REGISTER_SOFTSIGN_GPU_KERNELS);
 #endif
 TF_CALL_GPU_NUMBER_TYPES(REGISTER_SOFTSIGN_GRAD_GPU_KERNELS);
-
 #undef REGISTER_SOFTSIGN_GPU_KERNELS
 #undef REGISTER_SOFTSIGN_GRAD_GPU_KERNELS
 

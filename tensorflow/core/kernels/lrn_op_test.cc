@@ -40,13 +40,13 @@ class LRNFloatTest : public OpsTestBase {
  protected:
   LRNFloatTest() : philox_(123, 17), rand_(&philox_) {}
 
-  int GetIntAttr(const string& name) {
+  int GetIntAttr(const std::string& name) {
     int value;
     TF_CHECK_OK(GetNodeAttr(*node_def(), name, &value));
     return value;
   }
 
-  float GetFloatAttr(const string& name) {
+  float GetFloatAttr(const std::string& name) {
     float value;
     TF_CHECK_OK(GetNodeAttr(*node_def(), name, &value));
     return value;
@@ -157,6 +157,44 @@ TEST_F(LRNFloatTest, Depth16) {
   // 16 / (1 + 0.1*(11^2 + 12^2 + 13^2 + 14^2 + 15^2 + 16^2))^2
   EXPECT_NEAR(16. / (112.1 * 112.1), actual(0, 0, 0, 15), tol_);
   EXPECT_TRUE(Compare());
+}
+
+TEST_F(LRNFloatTest, ZeroSizeInput) {
+  TF_ASSERT_OK(NodeDefBuilder("lrn_op", "LRN")
+                   .Input(FakeInput())
+                   .Attr("depth_radius", 2)
+                   .Attr("bias", 1.0f)
+                   .Attr("alpha", 1.0f)
+                   .Attr("beta", 0.5f)
+                   .Finalize(node_def()));
+  TF_ASSERT_OK(InitOp());
+  AddInput<float>(TensorShape({0, 0, 0, 0}),
+                  [](int i) -> float { return 0.0f; });
+  TF_ASSERT_OK(RunOpKernel());
+  EXPECT_EQ(GetOutput(0)->NumElements(), 0);
+  EXPECT_EQ(GetOutput(0)->shape(), TensorShape({0, 0, 0, 0}));
+}
+
+TEST_F(LRNFloatTest, ZeroSizeInputGrad) {
+  TF_ASSERT_OK(NodeDefBuilder("lrn_grad_op", "LRNGrad")
+                   .Input(FakeInput())
+                   .Input(FakeInput())
+                   .Input(FakeInput())
+                   .Attr("depth_radius", 2)
+                   .Attr("bias", 1.0f)
+                   .Attr("alpha", 1.0f)
+                   .Attr("beta", 0.5f)
+                   .Finalize(node_def()));
+  TF_ASSERT_OK(InitOp());
+  AddInput<float>(TensorShape({0, 0, 0, 0}),
+                  [](int i) -> float { return 0.0f; });
+  AddInput<float>(TensorShape({0, 0, 0, 0}),
+                  [](int i) -> float { return 0.0f; });
+  AddInput<float>(TensorShape({0, 0, 0, 0}),
+                  [](int i) -> float { return 0.0f; });
+  TF_ASSERT_OK(RunOpKernel());
+  EXPECT_EQ(GetOutput(0)->NumElements(), 0);
+  EXPECT_EQ(GetOutput(0)->shape(), TensorShape({0, 0, 0, 0}));
 }
 
 static double RndGaussian(random::SimplePhilox* rnd) {

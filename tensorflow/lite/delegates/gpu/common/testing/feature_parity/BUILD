@@ -1,9 +1,27 @@
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_cc//cc:cc_test.bzl", "cc_test")
 load(
     "//tensorflow/core/platform:build_config_root.bzl",
     "tf_gpu_tests_tags",
 )
 
 package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:LICENSE"],
     default_testonly = 1,
     default_visibility = ["//visibility:public"],
     licenses = ["notice"],
@@ -25,8 +43,10 @@ cc_library(
     deps = [
         "//tensorflow/lite:framework",
         "//tensorflow/lite:string",
-        "//tensorflow/lite/c:common",
-        "//tensorflow/lite/kernels:builtin_ops",
+        "//tensorflow/lite/core:framework",
+        "//tensorflow/lite/core/c:common",
+        "//tensorflow/lite/core/kernels:builtin_ops",
+        "//tensorflow/lite/schema:schema_fbs",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/types:span",
@@ -52,6 +72,7 @@ cc_test(
         ":utils",
         "//tensorflow/lite:framework_lib",
         "//tensorflow/lite/delegates/gpu:gl_delegate",
+        "//tensorflow/lite/schema:schema_fbs",
         "@com_google_googletest//:gtest_main",
     ],
 )
@@ -70,6 +91,8 @@ cc_test(
         ":utils",
         "//tensorflow/lite:framework_lib",
         "//tensorflow/lite/delegates/gpu:delegate",
+        "//tensorflow/lite/delegates/gpu:delegate_options",
+        "//tensorflow/lite/schema:schema_fbs",
         "@com_google_googletest//:gtest_main",
     ],
 )
@@ -88,6 +111,7 @@ cc_test(
         ":utils",
         "//tensorflow/lite:framework_lib",
         "//tensorflow/lite/delegates/xnnpack:xnnpack_delegate",
+        "//tensorflow/lite/schema:schema_fbs",
         "@com_google_googletest//:gtest_main",
     ],
 )

@@ -56,7 +56,7 @@ class NodeBuilder {
     // useful when preparing a graph for ExtendSession or creating a
     // back edge to a node that hasn't been added to the graph yet,
     // but will be.
-    NodeOut(StringPiece name, int32_t i, DataType t);
+    NodeOut(absl::string_view name, int32_t i, DataType t);
 
     // Default constructor for std::vector<NodeOut>.
     NodeOut();
@@ -67,8 +67,8 @@ class NodeBuilder {
     // * a nullptr Node* was passed to the NodeOut constructor, or
     // * an out-of-range index was passed to the NodeOut constructor.
     bool error;
-    string name;
-    int32 index;
+    std::string name;
+    int32_t index;
     DataType dt;
   };
 
@@ -76,10 +76,10 @@ class NodeBuilder {
   // the Op plus a registry) for the Node.  Other fields are
   // specified by calling the methods below.
   // REQUIRES: The OpDef must satisfy ValidateOpDef().
-  NodeBuilder(StringPiece name, StringPiece op_name,
+  NodeBuilder(absl::string_view name, absl::string_view op_name,
               const OpRegistryInterface* op_registry = OpRegistry::Global(),
               const NodeDebugInfo* debug = nullptr);
-  NodeBuilder(StringPiece name, const OpDef* op_def);
+  NodeBuilder(absl::string_view name, const OpDef* op_def);
 
   // Create a NodeBuilder from an existing NodeDefBuilder.
   NodeBuilder(const NodeDefBuilder& def_builder);
@@ -92,21 +92,21 @@ class NodeBuilder {
   NodeBuilder& Input(NodeOut src);
 
   // For inputs that take a list of tensors.
-  NodeBuilder& Input(gtl::ArraySlice<NodeOut> src_list);
+  NodeBuilder& Input(absl::Span<const NodeOut> src_list);
 
   // Require that this node run after src_node(s).
   NodeBuilder& ControlInput(Node* src_node);
-  NodeBuilder& ControlInputs(gtl::ArraySlice<Node*> src_nodes);
+  NodeBuilder& ControlInputs(absl::Span<Node* const> src_nodes);
 
   // Sets the "requested device spec" in the NodeDef (not the
   // "assigned device" in the Node).
-  NodeBuilder& Device(StringPiece device_spec);
+  NodeBuilder& Device(absl::string_view device_spec);
 
   // Sets the device name in the "assigned device" field in tensorflow::Node.
-  NodeBuilder& AssignedDevice(StringPiece device);
+  NodeBuilder& AssignedDevice(absl::string_view device);
 
   // Sets the _XlaCluster attribute in created node to `xla_cluster`.
-  NodeBuilder& XlaCluster(StringPiece xla_cluster);
+  NodeBuilder& XlaCluster(absl::string_view xla_cluster);
 
   // Set the value of an attr.  attr_name must match the name of one of
   // attrs defined by the Op, and value must have the corresponding type
@@ -114,19 +114,25 @@ class NodeBuilder {
   // types for value).  Note that attrs will be set automatically if
   // they can be determined by the inputs.
   template <class T>
-  NodeBuilder& Attr(StringPiece attr_name, T&& value);
+  NodeBuilder& Attr(absl::string_view attr_name, T&& value);
   template <class T>
-  NodeBuilder& Attr(StringPiece attr_name, std::initializer_list<T> value);
+  NodeBuilder& Attr(absl::string_view attr_name,
+                    std::initializer_list<T> value);
 
   // Validates the described node and adds it to *graph, adding edges
   // for all (non-back) inputs.  If created_node is not nullptr,
   // *created_node will be set to the new node (or nullptr on error).
   // If `consume` is true, the builder state will be moved into `node_def`,
   // and the builder will be left in an undefined state.
-  Status Finalize(Graph* graph, Node** created_node, bool consume = false);
+  absl::Status Finalize(Graph* graph, Node** created_node,
+                        bool consume = false);
+
+  // Same as `Finalize` above, but using StatusOr to return value. Preferred
+  // form.
+  absl::StatusOr<Node*> Finalize(Graph* graph, bool consume = false);
 
   // Accessors for the values set in the constructor.
-  const string& node_name() const { return def_builder_.node_name(); }
+  const std::string& node_name() const { return def_builder_.node_name(); }
   const OpDef& op_def() const { return def_builder_.op_def(); }
 
  private:
@@ -151,20 +157,20 @@ class NodeBuilder {
   const OpRegistryInterface* op_registry_;
   std::vector<NodeOut> inputs_;
   std::vector<Node*> control_inputs_;
-  std::vector<string> errors_;
-  string assigned_device_;
+  std::vector<std::string> errors_;
+  std::string assigned_device_;
 };
 
 // IMPLEMENTATION -------------------------------------------------------------
 
 template <class T>
-NodeBuilder& NodeBuilder::Attr(StringPiece attr_name, T&& value) {
+NodeBuilder& NodeBuilder::Attr(absl::string_view attr_name, T&& value) {
   def_builder_.Attr(attr_name, std::forward<T>(value));
   return *this;
 }
 
 template <class T>
-NodeBuilder& NodeBuilder::Attr(StringPiece attr_name,
+NodeBuilder& NodeBuilder::Attr(absl::string_view attr_name,
                                std::initializer_list<T> value) {
   def_builder_.Attr(attr_name, value);
   return *this;

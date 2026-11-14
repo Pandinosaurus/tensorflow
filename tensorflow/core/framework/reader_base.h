@@ -31,7 +31,7 @@ class ReaderBase : public ReaderInterface {
  public:
   // name: For use in error messages, should mention both the name of
   // the op and the node.
-  explicit ReaderBase(const string& name);
+  explicit ReaderBase(const std::string& name);
 
   // Note that methods with names ending in "Locked" are called while
   // the ReaderBase's mutex is held.
@@ -52,28 +52,29 @@ class ReaderBase : public ReaderInterface {
   //  d) If there was an error producing (e.g. an error reading the file,
   //     data corruption), return a non-OK() status.  ReadLocked may be
   //     called again if the user reruns this part of the graph.
-  virtual Status ReadLocked(tstring* key, tstring* value, bool* produced,
-                            bool* at_end) = 0;
+  virtual absl::Status ReadLocked(tstring* key, tstring* value, bool* produced,
+                                  bool* at_end) = 0;
 
   // Descendants may optionally implement these -------------------------------
 
   // Produce up to num_records next key/value pairs from the current
   // work item, in the same manner of ReadLocked.
-  virtual Status ReadUpToLocked(int64_t num_records, std::vector<tstring>* keys,
-                                std::vector<tstring>* values, int64_t* num_read,
-                                bool* at_end);
+  virtual absl::Status ReadUpToLocked(int64_t num_records,
+                                      std::vector<tstring>* keys,
+                                      std::vector<tstring>* values,
+                                      int64_t* num_read, bool* at_end);
 
   // Called when work starts / finishes.
-  virtual Status OnWorkStartedLocked() { return Status::OK(); }
-  virtual Status OnWorkFinishedLocked() { return Status::OK(); }
+  virtual absl::Status OnWorkStartedLocked() { return absl::OkStatus(); }
+  virtual absl::Status OnWorkFinishedLocked() { return absl::OkStatus(); }
 
   // Called to reset the Reader to a newly constructed state.
-  virtual Status ResetLocked();
+  virtual absl::Status ResetLocked();
 
   // Default implementation generates an Unimplemented error.
   // See the protected helper methods below.
-  virtual Status SerializeStateLocked(tstring* state);
-  virtual Status RestoreStateLocked(const tstring& state);
+  virtual absl::Status SerializeStateLocked(tstring* state);
+  virtual absl::Status RestoreStateLocked(const tstring& state);
 
   // Accessors ----------------------------------------------------------------
 
@@ -86,7 +87,7 @@ class ReaderBase : public ReaderInterface {
   const tstring& current_work() const { return work_; }
 
   // What was passed to the constructor.
-  const string& name() const { return name_; }
+  const std::string& name() const { return name_; }
 
   // Produce the key name (from current_work and the actual key).
   tstring KeyName(const tstring& key) const;
@@ -99,14 +100,14 @@ class ReaderBase : public ReaderInterface {
 
   // Restores ReaderBase state from state. Assumes state was filled
   // using SaveBaseState() above.
-  Status RestoreBaseState(const ReaderBaseState& state);
+  absl::Status RestoreBaseState(const ReaderBaseState& state);
 
  private:
   // For descendants that wish to obtain the next work item in a different way.
   // For implementing Read().  Dequeues the next work item from
   // *queue, and if successful returns "work" (a string). May block.
-  virtual string GetNextWorkLocked(QueueInterface* queue,
-                                   OpKernelContext* context) const;
+  virtual std::string GetNextWorkLocked(QueueInterface* queue,
+                                        OpKernelContext* context) const;
 
   // Implementations of ReaderInterface methods.  These ensure thread-safety
   // and call the methods above to do the work.
@@ -119,14 +120,14 @@ class ReaderBase : public ReaderInterface {
                    std::vector<tstring>* keys, std::vector<tstring>* value,
                    OpKernelContext* context) override;
 
-  Status Reset() override;
+  absl::Status Reset() override;
   int64_t NumRecordsProduced() override;
   int64_t NumWorkUnitsCompleted() override;
-  Status SerializeState(tstring* state) override;
-  Status RestoreState(const tstring& state) override;
+  absl::Status SerializeState(tstring* state) override;
+  absl::Status RestoreState(const tstring& state) override;
 
   mutable mutex mu_;
-  const string name_;
+  const std::string name_;
   int64_t work_started_ = 0;
   int64_t work_finished_ = 0;
   int64_t num_records_produced_ = 0;

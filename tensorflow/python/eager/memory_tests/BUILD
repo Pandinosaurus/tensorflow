@@ -1,6 +1,23 @@
-load("//tensorflow:tensorflow.bzl", "cuda_py_test")
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
+load("@xla//third_party/rules_python/python:py_library.bzl", "py_library")
+load("//tensorflow:tensorflow.default.bzl", "cuda_py_strict_test")
 
 package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
     licenses = ["notice"],
 )
 
@@ -11,12 +28,12 @@ package(
 py_library(
     name = "memory_test_util",
     srcs = ["memory_test_util.py"],
-    srcs_version = "PY3",
+    strict_deps = True,
     visibility = ["//tensorflow:internal"],
-    deps = ["@six_archive//:six"],
+    deps = ["//tensorflow/python/eager:context"],
 )
 
-cuda_py_test(
+cuda_py_strict_test(
     name = "memory_test",
     size = "medium",
     srcs = ["memory_test.py"],
@@ -30,16 +47,20 @@ cuda_py_test(
     xla_enable_strict_auto_jit = False,
     deps = [
         ":memory_test_util",
-        "//tensorflow/python:array_ops",
-        "//tensorflow/python:client_testlib",
-        "//tensorflow/python:framework_test_lib",
         "//tensorflow/python/eager:backprop",
+        "//tensorflow/python/eager:def_function",
         "//tensorflow/python/eager:test",
-        "@six_archive//:six",
+        "//tensorflow/python/framework:constant_op",
+        "//tensorflow/python/framework:dtypes",
+        "//tensorflow/python/framework:test_lib",
+        "//tensorflow/python/ops:array_ops",
+        "//tensorflow/python/ops:gradients",
+        "//tensorflow/python/ops:math_ops",
+        "//tensorflow/python/ops:variables",
     ],
 )
 
-cuda_py_test(
+cuda_py_strict_test(
     name = "remote_memory_test",
     size = "medium",
     srcs = ["remote_memory_test.py"],
@@ -50,10 +71,12 @@ cuda_py_test(
     xla_enable_strict_auto_jit = False,  # b/140261762
     deps = [
         ":memory_test_util",
-        "//tensorflow/python:array_ops",
-        "//tensorflow/python:client_testlib",
-        "//tensorflow/python/eager:backprop",
+        "//tensorflow/python/eager:def_function",
         "//tensorflow/python/eager:remote",
         "//tensorflow/python/eager:test",
+        "//tensorflow/python/framework:dtypes",
+        "//tensorflow/python/framework:ops",
+        "//tensorflow/python/ops:array_ops",
+        "//tensorflow/python/training:server_lib",
     ],
 )

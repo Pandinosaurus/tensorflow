@@ -1,31 +1,22 @@
+// Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+// ==============================================================================
+
 // This proto describes the types of hardware profiled by the TensorFlow
 // profiler.
 syntax = "proto3";
 
 package tensorflow.profiler;
 
-// Types of hardware profiled.
-enum HardwareType {
-  // Unknown hardware.
-  UNKNOWN_HARDWARE = 0;
-  // CPU only without any hardware accelerator.
-  CPU_ONLY = 1;
-  // GPU.
-  GPU = 2;
-  // TPU.
-  TPU = 3;
-}
-
-message GPUComputeCapability {
-  uint32 major = 1;
-  uint32 minor = 2;
-}
-
-message DeviceCapabilities {
-  double clock_rate_in_ghz = 1;
-  uint32 num_cores = 2;
-  uint64 memory_size_in_bytes = 3;
-  uint64 memory_bandwidth = 4;  // Bytes/s.
-  GPUComputeCapability compute_capability = 5;
-  string device_vendor = 6;
-}
+import public "plugin/xprof/protobuf/hardware_types.proto";

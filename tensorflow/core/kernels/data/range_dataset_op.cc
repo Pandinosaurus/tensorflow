@@ -14,17 +14,33 @@ limitations under the License.
 ==============================================================================*/
 #include "tensorflow/core/kernels/data/range_dataset_op.h"
 
+#include <cstdint>
 #include <functional>
+#include <limits>
+#include <memory>
+#include <optional>
 #include <string>
 #include <utility>
+#include <vector>
 
-#include "absl/memory/memory.h"
+#include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
+#include "xla/tsl/platform/errors.h"
+#include "xla/tsl/platform/statusor.h"
+#include "tensorflow/core/data/global_shuffle_utils.h"
 #include "tensorflow/core/data/name_utils.h"
 #include "tensorflow/core/data/split_utils.h"
+#include "tensorflow/core/framework/attr_value.pb.h"
 #include "tensorflow/core/framework/dataset.h"
-#include "tensorflow/core/framework/partial_tensor_shape.h"
+#include "tensorflow/core/framework/dataset_options.pb.h"
+#include "tensorflow/core/framework/model.h"
+#include "tensorflow/core/framework/op_kernel.h"
+#include "tensorflow/core/framework/op_requires.h"
 #include "tensorflow/core/framework/tensor.h"
-#include "tensorflow/core/platform/errors.h"
+#include "tensorflow/core/framework/types.h"
+#include "tensorflow/core/framework/types.pb.h"
+#include "tsl/platform/mutex.h"
+#include "tsl/platform/thread_annotations.h"
 
 namespace tensorflow {
 namespace data {
@@ -38,6 +54,7 @@ namespace data {
 /* static */ constexpr const char* const RangeDatasetOp::kStep;
 /* static */ constexpr const char* const RangeDatasetOp::kOutputTypes;
 /* static */ constexpr const char* const RangeDatasetOp::kOutputShapes;
+/* static */ constexpr const char* const RangeDatasetOp::kReplicateOnSplit;
 
 namespace {
 constexpr char kNext[] = "next";
@@ -45,8 +62,9 @@ constexpr char kHasSplitProvider[] = "has_split_provider";
 constexpr char kSlash[] = "/";
 constexpr char kSplitProvider[] = "split_provider";
 
-Status ConvertOutputTypes(const tensorflow::DataTypeVector& output_dtypes,
-                          std::vector<Tensor>* out_tensors, int64 value) {
+absl::Status ConvertOutputTypes(const tensorflow::DataTypeVector& output_dtypes,
+                                std::vector<Tensor>* out_tensors,
+                                int64_t value) {
   switch (output_dtypes[0]) {
 #define HANDLE_TYPE(type)                                \
   case DataTypeToEnum<type>::value: {                    \
@@ -56,13 +74,32 @@ Status ConvertOutputTypes(const tensorflow::DataTypeVector& output_dtypes,
     TF_CALL_NUMBER_TYPES(HANDLE_TYPE);
 #undef HANDLE_TYPE
     default:
-      return errors::InvalidArgument("Unsupported data type: ",
-                                     DataTypeString(output_dtypes[0]));
+      return absl::InvalidArgumentError(absl::StrCat(
+          "Unsupported data type: ", DataTypeString(output_dtypes[0])));
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 int64_t sgn(int64_t val) { return (0 < val) - (val < 0); }
+
+int64_t RangeCardinality(int64_t start, int64_t stop, int64_t step) {
+  // `enumerate` uses int max to simulate an infinite range dataset.
+  if (stop >= std::numeric_limits<int64_t>::max()) {
+    return kInfiniteCardinality;
+  }
+
+  // If the signs of `stop - start` and `step` are different or either of
+  // the values is zero, the range will be empty.
+  if (sgn(stop - start) * sgn(step) <= 0) {
+    return 0;
+  } else if (step > 0) {
+    // Invariant: stop - start > 0 && step > 0
+    return (stop - start - 1) / step + 1;
+  } else {
+    // Invariant: start - stop > 0 && step < 0
+    return (start - stop - 1) / -step + 1;
+  }
+}
 
 // Class which produces the elements of `range(start, stop, step)`. Threadsafe.
 class RangeCounter {
@@ -79,7 +116,7 @@ class RangeCounter {
       return -1;
     }
     *end_of_counter = false;
-    int result = next_;
+    int64_t result = next_;
     next_ += step_;
     return result;
   }
@@ -99,6 +136,8 @@ class RangeCounter {
     next_ = value;
   }
 
+  int64_t Cardinality() const { return RangeCardinality(start_, stop_, step_); }
+
  private:
   const int64_t start_;
   const int64_t stop_;
@@ -116,35 +155,37 @@ class RangeDatasetOp::RangeSplitProvider : public SplitProvider {
   RangeSplitProvider(int64_t start, int64_t stop, int64_t step)
       : counter_(start, stop, step) {}
 
-  Status GetNext(Tensor* split, bool* end_of_splits) override {
+  absl::Status GetNext(Tensor* split, bool* end_of_splits) override {
     int64_t next = counter_.GetNext(end_of_splits);
     if (*end_of_splits) {
-      return Status::OK();
+      return absl::OkStatus();
     }
     *split = Tensor(DT_INT64, TensorShape{});
     split->scalar<int64_t>()() = next;
-    return Status::OK();
+    return absl::OkStatus();
   }
 
-  Status Reset() override {
+  absl::Status Reset() override {
     counter_.Reset();
-    return Status::OK();
+    return absl::OkStatus();
   }
 
-  Status Save(std::function<std::string(std::string)> key_name_fn,
-              IteratorStateWriter* writer) override {
+  absl::Status Save(std::function<std::string(std::string)> key_name_fn,
+                    IteratorStateWriter* writer) override {
     TF_RETURN_IF_ERROR(
         writer->WriteScalar(key_name_fn(kNext), counter_.Peek()));
-    return Status::OK();
+    return absl::OkStatus();
   }
 
-  Status Restore(std::function<std::string(std::string)> key_name_fn,
-                 IteratorStateReader* reader) override {
+  absl::Status Restore(std::function<std::string(std::string)> key_name_fn,
+                       IteratorStateReader* reader) override {
     int64_t next;
     TF_RETURN_IF_ERROR(reader->ReadScalar(key_name_fn(kNext), &next));
     counter_.SetNext(next);
-    return Status::OK();
+    return absl::OkStatus();
   }
+
+  int64_t Cardinality() const override { return counter_.Cardinality(); }
 
  private:
   RangeCounter counter_;
@@ -153,16 +194,21 @@ class RangeDatasetOp::RangeSplitProvider : public SplitProvider {
 class RangeDatasetOp::Dataset : public DatasetBase {
  public:
   Dataset(OpKernelContext* ctx, int64_t start, int64_t stop, int64_t step,
-          DataTypeVector output_dtypes)
+          DataTypeVector output_dtypes, bool replicate_on_split)
       : DatasetBase(DatasetContext(ctx)),
         start_(start),
         stop_(stop),
         step_(step),
-        output_dtypes_(output_dtypes) {}
+        output_dtypes_(output_dtypes),
+        replicate_on_split_(replicate_on_split) {}
+
+  absl::Status RandomIndexingCompatible() const override {
+    return absl::OkStatus();
+  }
 
   std::unique_ptr<IteratorBase> MakeIteratorInternal(
-      const string& prefix) const override {
-    return absl::make_unique<Iterator>(Iterator::Params{
+      const std::string& prefix) const override {
+    return std::make_unique<Iterator>(Iterator::Params{
         this, name_utils::IteratorPrefix(kDatasetType, prefix)});
   }
 
@@ -176,91 +222,102 @@ class RangeDatasetOp::Dataset : public DatasetBase {
     return *shapes;
   }
 
-  string DebugString() const override {
+  std::string DebugString() const override {
     name_utils::DatasetDebugStringParams params;
     params.set_args(start_, stop_, step_);
     return name_utils::DatasetDebugString(kDatasetType, params);
   }
 
-  int64_t Cardinality() const override {
-    // If start_ == stop_ or if the sign of stop_ - start_ and step do not agree
-    // (or are zero), return zero.
-    if (sgn(stop_ - start_) * sgn(step_) <= 0) {
-      return 0;
-    } else if (step_ > 0) {
-      return std::max(int64_t{0}, (stop_ - start_ - 1) / step_ + 1);
-    } else {
-      return std::max(int64_t{0}, (start_ - stop_ - 1) / -step_ + 1);
-    }
+  int64_t CardinalityInternal(CardinalityOptions options) const override {
+    return RangeCardinality(start_, stop_, step_);
   }
 
-  Status MakeSplitProviders(std::vector<std::unique_ptr<SplitProvider>>*
-                                split_providers) const override {
+  absl::Status MakeSplitProviders(std::vector<std::unique_ptr<SplitProvider>>*
+                                      split_providers) const override {
     split_providers->push_back(
-        absl::make_unique<RangeSplitProvider>(start_, stop_, step_));
-    return Status::OK();
+        std::make_unique<RangeSplitProvider>(start_, stop_, step_));
+    return absl::OkStatus();
   }
 
-  Status InputDatasets(std::vector<const DatasetBase*>* inputs) const override {
+  absl::Status InputDatasets(
+      std::vector<const DatasetBase*>* inputs) const override {
     inputs->clear();
-    return Status::OK();
+    return absl::OkStatus();
   }
 
-  Status CheckExternalState() const override { return Status::OK(); }
+  absl::Status CheckExternalState() const override { return absl::OkStatus(); }
 
-  Status Get(OpKernelContext* ctx, int64 index,
-             std::vector<Tensor>* out_tensors) const override {
+  absl::Status Get(OpKernelContext* ctx, int64_t index,
+                   std::vector<Tensor>* out_tensors) const override {
+    return Get(AnyContext(ctx), index, out_tensors);
+  }
+
+  absl::Status Get(AnyContext ctx, int64_t index,
+                   std::vector<Tensor>* out_tensors) const override {
     TF_RETURN_IF_ERROR(CheckRandomAccessCompatible(index));
     return ConvertOutputTypes(output_dtypes(), out_tensors,
                               start_ + (index * step_));
   }
 
  protected:
-  Status AsGraphDefInternal(SerializationContext* ctx,
-                            DatasetGraphDefBuilder* b,
-                            Node** output) const override {
+  absl::Status AsGraphDefInternal(SerializationContext* ctx,
+                                  DatasetGraphDefBuilder* b,
+                                  Node** output) const override {
     Node* start = nullptr;
     Node* stop = nullptr;
     Node* step = nullptr;
     TF_RETURN_IF_ERROR(b->AddScalar(start_, &start));
     TF_RETURN_IF_ERROR(b->AddScalar(stop_, &stop));
     TF_RETURN_IF_ERROR(b->AddScalar(step_, &step));
-    TF_RETURN_IF_ERROR(b->AddDataset(this, {start, stop, step}, output));
-    return Status::OK();
+    AttrValue replicate_on_split;
+    b->BuildAttrValue(replicate_on_split_, &replicate_on_split);
+
+    TF_RETURN_IF_ERROR(b->AddDataset(
+        this, {start, stop, step},                                // Inputs
+        {std::make_pair(kReplicateOnSplit, replicate_on_split)},  // Attrs
+        output));
+    return absl::OkStatus();
   }
 
  private:
   class Iterator : public DatasetIterator<Dataset> {
    public:
     explicit Iterator(const Params& params)
-        : DatasetIterator<Dataset>(params) {}
+        : DatasetIterator<Dataset>(params),
+          global_shuffle_iterator_(dataset()) {}
 
-    Status Initialize(IteratorContext* ctx) override {
-      if (ctx->split_providers().empty()) {
-        counter_ = absl::make_unique<RangeCounter>(
+    bool SymbolicCheckpointCompatible() const override { return true; }
+
+    absl::Status Initialize(IteratorContext* ctx) override {
+      if (ctx->split_providers().empty() || dataset()->replicate_on_split_) {
+        counter_ = std::make_unique<RangeCounter>(
             dataset()->start_, dataset()->stop_, dataset()->step_);
       } else {
         TF_ASSIGN_OR_RETURN(split_provider_,
                             GetSingleSplitProvider(ctx, dataset()));
       }
-      return Status::OK();
+      return absl::OkStatus();
     }
 
-    Status GetNextInternal(IteratorContext* ctx,
-                           std::vector<Tensor>* out_tensors,
-                           bool* end_of_sequence) override {
+    absl::Status GetNextInternal(IteratorContext* ctx,
+                                 std::vector<Tensor>* out_tensors,
+                                 bool* end_of_sequence) override {
+      if (ctx->index_mapper() != nullptr) {
+        return global_shuffle_iterator_.GetNext(ctx, out_tensors,
+                                                end_of_sequence);
+      }
       int64_t value;
       if (split_provider_ != nullptr) {
         Tensor split;
         TF_RETURN_IF_ERROR(split_provider_->GetNext(&split, end_of_sequence));
         if (*end_of_sequence) {
-          return Status::OK();
+          return absl::OkStatus();
         }
         value = split.scalar<int64_t>()();
       } else {
         value = counter_->GetNext(end_of_sequence);
         if (*end_of_sequence) {
-          return Status::OK();
+          return absl::OkStatus();
         }
       }
       out_tensors->reserve(1);
@@ -273,11 +330,16 @@ class RangeDatasetOp::Dataset : public DatasetBase {
       return model::MakeSourceNode(std::move(args));
     }
 
-    Status SaveInternal(SerializationContext* ctx,
-                        IteratorStateWriter* writer) override {
-      if (split_provider_) {
+    absl::Status SaveInternal(SerializationContext* ctx,
+                              IteratorStateWriter* writer) override {
+      if (split_provider_ == nullptr && counter_ == nullptr) {
+        return absl::FailedPreconditionError(
+            "`Initialize` should be called before saving/restoring from "
+            "tf.data checkpoints.");
+      }
+      if (split_provider_ != nullptr) {
         TF_RETURN_IF_ERROR(
-            writer->WriteScalar(full_name(kHasSplitProvider), true));
+            writer->WriteScalar(prefix(), kHasSplitProvider, true));
         TF_RETURN_IF_ERROR(split_provider_->Save(
             [this](const std::string& key) {
               return SplitProviderKeyNameFn(key);
@@ -285,14 +347,23 @@ class RangeDatasetOp::Dataset : public DatasetBase {
             writer));
       } else {
         TF_RETURN_IF_ERROR(
-            writer->WriteScalar(full_name(kNext), counter_->Peek()));
+            writer->WriteScalar(prefix(), kNext, counter_->Peek()));
       }
-      return Status::OK();
+      TF_RETURN_IF_ERROR(global_shuffle_iterator_.Save(prefix(), ctx, writer));
+      return absl::OkStatus();
     }
 
-    Status RestoreInternal(IteratorContext* ctx,
-                           IteratorStateReader* reader) override {
-      if (reader->Contains(full_name(kHasSplitProvider))) {
+    absl::Status RestoreInternal(IteratorContext* ctx,
+                                 IteratorStateReader* reader) override {
+      if (split_provider_ == nullptr && counter_ == nullptr) {
+        return absl::FailedPreconditionError(
+            "`Initialize` should be called before saving/restoring from "
+            "tf.data checkpoints.");
+      }
+      if (ctx->restored_element_count().has_value()) {
+        return global_shuffle_iterator_.Restore(prefix(), ctx, reader);
+      }
+      if (reader->Contains(prefix(), kHasSplitProvider)) {
         TF_RETURN_IF_ERROR(split_provider_->Restore(
             [this](const std::string& key) {
               return SplitProviderKeyNameFn(key);
@@ -300,10 +371,10 @@ class RangeDatasetOp::Dataset : public DatasetBase {
             reader));
       } else {
         int64_t next;
-        TF_RETURN_IF_ERROR(reader->ReadScalar(full_name(kNext), &next));
+        TF_RETURN_IF_ERROR(reader->ReadScalar(prefix(), kNext, &next));
         counter_->SetNext(next);
       }
-      return Status::OK();
+      return absl::OkStatus();
     }
 
     std::string SplitProviderKeyNameFn(const std::string& key) {
@@ -313,17 +384,22 @@ class RangeDatasetOp::Dataset : public DatasetBase {
    private:
     std::unique_ptr<RangeCounter> counter_;
     std::shared_ptr<SplitProvider> split_provider_;
+    GlobalShuffleIterator global_shuffle_iterator_;
   };
 
   const int64_t start_;
   const int64_t stop_;
   const int64_t step_;
   const DataTypeVector output_dtypes_;
+  const bool replicate_on_split_;
 };
 
 RangeDatasetOp::RangeDatasetOp(OpKernelConstruction* ctx)
     : DatasetOpKernel(ctx) {
   OP_REQUIRES_OK(ctx, ctx->GetAttr(kOutputTypes, &output_types_));
+  if (ctx->HasAttr(kReplicateOnSplit)) {
+    OP_REQUIRES_OK(ctx, ctx->GetAttr(kReplicateOnSplit, &replicate_on_split_));
+  }
 }
 
 void RangeDatasetOp::MakeDataset(OpKernelContext* ctx, DatasetBase** output) {
@@ -336,9 +412,10 @@ void RangeDatasetOp::MakeDataset(OpKernelContext* ctx, DatasetBase** output) {
   int64_t step;
   OP_REQUIRES_OK(ctx, ParseScalarArgument<int64_t>(ctx, kStep, &step));
   OP_REQUIRES(ctx, step != 0,
-              errors::InvalidArgument("step must be a non-zero integer."));
+              absl::InvalidArgumentError("step must be a non-zero integer."));
 
-  *output = new Dataset(ctx, start, stop, step, output_types_);
+  *output =
+      new Dataset(ctx, start, stop, step, output_types_, replicate_on_split_);
 }
 
 namespace {

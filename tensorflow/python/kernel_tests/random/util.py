@@ -14,10 +14,6 @@
 # ==============================================================================
 """Utilities for testing random variables."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import math
 
 import numpy as np
@@ -100,8 +96,17 @@ def anderson_darling(x):
   return -n - z / n
 
 
-def test_truncated_normal(assert_equal, assert_all_close, n, y,
-                          mean_atol=5e-4, median_atol=8e-4, variance_rtol=1e-3):
+def test_truncated_normal(assert_equal,
+                          assert_all_close,
+                          n,
+                          y,
+                          means=None,
+                          stddevs=None,
+                          minvals=None,
+                          maxvals=None,
+                          mean_atol=5e-4,
+                          median_atol=8e-4,
+                          variance_rtol=1e-3):
   """Tests truncated normal distribution's statistics."""
   def _normal_cdf(x):
     return .5 * math.erfc(-x / math.sqrt(2))
@@ -110,16 +115,33 @@ def test_truncated_normal(assert_equal, assert_all_close, n, y,
     return math.exp(-(x**2) / 2.) / math.sqrt(2 * math.pi)
 
   def probit(x):
-    return special_math.ndtri(x)
+    return special_math.ndtri(np.float64(x))
 
   a = -2.
   b = 2.
   mu = 0.
   sigma = 1.
 
+  if minvals is not None:
+    a = minvals
+
+  if maxvals is not None:
+    b = maxvals
+
+  if means is not None:
+    mu = means
+
+  if stddevs is not None:
+    sigma = stddevs
+
   alpha = (a - mu) / sigma
   beta = (b - mu) / sigma
-  z = _normal_cdf(beta) - _normal_cdf(alpha)
+  if alpha > 0:
+    z = _normal_cdf(-alpha) - _normal_cdf(-beta)
+    median_norm = -probit((_normal_cdf(-alpha) + _normal_cdf(-beta)) / 2.0)
+  else:
+    z = _normal_cdf(beta) - _normal_cdf(alpha)
+    median_norm = probit((_normal_cdf(alpha) + _normal_cdf(beta)) / 2.0)
 
   assert_equal((y >= a).sum(), n)
   assert_equal((y <= b).sum(), n)
@@ -132,8 +154,7 @@ def test_truncated_normal(assert_equal, assert_all_close, n, y,
   actual_mean = np.mean(y)
   assert_all_close(actual_mean, expected_mean, atol=mean_atol)
 
-  expected_median = mu + probit(
-      (_normal_cdf(alpha) + _normal_cdf(beta)) / 2.) * sigma
+  expected_median = mu + median_norm * sigma
   actual_median = np.median(y)
   assert_all_close(actual_median, expected_median, atol=median_atol)
 

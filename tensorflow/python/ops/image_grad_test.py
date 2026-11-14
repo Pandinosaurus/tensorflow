@@ -14,10 +14,6 @@
 # ==============================================================================
 """Functional tests for Image Op Gradients."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 from tensorflow.python.ops import image_grad_test_base as test_base
 from tensorflow.python.platform import test
 
@@ -27,6 +23,8 @@ ResizeBicubicOpTest = test_base.ResizeBicubicOpTestBase
 ScaleAndTranslateOpTest = test_base.ScaleAndTranslateOpTestBase
 CropAndResizeOpTest = test_base.CropAndResizeOpTestBase
 RGBToHSVOpTest = test_base.RGBToHSVOpTestBase
+AdjustContrastOpTest = test_base.AdjustContrastOpTestBase
+ImageProjectiveTransformOpTest = test_base.ImageProjectiveTransformOpTestBase
 
 if __name__ == "__main__":
   test.main()

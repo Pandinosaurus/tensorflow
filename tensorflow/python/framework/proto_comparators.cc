@@ -17,9 +17,9 @@ limitations under the License.
 #include <memory>
 #include <string>
 
-#include "pybind11/detail/common.h"
-#include "pybind11/pybind11.h"
-#include "pybind11/pytypes.h"
+#include "pybind11/detail/common.h"  // from @pybind11
+#include "pybind11/pybind11.h"  // from @pybind11
+#include "pybind11/pytypes.h"  // from @pybind11
 #include "tensorflow/core/framework/function.pb.h"
 #include "tensorflow/core/framework/graph.pb.h"
 #include "tensorflow/core/platform/errors.h"
@@ -39,16 +39,16 @@ struct ProtoComparisonOptions {
   bool treat_nan_as_equal;
 };
 
-bool EqualsGraphDef(string graphdef_string1, string graphdef_string2,
+bool EqualsGraphDef(std::string graphdef_string1, std::string graphdef_string2,
                     const ProtoComparisonOptions& options) {
   GraphDef graph_def_1;
   if (!graph_def_1.ParseFromString(graphdef_string1)) {
-    MaybeRaiseFromStatus(errors::InvalidArgument(
+    MaybeRaiseFromStatus(absl::InvalidArgumentError(
         "Couldn't interpret first argument as a GraphDef"));
   }
   GraphDef graph_def_2;
   if (!graph_def_2.ParseFromString(graphdef_string2)) {
-    MaybeRaiseFromStatus(errors::InvalidArgument(
+    MaybeRaiseFromStatus(absl::InvalidArgumentError(
         "Couldn't interpret second argument as a GraphDef"));
   }
   tf::protobuf::util::MessageDifferencer differencer;

@@ -1,4 +1,4 @@
-/* Copyright 2021 The TensorFlow Authors All Rights Reserved.
+/* Copyright 2021 The TensorFlow Authors. All Rights Reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -15,9 +15,25 @@ limitations under the License.
 
 #include "tensorflow/core/activity_watcher/activity.h"
 
+#include <atomic>
+#include <memory>
+
+#include "absl/base/attributes.h"
+
 namespace tensorflow {
 namespace activity_watcher {
-ActivityScope::ActivityScope(std::unique_ptr<Activity>) {}
-ActivityScope::~ActivityScope() {}
+ABSL_ATTRIBUTE_WEAK void MaybeEnableMultiWorkersWatching(
+    tsl::CoordinationServiceAgent* agent) {}
+
+namespace tfw_internal {
+
+ABSL_ATTRIBUTE_WEAK std::atomic<int> g_watcher_level(kWatcherDisabled);
+ABSL_ATTRIBUTE_WEAK ActivityId RecordActivityStart(std::unique_ptr<Activity>) {
+  return kActivityNotRecorded;
+}
+ABSL_ATTRIBUTE_WEAK void RecordActivityEnd(ActivityId id) {}
+
+}  // namespace tfw_internal
+
 }  // namespace activity_watcher
 }  // namespace tensorflow

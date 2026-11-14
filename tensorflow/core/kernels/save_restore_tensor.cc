@@ -14,15 +14,19 @@ limitations under the License.
 ==============================================================================*/
 
 #include "tensorflow/core/kernels/save_restore_tensor.h"
+
+#include <memory>
 #include <numeric>
 #include <unordered_map>
 #include <utility>
 #include <vector>
 
+#include "xla/tsl/platform/env.h"
 #include "tensorflow/core/framework/bounds_check.h"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/register_types.h"
 #include "tensorflow/core/framework/types.h"
+#include "tensorflow/core/framework/types.pb.h"
 #include "tensorflow/core/lib/core/threadpool.h"
 #include "tensorflow/core/lib/gtl/array_slice.h"
 #include "tensorflow/core/lib/strings/str_util.h"
@@ -46,9 +50,9 @@ void SaveTensors(
     const int64_t size = filename_t.NumElements();
     OP_REQUIRES(
         context, size == 1,
-        errors::InvalidArgument(
+        absl::InvalidArgumentError(absl::StrCat(
             "Input 0 (filename) must be a string scalar; got a tensor of ",
-            size, "elements"));
+            size, "elements")));
   }
 
   // Path, names, and slices if save_slices is true.
@@ -57,7 +61,7 @@ void SaveTensors(
   OP_REQUIRES(context,
               FastBoundsCheck(tensor_names_t.NumElements() + kFixedInputs,
                               std::numeric_limits<int>::max()),
-              errors::InvalidArgument("Too many inputs to SaveTensors"));
+              absl::InvalidArgumentError("Too many inputs to SaveTensors"));
   const int N = static_cast<int>(tensor_names_t.NumElements());
   const tstring* tensor_shapes_and_slices_ptr = nullptr;
   if (save_slices) {
@@ -65,31 +69,36 @@ void SaveTensors(
     OP_REQUIRES(
         context,
         tensor_shapes_and_slices_t.NumElements() == static_cast<int64_t>(N),
-        errors::InvalidArgument("Expected ", N,
-                                " elements for the tensor "
-                                "shapes and slices but got ",
-                                tensor_shapes_and_slices_t.NumElements()));
+        absl::InvalidArgumentError(
+            absl::StrCat("Expected ", N,
+                         " elements for the tensor "
+                         "shapes and slices but got ",
+                         tensor_shapes_and_slices_t.NumElements())));
     tensor_shapes_and_slices_ptr =
         tensor_shapes_and_slices_t.flat<tstring>().data();
   }
-  OP_REQUIRES(context, context->num_inputs() == N + kFixedInputs,
-              errors::InvalidArgument("Expected totally ", N + kFixedInputs,
-                                      " inputs as input #1 (which is a string "
-                                      "tensor of saved names) contains ",
-                                      N, " names, but received ",
-                                      context->num_inputs(), " inputs"));
+  OP_REQUIRES(
+      context, context->num_inputs() == N + kFixedInputs,
+      absl::InvalidArgumentError(absl::StrCat(
+          "Expected totally ", N + kFixedInputs,
+          " inputs as input #1 (which is a string "
+          "tensor of saved names) contains ",
+          N, " names, but received ", context->num_inputs(), " inputs")));
 
   VLOG(1) << "About to save tensors to file " << filename_t.flat<tstring>()(0)
           << "...";
   checkpoint::TensorSliceWriter writer(filename_t.flat<tstring>()(0),
                                        std::move(builder_func));
 
-  Status s;
+  absl::Status s;
   auto tensor_names_flat = tensor_names_t.flat<tstring>();
 
   // Process tensors in sorted name order.  This allows us to avoid seeking
   // during restoration in the common case where we are restoring a full
   // checkpoint.
+  // RestoreTensorsV2 was changed to sort by file offset, so this sorting isn't
+  // strictly necessary anymore. However, restores with TF version <= 2.7 will
+  // still benefit.
   std::vector<size_t> sorted_name_idx(tensor_names_flat.size());
   std::iota(sorted_name_idx.begin(), sorted_name_idx.end(), 0);
   std::sort(sorted_name_idx.begin(), sorted_name_idx.end(),
@@ -98,7 +107,7 @@ void SaveTensors(
             });
 
   for (const size_t i : sorted_name_idx) {
-    const string& name = tensor_names_flat(i);
+    const std::string& name = tensor_names_flat(i);
     const Tensor& input = context->input(i + kFixedInputs);
     TensorShape shape(input.shape());
     TensorSlice slice(input.dims());
@@ -108,11 +117,11 @@ void SaveTensors(
       OP_REQUIRES_OK(context, checkpoint::ParseShapeAndSlice(
                                   shape_spec, &shape, &slice, &slice_shape));
       OP_REQUIRES(context, slice_shape.IsSameSize(input.shape()),
-                  errors::InvalidArgument(
+                  absl::InvalidArgumentError(absl::StrCat(
                       "Slice in shape_and_slice "
                       "specification does not match the "
                       "shape of the tensor to  save: ",
-                      shape_spec, ", tensor: ", input.shape().DebugString()));
+                      shape_spec, ", tensor: ", input.shape().DebugString())));
     }
 
 #define WRITER_ADD(T)                                           \
@@ -123,9 +132,9 @@ void SaveTensors(
     switch (input.dtype()) {
       TF_CALL_SAVE_RESTORE_TYPES(WRITER_ADD)
       default:
-        context->SetStatus(errors::Unimplemented("Saving data type ",
-                                                 DataTypeString(input.dtype()),
-                                                 " not yet supported"));
+        context->SetStatus(absl::UnimplementedError(
+            absl::StrCat("Saving data type ", DataTypeString(input.dtype()),
+                         " not yet supported")));
         return;
     }
 #undef WRITER_ADD
@@ -149,21 +158,21 @@ void RestoreTensor(OpKernelContext* context,
     const int64_t size = file_pattern_t.NumElements();
     OP_REQUIRES(
         context, size == 1,
-        errors::InvalidArgument(
+        absl::InvalidArgumentError(absl::StrCat(
             "Input 0 (file_pattern) must be a string scalar; got a tensor of ",
-            size, " elements"));
+            size, " elements")));
   }
-  const string& file_pattern = file_pattern_t.flat<tstring>()(0);
+  const std::string& file_pattern = file_pattern_t.flat<tstring>()(0);
 
   const Tensor& tensor_name_t = context->input(1);
   {
     const int64_t size = tensor_name_t.NumElements();
     OP_REQUIRES(context, size > restore_index,
-                errors::InvalidArgument(
+                absl::InvalidArgumentError(absl::StrCat(
                     "Input 1 (file_pattern) must be a have at least ",
-                    restore_index + 1, " elements"));
+                    restore_index + 1, " elements")));
   }
-  const string& tensor_name = tensor_name_t.flat<tstring>()(restore_index);
+  const std::string& tensor_name = tensor_name_t.flat<tstring>()(restore_index);
 
   // If we cannot find a cached reader we will allocate our own.
   std::unique_ptr<checkpoint::TensorSliceReader> allocated_reader;
@@ -184,16 +193,16 @@ void RestoreTensor(OpKernelContext* context,
   // Get the shape and type from the save file.
   DataType type;
   TensorShape saved_shape;
-  OP_REQUIRES(
-      context, reader->HasTensor(tensor_name, &saved_shape, &type),
-      errors::NotFound("Tensor name \"", tensor_name,
-                       "\" not found in checkpoint files ", file_pattern));
-  OP_REQUIRES(
-      context, type == context->expected_output_dtype(restore_index),
-      errors::InvalidArgument("Expected to restore a tensor of type ",
-                              DataTypeString(context->expected_output_dtype(0)),
-                              ", got a tensor of type ", DataTypeString(type),
-                              " instead: tensor_name = ", tensor_name));
+  OP_REQUIRES(context, reader->HasTensor(tensor_name, &saved_shape, &type),
+              absl::NotFoundError(absl::StrCat(
+                  "Tensor name \"", tensor_name,
+                  "\" not found in checkpoint files ", file_pattern)));
+  OP_REQUIRES(context, type == context->expected_output_dtype(restore_index),
+              absl::InvalidArgumentError(absl::StrCat(
+                  "Expected to restore a tensor of type ",
+                  DataTypeString(context->expected_output_dtype(0)),
+                  ", got a tensor of type ", DataTypeString(type),
+                  " instead: tensor_name = ", tensor_name)));
 
   // Shape of the output and slice to load.
   TensorShape output_shape(saved_shape);
@@ -208,11 +217,11 @@ void RestoreTensor(OpKernelContext* context,
                                   &output_shape));
       OP_REQUIRES(
           context, parsed_shape.IsSameSize(saved_shape),
-          errors::InvalidArgument(
+          absl::InvalidArgumentError(absl::StrCat(
               "Shape in shape_and_slice spec does not match the shape in the "
               "save file: ",
               parsed_shape.DebugString(),
-              ", save file shape: ", saved_shape.DebugString()));
+              ", save file shape: ", saved_shape.DebugString())));
     }
   }
 
@@ -233,8 +242,8 @@ void RestoreTensor(OpKernelContext* context,
   switch (type) {
     TF_CALL_SAVE_RESTORE_TYPES(READER_COPY)
     default:
-      context->SetStatus(errors::Unimplemented(
-          "Restoring data type ", DataTypeString(type), " not yet supported"));
+      context->SetStatus(absl::UnimplementedError(absl::StrCat(
+          "Restoring data type ", DataTypeString(type), " not yet supported")));
   }
 #undef READER_COPY
 }
@@ -249,9 +258,23 @@ const int64_t kLargeShapeThreshold = 16 << 20;  // 16M
 // restored from a thread pool: this requires creating a separate BundleReader
 // for each restore.
 struct RestoreOp {
-  RestoreOp& operator=(const RestoreOp&) = delete;
+  RestoreOp(OpKernelContext* context, int idx, const std::string& tensor_name,
+            const std::string& shape_and_slice,
+            const std::string& reader_prefix, DataType dtype)
+      : context(context),
+        idx(idx),
+        tensor_name(tensor_name),
+        shape_and_slice(shape_and_slice),
+        reader_prefix(reader_prefix),
+        dtype(dtype) {}
 
-  bool should_run_in_pool(BundleReader* reader) const {
+  // Move-only. It does not make sense to "run()" a copied RestoreOp.
+  RestoreOp(const RestoreOp&) = delete;
+  RestoreOp& operator=(const RestoreOp&) = delete;
+  RestoreOp(RestoreOp&&) = default;
+  RestoreOp& operator=(RestoreOp&&) = default;
+
+  bool is_large_shape(BundleReader* reader) const {
     TensorShape restored_full_shape;
 
     // Ignore status here; we'll catch the error later.
@@ -263,8 +286,8 @@ struct RestoreOp {
   }
 
   // Run this restore operation using a new BundleReader.
-  void run_with_new_reader() {
-    BundleReader reader(Env::Default(), reader_prefix);
+  void run_with_new_reader(BundleCache* cache) {
+    BundleReader reader(tsl::Env::Default(), reader_prefix, {cache, false});
     if (!reader.status().ok()) {
       status = reader.status();
       return;
@@ -273,7 +296,7 @@ struct RestoreOp {
     status = run(&reader);
   }
 
-  Status run(BundleReader* reader) {
+  absl::Status run(BundleReader* reader) {
     TensorShape restored_full_shape;
     TF_RETURN_IF_ERROR(
         reader->LookupTensorShape(tensor_name, &restored_full_shape));
@@ -297,11 +320,11 @@ struct RestoreOp {
                                          &parsed_slice, &parsed_slice_shape));
 
       if (!restored_full_shape.IsSameSize(parsed_full_shape)) {
-        return errors::InvalidArgument(
+        return absl::InvalidArgumentError(absl::StrCat(
             "tensor_name = ", tensor_name, "; shape in shape_and_slice spec ",
             parsed_full_shape.DebugString(),
             " does not match the shape stored in checkpoint: ",
-            restored_full_shape.DebugString());
+            restored_full_shape.DebugString()));
       }
       TF_RETURN_IF_ERROR(
           context->allocate_output(idx, parsed_slice_shape, &restored_tensor));
@@ -326,109 +349,138 @@ struct RestoreOp {
     }
     VLOG(1) << "Done restoring tensor " << idx << " : " << tensor_name << " : "
             << restored_full_shape.num_elements();
-    return Status::OK();
+    return absl::OkStatus();
   }
 
   OpKernelContext* context;
-  size_t idx;
-  string tensor_name;
-  string shape_and_slice;
-  string reader_prefix;
+  int idx;
+  std::string tensor_name;
+  std::string shape_and_slice;
+  std::string reader_prefix;
+  DataType dtype;
 
-  ::tensorflow::Status status;
+  absl::Status status;
 };
 
 }  // namespace
 
-Status RestoreTensorsV2(OpKernelContext* context, const Tensor& prefix,
-                        const Tensor& tensor_names,
-                        const Tensor& shape_and_slices,
-                        gtl::ArraySlice<DataType> dtypes) {
-  const string& prefix_string = prefix.scalar<tstring>()();
+absl::Status RestoreTensorsV2(OpKernelContext* context, const Tensor& prefix,
+                              const Tensor& tensor_names,
+                              const Tensor& shape_and_slices,
+                              absl::Span<const DataType> dtypes) {
+  const std::string& prefix_string = prefix.scalar<tstring>()();
 
   const auto& tensor_names_flat = tensor_names.flat<tstring>();
   const auto& shape_and_slices_flat = shape_and_slices.flat<tstring>();
 
-  // Sort lookup keys to improve locality when reading multiple tensors.
-  std::vector<size_t> sorted_name_idx(tensor_names_flat.size());
-  std::iota(sorted_name_idx.begin(), sorted_name_idx.end(), 0);
-  std::sort(sorted_name_idx.begin(), sorted_name_idx.end(),
-            [&tensor_names_flat](size_t a, size_t b) {
-              return tensor_names_flat(a) < tensor_names_flat(b);
-            });
+  std::vector<RestoreOp> restore_ops;
+  restore_ops.reserve(tensor_names_flat.size());
+  for (int i = 0; i < tensor_names_flat.size(); ++i) {
+    restore_ops.push_back({context, i, tensor_names_flat(i),
+                           shape_and_slices_flat(i), prefix_string, dtypes[i]});
+  }
 
-  std::vector<std::unique_ptr<RestoreOp> > pool_restore_ops;
-  std::vector<std::unique_ptr<RestoreOp> > direct_restore_ops;
-
-  BundleReader default_reader(Env::Default(), prefix_string);
+  tsl::Env* const env = tsl::Env::Default();
+  BundleCache cache(env);
+  BundleReader default_reader(env, prefix_string, {&cache, false});
   TF_RETURN_IF_ERROR(default_reader.status());
 
-  std::vector<string> mismatched_errors;
-  for (const size_t i : sorted_name_idx) {
+  TF_RETURN_IF_ERROR(default_reader.SortForSequentialAccess<RestoreOp>(
+      restore_ops, [](const RestoreOp& op) { return op.tensor_name; }));
+
+  std::vector<std::string> mismatched_errors;
+  for (const RestoreOp& restore_op : restore_ops) {
     TensorShape restored_full_shape;
     DataType original_dtype;
-    const string& tensor_name = tensor_names_flat(i);
     TF_RETURN_IF_ERROR(default_reader.LookupDtypeAndShape(
-        tensor_name, &original_dtype, &restored_full_shape));
-    if (dtypes[i] != original_dtype) {
-      string error_msg = strings::StrCat(
-          "tensor_name = ", tensor_name, "; expected dtype ",
-          DataTypeString(dtypes[i]), " does not equal original dtype ",
+        restore_op.tensor_name, &original_dtype, &restored_full_shape));
+    if (restore_op.dtype != original_dtype) {
+      std::string error_msg = strings::StrCat(
+          "tensor_name = ", restore_op.tensor_name, "; expected dtype ",
+          DataTypeString(restore_op.dtype), " does not equal original dtype ",
           DataTypeString(original_dtype));
       mismatched_errors.emplace_back(error_msg);
     }
   }
   if (!mismatched_errors.empty()) {
-    const string error_msg = absl::StrJoin(mismatched_errors, "\n");
-    return errors::InvalidArgument(error_msg);
+    const std::string error_msg = absl::StrJoin(mismatched_errors, "\n");
+    return absl::InvalidArgumentError(error_msg);
   }
 
-  for (auto i : sorted_name_idx) {
-    const string& tensor_name = tensor_names_flat(i);
-    const string& shape_and_slice = shape_and_slices_flat(i);
-    auto op =
-        new RestoreOp{context, i, tensor_name, shape_and_slice, prefix_string};
-    if (op->should_run_in_pool(&default_reader)) {
-      pool_restore_ops.emplace_back(op);
+  // Split restore ops into two groups: large and small. We schedule
+  // large ops first, to prevent them from waiting on the small op.
+  std::vector<RestoreOp*> large_restore_ops;
+  std::vector<RestoreOp*> small_restore_ops;
+  for (RestoreOp& restore_op : restore_ops) {
+    if (restore_op.is_large_shape(&default_reader)) {
+      large_restore_ops.push_back(&restore_op);
     } else {
-      direct_restore_ops.emplace_back(op);
+      small_restore_ops.push_back(&restore_op);
     }
   }
 
-  {
-    // Schedule any threaded operations first, skipping thread pool creation if
-    // we don't have any expensive operations.
+  if (context->session_config() != nullptr &&
+      context->session_config()->intra_op_parallelism_threads() > 0) {
+    // If an explicit restore parallelism is specified, we use it to run
+    // run both small and large restore ops in parallel.
+    auto reader_pool = std::make_unique<thread::ThreadPool>(
+        tsl::Env::Default(), "restore_tensors",
+        context->session_config()->intra_op_parallelism_threads());
+
+    // Schedule large ops first, followed by the small.
+    for (auto* op : large_restore_ops) {
+      reader_pool->Schedule(
+          [op, &cache]() { op->run_with_new_reader(&cache); });
+    }
+    for (auto* op : small_restore_ops) {
+      reader_pool->Schedule(
+          [op, &cache]() { op->run_with_new_reader(&cache); });
+    }
+
+    // Wait for all scheduled work to finish and check the status of all
+    // ops that ran in the pool.
+    reader_pool.reset();
+    for (auto& op : restore_ops) {
+      TF_RETURN_IF_ERROR(op.status);
+    }
+  } else {
+    // If no restore parallelism is specified, we run large restore ops with
+    // a modest parallelism, and small restore ops serially.
+
+    // Avoid creating a pool if there are no large restore ops.
     std::unique_ptr<thread::ThreadPool> reader_pool;
-    if (!pool_restore_ops.empty()) {
+    if (!large_restore_ops.empty()) {
       reader_pool.reset(
           new thread::ThreadPool(Env::Default(), "restore_tensors", 8));
-      for (auto& op : pool_restore_ops) {
-        reader_pool->Schedule([&op]() { op->run_with_new_reader(); });
+      for (auto* op : large_restore_ops) {
+        reader_pool->Schedule(
+            [op, &cache]() { op->run_with_new_reader(&cache); });
       }
     }
 
-    // Read small tensors from the op thread
-    for (auto& op : direct_restore_ops) {
+    // Read small tensors from the op thread.
+    for (auto* op : small_restore_ops) {
       TF_RETURN_IF_ERROR(op->run(&default_reader));
     }
-  }
 
-  // Check status of pool ops; this must come after the pool shuts down.
-  for (auto& op : pool_restore_ops) {
-    TF_RETURN_IF_ERROR(op->status);
-  }
-
-  for (auto i : sorted_name_idx) {
-    const string& tensor_name = tensor_names_flat(i);
-    if (dtypes[i] != context->mutable_output(i)->dtype()) {
-      return errors::InvalidArgument(
-          "tensor_name = ", tensor_name, "; expected dtype ",
-          DataTypeString(dtypes[i]), " does not equal restored dtype ",
-          DataTypeString(context->mutable_output(i)->dtype()));
+    // Wait for all scheduled work to finish and check the status of all
+    // ops that ran in the pool.
+    reader_pool.reset();
+    for (auto* op : large_restore_ops) {
+      TF_RETURN_IF_ERROR(op->status);
     }
   }
 
-  return Status::OK();
+  for (const RestoreOp& restore_op : restore_ops) {
+    if (restore_op.dtype != context->mutable_output(restore_op.idx)->dtype()) {
+      return absl::InvalidArgumentError(absl::StrCat(
+          "tensor_name = ", restore_op.tensor_name, "; expected dtype ",
+          DataTypeString(restore_op.dtype), " does not equal restored dtype ",
+          DataTypeString(context->mutable_output(restore_op.idx)->dtype())));
+    }
+  }
+
+  return absl::OkStatus();
 }
 
 }  // namespace tensorflow

@@ -13,11 +13,19 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include <cstdint>
+#include <string>
+#include <vector>
+
+#include "absl/log/check.h"
+#include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
+#include "absl/types/span.h"
 #include "tensorflow/compiler/tf2xla/lib/data_format.h"
 #include "tensorflow/compiler/tf2xla/xla_helpers.h"
 #include "tensorflow/compiler/tf2xla/xla_op_kernel.h"
 #include "tensorflow/compiler/tf2xla/xla_op_registry.h"
-#include "tensorflow/compiler/xla/client/xla_builder.h"
+#include "xla/hlo/builder/xla_builder.h"
 #include "tensorflow/core/util/tensor_format.h"
 
 namespace tensorflow {
@@ -26,15 +34,15 @@ namespace {
 class DepthToSpaceOp : public XlaOpKernel {
  public:
   explicit DepthToSpaceOp(OpKernelConstruction* ctx) : XlaOpKernel(ctx) {
-    string data_format_str;
+    std::string data_format_str;
     OP_REQUIRES_OK(ctx, ctx->GetAttr("data_format", &data_format_str));
     OP_REQUIRES(ctx, FormatFromString(data_format_str, &data_format_),
-                errors::InvalidArgument("Invalid data format"));
+                absl::InvalidArgumentError("Invalid data format"));
 
     OP_REQUIRES_OK(ctx, ctx->GetAttr("block_size", &block_size_));
-    OP_REQUIRES(
-        ctx, block_size_ > 1,
-        errors::InvalidArgument("Block size should be > 1: ", block_size_));
+    OP_REQUIRES(ctx, block_size_ > 1,
+                absl::InvalidArgumentError(
+                    absl::StrCat("Block size should be > 1: ", block_size_)));
   }
 
   void Compile(XlaOpKernelContext* ctx) override {
@@ -47,24 +55,25 @@ class DepthToSpaceOp : public XlaOpKernel {
       data_format = FORMAT_NCHW;
       auto input_reshaped = NCHW_VECT_CToNCHW(input);
       OP_REQUIRES_OK(ctx, input_reshaped.status());
-      input = input_reshaped.ValueOrDie();
+      input = input_reshaped.value();
     }
 
     OP_REQUIRES(ctx, data_format == FORMAT_NCHW || data_format == FORMAT_NHWC,
-                errors::InvalidArgument("Unsupported data format ",
-                                        ToString(data_format_)));
+                absl::InvalidArgumentError(absl::StrCat(
+                    "Unsupported data format ", ToString(data_format_))));
 
     xla::XlaBuilder* builder = input.builder();
     auto input_xla_shape = builder->GetShape(input);
     OP_REQUIRES_OK(ctx, input_xla_shape.status());
     absl::Span<const int64_t> input_shape =
-        input_xla_shape.ValueOrDie().dimensions();
+        input_xla_shape.value().dimensions();
     int input_rank = input_shape.size();
 
     static const int kRequiredDims = 4;
-    OP_REQUIRES(ctx, kRequiredDims == input_rank,
-                errors::InvalidArgument("Input rank should be ", kRequiredDims,
-                                        "; got: ", input_rank));
+    OP_REQUIRES(
+        ctx, kRequiredDims == input_rank,
+        absl::InvalidArgumentError(absl::StrCat(
+            "Input rank should be ", kRequiredDims, "; got: ", input_rank)));
 
     int feature_dim = GetTensorFeatureDimIndex(input_rank, data_format);
     int num_spatial_dims = GetTensorSpatialDims(input_rank, data_format);
@@ -138,10 +147,10 @@ class DepthToSpaceOp : public XlaOpKernel {
     //       depth / (block_size_ * block_size_)]
     OP_REQUIRES(ctx,
                 input_shape[feature_dim] % (block_size_ * block_size_) == 0,
-                errors::InvalidArgument(
+                absl::InvalidArgumentError(absl::StrCat(
                     "Input depth dimension (", input_shape[3],
                     ") is not divisible by square of the block size (",
-                    block_size_, ")"));
+                    block_size_, ")")));
 
     xla::XlaOp reshaped = xla::Reshape(input, reshaped_shape);
 
@@ -171,7 +180,7 @@ class DepthToSpaceOp : public XlaOpKernel {
       DCHECK(data_format == FORMAT_NCHW && data_format_ == FORMAT_NCHW_VECT_C);
       auto output_reshaped = NCHWToNCHW_VECT_C(output);
       OP_REQUIRES_OK(ctx, output_reshaped.status());
-      output = output_reshaped.ValueOrDie();
+      output = output_reshaped.value();
     }
 
     ctx->SetOutput(0, output);

@@ -13,8 +13,18 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "tensorflow/cc/ops/standard_ops.h"
+#include "absl/log/log.h"
+#include "tensorflow/cc/framework/scope.h"
+#include "tensorflow/cc/ops/array_ops.h"
+#include "tensorflow/cc/ops/parsing_ops.h"
+#include "tensorflow/core/framework/tensor.h"
+#include "tensorflow/core/framework/tensor.pb.h"
+#include "tensorflow/core/framework/tensor_shape.h"
+#include "tensorflow/core/framework/types.pb.h"
 #include "tensorflow/core/kernels/fuzzing/fuzz_session.h"
+#include "tensorflow/core/platform/protobuf.h"
+#include "tensorflow/core/platform/tstring.h"
+#include "tensorflow/core/platform/types.h"
 
 namespace tensorflow {
 namespace fuzzing {
@@ -43,7 +53,8 @@ class FuzzParseTensor : public FuzzSession {
     // detects another similar OOM.
     // After adding `-fsanitize=null` to ASAN (cl/317376103), the memory
     // footprint increased, so we lower the maximum threshold to 2^18.
-    string as_string = string(reinterpret_cast<const char*>(data), size);
+    std::string as_string =
+        std::string(reinterpret_cast<const char*>(data), size);
     TensorProto proto;
     if (!ParseProtoUnlimited(&proto, as_string)) {
       LOG(WARNING) << "Unable to parse proto of tensor\n";

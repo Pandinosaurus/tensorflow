@@ -14,12 +14,9 @@
 # ==============================================================================
 """TensorFlow monitoring APIs."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import collections
 import functools
+import threading
 import time
 
 from tensorflow.core.framework import summary_pb2
@@ -113,7 +110,13 @@ _sampler_methods = [
 class Metric(object):
   """The base class of metric."""
 
-  __slots__ = ["_metric", "_metric_name", "_metric_methods", "_label_length"]
+  __slots__ = [
+      "_metric",
+      "_metric_name",
+      "_metric_methods",
+      "_label_length",
+      "_get_cell_lock",
+  ]
 
   def __init__(self, metric_name, metric_methods, label_length, *args):
     """Creates a new metric.
@@ -124,6 +127,10 @@ class Metric(object):
       label_length: length of label args.
       *args: the arguments to call create method.
     """
+    # Serializes pybind11 casts of this metric's raw cell pointers in
+    # get_cell(), so a wrapper is fully initialized before another thread can
+    # observe it.
+    self._get_cell_lock = threading.Lock()
     self._metric_name = metric_name
     self._metric_methods = metric_methods
     self._label_length = label_length
@@ -149,8 +156,9 @@ class Metric(object):
     if len(labels) != self._label_length:
       raise ValueError('The {} expects taking {} labels'.format(
           self._metric_name, self._label_length))
-    return self._metric_methods[self._label_length].get_cell(
-        self._metric, *labels)
+    get_cell_fn = self._metric_methods[self._label_length].get_cell
+    with self._get_cell_lock:
+      return get_cell_fn(self._metric, *labels)
 
 
 class CounterCell(object):
@@ -468,27 +476,60 @@ class Sampler(Metric):
     return SamplerCell(super(Sampler, self).get_cell(*labels))
 
 
+# Keeping track of current MonitoredTimer sections to prevent repetitive
+# counting.
+MonitoredTimerSections = []
+
+
 class MonitoredTimer(object):
   """A context manager to measure the walltime and increment a Counter cell."""
 
-  __slots__ = ["cell", "t"]
+  __slots__ = [
+      "cell",
+      "t",
+      "monitored_section_name",
+      "_counting",
+      "_avoid_repetitive_counting",
+  ]
 
-  def __init__(self, cell):
+  def __init__(
+      self, cell, monitored_section_name=None, avoid_repetitive_counting=False
+  ):
     """Creates a new MonitoredTimer.
 
     Args:
       cell: the cell associated with the time metric that will be inremented.
+      monitored_section_name: name of action being monitored here.
+      avoid_repetitive_counting: when set to True, if already in a monitored
+        timer section with the same monitored_section_name, skip counting.
     """
     self.cell = cell
+    self.monitored_section_name = monitored_section_name
+    self._avoid_repetitive_counting = avoid_repetitive_counting
+    self._counting = True
 
   def __enter__(self):
+    if (
+        self._avoid_repetitive_counting
+        and self.monitored_section_name
+        and self.monitored_section_name in MonitoredTimerSections
+    ):
+      self._counting = False
+      return self
+
     self.t = time.time()
+    if self.monitored_section_name:
+      MonitoredTimerSections.append(self.monitored_section_name)
+
     return self
 
   def __exit__(self, exception_type, exception_value, traceback):
     del exception_type, exception_value, traceback
-    micro_seconds = (time.time() - self.t) * 1000000
-    self.cell.increase_by(int(micro_seconds))
+    if self._counting:
+      micro_seconds = (time.time() - self.t) * 1000000
+      self.cell.increase_by(int(micro_seconds))
+      if self.monitored_section_name:
+        MonitoredTimerSections.remove(self.monitored_section_name)
 
 
 def monitored_timer(cell):

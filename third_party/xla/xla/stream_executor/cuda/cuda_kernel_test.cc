@@ -1,0 +1,170 @@
+/* Copyright 2024 The OpenXLA Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+==============================================================================*/
+
+#include <cstdint>
+#include <memory>
+#include <optional>
+#include <vector>
+
+#include <gmock/gmock.h>
+#include <gtest/gtest.h>
+#include "absl/status/status_matchers.h"
+#include "third_party/gpus/cuda/include/cuda.h"
+#include "xla/stream_executor/device_address.h"
+#include "xla/stream_executor/gpu/gpu_test_kernels.h"
+#include "xla/stream_executor/kernel.h"
+#include "xla/stream_executor/kernel_args.h"
+#include "xla/stream_executor/kernel_spec.h"
+#include "xla/stream_executor/launch_dim.h"
+#include "xla/stream_executor/platform.h"
+#include "xla/stream_executor/platform_manager.h"
+#include "xla/stream_executor/stream.h"
+#include "xla/stream_executor/stream_executor.h"
+#include "xla/tsl/platform/statusor.h"
+
+namespace stream_executor::gpu {
+namespace {
+using testing::Ge;
+
+TEST(CudaKernelTest, GetMaxOccupiedBlocksPerCore) {
+  ASSERT_OK_AND_ASSIGN(Platform * platform,
+                       PlatformManager::PlatformWithName("CUDA"));
+  ASSERT_OK_AND_ASSIGN(StreamExecutor * executor,
+                       platform->ExecutorForDevice(0));
+
+  ASSERT_OK_AND_ASSIGN(auto cuda_kernel, LoadAddI32TestKernel(executor));
+
+  EXPECT_EQ(cuda_kernel->Arity(), 3);
+  EXPECT_THAT(cuda_kernel->GetMaxOccupiedBlocksPerCore(
+                  ThreadDim(1, 1, 1), /*dynamic_shared_memory_bytes=*/0),
+              absl_testing::IsOkAndHolds(Ge(1)));
+}
+
+TEST(CudaKernelTest, DynamicSharedMemoryOptIn) {
+  ASSERT_OK_AND_ASSIGN(Platform * platform,
+                       PlatformManager::PlatformWithName("CUDA"));
+  ASSERT_OK_AND_ASSIGN(StreamExecutor * executor,
+                       platform->ExecutorForDevice(0));
+
+  int64_t max_shmem =
+      executor->GetDeviceDescription().shared_memory_per_block_optin();
+  int64_t default_shmem =
+      executor->GetDeviceDescription().shared_memory_per_block();
+  if (max_shmem <= default_shmem) {
+    GTEST_SKIP() << "Device does not support dynamic shared memory opt-in";
+  }
+
+  ASSERT_OK_AND_ASSIGN(auto stream, executor->CreateStream());
+  ASSERT_OK_AND_ASSIGN(auto kernel1, LoadAddI32TestKernel(executor));
+  ASSERT_OK_AND_ASSIGN(auto kernel2, LoadAddI32TestKernel(executor));
+
+  int32_t length = 4;
+  int64_t byte_length = sizeof(int32_t) * length;
+
+  DeviceAddress<int32_t> a = executor->AllocateArray<int32_t>(length, 0);
+  DeviceAddress<int32_t> b = executor->AllocateArray<int32_t>(length, 0);
+  DeviceAddress<int32_t> c = executor->AllocateArray<int32_t>(length, 0);
+
+  std::vector<int32_t> a_host = {1, 2, 3, 4};
+  std::vector<int32_t> b_host = {10, 20, 30, 40};
+  ASSERT_OK(stream->Memcpy(&a, a_host.data(), byte_length));
+  ASSERT_OK(stream->Memcpy(&b, b_host.data(), byte_length));
+  ASSERT_OK(stream->MemZero(&c, byte_length));
+
+  // 1. Launch kernel1 with large dynamic shared memory (> default 48KB).
+  // This raises the dynamic shared memory ceiling for the underlying
+  // CUfunction.
+  int32_t large_shmem = max_shmem;
+  ASSERT_OK(kernel1.Launch(ThreadDim(length, 1, 1), BlockDim(1, 1, 1),
+                           large_shmem, stream.get(), a, b, c));
+
+  // 2. Launch kernel2 (wrapping the same CUfunction) with smaller dynamic
+  // shared memory. This should not lower the ceiling on the underlying
+  // CUfunction.
+  int32_t small_shmem = 1024;
+  ASSERT_OK(kernel2.Launch(ThreadDim(length, 1, 1), BlockDim(1, 1, 1),
+                           small_shmem, stream.get(), a, b, c));
+
+  // 3. Launch kernel1 again with large dynamic shared memory.
+  // If the ceiling was lowered by kernel2, this launch will fail.
+  ASSERT_OK(kernel1.Launch(ThreadDim(length, 1, 1), BlockDim(1, 1, 1),
+                           large_shmem, stream.get(), a, b, c));
+
+  std::vector<int32_t> dst(4, 0);
+  ASSERT_OK(stream->Memcpy(dst.data(), c, byte_length));
+  std::vector<int32_t> expected = {11, 22, 33, 44};
+  EXPECT_EQ(dst, expected);
+}
+
+TEST(CudaKernelTest, ArityZeroKernelSkipsArgumentCountCheck) {
+  ASSERT_OK_AND_ASSIGN(Platform * platform,
+                       PlatformManager::PlatformWithName("CUDA"));
+  ASSERT_OK_AND_ASSIGN(StreamExecutor * executor,
+                       platform->ExecutorForDevice(0));
+  ASSERT_OK_AND_ASSIGN(auto stream, executor->CreateStream());
+
+  // Load AddI32 without a typed signature, like FFI registered kernels.
+  KernelLoaderSpec add_i32 = GetAddI32PtxKernelSpec();
+  KernelLoaderSpec spec = KernelLoaderSpec::CreateCudaPtxInMemorySpec(
+      add_i32.cuda_ptx_in_memory()->ptx, add_i32.kernel_name(), /*arity=*/0);
+  ASSERT_OK_AND_ASSIGN(std::unique_ptr<Kernel> kernel,
+                       executor->LoadKernel(spec));
+  EXPECT_EQ(kernel->Arity(), 0);
+
+  constexpr int32_t kLength = 4;
+  constexpr int64_t kByteLength = sizeof(int32_t) * kLength;
+  DeviceAddress<int32_t> a = executor->AllocateArray<int32_t>(kLength, 0);
+  DeviceAddress<int32_t> b = executor->AllocateArray<int32_t>(kLength, 0);
+  DeviceAddress<int32_t> c = executor->AllocateArray<int32_t>(kLength, 0);
+  std::vector<int32_t> a_host = {1, 2, 3, 4};
+  std::vector<int32_t> b_host = {10, 20, 30, 40};
+  ASSERT_OK(stream->Memcpy(&a, a_host.data(), kByteLength));
+  ASSERT_OK(stream->Memcpy(&b, b_host.data(), kByteLength));
+  ASSERT_OK(stream->MemZero(&c, kByteLength));
+
+  std::vector<DeviceAddressBase> args = {a, b, c};
+  ASSERT_OK(kernel->Launch(ThreadDim(kLength, 1, 1), BlockDim(1, 1, 1),
+                           /*cluster_dims=*/std::nullopt, stream.get(),
+                           *PackKernelArgs(args, /*shmem_bytes=*/0)));
+
+  std::vector<int32_t> dst(kLength, 0);
+  ASSERT_OK(stream->Memcpy(dst.data(), c, kByteLength));
+  EXPECT_EQ(dst, std::vector<int32_t>({11, 22, 33, 44}));
+}
+
+TEST(CudaKernelTest, LaunchesWithNonPortableClusterSize) {
+  ASSERT_OK_AND_ASSIGN(Platform * platform,
+                       PlatformManager::PlatformWithName("CUDA"));
+  ASSERT_OK_AND_ASSIGN(StreamExecutor * executor,
+                       platform->ExecutorForDevice(0));
+  if (!executor->GetDeviceDescription()
+           .cuda_compute_capability()
+           .IsAtLeastHopper()) {
+    GTEST_SKIP() << "Requires at least a Hopper GPU.";
+  }
+  ASSERT_OK_AND_ASSIGN(auto stream, executor->CreateStream());
+  ASSERT_OK_AND_ASSIGN(std::unique_ptr<Kernel> kernel,
+                       executor->LoadKernel(GetMinimalClusterKernelSpec()));
+  DeviceAddress<uint8_t> dummy = executor->AllocateArray<uint8_t>(256);
+
+  // Clusters larger than 8 blocks need the non-portable cluster attribute.
+  ASSERT_OK(kernel->Launch(ThreadDim(128, 1, 1), BlockDim(16, 1, 1),
+                           ClusterDim(16, 1, 1), stream.get(),
+                           *PackKernelArgs(/*shmem_bytes=*/0, dummy)));
+  ASSERT_OK(stream->BlockHostUntilDone());
+}
+
+}  // namespace
+}  // namespace stream_executor::gpu

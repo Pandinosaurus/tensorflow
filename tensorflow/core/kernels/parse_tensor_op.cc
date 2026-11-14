@@ -15,13 +15,16 @@ limitations under the License.
 
 // See docs in ../ops/parsing_ops.cc.
 
+#include "absl/strings/escaping.h"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/register_types.h"
 #include "tensorflow/core/framework/tensor.h"
 #include "tensorflow/core/framework/tensor.pb.h"
 #include "tensorflow/core/framework/tensor_shape.h"
+#include "tensorflow/core/framework/tensor_util.h"
 #include "tensorflow/core/framework/types.h"
 #include "tensorflow/core/lib/core/errors.h"
+#include "tensorflow/core/util/tensor_bundle/byte_swap_tensor.h"
 
 namespace tensorflow {
 
@@ -35,27 +38,30 @@ class ParseTensorOp : public OpKernel {
     const Tensor& serialized = ctx->input(0);
 
     OP_REQUIRES(ctx, TensorShapeUtils::IsScalar(serialized.shape()),
-                errors::InvalidArgument(
+                absl::InvalidArgumentError(absl::StrCat(
                     "Expected `serialized` to be a scalar, got shape: ",
-                    serialized.shape().DebugString()));
+                    serialized.shape().DebugString())));
 
     auto serialized_t = serialized.scalar<tstring>();
 
     TensorProto proto;
     OP_REQUIRES(ctx, ParseProtoUnlimited(&proto, serialized_t()),
-                errors::InvalidArgument(
-                    "Could not parse `serialized` as TensorProto: '",
-                    serialized_t(), "'"));
+                absl::InvalidArgumentError(absl::StrCat(
+                    "Could not parse `serialized` as TensorProto, base64: ",
+                    absl::Base64Escape(serialized_t()))));
 
     Tensor output;
     OP_REQUIRES_OK(ctx, ctx->device()->MakeTensorFromProto(
                             proto, ctx->output_alloc_attr(0), &output));
 
-    OP_REQUIRES(
-        ctx, out_type_ == output.dtype(),
-        errors::InvalidArgument("Type mismatch between parsed tensor (",
-                                DataTypeString(output.dtype()), ") and dtype (",
-                                DataTypeString(out_type_), ")"));
+    OP_REQUIRES(ctx, out_type_ == output.dtype(),
+                absl::InvalidArgumentError(absl::StrCat(
+                    "Type mismatch between parsed tensor (",
+                    DataTypeString(output.dtype()), ") and dtype (",
+                    DataTypeString(out_type_), ")")));
+
+    if (!port::kLittleEndian && IsByteSwappable(output.dtype()))
+      OP_REQUIRES_OK(ctx, ByteSwapTensor(&output));
 
     ctx->set_output(0, output);
   }
@@ -77,7 +83,13 @@ class SerializeTensorOp : public OpKernel {
     if (tensor.dtype() == DT_STRING) {
       tensor.AsProtoField(&proto);
     } else {
-      tensor.AsProtoTensorContent(&proto);
+      if (!port::kLittleEndian && IsByteSwappable(tensor.dtype())) {
+        Tensor ts_ = tensor::DeepCopy(tensor);
+        OP_REQUIRES_OK(context, ByteSwapTensor(&ts_));
+        ts_.AsProtoTensorContent(&proto);
+      } else {
+        tensor.AsProtoTensorContent(&proto);
+      }
     }
     Tensor* proto_string = nullptr;
     OP_REQUIRES_OK(context,

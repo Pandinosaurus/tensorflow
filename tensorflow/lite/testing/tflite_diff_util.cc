@@ -14,13 +14,14 @@ limitations under the License.
 ==============================================================================*/
 #include "tensorflow/lite/testing/tflite_diff_util.h"
 
-#include <cstdarg>
 #include <cstdio>
-#include <cstdlib>
+#include <memory>
 #include <sstream>
+#include <string>
 
 #include "tensorflow/lite/testing/generate_testspec.h"
 #include "tensorflow/lite/testing/parse_testdata.h"
+#include "tensorflow/lite/testing/test_runner.h"
 #include "tensorflow/lite/testing/tflite_driver.h"
 
 namespace tflite {

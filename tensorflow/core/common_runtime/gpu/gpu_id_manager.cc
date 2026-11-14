@@ -15,18 +15,19 @@ limitations under the License.
 
 #include "tensorflow/core/common_runtime/gpu/gpu_id_manager.h"
 
+#include "absl/status/status.h"
 #include "tensorflow/core/common_runtime/device/device_id_manager.h"
 #include "tensorflow/core/framework/types.h"
 
 namespace tensorflow {
 
-Status GpuIdManager::InsertTfPlatformDeviceIdPair(
+absl::Status GpuIdManager::InsertTfPlatformDeviceIdPair(
     TfDeviceId tf_device_id, PlatformDeviceId platform_device_id) {
   return DeviceIdManager::InsertTfPlatformDeviceIdPair(DEVICE_GPU, tf_device_id,
                                                        platform_device_id);
 }
 
-Status GpuIdManager::TfToPlatformDeviceId(
+absl::Status GpuIdManager::TfToPlatformDeviceId(
     TfDeviceId tf_device_id, PlatformDeviceId* platform_device_id) {
   return DeviceIdManager::TfToPlatformDeviceId(DEVICE_GPU, tf_device_id,
                                                platform_device_id);

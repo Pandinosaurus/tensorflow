@@ -34,10 +34,10 @@ class ClusterScopingPassImpl {
         global_jit_level_(global_jit_level),
         unique_scope_id_(0) {}
 
-  Status Run();
+  absl::Status Run();
 
  private:
-  Status ScopingForPipelineStages();
+  absl::Status ScopingForPipelineStages();
 
   size_t GetUniqueScopeId() { return unique_scope_id_++; }
 
@@ -51,16 +51,16 @@ class ClusterScopingPassImpl {
   size_t unique_scope_id_;
 };
 
-absl::optional<string> GetXlaInternalScope(Node* node) {
-  string scope;
+std::optional<std::string> GetXlaInternalScope(Node* node) {
+  std::string scope;
   if (GetNodeAttr(node->attrs(), kXlaInternalScopeAttr, &scope).ok()) {
     return scope;
   }
 
-  return absl::nullopt;
+  return std::nullopt;
 }
 
-void SetXlaInternalScope(Node* node, StringPiece scope) {
+void SetXlaInternalScope(Node* node, absl::string_view scope) {
   node->AddAttr(kXlaInternalScopeAttr, scope);
 }
 
@@ -85,9 +85,9 @@ void SetXlaInternalScope(Node* node, StringPiece scope) {
 //  Node_X (scope "stage") -> Stage
 //
 void AddOrAppendXlaInternalScope(Node* node, absl::string_view suffix) {
-  string updated_scope;
-  absl::optional<string> cur_scope = GetXlaInternalScope(node);
-  if (cur_scope == absl::nullopt) {
+  std::string updated_scope;
+  std::optional<std::string> cur_scope = GetXlaInternalScope(node);
+  if (cur_scope == std::nullopt) {
     updated_scope = std::string(suffix);
   } else {
     updated_scope = absl::StrCat(cur_scope.value(), "&", suffix);
@@ -96,7 +96,7 @@ void AddOrAppendXlaInternalScope(Node* node, absl::string_view suffix) {
 }
 
 void ClusterScopingPassImpl::AddScopeToAllTransitivePredecessors(Node* start) {
-  const string unique_suffix = absl::StrCat("_", GetUniqueScopeId());
+  const std::string unique_suffix = absl::StrCat("_", GetUniqueScopeId());
 
   std::vector<Node*> starts;
   starts.push_back(start);
@@ -106,7 +106,7 @@ void ClusterScopingPassImpl::AddScopeToAllTransitivePredecessors(Node* start) {
 }
 
 void ClusterScopingPassImpl::AddScopeToAllTransitiveSuccessors(Node* start) {
-  const string unique_suffix = absl::StrCat("_", GetUniqueScopeId());
+  const std::string unique_suffix = absl::StrCat("_", GetUniqueScopeId());
 
   std::vector<Node*> starts;
   starts.push_back(start);
@@ -131,7 +131,7 @@ void ClusterScopingPassImpl::AddScopeToAllTransitiveSuccessors(Node* start) {
 //
 // Unstage -> Node_Y
 //
-Status ClusterScopingPassImpl::ScopingForPipelineStages() {
+absl::Status ClusterScopingPassImpl::ScopingForPipelineStages() {
   for (Node* n : graph_->nodes()) {
     DCHECK(n);
     if (n->type_string() == "Unstage") {
@@ -142,19 +142,20 @@ Status ClusterScopingPassImpl::ScopingForPipelineStages() {
     }
   }
 
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-Status ClusterScopingPassImpl::Run() {
+absl::Status ClusterScopingPassImpl::Run() {
   if (global_jit_level_ == OptimizerOptions::OFF) {
-    return Status::OK();
+    return absl::OkStatus();
   }
 
   return ScopingForPipelineStages();
 }
 }  // namespace
 
-Status ClusterScopingPass::Run(const GraphOptimizationPassOptions& options) {
+absl::Status ClusterScopingPass::Run(
+    const GraphOptimizationPassOptions& options) {
   Graph* graph = options.graph->get();
 
   return ClusterScopingPassImpl{graph, GetGlobalJitLevelForGraph(options)}

@@ -13,7 +13,7 @@ limitations under the License.
 #if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 #define EIGEN_USE_GPU
 
-#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
+#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/register_types.h"
 #include "tensorflow/core/framework/tensor.h"
@@ -28,28 +28,32 @@ namespace tensorflow {
 
 namespace {
 
-__global__ void IndicesFlattenKernel(const int64* __restrict__ indices,
-                                     const int64 nnz,
-                                     const int64* __restrict__ dims,
-                                     const int64 ndims,
-                                     int64* __restrict__ flat_indices) {
+__global__ void IndicesFlattenKernel(const int64_t* __restrict__ indices,
+                                     const int64_t nnz,
+                                     const int64_t* __restrict__ dims,
+                                     const int64_t ndims,
+                                     int64_t* __restrict__ flat_indices) {
   GPU_1D_KERNEL_LOOP(thread_idx, nnz) {
-    eigen_assert(ndims >= 1);
-    int64 output_idx = indices[thread_idx * ndims + ndims - 1];
-    int64 strides = 1;
-    for (int i = ndims - 2; i >= 0; i--) {
-      strides *= dims[i + 1];
-      output_idx += indices[thread_idx * ndims + i] * strides;
+    if (ndims < 1) {
+      flat_indices[thread_idx] = 0;  // Scalar.
+    } else {
+      int64_t output_idx = indices[thread_idx * ndims + ndims - 1];
+      int64_t strides = 1;
+      for (int i = ndims - 2; i >= 0; i--) {
+        strides *= dims[i + 1];
+        output_idx += indices[thread_idx * ndims + i] * strides;
+      }
+      flat_indices[thread_idx] = output_idx;
     }
-    flat_indices[thread_idx] = output_idx;
   }
 }
 
 template <typename T>
 __global__ void PermuteIndicesAndValuesKernel(
-    const int64* __restrict__ indices, const T* __restrict__ values,
-    const int64 nnz, const int64 ndims, const int64* __restrict__ permutation,
-    int64* reordered_indices, T* reordered_values) {
+    const int64_t* __restrict__ indices, const T* __restrict__ values,
+    const int64_t nnz, const int64_t ndims,
+    const int64_t* __restrict__ permutation, int64_t* reordered_indices,
+    T* reordered_values) {
   GPU_1D_KERNEL_LOOP(thread_idx, nnz) {
     for (int i = 0; i < ndims; i++) {
       reordered_indices[thread_idx * ndims + i] =
@@ -71,12 +75,12 @@ struct SparseReorderFunctor<GPUDevice, T> {
                   const Tensor& input_val, const Tensor& input_shape_in) {
     const Eigen::GpuDevice& d = c->eigen_gpu_device();
 
-    const int64 num_elems = input_ind.dims() > 0 ? input_ind.dim_size(0) : 1;
-    const int64 num_dims = input_ind.dims() > 1 ? input_ind.dim_size(1) : 1;
+    const int64_t num_elems = input_ind.dims() > 0 ? input_ind.dim_size(0) : 1;
+    const int64_t num_dims = input_ind.dims() > 1 ? input_ind.dim_size(1) : 1;
 
-    auto indices = input_ind.template flat<int64>().data();
+    auto indices = input_ind.template flat<int64_t>().data();
     auto values = input_val.template flat<T>().data();
-    auto dims = input_shape_in.template flat<int64>().data();
+    auto dims = input_shape_in.template flat<int64_t>().data();
 
     if (num_elems == 0) {
       c->set_output(0, input_ind);
@@ -87,7 +91,7 @@ struct SparseReorderFunctor<GPUDevice, T> {
     Tensor flat_indices_tensor;
     OP_REQUIRES_OK(c, c->allocate_temp(DT_INT64, TensorShape({num_elems}),
                                        &flat_indices_tensor));
-    auto flat_indices = flat_indices_tensor.template flat<int64>().data();
+    auto flat_indices = flat_indices_tensor.template flat<int64_t>().data();
 
     GpuLaunchConfig config = GetGpuLaunchConfig(num_elems, d);
     OP_REQUIRES_OK(
@@ -98,12 +102,12 @@ struct SparseReorderFunctor<GPUDevice, T> {
     Tensor permutation_tensor;
     OP_REQUIRES_OK(
         c, c->allocate_temp(DT_INT64, {num_elems}, &permutation_tensor));
-    auto permutation_data = permutation_tensor.template flat<int64>().data();
+    auto permutation_data = permutation_tensor.template flat<int64_t>().data();
 
     OP_REQUIRES_OK(
         c, GpuRadixSort(c, num_elems, /*keys_in=*/flat_indices,
-                        /*keys_out=*/static_cast<int64*>(nullptr),
-                        /*indices_in=*/static_cast<const int64*>(nullptr),
+                        /*keys_out=*/static_cast<int64_t*>(nullptr),
+                        /*indices_in=*/static_cast<const int64_t*>(nullptr),
                         /*indices_out=*/permutation_data));
 
     // Free temporary tensor that is no longer needed.
@@ -117,7 +121,7 @@ struct SparseReorderFunctor<GPUDevice, T> {
     OP_REQUIRES_OK(
         c, c->allocate_output(1, input_val.shape(), &reordered_val_tensor));
     auto reordered_ind_data =
-        reordered_ind_tensor->template flat<int64>().data();
+        reordered_ind_tensor->template flat<int64_t>().data();
     auto reordered_val_data = reordered_val_tensor->template flat<T>().data();
 
     OP_REQUIRES_OK(

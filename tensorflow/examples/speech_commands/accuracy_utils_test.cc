@@ -15,22 +15,26 @@ limitations under the License.
 
 #include "tensorflow/examples/speech_commands/accuracy_utils.h"
 
-#include "tensorflow/core/framework/tensor_testutil.h"
-#include "tensorflow/core/lib/core/status_test_util.h"
-#include "tensorflow/core/lib/io/path.h"
-#include "tensorflow/core/lib/strings/str_util.h"
+#include <cstdint>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include "xla/tsl/lib/core/status_test_util.h"
 #include "tensorflow/core/platform/env.h"
+#include "tensorflow/core/platform/path.h"
 #include "tensorflow/core/platform/test.h"
+#include "tensorflow/core/platform/types.h"
 
 namespace tensorflow {
 
 TEST(AccuracyUtilsTest, ReadGroundTruthFile) {
-  string file_name = tensorflow::io::JoinPath(tensorflow::testing::TmpDir(),
-                                              "ground_truth.txt");
-  string file_data = "a,10\nb,12\n";
+  std::string file_name = tensorflow::io::JoinPath(
+      tensorflow::testing::TmpDir(), "ground_truth.txt");
+  std::string file_data = "a,10\nb,12\n";
   TF_ASSERT_OK(WriteStringToFile(Env::Default(), file_name, file_data));
 
-  std::vector<std::pair<string, int64_t>> ground_truth;
+  std::vector<std::pair<std::string, int64_t>> ground_truth;
   TF_ASSERT_OK(ReadGroundTruthFile(file_name, &ground_truth));
   ASSERT_EQ(2, ground_truth.size());
   EXPECT_EQ("a", ground_truth[0].first);

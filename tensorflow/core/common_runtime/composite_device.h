@@ -31,39 +31,41 @@ extern const char* const kCompositeDeviceType;
 // op on this virtial device.
 class CompositeDevice : public Device {
  public:
-  Status Sync() override {
-    return errors::Internal(
+  absl::Status Sync() override {
+    return absl::InternalError(
         "Sync() should never been invoked on CompositeDevice.");
   }
 
   Allocator* GetAllocator(AllocatorAttributes) override { return nullptr; }
 
-  const std::vector<string>* underlying_devices() const {
+  const std::vector<std::string>* underlying_devices() const {
     return &underlying_devices_;
   }
 
   // Helper for creating a CompositeDevice on the same task as the given host
   // CPU.
   static std::unique_ptr<CompositeDevice> MakeDevice(
-      const std::vector<string>& underlying_devices, const int unique_device_id,
-      const DeviceNameUtils::ParsedName& host_name, Status* status);
+      const std::vector<std::string>& underlying_devices,
+      const int unique_device_id, const DeviceNameUtils::ParsedName& host_name,
+      absl::Status* status);
 
   // Helper for creating a CompositeDevice with the given device name.
   static std::unique_ptr<CompositeDevice> MakeDevice(
-      const std::vector<string>& underlying_devices, const string& device_name,
-      Status* status);
+      const std::vector<std::string>& underlying_devices,
+      const std::string& device_name, absl::Status* status);
 
   bool IsRemoteCallAllowed() const override { return false; }
 
  private:
   CompositeDevice(const DeviceAttributes& device_attributes,
-                  const std::vector<string>& underlying_devices)
+                  const std::vector<std::string>& underlying_devices)
       : Device(/*env=*/nullptr, device_attributes),
         underlying_devices_(underlying_devices) {}
 
-  const std::vector<string> underlying_devices_;
+  const std::vector<std::string> underlying_devices_;
 
-  TF_DISALLOW_COPY_AND_ASSIGN(CompositeDevice);
+  CompositeDevice(const CompositeDevice&) = delete;
+  void operator=(const CompositeDevice&) = delete;
 };
 
 }  // namespace tensorflow

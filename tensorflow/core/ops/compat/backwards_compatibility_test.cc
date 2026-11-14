@@ -19,14 +19,14 @@ limitations under the License.
 #include "tensorflow/core/platform/env.h"
 #include "tensorflow/core/platform/protobuf.h"
 #include "tensorflow/core/platform/test.h"
-#include "tensorflow/core/public/version.h"
+#include "tensorflow/core/public/release_version.h"
 
 namespace tensorflow {
 namespace {
 
 TEST(BackwardsCompatibilityTest, IsCompatible) {
   OpCompatibilityLib compatibility("tensorflow/core/ops",
-                                   strings::StrCat("v", TF_MAJOR_VERSION),
+                                   absl::StrCat("v", TF_MAJOR_VERSION),
                                    nullptr);
 
   Env* env = Env::Default();

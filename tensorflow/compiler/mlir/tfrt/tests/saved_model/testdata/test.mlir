@@ -1,7 +1,22 @@
+// Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+// ==============================================================================
+
 module attributes {tf.versions = {bad_consumers = [], min_consumer = 0 : i32, producer = 398 : i32}, tf_saved_model.semantics} {
   "tf_saved_model.global_tensor"() {is_mutable, sym_name = "y", type = tensor<3x1xi32>, value = dense<[[1], [2], [3]]> : tensor<3x1xi32>} : () -> ()
   "tf_saved_model.asset"() {sym_name = "z", filename = "file"} : () -> ()
-  func @serving_default(
+  func.func @serving_default(
       %arg0: tensor<1x3xi32> {tf_saved_model.index_path = ["x"]},
       %arg1: tensor<!tf_type.resource<tensor<3x1xi32>>> {tf_saved_model.bound_input = @y},
       %arg2: tensor<!tf_type.string> {tf_saved_model.bound_input = @z}
@@ -13,9 +28,9 @@ module attributes {tf.versions = {bad_consumers = [], min_consumer = 0 : i32, pr
   {
     %0 = "tf.ReadVariableOp"(%arg1) {device = ""} : (tensor<!tf_type.resource<tensor<3x1xi32>>>) -> tensor<3x1xi32>
     %1 = "tf.MatMul"(%arg0, %0) {device = "", transpose_a = false, transpose_b = false} : (tensor<1x3xi32>, tensor<3x1xi32>) -> tensor<1x1xi32>
-    return %1 : tensor<1x1xi32>
+    func.return %1 : tensor<1x1xi32>
   }
-  func @predict(
+  func.func @predict(
     ) -> (tensor<0x!tf_type.string> {tf_saved_model.index_path = ["r"]})
       attributes {
         tf.entry_function = {control_outputs = "", inputs = "input:0", outputs = "result:0"},
@@ -23,6 +38,6 @@ module attributes {tf.versions = {bad_consumers = [], min_consumer = 0 : i32, pr
     }
   {
     %0 = "tf.Const"() {dtype = !tf_type.string, value = dense<[]> : tensor<0x!tf_type.string>} : () -> tensor<0x!tf_type.string>
-    return %0 : tensor<0x!tf_type.string>
+    func.return %0 : tensor<0x!tf_type.string>
   }
 }

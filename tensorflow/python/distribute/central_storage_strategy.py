@@ -14,10 +14,6 @@
 # ==============================================================================
 """Class implementing a single machine parameter server strategy."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 from tensorflow.python.distribute import device_util
 from tensorflow.python.distribute import distribute_lib
 from tensorflow.python.distribute import parameter_server_strategy
@@ -102,8 +98,11 @@ class CentralStorageStrategy(distribute_lib.Strategy):
     Returns:
       A "distributed `Dataset`" that the caller can iterate over.
     """
-    if (options and options.experimental_replication_moden ==
-        distribute_lib.InputReplicationMode.PER_REPLICA):
+    if (
+        options
+        and options.experimental_replication_mode
+        == distribute_lib.InputReplicationMode.PER_REPLICA
+    ):
       raise NotImplementedError(
           'InputReplicationMode.PER_REPLICA '
           'is only supported in '

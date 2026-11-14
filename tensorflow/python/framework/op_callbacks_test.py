@@ -14,10 +14,6 @@
 # ==============================================================================
 """Unit tests for op_callback."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import threading
 
 import numpy as np
@@ -613,8 +609,6 @@ class OpCallbacksTest(test_util.TensorFlowTestCase):
     greater_op_outputs = instrument.graph_internal_ndarrays[_GREATER_OP]
     self.assertEqual(len(greater_op_outputs), 1)
     self.assertAllClose(greater_op_outputs[0], False)
-    # This was needed for backwards compatibility with TF2 Estimators which
-    # rely on variable names.
     prefix = b"cond/" if context.executing_eagerly() else b""
     pow_op_outputs = instrument.graph_internal_ndarrays[b"%spow" % prefix]
     self.assertEqual(len(pow_op_outputs), 1)

@@ -31,7 +31,7 @@ class XlaAotOnlyVarHandleOp : public XlaOpKernel {
   void Compile(XlaOpKernelContext* context) override;
 
  private:
-  string name_;
+  std::string name_;
 };
 
 XlaAotOnlyVarHandleOp::XlaAotOnlyVarHandleOp(OpKernelConstruction* c)
@@ -49,8 +49,8 @@ void XlaAotOnlyVarHandleOp::Compile(XlaOpKernelContext* context) {
       return;
     }
   }
-  context->SetStatus(
-      errors::InvalidArgument("Variable: ", name_, " not configured"));
+  context->SetStatus(absl::InvalidArgumentError(
+      absl::StrCat("Variable: ", name_, " not configured")));
 }
 }  // namespace
 
@@ -60,6 +60,7 @@ Internal VarHandleOp registration used for XLA AOT compilation.
 )doc")
     .Attr("container: string = ''")
     .Attr("shared_name: string = ''")
+    .Attr("debug_name: string = ''")
     .Attr("dtype: type")
     .Attr("shape: shape")
     .Output("resource: resource")
@@ -75,7 +76,7 @@ Internal VarHandleOp registration used for XLA AOT compilation.
       c->set_output_handle_shapes_and_types(
           0, std::vector<shape_inference::ShapeAndType>{{s, t}});
 
-      return Status::OK();
+      return absl::OkStatus();
     });
 
 REGISTER_XLA_OP(Name(tfcompile::kXlaAotOnlyVarHandleOp).CompilationOnly(),

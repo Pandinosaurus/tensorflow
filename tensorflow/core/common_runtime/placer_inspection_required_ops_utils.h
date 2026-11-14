@@ -31,7 +31,9 @@ limitations under the License.
 
 #include <vector>
 
+#include "absl/status/status.h"
 #include "absl/types/optional.h"
+#include "tensorflow/core/framework/attr_value.pb.h"
 #include "tensorflow/core/framework/function.h"
 #include "tensorflow/core/graph/graph.h"
 #include "tensorflow/core/lib/core/status.h"
@@ -53,13 +55,13 @@ class PlacerInspectionRequiredOpChecker {
                                     const FunctionLibraryDefinition* flib_def);
 
   // If `node` is considered a deep op, sets `*is_deep` to true and returns
-  // Status::OK(). If an error occurs, returns that error, and the value of
+  // OkStatus(). If an error occurs, returns that error, and the value of
   // `*is_deep` is undefined.
   // Currently, an op is considered deep, if it is a calling a function
   // returning a resource. This definition is driven by Placer's need to
   // look inside the op.
   // REQUIRES: `node` is part of `graph` passed into constructor.
-  Status IsPlacerInspectionRequired(const Node& node, bool* is_deep);
+  absl::Status IsPlacerInspectionRequired(const Node& node, bool* is_deep);
 
  private:
   const Graph& graph_;
@@ -72,42 +74,45 @@ class PlacerInspectionRequiredOpChecker {
 
 // Extracts `fdef` and `func` from `flib_def` for the function identified
 // in "f" attribute of `node`.
-Status GetFunctionDefAndAttrs(const FunctionLibraryDefinition& flib_def,
-                              const Node& node, const FunctionDef** fdef,
-                              NameAttrList* func);
+absl::Status GetFunctionDefAndAttrs(const FunctionLibraryDefinition& flib_def,
+                                    const Node& node,
+                                    core::RefCountPtr<FunctionRecord>* fdef,
+                                    NameAttrList* func);
 
 // The "call" stack of functions.
 // Useful for better error messages as well as for detecting recursion.
 // Stores references to graph nodes. These references must outlive this.
 class FunctionStack {
  public:
-  explicit FunctionStack(const string& function_name);
+  explicit FunctionStack(const std::string& function_name);
 
   // `node_in_current_function` must outlive this.
   FunctionStack Push(const Node* node_in_current_function,
-                     const string& new_current_function) const;
+                     const std::string& new_current_function) const;
 
   // Returns true iff this stack already includes `function_name`.
-  bool HasFunction(const string& function_name) const;
+  bool HasFunction(const std::string& function_name) const;
 
-  const string& current_function_name() const { return current_function_name_; }
+  const std::string& current_function_name() const {
+    return current_function_name_;
+  }
 
   // Format's this suitable for error interpolation that retrieves
   // Python files and line numbers.
-  string FormatForError() const;
+  std::string FormatForError() const;
 
  private:
   struct Frame {
-    Frame(const string& function, const Node* node)
+    Frame(const std::string& function, const Node* node)
         : function_name(function), node(node) {}
 
-    string function_name;
+    std::string function_name;
     const Node* node;
   };
 
   // The function at the top of the stack. In other words, the function
   // that is currently being inspected for placement.
-  string current_function_name_;
+  std::string current_function_name_;
 
   // The stack of frames that got the placement to the current_function_name_.
   // frames_[0].function_name is the top function that Placer was constructed
@@ -148,7 +153,7 @@ class FunctionStack {
 //         v
 //         y
 //
-Status IsolatePlacerInspectionRequiredOps(
+absl::Status IsolatePlacerInspectionRequiredOps(
     const FunctionLibraryDefinition& flib_def, Graph* graph);
 
 }  // namespace tensorflow

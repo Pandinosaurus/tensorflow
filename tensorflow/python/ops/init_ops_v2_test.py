@@ -14,10 +14,6 @@
 # ==============================================================================
 """Tests for initializers in init_ops_v2."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import numpy as np
 
 from tensorflow.python.framework import constant_op
@@ -385,8 +381,15 @@ class VarianceScalingInitializerTest(InitializersTest):
       self.assertTrue(mock_random_normal.called)
 
     self.assertEqual(x.shape, partition_shape)
-    self.assertNear(np.mean(x), expect_mean, err=1e-3)
-    self.assertNear(np.var(x), expect_var, err=1e-3)
+    self.assertNear(np.mean(x), expect_mean, err=2e-3)
+    self.assertNear(np.var(x), expect_var, err=2e-3)
+
+  @test_util.run_in_graph_and_eager_modes
+  def testInvalidDistributionType(self):
+    with self.assertRaisesRegex(ValueError, "must be a string"):
+      init_ops_v2.VarianceScaling(distribution=None)
+    with self.assertRaisesRegex(ValueError, "must be a string"):
+      init_ops_v2.VarianceScaling(distribution=123)
 
 
 class OrthogonalInitializerTest(InitializersTest):

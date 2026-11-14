@@ -1,35 +1,200 @@
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
+load("@xla//third_party/rules_python/python:py_library.bzl", "py_library")
+
 package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
     default_visibility = ["//tensorflow:internal"],
     licenses = ["notice"],
 )
 
 py_library(
-    name = "signal",
-    srcs = [
-        "dct_ops.py",
-        "fft_ops.py",
-        "mel_ops.py",
-        "mfcc_ops.py",
-        "reconstruction_ops.py",
-        "shape_ops.py",
-        "signal.py",
-        "spectral_ops.py",
-        "util_ops.py",
-        "window_ops.py",
-    ],
-    srcs_version = "PY3",
+    name = "dct_ops",
+    srcs = ["dct_ops.py"],
+    strict_deps = True,
     deps = [
-        "//tensorflow/python:array_ops",
-        "//tensorflow/python:constant_op",
-        "//tensorflow/python:control_flow_ops",
-        "//tensorflow/python:dtypes",
-        "//tensorflow/python:framework",
-        "//tensorflow/python:framework_for_generated_wrappers",
-        "//tensorflow/python:framework_ops",
-        "//tensorflow/python:math_ops",
-        "//tensorflow/python:spectral_ops_gen",
-        "//tensorflow/python:tensor_util",
-        "//tensorflow/python:util",
+        ":fft_ops",
+        "//tensorflow/python/framework:dtypes",
+        "//tensorflow/python/framework:ops",
+        "//tensorflow/python/framework:smart_cond",
+        "//tensorflow/python/framework:tensor_shape",
+        "//tensorflow/python/ops:array_ops",
+        "//tensorflow/python/ops:math_ops",
+        "//tensorflow/python/util:dispatch",
+        "//tensorflow/python/util:tf_export",
+    ],
+)
+
+py_library(
+    name = "__init__",
+    srcs = ["__init__.py"],
+    strict_deps = True,
+)
+
+py_library(
+    name = "fft_ops",
+    srcs = ["fft_ops.py"],
+    strict_deps = True,
+    deps = [
+        "//tensorflow/python/framework:dtypes",
+        "//tensorflow/python/framework:ops",
+        "//tensorflow/python/framework:tensor_util",
+        "//tensorflow/python/ops:array_ops",
+        "//tensorflow/python/ops:array_ops_stack",
+        "//tensorflow/python/ops:manip_ops",
+        "//tensorflow/python/ops:math_ops",
+        "//tensorflow/python/ops:spectral_ops_gen",
+        "//tensorflow/python/util:dispatch",
+        "//tensorflow/python/util:tf_export",
+        "//third_party/py/numpy",
+    ],
+)
+
+py_library(
+    name = "mel_ops",
+    srcs = ["mel_ops.py"],
+    strict_deps = True,
+    deps = [
+        ":shape_ops",
+        "//tensorflow/python/framework:dtypes",
+        "//tensorflow/python/framework:ops",
+        "//tensorflow/python/framework:tensor",
+        "//tensorflow/python/framework:tensor_util",
+        "//tensorflow/python/ops:array_ops",
+        "//tensorflow/python/ops:math_ops",
+        "//tensorflow/python/util:dispatch",
+        "//tensorflow/python/util:tf_export",
+    ],
+)
+
+py_library(
+    name = "mfcc_ops",
+    srcs = ["mfcc_ops.py"],
+    strict_deps = True,
+    deps = [
+        ":dct_ops",
+        "//tensorflow/python/framework:ops",
+        "//tensorflow/python/ops:array_ops",
+        "//tensorflow/python/ops:math_ops",
+        "//tensorflow/python/util:dispatch",
+        "//tensorflow/python/util:tf_export",
+    ],
+)
+
+py_library(
+    name = "reconstruction_ops",
+    srcs = ["reconstruction_ops.py"],
+    strict_deps = True,
+    deps = [
+        "//tensorflow/python/framework:dtypes",
+        "//tensorflow/python/framework:ops",
+        "//tensorflow/python/framework:tensor_util",
+        "//tensorflow/python/ops:array_ops",
+        "//tensorflow/python/ops:math_ops",
+        "//tensorflow/python/util:dispatch",
+        "//tensorflow/python/util:tf_export",
+    ],
+)
+
+py_library(
+    name = "shape_ops",
+    srcs = ["shape_ops.py"],
+    strict_deps = True,
+    deps = [
+        ":util_ops",
+        "//tensorflow/python/framework:constant_op",
+        "//tensorflow/python/framework:ops",
+        "//tensorflow/python/framework:tensor_util",
+        "//tensorflow/python/ops:array_ops",
+        "//tensorflow/python/ops:math_ops",
+        "//tensorflow/python/util:dispatch",
+        "//tensorflow/python/util:tf_export",
+        "//third_party/py/numpy",
+    ],
+)
+
+py_library(
+    name = "signal",
+    srcs = ["signal.py"],
+    strict_deps = True,
+    deps = [
+        ":__init__",
+        ":dct_ops",
+        ":fft_ops",
+        ":mel_ops",
+        ":mfcc_ops",
+        ":reconstruction_ops",
+        ":shape_ops",
+        ":spectral_ops",
+        ":window_ops",
+    ],
+)
+
+py_library(
+    name = "spectral_ops",
+    srcs = ["spectral_ops.py"],
+    strict_deps = True,
+    deps = [
+        ":dct_ops",
+        ":fft_ops",
+        ":reconstruction_ops",
+        ":shape_ops",
+        ":window_ops",
+        "//tensorflow/python/framework:constant_op",
+        "//tensorflow/python/framework:dtypes",
+        "//tensorflow/python/framework:ops",
+        "//tensorflow/python/framework:tensor_util",
+        "//tensorflow/python/ops:array_ops",
+        "//tensorflow/python/ops:math_ops",
+        "//tensorflow/python/util:dispatch",
+        "//tensorflow/python/util:tf_export",
+        "//third_party/py/numpy",
+    ],
+)
+
+py_library(
+    name = "util_ops",
+    srcs = ["util_ops.py"],
+    strict_deps = True,
+    deps = [
+        "//tensorflow/python/framework:ops",
+        "//tensorflow/python/framework:tensor_util",
+        "//tensorflow/python/ops:array_ops",
+        "//tensorflow/python/ops:math_ops",
+        "//tensorflow/python/ops:while_loop",
+    ],
+)
+
+py_library(
+    name = "window_ops",
+    srcs = ["window_ops.py"],
+    strict_deps = True,
+    visibility = ["//visibility:public"],
+    deps = [
+        "//tensorflow/python/framework:constant_op",
+        "//tensorflow/python/framework:dtypes",
+        "//tensorflow/python/framework:ops",
+        "//tensorflow/python/framework:tensor_util",
+        "//tensorflow/python/ops:array_ops",
+        "//tensorflow/python/ops:cond",
+        "//tensorflow/python/ops:math_ops",
+        "//tensorflow/python/ops:nn_ops",
+        "//tensorflow/python/ops:special_math_ops",
+        "//tensorflow/python/util:dispatch",
+        "//tensorflow/python/util:tf_export",
         "//third_party/py/numpy",
     ],
 )

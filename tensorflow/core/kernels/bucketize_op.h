@@ -17,8 +17,9 @@ limitations under the License.
 #define TENSORFLOW_CORE_KERNELS_BUCKETIZE_OP_H_
 
 #include <vector>
-#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
 
+#include "absl/status/status.h"
+#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/tensor_types.h"
 #include "tensorflow/core/framework/types.h"
@@ -29,10 +30,10 @@ namespace functor {
 
 template <typename Device, typename T>
 struct BucketizeFunctor {
-  static Status Compute(OpKernelContext* context,
-                        const typename TTypes<T, 1>::ConstTensor& input,
-                        const std::vector<float>& boundaries_vector,
-                        typename TTypes<int32, 1>::Tensor& output);
+  static absl::Status Compute(OpKernelContext* context,
+                              const typename TTypes<T, 1>::ConstTensor& input,
+                              const std::vector<float>& boundaries_vector,
+                              typename TTypes<int32_t, 1>::Tensor& output);
 };
 
 }  // namespace functor

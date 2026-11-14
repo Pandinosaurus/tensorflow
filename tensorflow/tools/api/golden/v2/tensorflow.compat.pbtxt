@@ -2,19 +2,19 @@ path: "tensorflow.compat"
 tf_module {
   member {
     name: "bytes_or_text_types"
-    mtype: "<type \'tuple\'>"
+    mtype: "<class \'tuple\'>"
   }
   member {
     name: "complex_types"
-    mtype: "<type \'tuple\'>"
+    mtype: "<class \'tuple\'>"
   }
   member {
     name: "integral_types"
-    mtype: "<type \'tuple\'>"
+    mtype: "<class \'tuple\'>"
   }
   member {
     name: "real_types"
-    mtype: "<type \'tuple\'>"
+    mtype: "<class \'tuple\'>"
   }
   member_method {
     name: "as_bytes"
@@ -26,7 +26,7 @@ tf_module {
   }
   member_method {
     name: "as_str_any"
-    argspec: "args=[\'value\'], varargs=None, keywords=None, defaults=None"
+    argspec: "args=[\'value\', \'encoding\'], varargs=None, keywords=None, defaults=[\'utf-8\'], "
   }
   member_method {
     name: "as_text"

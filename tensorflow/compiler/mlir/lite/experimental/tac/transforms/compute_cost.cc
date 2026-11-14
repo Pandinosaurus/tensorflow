@@ -41,17 +41,17 @@ namespace TFL {
 namespace tac {
 namespace {
 
-// We will caculate the total compute cost for each Func Op.
+// We will calculate the total compute cost for each Func Op.
 //
 // The compute cost is simply an add-up of the costs of all the operations
 // within the FuncOp. (Excluding const ops since they're just "data".)
 // We will ignore quant/dequant/requant costs within the Func Op as well,
 // intuition:
 //
-// The assumpution is that quant/dequant/requant will only happen at the begin
-// and the end of the FuncOp (basically the "boundaries" of the subgraph).
-// So we can imagine if multiple "same-inference-typed" graph are presented at
-// the same time, the quant/dequant ops pair can be squashed:
+// The assumption is that quant/dequant/requant will only happen at the
+// beginning and the end of the FuncOp (basically the "boundaries" of the
+// subgraph). So we can imagine if multiple "same-inference-typed" graph are
+// presented at the same time, the quant/dequant ops pair can be squashed:
 //
 //         dequant         ------------
 //            |
@@ -71,6 +71,9 @@ namespace {
 
 class ComputeCostPass
     : public mlir::PassWrapper<ComputeCostPass, mlir::OperationPass<ModuleOp>> {
+ public:
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(ComputeCostPass)
+
  private:
   llvm::StringRef getArgument() const final { return "tfl-compute-cost"; }
   llvm::StringRef getDescription() const final {
@@ -82,18 +85,18 @@ class ComputeCostPass
 void ComputeCostPass::runOnOperation() {
   auto module = getOperation();
 
-  for (auto func : module.getOps<FuncOp>()) {
+  for (auto func : module.getOps<func::FuncOp>()) {
     // We only care about those functions annotated with "tac.interface_name".
     auto interface_name = GetInterFaceName(func);
-    if (!interface_name.hasValue()) continue;
+    if (!interface_name.has_value()) continue;
 
     auto target = GetTargetAnnotation(func);
-    if (!target.hasValue()) {
+    if (!target.has_value()) {
       func.emitError("we cannot get hardware info for this function.");
       signalPassFailure();
     }
 
-    float total_cost = GetCostForFunc(&func, target.getValue());
+    float total_cost = GetCostForFunc(&func, *target);
     OpBuilder builder(func);
     UpdateCost(func, total_cost, &builder);
   }

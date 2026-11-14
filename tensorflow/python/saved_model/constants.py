@@ -18,10 +18,6 @@ The source of truth for these constants is in
 tensorflow/cc/saved_model/constants.h.
 
 """
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 from tensorflow.python.saved_model.pywrap_saved_model import constants
 from tensorflow.python.util.tf_export import tf_export
 
@@ -72,6 +68,9 @@ tf_export(
         "saved_model.constants.SAVED_MODEL_SCHEMA_VERSION"
     ]).export_constant(__name__, "SAVED_MODEL_SCHEMA_VERSION")
 
+# File name prefix for SavedModel protocol buffer.
+SAVED_MODEL_FILENAME_PREFIX = constants.SAVED_MODEL_FILENAME_PREFIX
+
 # File name for SavedModel protocol buffer.
 SAVED_MODEL_FILENAME_PB = constants.SAVED_MODEL_FILENAME_PB
 tf_export(
@@ -80,6 +79,9 @@ tf_export(
         "saved_model.SAVED_MODEL_FILENAME_PB",
         "saved_model.constants.SAVED_MODEL_FILENAME_PB"
     ]).export_constant(__name__, "SAVED_MODEL_FILENAME_PB")
+
+# File name for SavedModel chunked protocol buffer (experimental).
+SAVED_MODEL_FILENAME_CPB = constants.SAVED_MODEL_FILENAME_CPB
 
 # File name for text version of SavedModel protocol buffer.
 SAVED_MODEL_FILENAME_PBTXT = constants.SAVED_MODEL_FILENAME_PBTXT

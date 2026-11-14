@@ -15,6 +15,12 @@ limitations under the License.
 
 // See docs in ../ops/linalg_ops.cc.
 
+#include <cmath>
+#include <cstdint>
+#include <limits>
+
+#include "absl/log/log.h"
+#include "absl/status/status.h"
 #include "tensorflow/core/framework/kernel_def_builder.h"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/register_types.h"
@@ -49,8 +55,8 @@ class TridiagonalSolveOp : public LinearAlgebraOp<Scalar> {
                      context->GetAttr("perturb_singular", &perturb_singular_));
     }
     OP_REQUIRES(context, pivoting_ || !perturb_singular_,
-                errors::InvalidArgument("Setting perturb_singular requires "
-                                        "also setting partial_pivoting."));
+                absl::InvalidArgumentError("Setting perturb_singular requires "
+                                           "also setting partial_pivoting."));
   }
 
   void ValidateInputMatrixShapes(
@@ -99,8 +105,9 @@ class TridiagonalSolveOp : public LinearAlgebraOp<Scalar> {
       cost = num_eqs * (div_cost * (num_rhss + 1) +
                         (add_cost + mult_cost) * (2 * num_rhss + 1));
     }
-    return cost >= static_cast<double>(kint64max) ? kint64max
-                                                  : static_cast<int64_t>(cost);
+    return cost >= static_cast<double>(std::numeric_limits<int64_t>::max())
+               ? std::numeric_limits<int64_t>::max()
+               : static_cast<int64_t>(cost);
   }
 
   bool EnableInputForwarding() const final { return false; }
@@ -150,7 +157,8 @@ class TridiagonalSolveOp : public LinearAlgebraOp<Scalar> {
   }
 
  private:
-  TF_DISALLOW_COPY_AND_ASSIGN(TridiagonalSolveOp);
+  TridiagonalSolveOp(const TridiagonalSolveOp&) = delete;
+  void operator=(const TridiagonalSolveOp&) = delete;
 
   // Adjust pivot such that neither 'rhs[i,:] / pivot' nor '1 / pivot' cause
   // overflow, where i numerates the multiple right-hand-sides. During the

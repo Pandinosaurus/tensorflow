@@ -26,7 +26,7 @@ limitations under the License.
 #include <unordered_map>
 #include <utility>
 
-#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
+#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/register_types.h"
 #include "tensorflow/core/framework/tensor.h"
@@ -34,7 +34,6 @@ limitations under the License.
 #include "tensorflow/core/lib/core/status.h"
 #include "tensorflow/core/lib/gtl/inlined_vector.h"
 #include "tensorflow/core/lib/strings/stringprintf.h"
-#include "tensorflow/core/util/ptr_util.h"
 #include "tensorflow/core/util/sparse/sparse_tensor.h"
 
 #if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
@@ -47,46 +46,58 @@ namespace tensorflow {
 
 namespace {
 
-Status CheckSparseToDenseShapes(const Tensor& indices,
-                                const Tensor& output_shape,
-                                const Tensor& sparse_values,
-                                const Tensor& default_value) {
+absl::Status CheckSparseToDenseShapes(const Tensor& indices,
+                                      const Tensor& output_shape,
+                                      const Tensor& sparse_values,
+                                      const Tensor& default_value) {
   // sparse_indices
   if (indices.dims() > 2) {
-    return errors::InvalidArgument(
-        "sparse_indices should be a scalar, vector, or matrix, "
-        "got shape ",
-        indices.shape().DebugString());
+    return absl::InvalidArgumentError(
+        absl::StrCat("sparse_indices should be a scalar, vector, or matrix, "
+                     "got shape ",
+                     indices.shape().DebugString()));
   }
   const int64_t num_elems = indices.dims() > 0 ? indices.dim_size(0) : 1;
   const int64_t num_dims = indices.dims() > 1 ? indices.dim_size(1) : 1;
 
   // output_shape
   if (!TensorShapeUtils::IsVector(output_shape.shape())) {
-    return errors::InvalidArgument("output_shape must be rank 1, got shape ",
-                                   output_shape.shape().DebugString());
+    return absl::InvalidArgumentError(
+        absl::StrCat("output_shape must be rank 1, got shape ",
+                     output_shape.shape().DebugString()));
   }
 
   if (output_shape.NumElements() != num_dims) {
-    return errors::InvalidArgument(
-        "output_shape has incorrect number of elements: ",
-        output_shape.NumElements(), " should be: ", num_dims);
+    return absl::InvalidArgumentError(
+        absl::StrCat("output_shape has incorrect number of elements: ",
+                     output_shape.NumElements(), " should be: ", num_dims));
   }
 
   // sparse_values
   const int64_t num_values = sparse_values.NumElements();
   if (sparse_values.dims() != 0 &&
       (sparse_values.dims() != 1 || num_values != num_elems)) {
-    return errors::InvalidArgument("sparse_values has incorrect shape ",
-                                   sparse_values.shape().DebugString(),
-                                   ", should be [] or [", num_elems, "]");
+    return absl::InvalidArgumentError(
+        absl::StrCat("sparse_values has incorrect shape ",
+                     sparse_values.shape().DebugString(), ", should be [] or [",
+                     num_elems, "]"));
+  }
+  // A scalar sparse_values is broadcast to num_elems values. When
+  // sparse_indices has no columns it holds no data, so num_elems is not
+  // bounded by the size of any input. The output is then a scalar, which has a
+  // single element.
+  if (sparse_values.dims() == 0 && num_dims == 0 && num_elems > 1) {
+    return absl::InvalidArgumentError(absl::StrCat(
+        "sparse_indices for a scalar output should have at most 1 row when "
+        "sparse_values is a scalar, got ",
+        num_elems, " rows"));
   }
 
   // default_value
   if (!TensorShapeUtils::IsScalar(default_value.shape())) {
-    return errors::InvalidArgument("default_value should be a scalar.");
+    return absl::InvalidArgumentError("default_value should be a scalar.");
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 }  // end namespace
@@ -125,7 +136,7 @@ class SparseToDense : public OpKernel {
       indices_shaped = &indices;
     } else {
       TensorShape ix_shape({num_elems, num_dims});
-      indices_shaped_holder = MakeUnique<Tensor>(DT_INT64, ix_shape);
+      indices_shaped_holder = std::make_unique<Tensor>(DT_INT64, ix_shape);
       indices_shaped = indices_shaped_holder.get();
       if (indices.dtype() == DT_INT64) {
         CHECK(indices_shaped_holder->CopyFrom(indices, ix_shape));
@@ -142,8 +153,8 @@ class SparseToDense : public OpKernel {
     std::unique_ptr<Tensor> sparse_values_b_holder;
 
     if (TensorShapeUtils::IsScalar(sparse_values.shape())) {
-      sparse_values_b_holder = MakeUnique<Tensor>(DataTypeToEnum<T>::value,
-                                                  TensorShape({num_elems}));
+      sparse_values_b_holder = std::make_unique<Tensor>(
+          DataTypeToEnum<T>::value, TensorShape({num_elems}));
       sparse_values_b = sparse_values_b_holder.get();
       sparse_values_b_holder->vec<T>().setConstant(sparse_values.scalar<T>()());
     } else {
@@ -151,7 +162,7 @@ class SparseToDense : public OpKernel {
     }
 
     // Assume SparseTensor is lexicographically sorted.
-    gtl::InlinedVector<int64_t, 8> order(output->shape().dims());
+    absl::InlinedVector<int64_t, 8UL> order(output->shape().dims());
     std::iota(order.begin(), order.end(), 0);
     sparse::SparseTensor st;
     OP_REQUIRES_OK(
@@ -164,9 +175,9 @@ class SparseToDense : public OpKernel {
 
     output->flat<T>().setConstant(default_value.scalar<T>()());
     OP_REQUIRES(c, st.template ToDense<T>(output, false /* initialize */),
-                errors::InvalidArgument(
+                absl::InvalidArgumentError(absl::StrCat(
                     "Indices are not valid (out of bounds).  Shape: ",
-                    output->shape().DebugString()));
+                    output->shape().DebugString())));
   }
 
  private:
@@ -187,6 +198,12 @@ class SparseToDense : public OpKernel {
 TF_CALL_REAL_NUMBER_TYPES(REGISTER_KERNELS_ALL);
 REGISTER_KERNELS_ALL(bool);
 REGISTER_KERNELS_ALL(tstring);
+REGISTER_KERNELS_ALL(complex64);
+REGISTER_KERNELS_ALL(complex128);
+REGISTER_KERNELS_ALL(qint8);
+REGISTER_KERNELS_ALL(qint16);
+REGISTER_KERNELS_ALL(quint8);
+REGISTER_KERNELS_ALL(quint16);
 
 #undef REGISTER_KERNELS_ALL
 #undef REGISTER_KERNELS
@@ -203,8 +220,8 @@ class SparseToDenseGPU : public AsyncOpKernel {
 
   void ComputeAsync(OpKernelContext* c, DoneCallback done) final {
     auto* stream = c->op_device_context()->stream();
-    OP_REQUIRES_ASYNC(c, stream, errors::Internal("No GPU stream available."),
-                      done);
+    OP_REQUIRES_ASYNC(c, stream,
+                      absl::InternalError("No GPU stream available."), done);
 
     const Tensor& indices = c->input(0);
     const Tensor& output_shape = c->input(1);
@@ -235,15 +252,10 @@ class SparseToDenseGPU : public AsyncOpKernel {
     auto output_shape_data =
         AsDeviceMemory(output_shape_tensor.template flat<Index>().data(),
                        output_shape_tensor.template flat<Index>().size());
-    OP_REQUIRES_ASYNC(
+    OP_REQUIRES_OK_ASYNC(
         c,
-        stream
-            ->ThenMemcpy(&output_shape_data, output_shape_vec.data(),
-                         output_shape_tensor.NumElements() * sizeof(Index))
-            .ok(),
-        errors::InvalidArgument(
-            "failed to copy output_shape vector from host to "
-            "device in SparseToDenseOp"),
+        stream->Memcpy(&output_shape_data, output_shape_vec.data(),
+                       output_shape_tensor.NumElements() * sizeof(Index)),
         done);
 
     functor::LaunchSparseToDense<T, Index>()(
@@ -271,8 +283,8 @@ class SparseToDenseGPU : public AsyncOpKernel {
   REGISTER_GPU_KERNELS(type, int64_t);
 
 TF_CALL_GPU_NUMBER_TYPES(REGISTER_GPU_KERNELS_ALL);
-TF_CALL_INTEGRAL_TYPES(REGISTER_GPU_KERNELS_ALL)
-REGISTER_GPU_KERNELS_ALL(bool)
+TF_CALL_INTEGRAL_TYPES(REGISTER_GPU_KERNELS_ALL);
+REGISTER_GPU_KERNELS_ALL(bool);
 
 #undef REGISTER_GPU_KERNELS_ALL
 #undef REGISTER_GPU_KERNELS

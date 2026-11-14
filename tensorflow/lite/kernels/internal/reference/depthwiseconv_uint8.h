@@ -68,6 +68,27 @@ inline int32_t DepthwiseConvRound(int32_t x, int32_t quantized_multiplier,
   return MultiplyByQuantizedMultiplier(x, quantized_multiplier, shift);
 }
 
+// Single-rounding MultiplyByQuantizedMultiplier
+#if TFLITE_SINGLE_ROUNDING
+template <>
+inline int32_t DepthwiseConvRound<DepthwiseConvOutputRounding::kAwayFromZero>(
+    int32_t x, int32_t quantized_multiplier, int shift) {
+  using gemmlowp::RoundingDivideByPOT;
+  using gemmlowp::SaturatingRoundingDoublingHighMul;
+  int left_shift = shift > 0 ? shift : 0;
+  int right_shift = shift > 0 ? 0 : -shift;
+  return RoundingDivideByPOT(SaturatingRoundingDoublingHighMul(
+                                 x * (1 << left_shift), quantized_multiplier),
+                             right_shift);
+}
+
+template <>
+inline int32_t DepthwiseConvRound<DepthwiseConvOutputRounding::kUpward>(
+    int32_t x, int32_t quantized_multiplier, int shift) {
+  return MultiplyByQuantizedMultiplier(x, quantized_multiplier, shift);
+}
+// Double-rounding MultiplyByQuantizedMultiplier
+#else
 template <>
 inline int32_t DepthwiseConvRound<DepthwiseConvOutputRounding::kAwayFromZero>(
     int32_t x, int32_t quantized_multiplier, int shift) {
@@ -86,6 +107,7 @@ inline int32_t DepthwiseConvRound<DepthwiseConvOutputRounding::kUpward>(
           rounding_offset) >>
          right_shift;
 }
+#endif  // TFLITE_SINGLE_ROUNDING
 
 template <DepthwiseConvOutputRounding output_rounding>
 struct DepthwiseConvBasicKernel {
@@ -131,7 +153,8 @@ struct DepthwiseConvBasicKernel {
         for (int out_x = 0; out_x < output_width; ++out_x) {
           for (int ic = 0; ic < input_depth; ++ic) {
             for (int m = 0; m < depth_multiplier; m++) {
-              const int oc = m + ic * depth_multiplier;
+              const int64_t oc =
+                  m + static_cast<int64_t>(ic) * depth_multiplier;
               const int in_x_origin = (out_x * stride_width) - pad_width;
               const int in_y_origin = (out_y * stride_height) - pad_height;
               int32_t acc = 0;
@@ -218,7 +241,8 @@ struct DepthwiseConvBasicKernel {
         for (int out_x = 0; out_x < output_width; ++out_x) {
           for (int in_channel = 0; in_channel < input_depth; ++in_channel) {
             for (int m = 0; m < depth_multiplier; ++m) {
-              const int output_channel = m + in_channel * depth_multiplier;
+              const int64_t output_channel =
+                  m + static_cast<int64_t>(in_channel) * depth_multiplier;
               const int in_x_origin = (out_x * stride_width) - pad_width;
               const int in_y_origin = (out_y * stride_height) - pad_height;
               int32_t acc = 0;

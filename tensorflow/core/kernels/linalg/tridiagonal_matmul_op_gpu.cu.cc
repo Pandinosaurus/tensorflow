@@ -15,6 +15,9 @@ limitations under the License.
 
 // See docs in ../ops/linalg_ops.cc.
 
+#include <string>
+
+#include "absl/status/status.h"
 #ifdef GOOGLE_CUDA
 
 #define EIGEN_USE_GPU
@@ -26,9 +29,7 @@ limitations under the License.
 #include "tensorflow/core/kernels/transpose_functor.h"
 #include "tensorflow/core/lib/core/errors.h"
 #include "tensorflow/core/util/cuda_sparse.h"
-#include "tensorflow/core/util/gpu_device_functions.h"
 #include "tensorflow/core/util/gpu_kernel_helper.h"
-#include "tensorflow/core/util/gpu_launch_config.h"
 #include "tensorflow/core/util/gpu_solvers.h"
 
 namespace tensorflow {
@@ -66,7 +67,13 @@ class TridiagonalMatMulOpGpu : public OpKernel {
     const Tensor& rhs = context->input(3);
 
     const int ndims = rhs.dims();
-    int64 batch_size = 1;
+    OP_REQUIRES(context, ndims >= 2,
+                absl::InvalidArgumentError(absl::StrCat(
+                    "Input must have rank >= 2, but got ", ndims)));
+    OP_REQUIRES_OK(context, ValidateInputTensor(superdiag, "superdiag", rhs));
+    OP_REQUIRES_OK(context, ValidateInputTensor(maindiag, "maindiag", rhs));
+    OP_REQUIRES_OK(context, ValidateInputTensor(subdiag, "subdiag", rhs));
+    int64_t batch_size = 1;
     for (int i = 0; i < ndims - 2; i++) {
       batch_size *= rhs.dim_size(i);
     }
@@ -84,6 +91,39 @@ class TridiagonalMatMulOpGpu : public OpKernel {
         0, device.stream(), batch_size, m, n, superdiag.flat<Scalar>().data(),
         maindiag.flat<Scalar>().data(), subdiag.flat<Scalar>().data(),
         rhs.flat<Scalar>().data(), output->flat<Scalar>().data()));
+  }
+
+ private:
+  absl::Status ValidateInputTensor(const Tensor& tensor,
+                                   const std::string& tensor_name,
+                                   const Tensor& rhs) {
+    const int ndims = rhs.dims();
+    if (tensor.dims() != ndims) {
+      return absl::InvalidArgumentError(
+          absl::StrCat(tensor_name, " must have same rank as rhs, but got ",
+                       tensor.dims(), " and ", ndims));
+    }
+    for (int i = 0; i < ndims - 2; i++) {
+      if (tensor.dim_size(i) != rhs.dim_size(i)) {
+        return absl::InvalidArgumentError(absl::StrCat(
+            tensor_name,
+            " must have same outer dimensions as rhs, but for index ", i,
+            ", got ", tensor.dim_size(i), " and ", rhs.dim_size(i)));
+      }
+    }
+    if (tensor.dim_size(ndims - 2) != 1) {
+      return absl::InvalidArgumentError(absl::StrCat(
+          tensor_name, "'s second-to-last dimension must be 1, but got ",
+          tensor.dim_size(ndims - 2)));
+    }
+    if (tensor.dim_size(ndims - 1) != rhs.dim_size(ndims - 2)) {
+      return absl::InvalidArgumentError(absl::StrCat(
+          tensor_name,
+          "'s last dimension size must be rhs's "
+          "second-to-last dimension size, but got ",
+          tensor.dim_size(ndims - 1), " and ", rhs.dim_size(ndims - 2)));
+    }
+    return absl::OkStatus();
   }
 };
 

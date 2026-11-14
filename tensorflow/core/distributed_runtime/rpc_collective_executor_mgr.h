@@ -39,9 +39,9 @@ class RpcCollectiveExecutorMgr : public CollectiveExecutorMgr {
       std::unique_ptr<DeviceResolverDistributed> dev_resolver,
       std::unique_ptr<CollectiveParamResolverDistributed> param_resolver,
       std::unique_ptr<NcclCommunicatorInterface> nccl_communicator,
-      WorkerCacheInterface* worker_cache, const string& task_name);
+      WorkerCacheInterface* worker_cache, const std::string& task_name);
 
-  virtual ~RpcCollectiveExecutorMgr();
+  ~RpcCollectiveExecutorMgr() override;
 
   // This function should only be called at the group_leader, by an RPC.
   // Other needs for StepIds should be satisfied by NextStepId.
@@ -57,15 +57,15 @@ class RpcCollectiveExecutorMgr : public CollectiveExecutorMgr {
   void RetireStepId(int64_t graph_key, int64_t step_id) override;
 
  protected:
-  virtual CollectiveExecutor* Create(int64_t step_id) override;
+  CollectiveExecutor* Create(int64_t step_id) override;
 
   WorkerCacheInterface* const worker_cache_;  // Not owned.
-  const string task_name_;
-  string group_leader_;
+  const std::string task_name_;
+  std::string group_leader_;
   friend class RpcCollectiveExecutorMgrTest;
 
  private:
-  Status UpdateStepSequences(const GetStepSequenceResponse& resp);
+  absl::Status UpdateStepSequences(const GetStepSequenceResponse& resp);
 
   // This class maintains the step_id sequencing for a single
   // collective_graph_key.
@@ -88,7 +88,7 @@ class RpcCollectiveExecutorMgr : public CollectiveExecutorMgr {
 std::unique_ptr<RpcCollectiveExecutorMgr> CreateProdRpcCollectiveExecutorMgr(
     const ConfigProto& config, const DeviceMgr* device_mgr,
     std::unique_ptr<NcclCommunicatorInterface> nccl_communicator,
-    WorkerCacheInterface* worker_cache, const string& default_worker_name);
+    WorkerCacheInterface* worker_cache, const std::string& default_worker_name);
 
 }  // namespace tensorflow
 #endif  // TENSORFLOW_CORE_DISTRIBUTED_RUNTIME_RPC_COLLECTIVE_EXECUTOR_MGR_H_

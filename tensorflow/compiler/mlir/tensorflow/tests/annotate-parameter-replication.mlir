@@ -1,10 +1,24 @@
+// Copyright 2026 Google Inc. All Rights Reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+// ==============================================================================
 // RUN: tf-opt %s -split-input-file -tf-annotate-parameter-replication | FileCheck %s
 
 // Tests that an operand from outside the replicated region is annotated.
 
 module attributes {tf.versions = {producer = 888 : i32}} {
   // CHECK-LABEL: func @annotate_broadcast_values
-  func @annotate_broadcast_values(%arg0: tensor<?xi32>) -> tensor<?xi32> {
+  func.func @annotate_broadcast_values(%arg0: tensor<?xi32>) -> tensor<?xi32> {
     %0 = "tf._A"(%arg0) : (tensor<?xi32>) -> tensor<?xi32>
     %1 = "tf._B"(%arg0) : (tensor<?xi32>) -> tensor<?xi32>
     %5:2 = tf_device.replicate([%0, %arg0] as %ri_0: tensor<?xi32>) {n = 2 : i32} {
@@ -14,16 +28,16 @@ module attributes {tf.versions = {producer = 888 : i32}} {
       tf_device.return %4 : tensor<?xi32>
     }
     %6 = "tf._C"(%5#1) : (tensor<?xi32>) -> tensor<?xi32>
-    return %6 : tensor<?xi32>
+    func.return %6 : tensor<?xi32>
   }
 
   // CHECK-LABEL: func @_func
   // CHECK-SAME: %[[ARG0:.*]]: tensor<?xi32>,
-  // CHECK-SAME: %[[ARG1:.*]]: tensor<?xi32> {mhlo.is_same_data_across_replicas}
+  // CHECK-SAME: %[[ARG1:.*]]: tensor<?xi32> {mhlo.is_same_data_across_replicas = true}
   // CHECK-SAME: %[[ARG2:.*]]: tensor<?xi32>)
-  func @_func(%arg0: tensor<?xi32>, %arg1: tensor<?xi32>, %arg2: tensor<?xi32>) -> tensor<?xi32> {
+  func.func @_func(%arg0: tensor<?xi32>, %arg1: tensor<?xi32>, %arg2: tensor<?xi32>) -> tensor<?xi32> {
     %0 = "tf._D"(%arg0, %arg1) : (tensor<?xi32>, tensor<?xi32>) -> tensor<?xi32>
-    return %0 : tensor<?xi32>
+    func.return %0 : tensor<?xi32>
   }
 }
 
@@ -33,7 +47,7 @@ module attributes {tf.versions = {producer = 888 : i32}} {
 
 module attributes {tf.versions = {producer = 888 : i32}} {
   // CHECK-LABEL: func @annotate_mirrored_variable
-  func @annotate_mirrored_variable(
+  func.func @annotate_mirrored_variable(
     %arg0: tensor<!tf_type.resource<tensor<?xi32>>>,
     %arg1: tensor<!tf_type.resource<tensor<?xi32>>>,
     %arg2: tensor<!tf_type.resource<tensor<?xi32>>>,
@@ -50,16 +64,16 @@ module attributes {tf.versions = {producer = 888 : i32}} {
       tf_device.return %2 : tensor<?xi32>
     }
     %4 = "tf._C"(%3#1) : (tensor<?xi32>) -> tensor<?xi32>
-    return %4 : tensor<?xi32>
+    func.return %4 : tensor<?xi32>
   }
 
   // CHECK-LABEL: func @_func
-  // CHECK-SAME: %[[ARG0:.*]]: tensor<?xi32> {mhlo.is_same_data_across_replicas},
+  // CHECK-SAME: %[[ARG0:.*]]: tensor<?xi32> {mhlo.is_same_data_across_replicas = true},
   // CHECK-SAME: %[[ARG1:.*]]: tensor<?xi32>,
-  // CHECK-SAME: %[[ARG2:.*]]: tensor<!tf_type.resource<tensor<?xi32>>> {mhlo.is_same_data_across_replicas}
-  func @_func(%arg0: tensor<?xi32>, %arg1: tensor<?xi32>, %arg2: tensor<!tf_type.resource<tensor<?xi32>>>) -> tensor<?xi32> {
+  // CHECK-SAME: %[[ARG2:.*]]: tensor<!tf_type.resource<tensor<?xi32>>> {mhlo.is_same_data_across_replicas = true}
+  func.func @_func(%arg0: tensor<?xi32>, %arg1: tensor<?xi32>, %arg2: tensor<!tf_type.resource<tensor<?xi32>>>) -> tensor<?xi32> {
     %0 = "tf._D"(%arg0, %arg1) : (tensor<?xi32>, tensor<?xi32>) -> tensor<?xi32>
-    return %0 : tensor<?xi32>
+    func.return %0 : tensor<?xi32>
   }
 }
 
@@ -69,18 +83,18 @@ module attributes {tf.versions = {producer = 888 : i32}} {
 
 module attributes {tf.versions = {producer = 888 : i32}} {
   // CHECK-LABEL: func @do_not_annotate_without_replicate
-  func @do_not_annotate_without_replicate(%arg0: tensor<?xi32>) -> tensor<?xi32> {
+  func.func @do_not_annotate_without_replicate(%arg0: tensor<?xi32>) -> tensor<?xi32> {
     %0 = "tf._A"(%arg0) : (tensor<?xi32>) -> tensor<?xi32>
     %1 = "tf._B"(%arg0) : (tensor<?xi32>) -> tensor<?xi32>
     %2 = "tf_device.cluster_func"(%0, %1) {func = @_func, device = ""} : (tensor<?xi32>, tensor<?xi32>) -> tensor<?xi32>
     %3 = "tf._C"(%2) : (tensor<?xi32>) -> tensor<?xi32>
-    return %3 : tensor<?xi32>
+    func.return %3 : tensor<?xi32>
   }
 
   // CHECK-LABEL: func @_func
-  // CHECK-NOT: mhlo.is_same_data_across_replicas
-  func @_func(%arg0: tensor<?xi32>, %arg1: tensor<?xi32>) -> tensor<?xi32> {
+  // CHECK-NOT: mhlo.is_same_data_across_replicas = true
+  func.func @_func(%arg0: tensor<?xi32>, %arg1: tensor<?xi32>) -> tensor<?xi32> {
     %0 = "tf._D"(%arg0, %arg1) : (tensor<?xi32>, tensor<?xi32>) -> tensor<?xi32>
-    return %0 : tensor<?xi32>
+    func.return %0 : tensor<?xi32>
   }
 }

@@ -13,10 +13,6 @@
 # limitations under the License.
 # ==============================================================================
 """Tests for the `MapParallelization` optimization."""
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import functools
 
 from absl.testing import parameterized
@@ -29,7 +25,7 @@ from tensorflow.python.framework import combinations
 from tensorflow.python.framework import constant_op
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import ops
-from tensorflow.python.ops import control_flow_ops
+from tensorflow.python.ops import control_flow_assert
 from tensorflow.python.ops import math_ops
 from tensorflow.python.ops import variables
 from tensorflow.python.platform import test
@@ -37,7 +33,7 @@ from tensorflow.python.platform import test
 
 def _test_combinations():
   def assert_greater(x):
-    assert_op = control_flow_ops.Assert(math_ops.greater(x, -1), [x])
+    assert_op = control_flow_assert.Assert(math_ops.greater(x, -1), [x])
     with ops.control_dependencies([assert_op]):
       return x
 
@@ -71,6 +67,21 @@ class MapParallelizationTest(test_base.DatasetTestBase, parameterized.TestCase):
     dataset = dataset.with_options(options)
     self.assertDatasetProduces(
         dataset, expected_output=[function(x) for x in range(5)])
+
+  @combinations.generate(test_base.default_test_combinations())
+  def testNoMapParallelizationWhenSynchronous(self):
+    dataset = (
+        dataset_ops.Dataset.range(5)
+        .apply(testing.assert_next(["Map"]))
+        .map(lambda x: x + 1, synchronous=True)
+    )
+    options = options_lib.Options()
+    options.experimental_optimization.apply_default_optimizations = False
+    options.experimental_optimization.map_parallelization = True
+    dataset = dataset.with_options(options)
+    self.assertDatasetProduces(
+        dataset, expected_output=[x + 1 for x in range(5)]
+    )
 
   @combinations.generate(test_base.default_test_combinations())
   def testCapturedConstant(self):

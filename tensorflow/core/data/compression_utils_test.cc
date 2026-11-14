@@ -14,12 +14,208 @@ limitations under the License.
 ==============================================================================*/
 #include "tensorflow/core/data/compression_utils.h"
 
+#include <cstdint>
+#include <vector>
+
+#include <gmock/gmock.h>
+#include "absl/status/status_matchers.h"
+#include "xla/tsl/platform/status_matchers.h"
+#include "xla/tsl/protobuf/error_codes.pb.h"
 #include "tensorflow/core/data/dataset_test_base.h"
+#include "tensorflow/core/framework/dataset.pb.h"
+#include "tensorflow/core/framework/tensor.h"
+#include "tensorflow/core/framework/tensor_shape.h"
 #include "tensorflow/core/framework/tensor_testutil.h"
+#include "tensorflow/core/framework/types.pb.h"
 #include "tensorflow/core/platform/test.h"
+#include "tensorflow/core/protobuf/error_codes.pb.h"
 
 namespace tensorflow {
 namespace data {
+namespace {
+
+using ::testing::HasSubstr;
+using ::tsl::testing::StatusIs;
+
+TEST(CompressionUtilsTest, Exceeds4GB) {
+  std::vector<Tensor> element = {
+      CreateTensor<int64_t>(TensorShape{1024, 1024, 513})};  // Just over 4GB.
+  CompressedElement compressed;
+  EXPECT_THAT(
+      CompressElement(element, &compressed),
+      absl_testing::StatusIs(error::OUT_OF_RANGE,
+                             HasSubstr("exceeding the 4GB Snappy limit")));
+}
+
+TEST(CompressionUtilsTest, ZeroElementNonMemcpyableComponent) {
+  // If metadata claims a non-memcpyable component has 65536 uncompressed bytes
+  // when the compressed data only holds 0 bytes, the byte count exhausts the
+  // budget and is rejected before the scratch buffer is sized from it.
+  std::vector<Tensor> empty_element;
+  CompressedElement compressed;
+  TF_ASSERT_OK(CompressElement(empty_element, &compressed));
+
+  CompressedComponentMetadata* metadata =
+      compressed.mutable_component_metadata()->Add();
+  metadata->set_dtype(DT_VARIANT);
+  TensorShape empty_shape({0});
+  empty_shape.AsProto(metadata->mutable_tensor_shape());
+  metadata->add_uncompressed_bytes(65536);
+
+  std::vector<Tensor> element;
+  EXPECT_THAT(
+      UncompressElement(compressed, &element),
+      absl_testing::StatusIs(error::INVALID_ARGUMENT,
+                             HasSubstr("exceeds the uncompressed data size")));
+}
+
+TEST(CompressionUtilsTest, RoundTripEmptyVariantTensor) {
+  // A zero-element variant tensor is a legitimate, first-class tensor and must
+  // round-trip through compression without being rejected.
+  std::vector<Tensor> element = {Tensor(DT_VARIANT, TensorShape{0})};
+  CompressedElement compressed;
+  TF_ASSERT_OK(CompressElement(element, &compressed));
+  std::vector<Tensor> round_trip;
+  TF_ASSERT_OK(UncompressElement(compressed, &round_trip));
+  ASSERT_EQ(round_trip.size(), 1);
+  EXPECT_EQ(round_trip[0].dtype(), DT_VARIANT);
+  EXPECT_EQ(round_trip[0].shape(), TensorShape({0}));
+}
+
+TEST(CompressionUtilsTest, MalformedTensorShape) {
+  // A malformed shape proto (negative dimension) must be rejected with a
+  // status instead of aborting the direct `TensorShape` constructor.
+  std::vector<Tensor> empty_element;
+  CompressedElement compressed;
+  TF_ASSERT_OK(CompressElement(empty_element, &compressed));
+
+  CompressedComponentMetadata* metadata =
+      compressed.mutable_component_metadata()->Add();
+  metadata->set_dtype(DT_INT64);
+  metadata->mutable_tensor_shape()->add_dim()->set_size(-1);
+
+  std::vector<Tensor> element;
+  EXPECT_THAT(
+      UncompressElement(compressed, &element),
+      absl_testing::StatusIs(error::INVALID_ARGUMENT,
+                             HasSubstr("Expected a non-negative size")));
+}
+
+TEST(CompressionUtilsTest, MalformedTensorShapeString) {
+  // A `DT_STRING` component with a malformed shape proto (negative dimension)
+  // must also be rejected with a status rather than aborting the direct
+  // `TensorShape` constructor when the string tensor is built.
+  std::vector<Tensor> empty_element;
+  CompressedElement compressed;
+  TF_ASSERT_OK(CompressElement(empty_element, &compressed));
+
+  CompressedComponentMetadata* metadata =
+      compressed.mutable_component_metadata()->Add();
+  metadata->set_dtype(DT_STRING);
+  metadata->mutable_tensor_shape()->add_dim()->set_size(-1);
+
+  std::vector<Tensor> element;
+  EXPECT_THAT(
+      UncompressElement(compressed, &element),
+      absl_testing::StatusIs(error::INVALID_ARGUMENT,
+                             HasSubstr("Expected a non-negative size")));
+}
+
+TEST(CompressionUtilsTest, NegativeUncompressedBytes) {
+  // `uncompressed_bytes` is a `uint64` field, so a forged -1 arrives as
+  // `UINT64_MAX`. It has to be rejected before the unsigned scratch buffer is
+  // sized from it.
+  std::vector<Tensor> empty_element;
+  CompressedElement compressed;
+  TF_ASSERT_OK(CompressElement(empty_element, &compressed));
+
+  CompressedComponentMetadata* metadata =
+      compressed.mutable_component_metadata()->Add();
+  metadata->set_dtype(DT_VARIANT);
+  TensorShape empty_shape({0});
+  empty_shape.AsProto(metadata->mutable_tensor_shape());
+  metadata->add_uncompressed_bytes(-1);
+
+  std::vector<Tensor> element;
+  EXPECT_THAT(
+      UncompressElement(compressed, &element),
+      absl_testing::StatusIs(error::INVALID_ARGUMENT,
+                             HasSubstr("exceeds the uncompressed data size")));
+}
+
+TEST(CompressionUtilsTest, NegativeUncompressedBytesString) {
+  // The same holds for the per-string byte counts of a `DT_STRING` component:
+  // -1 arrives as `UINT64_MAX` and must be rejected before the string is
+  // resized to it.
+  std::vector<Tensor> empty_element;
+  CompressedElement compressed;
+  TF_ASSERT_OK(CompressElement(empty_element, &compressed));
+
+  CompressedComponentMetadata* metadata =
+      compressed.mutable_component_metadata()->Add();
+  metadata->set_dtype(DT_STRING);
+  TensorShape shape({1});
+  shape.AsProto(metadata->mutable_tensor_shape());
+  metadata->add_uncompressed_bytes(-1);
+
+  std::vector<Tensor> element;
+  EXPECT_THAT(
+      UncompressElement(compressed, &element),
+      absl_testing::StatusIs(error::INVALID_ARGUMENT,
+                             HasSubstr("exceeds the uncompressed data size")));
+}
+
+TEST(CompressionUtilsTest, StringBytesExceedUncompressedSizeInTotal) {
+  // Each per-string count fits inside the uncompressed data on its own, but
+  // their sum does not, so only a cumulative budget rejects this.
+  std::vector<Tensor> element = {
+      CreateTensor<tstring>(TensorShape{2}, {"ab", "cd"})};
+  CompressedElement compressed;
+  TF_ASSERT_OK(CompressElement(element, &compressed));
+  CompressedComponentMetadata* metadata =
+      compressed.mutable_component_metadata(0);
+  metadata->set_uncompressed_bytes(0, 4);
+  metadata->set_uncompressed_bytes(1, 4);
+
+  std::vector<Tensor> round_trip;
+  EXPECT_THAT(
+      UncompressElement(compressed, &round_trip),
+      absl_testing::StatusIs(error::INVALID_ARGUMENT,
+                             HasSubstr("exceeds the uncompressed data size")));
+}
+
+std::vector<std::vector<Tensor>> TestCases() {
+  return {
+      // Single int64.
+      CreateTensors<int64_t>(TensorShape{1}, {{1}}),
+      // Multiple int64s.
+      CreateTensors<int64_t>(TensorShape{1}, {{1}, {2}}),
+      // Single tstring.
+      CreateTensors<tstring>(TensorShape{1}, {{"a"}, {"b"}}),
+      // Multiple tstrings.
+      {CreateTensor<tstring>(TensorShape{1, 2}, {"abc", "xyz"}),
+       CreateTensor<tstring>(TensorShape{2, 1}, {"ijk", "mnk"})},
+      // Mix of tstring and int64.
+      {CreateTensor<tstring>(TensorShape{1}, {"a"}),
+       CreateTensor<int64_t>(TensorShape{1}, {1})},
+      // Empty element.
+      {},
+      // Empty tensor.
+      {CreateTensor<int64_t>(TensorShape{1, 0})},
+      // Larger int64.
+      {CreateTensor<int64_t>(TensorShape{128, 128}),
+       CreateTensor<int64_t>(TensorShape{64, 2})},
+      // Variants.
+      {
+          DatasetOpsTestBase::CreateTestVariantTensor(
+              {CreateTensor<int64_t>(TensorShape{3, 1}, {1, 2, 3}),
+               CreateTensor<tstring>(TensorShape{}, {"abc"})}),
+          DatasetOpsTestBase::CreateTestVariantTensor(
+              {CreateTensor<int64_t>(TensorShape{3, 1}, {10, 11, 12}),
+               CreateTensor<tstring>(TensorShape{}, {"xyz"})}),
+      },
+  };
+}
 
 class ParameterizedCompressionUtilsTest
     : public DatasetOpsTestBase,
@@ -35,19 +231,27 @@ TEST_P(ParameterizedCompressionUtilsTest, RoundTrip) {
       ExpectEqual(element, round_trip_element, /*compare_order=*/true));
 }
 
-std::vector<std::vector<Tensor>> TestCases() {
-  return {
-      CreateTensors<int64_t>(TensorShape{1}, {{1}}),           // int64
-      CreateTensors<int64_t>(TensorShape{1}, {{1}, {2}}),      // multiple int64
-      CreateTensors<tstring>(TensorShape{1}, {{"a"}, {"b"}}),  // tstring
-      {CreateTensor<tstring>(TensorShape{1}, {"a"}),
-       CreateTensor<int64_t>(TensorShape{1}, {1})},  // mixed tstring/int64
-      {},                                            // empty
-  };
+TEST_P(ParameterizedCompressionUtilsTest, CompressedElementVersion) {
+  std::vector<Tensor> element = GetParam();
+  CompressedElement compressed;
+  TF_ASSERT_OK(CompressElement(element, &compressed));
+  EXPECT_EQ(0, compressed.version());
+}
+
+TEST_P(ParameterizedCompressionUtilsTest, VersionMismatch) {
+  std::vector<Tensor> element = GetParam();
+  CompressedElement compressed;
+  TF_ASSERT_OK(CompressElement(element, &compressed));
+
+  compressed.set_version(1);
+  std::vector<Tensor> round_trip_element;
+  EXPECT_THAT(UncompressElement(compressed, &round_trip_element),
+              absl_testing::StatusIs(error::INTERNAL));
 }
 
 INSTANTIATE_TEST_SUITE_P(Instantiation, ParameterizedCompressionUtilsTest,
                          ::testing::ValuesIn(TestCases()));
 
+}  // namespace
 }  // namespace data
 }  // namespace tensorflow

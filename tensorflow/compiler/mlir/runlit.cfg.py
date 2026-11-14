@@ -13,11 +13,8 @@
 # limitations under the License.
 """Lit runner configuration."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import os
+import pathlib
 import platform
 import sys
 import lit.formats
@@ -34,10 +31,10 @@ from lit.llvm.subst import ToolSubst
 # name: The name of this test suite.
 config.name = 'MLIR ' + os.path.basename(config.mlir_test_dir)
 
-config.test_format = lit.formats.ShTest(not llvm_config.use_lit_shell)
+config.test_format = lit.formats.ShTest()
 
 # suffixes: A list of file extensions to treat as test files.
-config.suffixes = ['.cc', '.hlo', '.hlotxt', '.json', '.mlir', '.pbtxt', '.py']
+config.suffixes = ['.cc', '.hlo', '.json', '.mlir', '.pbtxt', '.py']
 
 # test_source_root: The root path where tests are located.
 config.test_source_root = config.mlir_test_dir
@@ -67,17 +64,73 @@ llvm_config.config.substitutions.append(
 # Tweak the PATH to include the tools dir.
 llvm_config.with_environment('PATH', config.llvm_tools_dir, append_path=True)
 
+# Dynamically resolve hermetic cuda_nvcc in runfiles if present.
+runfiles_env = os.environ.get('RUNFILES_DIR')
+if runfiles_env:
+  rf_path = pathlib.Path(runfiles_env)
+  cuda_dir = None
+  # Check standard runfiles locations.
+  for candidate in [
+      rf_path / 'cuda_nvcc',
+      rf_path / 'xla' / 'cuda_nvcc',
+      rf_path.parent / 'cuda_nvcc',
+  ]:
+    if (candidate / 'bin' / 'ptxas').is_file() or (
+        candidate / 'nvvm' / 'libdevice' / 'libdevice.10.bc'
+    ).is_file():
+      cuda_dir = candidate
+      break
+  # Fallback search for Bzlmod repository names.
+  if not cuda_dir and rf_path.is_dir():
+    for p in rf_path.rglob('*cuda_nvcc*'):
+      if (p / 'bin' / 'ptxas').is_file() or (
+          p / 'nvvm' / 'libdevice' / 'libdevice.10.bc'
+      ).is_file():
+        cuda_dir = p
+        break
+
+  # Inject --xla_gpu_cuda_data_dir into XLA_FLAGS if resolved.
+  if cuda_dir:
+    existing_flags = llvm_config.config.environment.get('XLA_FLAGS', '')
+    if '--xla_gpu_cuda_data_dir' not in existing_flags:
+      flag = f'--xla_gpu_cuda_data_dir={cuda_dir}'
+      llvm_config.config.environment['XLA_FLAGS'] = (
+          f'{existing_flags} {flag}'.strip()
+      )
+
 tool_dirs = config.mlir_tf_tools_dirs + [
     config.mlir_tools_dir, config.llvm_tools_dir
 ]
 tool_names = [
-    'mlir-opt', 'mlir-hlo-opt', 'mlir-translate', 'tf-opt', 'tf-reduce',
-    'tf_tfl_translate', 'tf_tfjs_translate', 'flatbuffer_to_string',
-    'flatbuffer_translate', 'tf-mlir-translate', 'mlir-tflite-runner',
-    'tfcompile', 'json_to_flatbuffer', 'xla-gpu-opt', 'xla-mlir-gpu-opt',
-    'xla-opt', 'hlo_to_llvm_ir', 'kernel-gen-opt', 'tf_to_kernel',
-    'tf_to_gpu_binary', 'tfjs-opt', 'tac-opt-all-backends', 'tac-translate',
-    'tfg-opt-no-passes', 'tfg-transforms-opt'
+    'dtensor-opt',
+    'flatbuffer_to_string',
+    'flatbuffer_translate',
+    'hlo_to_kernel',
+    'json_to_flatbuffer',
+    'kernel-gen-opt',
+    'litert-opt',
+    'mlir-hlo-opt',
+    'mlir-opt',
+    'mlir-tflite-runner',
+    'mlir-translate',
+    'odml-to-stablehlo-opt',
+    'odml_to_stablehlo',
+    'odml-converter',
+    'stable-quant-opt',
+    'tac-opt-all-backends',
+    'tac-translate',
+    'tf-mlir-translate',
+    'tf-opt',
+    'tf-quant-opt',
+    'tf-reduce',
+    'tf-tfrt-opt',
+    'tf_tfjs_translate',
+    'tf_tfl_translate',
+    'tfcompile',
+    'tfg-opt-no-passes',
+    'tfg-transforms-opt',
+    'tfg-translate',
+    'tfjs-opt',
 ]
 tools = [ToolSubst(s, unresolved='ignore') for s in tool_names]
 llvm_config.add_tool_substitutions(tools, tool_dirs)

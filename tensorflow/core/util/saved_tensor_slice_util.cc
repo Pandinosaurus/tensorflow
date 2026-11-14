@@ -15,6 +15,8 @@ limitations under the License.
 
 #include "tensorflow/core/util/saved_tensor_slice_util.h"
 
+#include <vector>
+
 #include "tensorflow/core/lib/core/errors.h"
 #include "tensorflow/core/lib/strings/ordered_code.h"
 #include "tensorflow/core/lib/strings/str_util.h"
@@ -25,8 +27,9 @@ namespace checkpoint {
 
 const char kSavedTensorSlicesKey[] = "";
 
-string EncodeTensorNameSlice(const string& name, const TensorSlice& slice) {
-  string buffer;
+std::string EncodeTensorNameSlice(const std::string& name,
+                                  const TensorSlice& slice) {
+  std::string buffer;
   // All the tensor slice keys will start with a 0
   tensorflow::strings::OrderedCode::WriteNumIncreasing(&buffer, 0);
   tensorflow::strings::OrderedCode::WriteString(&buffer, name);
@@ -42,41 +45,47 @@ string EncodeTensorNameSlice(const string& name, const TensorSlice& slice) {
   return buffer;
 }
 
-Status DecodeTensorNameSlice(const string& code, string* name,
-                             tensorflow::TensorSlice* slice) {
-  StringPiece src(code);
-  uint64 x;
+absl::Status DecodeTensorNameSlice(const std::string& code, std::string* name,
+                                   tensorflow::TensorSlice* slice) {
+  absl::string_view src(code);
+  uint64_t x;
   if (!tensorflow::strings::OrderedCode::ReadNumIncreasing(&src, &x)) {
-    return errors::Internal("Failed to parse the leading number: src = ", src);
+    return absl::InternalError(
+        absl::StrCat("Failed to parse the leading number: src = ", src));
   }
   if (x != 0) {
-    return errors::Internal(
-        "The leading number should always be 0 for any valid key: src = ", src);
+    return absl::InternalError(absl::StrCat(
+        "The leading number should always be 0 for any valid key: src = ",
+        src));
   }
   if (!tensorflow::strings::OrderedCode::ReadString(&src, name)) {
-    return errors::Internal("Failed to parse the tensor name: src = ", src);
+    return absl::InternalError(
+        absl::StrCat("Failed to parse the tensor name: src = ", src));
   }
   if (!tensorflow::strings::OrderedCode::ReadNumIncreasing(&src, &x)) {
-    return errors::Internal("Failed to parse the tensor rank: src = ", src);
+    return absl::InternalError(
+        absl::StrCat("Failed to parse the tensor rank: src = ", src));
   }
   if (x == 0) {
-    return errors::Internal("Expecting positive rank of the tensor, got ", x,
-                            ", src = ", src);
+    return absl::InternalError(absl::StrCat(
+        "Expecting positive rank of the tensor, got ", x, ", src = ", src));
   }
-  if (x >= kint32max) {
-    return errors::Internal("Too many elements ", x);
+  if (x >= std::numeric_limits<int32_t>::max()) {
+    return absl::InternalError(absl::StrCat("Too many elements ", x));
   }
   slice->SetFullSlice(x);
-  for (int d = 0; d < static_cast<int32>(x); ++d) {
+  for (int d = 0; d < static_cast<int32_t>(x); ++d) {
     // We expected 2x integers
     int64_t start, length;
     if (!tensorflow::strings::OrderedCode::ReadSignedNumIncreasing(&src,
                                                                    &start)) {
-      return errors::Internal("Failed to parse start: src = ", src);
+      return absl::InternalError(
+          absl::StrCat("Failed to parse start: src = ", src));
     }
     if (!tensorflow::strings::OrderedCode::ReadSignedNumIncreasing(&src,
                                                                    &length)) {
-      return errors::Internal("Failed to parse length: src = ", src);
+      return absl::InternalError(
+          absl::StrCat("Failed to parse length: src = ", src));
     }
     if (length >= 0) {
       // a non-trivial extent
@@ -84,21 +93,22 @@ Status DecodeTensorNameSlice(const string& code, string* name,
       slice->set_length(d, length);
     }
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-Status ParseShapeAndSlice(const string& shape_and_slice, TensorShape* shape,
-                          TensorSlice* slice, TensorShape* shape_slice) {
+absl::Status ParseShapeAndSlice(const std::string& shape_and_slice,
+                                TensorShape* shape, TensorSlice* slice,
+                                TensorShape* shape_slice) {
   CHECK(!shape_and_slice.empty());
   // Syntax: dim0 dim1 dim2 ... <slice string>
   // Where slice string is defined in core/framework/tensor_slice.h
-  std::vector<string> splits = str_util::Split(shape_and_slice, ' ');
+  std::vector<std::string> splits = str_util::Split(shape_and_slice, ' ');
 
   // Must have at least 2 strings.
   if (splits.size() < 2) {
-    return errors::InvalidArgument(
+    return absl::InvalidArgumentError(absl::StrCat(
         "Need least two elements in shape_and_slice specification: ",
-        shape_and_slice);
+        shape_and_slice));
   }
 
   // The last split is the slice specification.
@@ -111,9 +121,9 @@ Status ParseShapeAndSlice(const string& shape_and_slice, TensorShape* shape,
   shape->Clear();
   for (const auto& s : splits) {
     int64_t dim;
-    if (!strings::safe_strto64(s, &dim)) {
-      return errors::InvalidArgument(
-          "Non numerical dimension in shape_and_slice: ", shape_and_slice);
+    if (!absl::SimpleAtoi(s, &dim)) {
+      return absl::InvalidArgumentError(absl::StrCat(
+          "Non numerical dimension in shape_and_slice: ", shape_and_slice));
     }
     shape->AddDim(dim);
   }

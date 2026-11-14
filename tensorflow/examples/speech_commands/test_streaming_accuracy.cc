@@ -63,20 +63,31 @@ bazel run tensorflow/examples/speech_commands:test_streaming_accuracy -- \
 
  */
 
+#include <algorithm>
+#include <cstdint>
 #include <fstream>
-#include <iomanip>
-#include <unordered_set>
+#include <memory>
+#include <string>
+#include <utility>
 #include <vector>
 
+#include "absl/log/log.h"
+#include "absl/status/status.h"
+#include "xla/tsl/platform/env.h"
+#include "xla/tsl/platform/types.h"
+#include "xla/tsl/util/command_line_flags.h"
+#include "tensorflow/core/framework/graph.pb.h"
 #include "tensorflow/core/framework/tensor.h"
-#include "tensorflow/core/lib/io/path.h"
-#include "tensorflow/core/lib/strings/numbers.h"
-#include "tensorflow/core/lib/strings/str_util.h"
+#include "tensorflow/core/framework/tensor_shape.h"
+#include "tensorflow/core/framework/types.pb.h"
 #include "tensorflow/core/lib/wav/wav_io.h"
+#include "tensorflow/core/platform/env.h"
+#include "tensorflow/core/platform/errors.h"
 #include "tensorflow/core/platform/init_main.h"
 #include "tensorflow/core/platform/logging.h"
-#include "tensorflow/core/platform/types.h"
+#include "tensorflow/core/platform/status.h"
 #include "tensorflow/core/public/session.h"
+#include "tensorflow/core/public/session_options.h"
 #include "tensorflow/core/util/command_line_flags.h"
 #include "tensorflow/examples/speech_commands/accuracy_utils.h"
 #include "tensorflow/examples/speech_commands/recognize_commands.h"
@@ -101,15 +112,15 @@ Status LoadGraph(const string& graph_file_name,
   Status load_graph_status =
       ReadBinaryProto(tensorflow::Env::Default(), graph_file_name, &graph_def);
   if (!load_graph_status.ok()) {
-    return tensorflow::errors::NotFound("Failed to load compute graph at '",
-                                        graph_file_name, "'");
+    return absl::NotFoundError(absl::StrCat("Failed to load compute graph at '",
+                                            graph_file_name, "'"));
   }
   session->reset(tensorflow::NewSession(tensorflow::SessionOptions()));
   Status session_create_status = (*session)->Create(graph_def);
   if (!session_create_status.ok()) {
     return session_create_status;
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 // Takes a file name, and loads a list of labels from it, one per line, and
@@ -117,15 +128,15 @@ Status LoadGraph(const string& graph_file_name,
 Status ReadLabelsFile(const string& file_name, std::vector<string>* result) {
   std::ifstream file(file_name);
   if (!file) {
-    return tensorflow::errors::NotFound("Labels file '", file_name,
-                                        "' not found.");
+    return absl::NotFoundError(
+        absl::StrCat("Labels file '", file_name, "' not found."));
   }
   result->clear();
   string line;
   while (std::getline(file, line)) {
     result->push_back(line);
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 }  // namespace

@@ -18,10 +18,6 @@ See [Version
 Compatibility](https://tensorflow.org/guide/version_compat#backward_forward)
 """
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import datetime
 import os
 
@@ -33,7 +29,7 @@ from tensorflow.python.util.tf_export import tf_export
 # This value changes every day with an automatic CL. It can be modified in code
 # via `forward_compatibility_horizon()` or with the environment variable
 # TF_FORWARD_COMPATIBILITY_DELTA_DAYS, which is added to the compatibility date.
-_FORWARD_COMPATIBILITY_HORIZON = datetime.date(2021, 9, 25)
+_FORWARD_COMPATIBILITY_HORIZON = datetime.date(2026, 1, 16)
 _FORWARD_COMPATIBILITY_DELTA_DAYS_VAR_NAME = "TF_FORWARD_COMPATIBILITY_DELTA_DAYS"
 _FORWARD_COMPATIBILITY_DATE_NUMBER = None
 
@@ -56,8 +52,11 @@ def _update_forward_compatibility_date_number(date_to_override=None):
       date += datetime.timedelta(days=int(delta_days))
 
   if date < _FORWARD_COMPATIBILITY_HORIZON:
-    logging.warning("Trying to set the forward compatibility date to the past"
-                    " date %s. This will be ignored by TensorFlow." % (date))
+    logging.warning(
+        "Trying to set the forward compatibility date to the past"
+        " date %s. This will be ignored by TensorFlow.",
+        date,
+    )
     return
   _FORWARD_COMPATIBILITY_DATE_NUMBER = _date_to_date_number(
       date.year, date.month, date.day)
@@ -71,7 +70,7 @@ def forward_compatible(year, month, day):
   """Return true if the forward compatibility window has expired.
 
   See [Version
-  compatibility](https://tensorflow.org/guide/version_compat#backward_forward).
+  compatibility](https://www.tensorflow.org/guide/versions#backward_and_partial_forward_compatibility).
 
   Forward-compatibility refers to scenarios where the producer of a TensorFlow
   model (a GraphDef or SavedModel) is compiled against a version of the
@@ -132,13 +131,13 @@ def forward_compatibility_horizon(year, month, day):
   """Context manager for testing forward compatibility of generated graphs.
 
   See [Version
-  compatibility](https://tensorflow.org/guide/version_compat#backward_forward).
+  compatibility](https://www.tensorflow.org/guide/versions#backward_and_partial_forward_compatibility).
 
   To ensure forward compatibility of generated graphs (see `forward_compatible`)
   with older binaries, new features can be gated with:
 
   ```python
-  if compat.forward_compatible(year=2018, month=08, date=01):
+  if compat.forward_compatible(year=2018, month=8, day=1):
     generate_graph_with_new_features()
   else:
     generate_graph_so_older_binaries_can_consume_it()
@@ -152,7 +151,7 @@ def forward_compatibility_horizon(year, month, day):
   from tensorflow.python.compat import compat
 
   def testMyNewFeature(self):
-    with compat.forward_compatibility_horizon(2018, 08, 02):
+    with compat.forward_compatibility_horizon(2018, 8, 2):
        # Test that generate_graph_with_new_features() has an effect
   ```
 

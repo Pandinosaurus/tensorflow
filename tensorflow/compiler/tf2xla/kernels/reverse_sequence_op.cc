@@ -13,14 +13,20 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "tensorflow/compiler/tf2xla/shape_util.h"
-#include "tensorflow/compiler/tf2xla/xla_helpers.h"
+#include <cstdint>
+
 #include "tensorflow/compiler/tf2xla/xla_op_kernel.h"
 #include "tensorflow/compiler/tf2xla/xla_op_registry.h"
-#include "tensorflow/compiler/xla/client/lib/constants.h"
-#include "tensorflow/compiler/xla/client/xla_builder.h"
-#include "tensorflow/compiler/xla/xla_data.pb.h"
+#include "xla/hlo/builder/lib/constants.h"
+#include "xla/hlo/builder/xla_builder.h"
+#include "xla/shape.h"
+#include "xla/shape_util.h"
+#include "xla/xla_data.pb.h"
+#include "tensorflow/core/framework/op_kernel.h"
+#include "tensorflow/core/framework/op_requires.h"
 #include "tensorflow/core/framework/tensor_shape.h"
+#include "tensorflow/core/platform/errors.h"
+#include "tensorflow/core/platform/types.h"
 
 namespace tensorflow {
 namespace {
@@ -42,10 +48,15 @@ class ReverseSequenceOp : public XlaOpKernel {
                                         seq_lens_shape.dims()));
     OP_REQUIRES(context, batch_dim_ != seq_dim_,
                 errors::InvalidArgument("batch_dim == seq_dim == ", seq_dim_));
+    OP_REQUIRES(context, seq_dim_ >= 0,
+                errors::InvalidArgument("seq_dim must be >=0, got ", seq_dim_));
     OP_REQUIRES(
         context, seq_dim_ < input_shape.dims(),
         errors::InvalidArgument("seq_dim must be < input rank", " ( ", seq_dim_,
                                 " vs. ", input_shape.dims(), ")"));
+    OP_REQUIRES(
+        context, batch_dim_ >= 0,
+        errors::InvalidArgument("batch_dim must be >=0, got ", batch_dim_));
     OP_REQUIRES(
         context, batch_dim_ < input_shape.dims(),
         errors::InvalidArgument("batch_dim must be < input rank", " ( ",
@@ -119,13 +130,26 @@ class ReverseSequenceOp : public XlaOpKernel {
     slice_sizes[batch_dim_] = 1;
     slice_sizes[seq_dim_] = 1;
 
-    context->SetOutput(0,
-                       xla::Gather(input, start_indices, dnums, slice_sizes));
+    xla::XlaOp output = xla::Gather(input, start_indices, dnums, slice_sizes);
+    // The gather indices and slice sizes come from each dimension's static
+    // bound, so the output drops the input's dynamic sizes. Its dimensions are
+    // the input's, in the same order, so give them the input's sizes.
+    xla::Shape input_xla_shape;
+    OP_REQUIRES_VALUE(input_xla_shape, context, context->InputXlaShape(0));
+    if (input_xla_shape.is_dynamic()) {
+      for (int i = 0; i < input_shape.dims(); ++i) {
+        if (input_xla_shape.is_dynamic_dimension(i)) {
+          output =
+              xla::SetDimensionSize(output, xla::GetDimensionSize(input, i), i);
+        }
+      }
+    }
+    context->SetOutput(0, output);
   }
 
  private:
-  int32 batch_dim_;
-  int32 seq_dim_;
+  int32_t batch_dim_;
+  int32_t seq_dim_;
 };
 
 REGISTER_XLA_OP(Name("ReverseSequence"), ReverseSequenceOp);

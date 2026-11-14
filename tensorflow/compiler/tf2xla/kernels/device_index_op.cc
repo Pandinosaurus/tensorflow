@@ -13,16 +13,19 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "absl/container/flat_hash_map.h"
+#include <cstdint>
+#include <string>
+#include <vector>
+
 #include "absl/strings/string_view.h"
 #include "tensorflow/compiler/tf2xla/xla_helpers.h"
 #include "tensorflow/compiler/tf2xla/xla_op_kernel.h"
 #include "tensorflow/compiler/tf2xla/xla_op_registry.h"
-#include "tensorflow/compiler/xla/client/client_library.h"
-#include "tensorflow/compiler/xla/client/lib/arithmetic.h"
-#include "tensorflow/compiler/xla/client/lib/constants.h"
-#include "tensorflow/compiler/xla/client/lib/math.h"
-#include "tensorflow/compiler/xla/client/xla_builder.h"
+#include "xla/client/client_library.h"
+#include "xla/hlo/builder/lib/arithmetic.h"
+#include "xla/hlo/builder/lib/constants.h"
+#include "xla/hlo/builder/lib/math.h"
+#include "xla/hlo/builder/xla_builder.h"
 #include "tensorflow/core/framework/kernel_def_builder.h"
 
 namespace tensorflow {
@@ -38,11 +41,11 @@ class DeviceIndexOp : public XlaOpKernel {
     // When compiling we are not executing on any physical device, so we return
     // a sentinel value (size of the list of devices).
     ctx->SetOutput(
-        0, xla::ConstantR0<int32>(ctx->builder(), device_names_.size()));
+        0, xla::ConstantR0<int32_t>(ctx->builder(), device_names_.size()));
   }
 
  private:
-  std::vector<string> device_names_;
+  std::vector<std::string> device_names_;
 };
 
 REGISTER_XLA_OP(Name("DeviceIndex"), DeviceIndexOp);

@@ -21,6 +21,7 @@ limitations under the License.
 
 #include <string>  // for string
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "tensorflow/core/framework/tensor_shape.h"
@@ -40,29 +41,29 @@ class TensorSliceSet {
   virtual ~TensorSliceSet();
 
   const TensorShape& shape() const { return shape_; }
-  const DataType type() const { return type_; }
+  DataType type() const { return type_; }
 
   // Register a new slice for the tensor. The "tag" is an arbitrary string
   // associated with the slice (in one application it denotes the name of the
   // file that contains the slice); the "data" points to the data of the tensor
   // slice (it can be a nullptr).
-  Status Register(const TensorSlice& slice, const string& tag);
+  absl::Status Register(const TensorSlice& slice, const std::string& tag);
 
   // Alternative way of querying about a new slice: instead of copying the
   // data, it returns a list of meta data about the stored slices that will
   // supply data for the slice.
-  bool QueryMeta(
-      const TensorSlice& slice,
-      std::vector<std::pair<tensorflow::TensorSlice, string>>* results) const;
+  bool QueryMeta(const TensorSlice& slice,
+                 std::vector<std::pair<tensorflow::TensorSlice, std::string>>*
+                     results) const;
 
   struct SliceInfo {
     TensorSlice slice;
-    const string tag;
+    const std::string tag;
     int64_t num_floats;
   };
 
   // Returns the map from slice string to SliceInfo.
-  const std::unordered_map<string, SliceInfo>& Slices() const {
+  const std::unordered_map<std::string, SliceInfo>& Slices() const {
     return slices_;
   }
 
@@ -70,7 +71,7 @@ class TensorSliceSet {
   const TensorShape shape_;
   const DataType type_;
   // We maintain a mapping from the slice string to the slice information.
-  std::unordered_map<string, SliceInfo> slices_;
+  std::unordered_map<std::string, SliceInfo> slices_;
 
   // Minimal slice which contains all presented slices. Used for speeding up
   // overlap check when slices are being added consequently.
@@ -81,10 +82,10 @@ class TensorSliceSet {
 // "name".  Other arguments are used for validations.  Does not modify the map
 // or its values on non-OK.
 // REQUIRES: tensor_slices != nullptr
-Status RegisterTensorSlice(
-    const string& name, const TensorShape& shape, DataType type,
-    const string& tag, const TensorSlice& slice,
-    std::unordered_map<string, TensorSliceSet*>* tensor_slices);
+absl::Status RegisterTensorSlice(
+    const std::string& name, const TensorShape& shape, DataType type,
+    const std::string& tag, const TensorSlice& slice,
+    std::unordered_map<std::string, TensorSliceSet*>* tensor_slices);
 
 }  // namespace checkpoint
 

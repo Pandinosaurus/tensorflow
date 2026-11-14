@@ -34,10 +34,6 @@ raw PCM data (as floats in the range -1.0 to 1.0) called 'decoded_sample_data',
 and the output is called 'labels_softmax'.
 
 """
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import argparse
 import os.path
 import sys
@@ -46,7 +42,6 @@ import tensorflow as tf
 
 import input_data
 import models
-from tensorflow.python.framework import graph_util
 from tensorflow.python.ops import gen_audio_ops as audio_ops
 
 # If it's available, load the specialized feature generator. If this doesn't
@@ -84,7 +79,7 @@ def create_inference_graph(wanted_words, sample_rate, clip_duration_ms,
     Input and output tensor objects.
 
   Raises:
-    Exception: If the preprocessing mode isn't recognized.
+    ValueError: If the preprocessing mode isn't recognized.
   """
 
   words_list = input_data.prepare_words_list(wanted_words.split(','))
@@ -120,11 +115,12 @@ def create_inference_graph(wanted_words, sample_rate, clip_duration_ms,
         dct_coefficient_count=model_settings['fingerprint_width'])
   elif preprocess == 'micro':
     if not frontend_op:
-      raise Exception(
+      raise ImportError(
           'Micro frontend op is currently not available when running TensorFlow'
           ' directly from Python, you need to build and run through Bazel, for'
           ' example'
-          ' `bazel run tensorflow/examples/speech_commands:freeze_graph`')
+          ' `bazel run tensorflow/examples/speech_commands:freeze_graph`'
+      )
     sample_rate = model_settings['sample_rate']
     window_size_ms = (model_settings['window_size_samples'] *
                       1000) / sample_rate
@@ -142,8 +138,10 @@ def create_inference_graph(wanted_words, sample_rate, clip_duration_ms,
         out_type=tf.float32)
     fingerprint_input = tf.multiply(micro_frontend, (10.0 / 256.0))
   else:
-    raise Exception('Unknown preprocess mode "%s" (should be "mfcc",'
-                    ' "average", or "micro")' % (preprocess))
+    raise ValueError(
+        'Unknown preprocess mode "%s" (should be "mfcc", "average", or "micro")'
+        % (preprocess)
+    )
 
   fingerprint_size = model_settings['fingerprint_size']
   reshaped_input = tf.reshape(fingerprint_input, [-1, fingerprint_size])
@@ -231,7 +229,7 @@ def main(_):
   models.load_variables_from_checkpoint(sess, FLAGS.start_checkpoint)
 
   # Turn all the variables into inline constants inside the graph and save it.
-  frozen_graph_def = graph_util.convert_variables_to_constants(
+  frozen_graph_def = tf.compat.v1.graph_util.convert_variables_to_constants(
       sess, sess.graph_def, ['labels_softmax'])
 
   if FLAGS.save_format == 'graph_def':
@@ -239,8 +237,10 @@ def main(_):
   elif FLAGS.save_format == 'saved_model':
     save_saved_model(FLAGS.output_file, sess, input_tensor, output_tensor)
   else:
-    raise Exception('Unknown save format "%s" (should be "graph_def" or'
-                    ' "saved_model")' % (FLAGS.save_format))
+    raise ValueError(
+        'Unknown save format "%s" (should be "graph_def" or "saved_model")'
+        % (FLAGS.save_format)
+    )
 
 
 if __name__ == '__main__':

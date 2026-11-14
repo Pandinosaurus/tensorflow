@@ -13,8 +13,14 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "third_party/eigen3/Eigen/Core"
-#include "third_party/eigen3/Eigen/LU"
+#include <cstdint>
+#include <limits>
+
+#include "absl/container/inlined_vector.h"
+#include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
+#include "Eigen/Core"  // from @eigen_archive
+#include "Eigen/LU"  // from @eigen_archive
 #include "tensorflow/core/framework/kernel_def_builder.h"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/tensor_shape.h"
@@ -32,8 +38,8 @@ class LuOp : public OpKernel {
   explicit LuOp(OpKernelConstruction* context) : OpKernel(context) {}
 
  protected:
-  using TensorShapes = gtl::InlinedVector<TensorShape, 4>;
-  using TensorOutputs = gtl::InlinedVector<Tensor*, 4>;
+  using TensorShapes = absl::InlinedVector<TensorShape, 4UL>;
+  using TensorOutputs = absl::InlinedVector<Tensor*, 4UL>;
 
   using Matrix =
       Eigen::Matrix<Scalar, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
@@ -58,20 +64,22 @@ class LuOp : public OpKernel {
   int64_t GetCostPerUnit(const TensorShape& input_matrix_shape) const {
     double num_rows = static_cast<double>(input_matrix_shape.dim_size(0));
     double cost = (2 / 3.0) * MathUtil::IPow(num_rows, 3);
-    return cost >= static_cast<double>(kint64max) ? kint64max
-                                                  : static_cast<int64_t>(cost);
+    return cost >= static_cast<double>(std::numeric_limits<int64_t>::max())
+               ? std::numeric_limits<int64_t>::max()
+               : static_cast<int64_t>(cost);
   }
 
   void Compute(OpKernelContext* context) override {
-    OP_REQUIRES(context, context->num_inputs() == 1,
-                errors::InvalidArgument("Expecting exactly one input, got ",
-                                        context->num_inputs()));
+    OP_REQUIRES(
+        context, context->num_inputs() == 1,
+        absl::InvalidArgumentError(absl::StrCat(
+            "Expecting exactly one input, got ", context->num_inputs())));
 
     const Tensor& input = context->input(0);
     int input_rank = input.dims();
     OP_REQUIRES(context, input_rank >= 2,
-                errors::InvalidArgument(
-                    "Input tensor must have rank >= 2, got ", input_rank));
+                absl::InvalidArgumentError(absl::StrCat(
+                    "Input tensor must have rank >= 2, got ", input_rank)));
 
     // If the tensor rank is greater than 2, we consider the inner-most
     // dimensions as matrices, and loop over all the other outer ("batch")
@@ -79,19 +87,20 @@ class LuOp : public OpKernel {
     TensorShape input_matrix_shape;
     TensorShape batch_shape;
     for (int dim = 0; dim < input_rank - 2; ++dim) {
-      batch_shape.AddDim(input.dim_size(dim));
+      OP_REQUIRES_OK(context,
+                     batch_shape.AddDimWithStatus(input.dim_size(dim)));
     }
     const int64_t num_rows = input.dim_size(input_rank - 2);
     const int64_t num_cols = input.dim_size(input_rank - 1);
 
     input_matrix_shape.AppendShape({num_rows, num_cols});
     OP_REQUIRES(context, TensorShapeUtils::IsSquareMatrix(input_matrix_shape),
-                errors::InvalidArgument("Input matrix must be square."));
+                absl::InvalidArgumentError("Input matrix must be square."));
 
     // packed_triangular_factors is a matrix with the same shape as the input;
     // permutation is a vector.
     TensorShape permutation_shape = batch_shape;
-    permutation_shape.AddDim(num_rows);
+    OP_REQUIRES_OK(context, permutation_shape.AddDimWithStatus(num_rows));
 
     TensorShapes output_matrix_shapes({input.shape(), permutation_shape});
 
@@ -169,7 +178,7 @@ class LuOp : public OpKernel {
     const RealScalar min_abs_pivot =
         packed_triangular_factors.diagonal().cwiseAbs().minCoeff();
     OP_REQUIRES(context, min_abs_pivot > RealScalar(0),
-                errors::InvalidArgument("Input is not invertible."));
+                absl::InvalidArgumentError("Input is not invertible."));
   }
 };
 
@@ -180,10 +189,10 @@ class LuOp : public OpKernel {
                               .TypeConstraint<idx_type>("output_idx_type"), \
                           LuOp<type, idx_type>);
 
-REGISTER_LU(float, int32);
-REGISTER_LU(double, int32);
-REGISTER_LU(complex64, int32);
-REGISTER_LU(complex128, int32);
+REGISTER_LU(float, int32_t);
+REGISTER_LU(double, int32_t);
+REGISTER_LU(complex64, int32_t);
+REGISTER_LU(complex128, int32_t);
 
 REGISTER_LU(float, int64_t);
 REGISTER_LU(double, int64_t);

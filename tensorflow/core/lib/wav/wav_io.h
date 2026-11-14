@@ -15,8 +15,8 @@ limitations under the License.
 
 // Functions to write audio in WAV format.
 
-#ifndef TENSORFLOW_LIB_WAV_WAV_IO_H_
-#define TENSORFLOW_LIB_WAV_WAV_IO_H_
+#ifndef TENSORFLOW_CORE_LIB_WAV_WAV_IO_H_
+#define TENSORFLOW_CORE_LIB_WAV_WAV_IO_H_
 
 #include <string>
 #include <vector>
@@ -42,19 +42,17 @@ namespace wav {
 //   // Use wav_string.
 // }
 template <typename T>
-Status EncodeAudioAsS16LEWav(const float* audio, size_t sample_rate,
-                             size_t num_channels, size_t num_frames,
-                             T* wav_string);
+absl::Status EncodeAudioAsS16LEWav(const float* audio, size_t sample_rate,
+                                   size_t num_channels, size_t num_frames,
+                                   T* wav_string);
 
 // Explicit instantiations defined in wav_io.cc.
-extern template Status EncodeAudioAsS16LEWav<std::string>(
+extern template absl::Status EncodeAudioAsS16LEWav<std::string>(
     const float* audio, size_t sample_rate, size_t num_channels,
     size_t num_frames, std::string* wav_string);
-extern template Status EncodeAudioAsS16LEWav<tstring>(const float* audio,
-                                                      size_t sample_rate,
-                                                      size_t num_channels,
-                                                      size_t num_frames,
-                                                      tstring* wav_string);
+extern template absl::Status EncodeAudioAsS16LEWav<tstring>(
+    const float* audio, size_t sample_rate, size_t num_channels,
+    size_t num_frames, tstring* wav_string);
 
 // Decodes the little-endian signed 16-bit PCM WAV file data (aka LIN16
 // encoding) into a float Tensor. The channels are encoded as the lowest
@@ -63,23 +61,24 @@ extern template Status EncodeAudioAsS16LEWav<tstring>(const float* audio,
 // is read from the file header, and an error is returned if the format is not
 // supported.
 // The results are output as floats within the range -1 to 1,
-Status DecodeLin16WaveAsFloatVector(const std::string& wav_string,
-                                    std::vector<float>* float_values,
-                                    uint32* sample_count, uint16* channel_count,
-                                    uint32* sample_rate);
+absl::Status DecodeLin16WaveAsFloatVector(const std::string& wav_string,
+                                          std::vector<float>* float_values,
+                                          uint32_t* sample_count,
+                                          uint16_t* channel_count,
+                                          uint32_t* sample_rate);
 
 // Everything below here is only exposed publicly for testing purposes.
 
 // Handles moving the data index forward, validating the arguments, and avoiding
 // overflow or underflow.
-Status IncrementOffset(int old_offset, size_t increment, size_t max_size,
-                       int* new_offset);
+absl::Status IncrementOffset(int old_offset, int64_t increment, size_t max_size,
+                             int* new_offset);
 
 // This function is only exposed in the header for testing purposes, as a
 // template that needs to be instantiated. Reads a typed numeric value from a
 // stream of data.
 template <class T>
-Status ReadValue(const std::string& data, T* value, int* offset) {
+absl::Status ReadValue(const std::string& data, T* value, int* offset) {
   int new_offset;
   TF_RETURN_IF_ERROR(
       IncrementOffset(*offset, sizeof(T), data.size(), &new_offset));
@@ -87,18 +86,18 @@ Status ReadValue(const std::string& data, T* value, int* offset) {
     memcpy(value, data.data() + *offset, sizeof(T));
   } else {
     *value = 0;
-    const uint8* data_buf =
-        reinterpret_cast<const uint8*>(data.data() + *offset);
+    const uint8_t* data_buf =
+        reinterpret_cast<const uint8_t*>(data.data() + *offset);
     int shift = 0;
     for (int i = 0; i < sizeof(T); ++i, shift += 8) {
       *value = *value | (data_buf[i] << shift);
     }
   }
   *offset = new_offset;
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 }  // namespace wav
 }  // namespace tensorflow
 
-#endif  // TENSORFLOW_LIB_WAV_WAV_IO_H_
+#endif  // TENSORFLOW_CORE_LIB_WAV_WAV_IO_H_

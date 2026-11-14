@@ -1,0 +1,705 @@
+# Description:
+#   XLA’s HLO Intermediate Representation implementation.
+
+load("//xla:xla.default.bzl", "xla_cc_test")
+load("//xla/tsl:tsl.bzl", "internal_visibility")
+load("//xla/tsl/platform:rules_cc.bzl", "cc_library")
+
+package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
+    default_visibility = internal_visibility([":friends"]),
+    licenses = ["notice"],
+)
+
+package_group(
+    name = "friends",
+    includes = [
+        "//xla:friends",
+    ],
+)
+
+cc_library(
+    name = "hlo",
+    srcs = [
+        "dfs_hlo_visitor.cc",
+        "dynamic_parameter_binding.cc",
+        "hlo_clone_context.cc",
+        "hlo_computation.cc",
+        "hlo_input_output_alias_config.cc",
+        "hlo_instruction.cc",
+        "hlo_instruction_utils.cc",
+        "hlo_instructions.cc",
+        "hlo_module.cc",
+        "hlo_opcode.cc",
+        "hlo_original_value.cc",
+        "hlo_original_value_util.cc",
+        "hlo_schedule.cc",
+        "replica_group.cc",
+    ],
+    hdrs = [
+        "dfs_hlo_visitor.h",
+        "dynamic_parameter_binding.h",
+        "hlo_casting_utils.h",
+        "hlo_clone_context.h",
+        "hlo_computation.h",
+        "hlo_input_output_alias_config.h",
+        "hlo_instruction.h",
+        "hlo_instruction_utils.h",
+        "hlo_instructions.h",
+        "hlo_module.h",
+        "hlo_op_metadata.h",
+        "hlo_opcode.h",
+        "hlo_original_value.h",
+        "hlo_original_value_util.h",
+        "hlo_print_options.h",
+        "hlo_schedule.h",
+        "hlo_sharding.h",
+        "replica_group.h",
+    ],
+    visibility = internal_visibility([
+        ":friends",
+        "//xla:native_custom_call_handler_allowlist",
+    ]),
+    deps = [
+        ":backend_config",
+        ":hlo_module_metadata",
+        ":hlo_payload_deduplicator",
+        ":hlo_sharding",  # keep: provides implementations for re-exported hlo_sharding.h.
+        ":mesh_and_axis",
+        ":named_sharding",
+        ":ptrvec",
+        ":stack_frames",
+        ":tile_assignment",
+        "//xla:array",
+        "//xla:comparison_util",
+        "//xla:debug_options_flags",
+        "//xla:literal",
+        "//xla:literal_pool",
+        "//xla:literal_util",
+        "//xla:online_topsort",
+        "//xla:printer",
+        "//xla:protobuf_util",
+        "//xla:shape_layout",
+        "//xla:shape_pool",
+        "//xla:shape_tree",
+        "//xla:shape_util",
+        "//xla:side_effect_util",
+        "//xla:sort_json",
+        "//xla:status_macros",
+        "//xla:tuple_tree",
+        "//xla:util",
+        "//xla:window_util",
+        "//xla:xla_data_proto_cc",
+        "//xla:xla_proto_cc",
+        "//xla/hlo/parser:hlo_lexer",
+        "//xla/hlo/utils:pointer_utils",
+        "//xla/service:compilation_environments",
+        "//xla/service:computation_layout",
+        "//xla/service:device_assignment",
+        "//xla/service:hlo_module_config",
+        "//xla/service:hlo_proto_cc",
+        "//xla/service:mapped_ptr_container_sorter",
+        "//xla/service:name_uniquer",
+        "//xla/tsl/lib/gtl:iterator_range",
+        "//xla/tsl/lib/gtl:map_util",
+        "//xla/tsl/platform:env",
+        "//xla/tsl/platform:errors",
+        "//xla/tsl/platform:logging",
+        "//xla/tsl/util:sorted_range",
+        "@com_google_absl//absl/algorithm:container",
+        "@com_google_absl//absl/base:config",
+        "@com_google_absl//absl/base:core_headers",
+        "@com_google_absl//absl/base:no_destructor",
+        "@com_google_absl//absl/base:nullability",
+        "@com_google_absl//absl/container:btree",
+        "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/container:flat_hash_set",
+        "@com_google_absl//absl/container:inlined_vector",
+        "@com_google_absl//absl/functional:function_ref",
+        "@com_google_absl//absl/functional:overload",
+        "@com_google_absl//absl/hash",
+        "@com_google_absl//absl/log",
+        "@com_google_absl//absl/log:check",
+        "@com_google_absl//absl/log:die_if_null",
+        "@com_google_absl//absl/memory",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:status_macros",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/strings:cord",
+        "@com_google_absl//absl/strings:str_format",
+        "@com_google_absl//absl/synchronization",
+        "@com_google_absl//absl/types:span",
+        "@com_google_protobuf//:protobuf_lite",
+        "@com_googlesource_code_re2//:re2",
+        "@tsl//tsl/platform:fingerprint",
+        "@tsl//tsl/platform:protobuf",
+    ],
+)
+
+xla_cc_test(
+    name = "hlo_opcode_test",
+    srcs = ["hlo_opcode_test.cc"],
+    deps = [
+        ":hlo",
+        "//xla/tests:xla_internal_test_main",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+cc_library(
+    name = "stack_frames",
+    srcs = ["stack_frames.cc"],
+    hdrs = ["stack_frames.h"],
+    visibility = internal_visibility([
+        ":friends",
+        "//xla:native_custom_call_handler_allowlist",
+    ]),
+    deps = [
+        ":hlo_module_metadata",
+        "//xla/service:hlo_proto_cc",
+        "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings",
+    ],
+)
+
+xla_cc_test(
+    name = "stack_frames_test",
+    srcs = ["stack_frames_test.cc"],
+    deps = [
+        ":hlo_module_metadata",
+        ":stack_frames",
+        "//xla/service:hlo_proto_cc",
+        "//xla/tsl/platform:test",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+xla_cc_test(
+    name = "hlo_computation_test",
+    srcs = ["hlo_computation_test.cc"],
+    deps = [
+        ":hlo",
+        "//xla:shape_util",
+        "//xla:xla_data_proto_cc",
+        "//xla/hlo/parser:hlo_parser",
+        "//xla/hlo/testlib:hlo_hardware_independent_test_base",
+        "//xla/service:hlo_module_config",
+        "//xla/service:hlo_proto_cc",
+        "//xla/tsl/platform:test_benchmark",
+        "//xla/tsl/platform:test_main",
+        "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/log:check",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/strings:string_view",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+xla_cc_test(
+    name = "hlo_instruction_test",
+    srcs = ["hlo_instruction_test.cc"],
+    deps = [
+        ":dfs_hlo_visitor_with_default",
+        ":hlo",
+        ":stack_frames",
+        "//xla:comparison_util",
+        "//xla:frontend_attributes",
+        "//xla:literal_util",
+        "//xla:printer",
+        "//xla:shape_layout",
+        "//xla:shape_util",
+        "//xla:side_effect_util",
+        "//xla:xla_data_proto_cc",
+        "//xla/hlo/parser:hlo_parser",
+        "//xla/hlo/testlib:hlo_hardware_independent_test_base",
+        "//xla/hlo/transforms/simplifiers:hlo_dce",
+        "//xla/service:hlo_proto_cc",
+        "//xla/tsl/lib/core:status_test_util",
+        "//xla/tsl/platform:test_main",
+        "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:status_matchers",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings:string_view",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+cc_library(
+    name = "mesh_and_axis",
+    srcs = ["mesh_and_axis.cc"],
+    hdrs = ["mesh_and_axis.h"],
+    deps = [
+        ":tile_assignment",
+        "//xla:array",
+        "//xla:xla_data_proto_cc",
+        "@com_google_absl//absl/algorithm:container",
+        "@com_google_absl//absl/container:flat_hash_set",
+        "@com_google_absl//absl/log",
+        "@com_google_absl//absl/log:check",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:status_macros",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/types:span",
+    ],
+)
+
+cc_library(
+    name = "named_sharding",
+    srcs = ["named_sharding.cc"],
+    hdrs = ["named_sharding.h"],
+    deps = [
+        ":hlo_op_metadata",
+        ":mesh_and_axis",
+        ":tile_assignment",
+        "//xla:xla_data_proto_cc",
+        "//xla/tsl/platform:errors",
+        "@com_google_absl//absl/algorithm:container",
+        "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/log:check",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:status_macros",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/types:span",
+    ],
+)
+
+cc_library(
+    name = "hlo_sharding",
+    srcs = ["hlo_sharding.cc"],
+    hdrs = ["hlo_sharding.h"],
+    deps = [
+        ":hlo_op_metadata",
+        ":mesh_and_axis",
+        ":named_sharding",
+        ":tile_assignment",
+        "//xla:array",
+        "//xla:printer",
+        "//xla:shape_tree",
+        "//xla:shape_util",
+        "//xla:status_macros",
+        "//xla:util",
+        "//xla:xla_data_proto_cc",
+        "//xla/tsl/platform:errors",
+        "@com_google_absl//absl/algorithm:container",
+        "@com_google_absl//absl/base:core_headers",
+        "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/container:flat_hash_set",
+        "@com_google_absl//absl/container:inlined_vector",
+        "@com_google_absl//absl/functional:function_ref",
+        "@com_google_absl//absl/hash",
+        "@com_google_absl//absl/log",
+        "@com_google_absl//absl/log:check",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:status_macros",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/strings:str_format",
+        "@com_google_absl//absl/types:span",
+    ],
+)
+
+cc_library(
+    name = "hlo_op_metadata",
+    srcs = ["hlo_op_metadata.cc"],
+    hdrs = ["hlo_op_metadata.h"],
+    deps = [
+        "//xla:xla_data_proto_cc",
+        "@com_google_absl//absl/strings",
+    ],
+)
+
+cc_library(
+    name = "hlo_module_metadata",
+    srcs = ["hlo_module_metadata.cc"],
+    hdrs = ["hlo_module_metadata.h"],
+    visibility = internal_visibility([
+        ":friends",
+        "//xla:native_custom_call_handler_allowlist",
+    ]),
+    deps = [
+        "//xla:status_macros",
+        "//xla:util",
+        "//xla/service:hlo_proto_cc",
+        "//xla/service:metrics_proto_cc",
+        "//xla/tsl/platform:env",
+        "//xla/tsl/platform:statusor",
+        "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/container:flat_hash_set",
+        "@com_google_absl//absl/functional:function_ref",
+        "@com_google_absl//absl/hash",
+        "@com_google_absl//absl/log",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:status_macros",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings:str_format",
+        "@com_google_absl//absl/strings:string_view",
+        "@tsl//tsl/platform:protobuf",
+    ],
+)
+
+xla_cc_test(
+    name = "hlo_module_test",
+    srcs = ["hlo_module_test.cc"],
+    deps = [
+        ":hlo",
+        ":stack_frames",
+        "//xla:debug_options_flags",
+        "//xla:shape_util",
+        "//xla:util",
+        "//xla:xla_data_proto_cc",
+        "//xla:xla_proto_cc",
+        "//xla/hlo/analysis:alias_info",
+        "//xla/hlo/analysis:hlo_ordering",
+        "//xla/hlo/parser:hlo_parser",
+        "//xla/hlo/testlib:filecheck",
+        "//xla/hlo/utils:hlo_query",
+        "//xla/service:buffer_assignment",
+        "//xla/service:buffer_value",
+        "//xla/service:compilation_environments",
+        "//xla/service:hlo_module_config",
+        "//xla/service:hlo_proto_util",
+        "//xla/service:logical_buffer",
+        "//xla/tsl/lib/core:status_test_util",
+        "//xla/tsl/platform:statusor",
+        "//xla/tsl/platform:test",
+        "//xla/tsl/util/proto:proto_matchers",
+        "@com_google_absl//absl/container:btree",
+        "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/hash",
+        "@com_google_absl//absl/log:check",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/strings:string_view",
+        "@com_google_googletest//:gtest_main",
+        "@com_google_protobuf//:protobuf",
+        "@tsl//tsl/platform:fingerprint",
+    ],
+)
+
+cc_library(
+    name = "backend_config",
+    srcs = ["backend_config.cc"],
+    hdrs = ["backend_config.h"],
+    deps = [
+        "//xla:util",
+        "@com_google_absl//absl/base:core_headers",
+        "@com_google_absl//absl/log",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:status_macros",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/synchronization",
+        "@com_google_absl//absl/types:span",
+        "@com_google_protobuf//:protobuf",
+        "@com_googlesource_code_re2//:re2",
+        "@tsl//tsl/platform:human_readable_json",
+        "@tsl//tsl/platform:protobuf",
+    ],
+)
+
+xla_cc_test(
+    name = "backend_config_test",
+    srcs = ["backend_config_test.cc"],
+    deps = [
+        ":backend_config",
+        "//xla/service/gpu:backend_configs_cc",
+        "//xla/tsl/lib/core:status_test_util",
+        "//xla/tsl/platform:test",
+        "//xla/tsl/platform:test_main",
+        "@com_google_absl//absl/strings:string_view",
+        "@com_google_absl//absl/synchronization",
+    ],
+)
+
+cc_library(
+    name = "hlo_payload_deduplicator",
+    srcs = ["hlo_payload_deduplicator.cc"],
+    hdrs = ["hlo_payload_deduplicator.h"],
+    deps = [
+        ":backend_config",
+        "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/strings",
+    ],
+)
+
+xla_cc_test(
+    name = "hlo_payload_deduplicator_test",
+    srcs = ["hlo_payload_deduplicator_test.cc"],
+    deps = [
+        ":backend_config",
+        ":hlo_payload_deduplicator",
+        "@com_google_absl//absl/strings:string_view",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_library(
+    name = "hlo_computation_utils",
+    srcs = ["hlo_computation_utils.cc"],
+    hdrs = ["hlo_computation_utils.h"],
+    deps = [
+        ":hlo",
+        "@com_google_absl//absl/algorithm:container",
+        "@com_google_absl//absl/container:flat_hash_set",
+        "@com_google_absl//absl/container:inlined_vector",
+        "@com_google_absl//absl/functional:function_ref",
+        "@com_google_absl//absl/log:check",
+        "@com_google_absl//absl/strings:string_view",
+    ],
+)
+
+xla_cc_test(
+    name = "hlo_computation_utils_test",
+    srcs = ["hlo_computation_utils_test.cc"],
+    deps = [
+        ":hlo",
+        ":hlo_computation_utils",
+        "//xla/hlo/testlib:filecheck",
+        "//xla/hlo/testlib:hlo_hardware_independent_test_base",
+        "@com_google_absl//absl/status:status_matchers",
+        "@com_google_absl//absl/strings:string_view",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_library(
+    name = "hlo_instruction_utils",
+    hdrs = ["hlo_instruction_utils.h"],
+    deps = [
+        ":hlo",
+        "//xla:comparison_util",
+        "//xla:shape_util",
+        "//xla:xla_data_proto_cc",
+        "@com_google_absl//absl/container:flat_hash_set",
+        "@com_google_absl//absl/functional:function_ref",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings:string_view",
+        "@com_google_absl//absl/types:span",
+    ],
+)
+
+xla_cc_test(
+    name = "hlo_instruction_utils_test",
+    srcs = ["hlo_instruction_utils_test.cc"],
+    deps = [
+        ":hlo",
+        ":hlo_instruction_utils",
+        "//xla:comparison_util",
+        "//xla:literal_util",
+        "//xla:shape_util",
+        "//xla:xla_data_proto_cc",
+        "//xla/hlo/parser:hlo_parser",
+        "//xla/hlo/testlib:hlo_hardware_independent_test_base",
+        "//xla/hlo/utils:hlo_query",
+        "//xla/tsl/platform:statusor",
+        "//xla/tsl/platform:test_main",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:status_matchers",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+cc_library(
+    name = "ptrvec",
+    hdrs = ["ptrvec.h"],
+    deps = [
+        "//xla/tsl/platform:logging",
+        "@com_google_absl//absl/log:check",
+    ],
+)
+
+xla_cc_test(
+    name = "ptrvec_test",
+    srcs = ["ptrvec_test.cc"],
+    deps = [
+        ":ptrvec",
+        "//xla/tsl/platform:logging",
+        "//xla/tsl/platform:test",
+        "//xla/tsl/platform:test_benchmark",
+        "//xla/tsl/platform:test_main",
+        "@com_google_absl//absl/strings:str_format",
+        "@com_google_absl//absl/types:span",
+    ],
+)
+
+cc_library(
+    name = "tile_assignment",
+    srcs = ["tile_assignment.cc"],
+    hdrs = ["tile_assignment.h"],
+    deps = [
+        "//xla:array",
+        "//xla:printer",
+        "//xla:util",
+        "//xla:xla_data_proto_cc",
+        "@com_google_absl//absl/algorithm:container",
+        "@com_google_absl//absl/base:core_headers",
+        "@com_google_absl//absl/container:inlined_vector",
+        "@com_google_absl//absl/functional:function_ref",
+        "@com_google_absl//absl/log",
+        "@com_google_absl//absl/log:check",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/synchronization",
+        "@com_google_absl//absl/types:span",
+    ],
+)
+
+xla_cc_test(
+    name = "tile_assignment_test",
+    srcs = ["tile_assignment_test.cc"],
+    deps = [
+        ":tile_assignment",
+        "//xla:array",
+        "//xla:array2d",
+        "//xla/tsl/platform:test_main",
+        "@com_google_absl//absl/algorithm:container",
+        "@com_google_absl//absl/functional:any_invocable",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:status_matchers",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/strings:str_format",
+        "@com_google_absl//absl/types:span",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+xla_cc_test(
+    name = "replica_group_test",
+    srcs = ["replica_group_test.cc"],
+    deps = [
+        ":hlo",
+        ":mesh_and_axis",
+        ":tile_assignment",
+        "//xla:array",
+        "//xla:array2d",
+        "//xla:xla_data_proto_cc",
+        "//xla/service:hlo_proto_cc",
+        "//xla/tsl/platform:test_main",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+xla_cc_test(
+    name = "mesh_and_axis_test",
+    srcs = ["mesh_and_axis_test.cc"],
+    deps = [
+        ":mesh_and_axis",
+        ":tile_assignment",
+        "//xla:array",
+        "//xla:array2d",
+        "//xla/tsl/util/proto:proto_matchers",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:status_matchers",
+        "@com_google_absl//absl/strings:string_view",
+        "@com_google_absl//absl/types:span",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+xla_cc_test(
+    name = "named_sharding_test",
+    srcs = ["named_sharding_test.cc"],
+    deps = [
+        ":mesh_and_axis",
+        ":named_sharding",
+        ":tile_assignment",
+        "//xla:xla_data_proto_cc",
+        "//xla/tsl/lib/core:status_test_util",
+        "//xla/tsl/util/proto:parse_text_proto",
+        "//xla/tsl/util/proto:proto_matchers",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+xla_cc_test(
+    name = "hlo_casting_utils_test",
+    srcs = ["hlo_casting_utils_test.cc"],
+    deps = [
+        ":hlo",
+        "//xla:shape_util",
+        "//xla:xla_data_proto_cc",
+        "//xla/tsl/platform:test_main",
+        "@com_google_benchmark//:benchmark",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+cc_library(
+    name = "collective_op_group_mode",
+    srcs = ["collective_op_group_mode.cc"],
+    hdrs = ["collective_op_group_mode.h"],
+    deps = [
+        "//xla:util",
+        "//xla:xla_data_proto_cc",
+        "@com_google_absl//absl/log:check",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings:string_view",
+    ],
+)
+
+xla_cc_test(
+    name = "collective_op_group_mode_test",
+    srcs = ["collective_op_group_mode_test.cc"],
+    deps = [
+        ":collective_op_group_mode",
+        "//xla/tests:xla_internal_test_main",
+        "//xla/tsl/lib/core:status_test_util",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+cc_library(
+    name = "dfs_hlo_visitor_with_default",
+    hdrs = ["dfs_hlo_visitor_with_default.h"],
+    visibility = internal_visibility([
+        ":friends",
+        "//xla:native_custom_call_handler_allowlist",
+    ]),
+    deps = [
+        ":hlo",
+        "//xla/tsl/platform:status",
+        "@com_google_absl//absl/base:core_headers",
+        "@com_google_absl//absl/log",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings:string_view",
+    ],
+)
+
+xla_cc_test(
+    name = "dfs_hlo_visitor_test",
+    srcs = ["dfs_hlo_visitor_test.cc"],
+    deps = [
+        ":dfs_hlo_visitor_with_default",
+        ":hlo",
+        "//xla:literal_util",
+        "//xla:status_macros",
+        "//xla/hlo/testlib:hlo_hardware_independent_test_base",
+        "//xla/service:hlo_module_config",
+        "//xla/tsl/lib/core:status_test_util",
+        "//xla/tsl/platform:test",
+        "@com_google_absl//absl/status",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+xla_cc_test(
+    name = "hlo_original_value_test",
+    srcs = ["hlo_original_value_test.cc"],
+    deps = [
+        ":hlo",
+        "//xla:shape_util",
+        "//xla:tuple_tree",
+        "//xla:xla_data_proto_cc",
+        "//xla/hlo/testlib:hlo_hardware_independent_test_base",
+        "//xla/tsl/platform:statusor",
+        "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/hash:hash_testing",
+        "@com_google_googletest//:gtest_main",
+    ],
+)

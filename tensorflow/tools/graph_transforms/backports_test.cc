@@ -30,12 +30,12 @@ namespace tensorflow {
 namespace graph_transforms {
 
 // Declare here, so we don't need a public header.
-Status BackportConcatV2Transform(const GraphDef& input_graph_def,
-                                 const TransformFuncContext& context,
-                                 GraphDef* output_graph_def);
-Status BackportTensorArrayV3Transform(const GraphDef& input_graph_def,
-                                      const TransformFuncContext& context,
-                                      GraphDef* output_graph_def);
+absl::Status BackportConcatV2Transform(const GraphDef& input_graph_def,
+                                       const TransformFuncContext& context,
+                                       GraphDef* output_graph_def);
+absl::Status BackportTensorArrayV3Transform(const GraphDef& input_graph_def,
+                                            const TransformFuncContext& context,
+                                            GraphDef* output_graph_def);
 
 class BackportConcatV2Test : public ::testing::Test {
  protected:
@@ -86,7 +86,7 @@ class BackportConcatV2Test : public ::testing::Test {
     context.output_names = {"concat_node"};
     TF_ASSERT_OK(BackportConcatV2Transform(graph_def, context, &result));
 
-    std::map<string, const NodeDef*> node_lookup;
+    std::map<std::string, const NodeDef*> node_lookup;
     MapNamesToNodes(result, &node_lookup);
     EXPECT_EQ(1, node_lookup.count("concat_node"));
     EXPECT_EQ("Concat", node_lookup.at("concat_node")->op());
@@ -112,7 +112,7 @@ TEST(BackportTensorArrayV3Test, TestBackportTensorArrayV3) {
   size_node->set_name("size_node");
   size_node->set_op("Const");
   Tensor size_tensor(DT_INT32, {});
-  size_tensor.flat<int32>()(0) = 1;
+  size_tensor.flat<int32_t>()(0) = 1;
   SetNodeTensorAttr<float>("value", size_tensor, size_node);
 
   NodeDef* tensor_array_node = graph_def.add_node();
@@ -158,7 +158,7 @@ TEST(BackportTensorArrayV3Test, TestBackportTensorArrayV3) {
   context.output_names = {"handle_output_node", "grad_handle_output_node"};
   TF_ASSERT_OK(BackportTensorArrayV3Transform(graph_def, context, &result));
 
-  std::map<string, const NodeDef*> node_lookup;
+  std::map<std::string, const NodeDef*> node_lookup;
   MapNamesToNodes(result, &node_lookup);
   ASSERT_EQ(1, node_lookup.count("tensor_array_node"));
   EXPECT_EQ("TensorArrayV2", node_lookup.at("tensor_array_node")->op());
@@ -166,18 +166,18 @@ TEST(BackportTensorArrayV3Test, TestBackportTensorArrayV3) {
             node_lookup.at("tensor_array_grad_node")->op());
 
   for (const NodeDef& node : result.node()) {
-    for (const string& input : node.input()) {
+    for (const std::string& input : node.input()) {
       EXPECT_NE("tensor_array_node:1", input);
     }
   }
 }
 
 TEST(BackportTensorArrayV3Test, TestBackportTensorArrayV3Subtypes) {
-  const std::vector<string> v3_ops = {
+  const std::vector<std::string> v3_ops = {
       "TensorArrayWriteV3",   "TensorArrayReadV3",   "TensorArrayGatherV3",
       "TensorArrayScatterV3", "TensorArrayConcatV3", "TensorArraySplitV3",
       "TensorArraySizeV3",    "TensorArrayCloseV3"};
-  for (const string& v3_op : v3_ops) {
+  for (const std::string& v3_op : v3_ops) {
     GraphDef graph_def;
     NodeDef* v3_node = graph_def.add_node();
     v3_node->set_name("v3_node");
@@ -189,10 +189,10 @@ TEST(BackportTensorArrayV3Test, TestBackportTensorArrayV3Subtypes) {
     context.output_names = {""};
     TF_ASSERT_OK(BackportTensorArrayV3Transform(graph_def, context, &result));
 
-    std::map<string, const NodeDef*> node_lookup;
+    std::map<std::string, const NodeDef*> node_lookup;
     MapNamesToNodes(result, &node_lookup);
     ASSERT_EQ(1, node_lookup.count("v3_node"));
-    EXPECT_TRUE(str_util::EndsWith(node_lookup.at("v3_node")->op(), "V2"));
+    EXPECT_TRUE(absl::EndsWith(node_lookup.at("v3_node")->op(), "V2"));
   }
 }
 

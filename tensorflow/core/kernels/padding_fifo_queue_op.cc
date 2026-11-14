@@ -46,14 +46,15 @@ class PaddingFIFOQueueOp : public TypedQueueOp {
       : TypedQueueOp(context) {
     OP_REQUIRES_OK(context, context->GetAttr("shapes", &component_shapes_));
     for (const auto& shape : component_shapes_) {
-      OP_REQUIRES(context, shape.dims() >= 0,
-                  errors::InvalidArgument("shape ", shape.DebugString(),
-                                          " must have known rank."));
+      OP_REQUIRES(
+          context, shape.dims() >= 0,
+          absl::InvalidArgumentError(absl::StrCat("shape ", shape.DebugString(),
+                                                  " must have known rank.")));
     }
   }
 
  private:
-  Status CreateResource(QueueInterface** ret) override
+  absl::Status CreateResource(QueueInterface** ret) override
       TF_EXCLUSIVE_LOCKS_REQUIRED(mu_) {
     PaddingFIFOQueue* queue = new PaddingFIFOQueue(
         capacity_, component_types_, component_shapes_, cinfo_.name());
@@ -62,7 +63,8 @@ class PaddingFIFOQueueOp : public TypedQueueOp {
 
   std::vector<PartialTensorShape> component_shapes_;
 
-  TF_DISALLOW_COPY_AND_ASSIGN(PaddingFIFOQueueOp);
+  PaddingFIFOQueueOp(const PaddingFIFOQueueOp&) = delete;
+  void operator=(const PaddingFIFOQueueOp&) = delete;
 };
 
 REGISTER_KERNEL_BUILDER(Name("PaddingFIFOQueue").Device(DEVICE_CPU),

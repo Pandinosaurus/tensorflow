@@ -36,7 +36,7 @@ __global__ void ReshapeSparseTensorKernel(
   GPU_1D_KERNEL_LOOP(sparse_index, nnz) {
     const Tindex* input_index = &input_indices[sparse_index * input_rank];
     Tindex* output_index = &output_indices[sparse_index * output_rank];
-    int64 dense_index = 0;  // int64 to avoid overflow if Tindex is int32
+    int64_t dense_index = 0;  // int64 to avoid overflow if Tindex is int32
     // Flatten input index from slowest- to fastest-changing dimension.
     for (int i = 0; i < input_rank; ++i) {
       dense_index = dense_index * input_shape[i] + input_index[i];
@@ -55,45 +55,39 @@ __global__ void ReshapeSparseTensorKernel(
 namespace functor {
 
 template <>
-Status ReshapeSparseTensorFunctor<GPUDevice>::operator()(
+absl::Status ReshapeSparseTensorFunctor<GPUDevice>::operator()(
     OpKernelContext* context, const TensorShape& input_shape,
     const TensorShape& output_shape,
-    typename TTypes<int64>::ConstMatrix input_indices,
-    typename TTypes<int64>::Matrix output_indices) const {
-  const int64 input_rank = input_shape.dims();
-  const int64 output_rank = output_shape.dims();
-  const int64 nnz = input_indices.dimension(0);
+    typename TTypes<int64_t>::ConstMatrix input_indices,
+    typename TTypes<int64_t>::Matrix output_indices) const {
+  const int64_t input_rank = input_shape.dims();
+  const int64_t output_rank = output_shape.dims();
+  const int64_t nnz = input_indices.dimension(0);
   // We copy input_shape and output_shape to the GPU and then launch a kernel
   // to compute output_indices.
   Tensor input_shape_gpu_t;
   TF_RETURN_IF_ERROR(context->allocate_temp(DT_INT64, TensorShape({input_rank}),
                                             &input_shape_gpu_t));
-  auto input_shape_gpu = input_shape_gpu_t.flat<int64>();
+  auto input_shape_gpu = input_shape_gpu_t.flat<int64_t>();
   Tensor output_shape_gpu_t;
   TF_RETURN_IF_ERROR(context->allocate_temp(
       DT_INT64, TensorShape({output_rank}), &output_shape_gpu_t));
-  auto output_shape_gpu = output_shape_gpu_t.flat<int64>();
+  auto output_shape_gpu = output_shape_gpu_t.flat<int64_t>();
   se::Stream* stream = context->op_device_context()->stream();
-  if (!stream) return errors::Internal("No GPU stream available.");
-  se::DeviceMemoryBase input_shape_gpu_mem(input_shape_gpu.data(),
-                                           input_rank * sizeof(int64));
-  if (!stream
-           ->ThenMemcpy(&input_shape_gpu_mem, input_shape.dim_sizes().data(),
-                        input_rank * sizeof(int64))
-           .ok()) {
-    return errors::Internal("Failed to copy input_shape to device");
-  }
-  se::DeviceMemoryBase output_shape_gpu_mem(output_shape_gpu.data(),
-                                            output_rank * sizeof(int64));
-  if (!stream
-           ->ThenMemcpy(&output_shape_gpu_mem, output_shape.dim_sizes().data(),
-                        output_rank * sizeof(int64))
-           .ok()) {
-    return errors::Internal("Failed to copy output_shape to device");
-  }
+  if (!stream) return absl::InternalError("No GPU stream available.");
+  stream_executor::DeviceAddressBase input_shape_gpu_mem(
+      input_shape_gpu.data(), input_rank * sizeof(int64_t));
+  TF_RETURN_IF_ERROR(stream->Memcpy(&input_shape_gpu_mem,
+                                    input_shape.dim_sizes().data(),
+                                    input_rank * sizeof(int64_t)));
+  stream_executor::DeviceAddressBase output_shape_gpu_mem(
+      output_shape_gpu.data(), output_rank * sizeof(int64_t));
+  TF_RETURN_IF_ERROR(stream->Memcpy(&output_shape_gpu_mem,
+                                    output_shape.dim_sizes().data(),
+                                    output_rank * sizeof(int64_t)));
   const GPUDevice& device = context->template eigen_device<GPUDevice>();
   auto config = GetGpuLaunchConfig(nnz, device);
-  return GpuLaunchKernel(ReshapeSparseTensorKernel<int64>, config.block_count,
+  return GpuLaunchKernel(ReshapeSparseTensorKernel<int64_t>, config.block_count,
                          config.thread_per_block, 0, device.stream(), nnz,
                          /*input_rank=*/input_rank,
                          /*output_rank=*/output_rank,

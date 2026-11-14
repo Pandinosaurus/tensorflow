@@ -41,24 +41,24 @@ class Tensor;
 // execution point.
 class BufRendezvous {
  public:
-  explicit BufRendezvous(uint64 step_id, const DeviceMgr* dev_mgr)
+  explicit BufRendezvous(uint64_t step_id, const DeviceMgr* dev_mgr)
       : step_id_(step_id), dev_mgr_(dev_mgr) {}
 
   virtual ~BufRendezvous();
 
   // Inform all waiting parties that this BufRendezvous is defunct because of
   // an error Status interrupting the Step.
-  void StartAbort(const Status& s);
+  void StartAbort(const absl::Status& s);
 
   struct Hook;
   // Provided by the consumer to be called when access to the buffer
   // is available.  If the Status arg is not OK, then hook will not
   // be populated.  Ownership of Hook passes to consumer with the
   // callback.
-  typedef std::function<void(const Status&, Hook*)> ConsumerCallback;
+  typedef std::function<void(const absl::Status&, Hook*)> ConsumerCallback;
   // Provided by the producer to be called when the consumer has finished
   // reading the buffer and will no longer access it.
-  typedef std::function<void(const Status&)> ProducerCallback;
+  typedef std::function<void(const absl::Status&)> ProducerCallback;
 
   struct Hook {
     Device* prod_dev;
@@ -78,7 +78,7 @@ class BufRendezvous {
           cons_cb(nullptr),
           cancellation_manager(cancellation_manager),
           cancellation_token(cancellation_token) {}
-    string DebugString() const;
+    std::string DebugString() const;
   };
 
   // Called to advertise availability of a Tensor value corresponding
@@ -87,7 +87,7 @@ class BufRendezvous {
   // If a non-null cancellation manager is provided, this function registers a
   // callback to delete the hook and invoke provider/consumer callbacks with
   // cancelled error.
-  void ProvideBuf(const string& key, Device* dev, DeviceContext* dev_ctx,
+  void ProvideBuf(const std::string& key, Device* dev, DeviceContext* dev_ctx,
                   const Tensor* v, const AllocatorAttributes& attr,
                   const ProducerCallback& done,
                   CancellationManager* cancellation_manager);
@@ -103,14 +103,14 @@ class BufRendezvous {
   // If a non-null cancellation manager is provided, this function registers a
   // callback to delete the hook and invoke provider/consumer callbacks with
   // cancelled error.
-  virtual void ConsumeBuf(const string& key, const string& device,
-                          const uint64 incarnation,
+  virtual void ConsumeBuf(const std::string& key, const std::string& device,
+                          const uint64_t incarnation,
                           const ConsumerCallback& done,
                           CancellationManager* cancellation_manager);
 
   // Cancel the rendezvous entry corresponding to `key`.  Triggered by the
   // cancellation manager. No-op if the rendezvous was already successful.
-  void CancelHook(const string& key);
+  void CancelHook(const std::string& key);
 
   // Consumer must call this function when it's done reading the Hook provided
   // by the ConsumerCallback.  This function will invoke the producer callback
@@ -121,14 +121,14 @@ class BufRendezvous {
   void LogContents();
 
  protected:
-  const uint64 step_id_;
+  const uint64_t step_id_;
   const DeviceMgr* const dev_mgr_;  // Not owned.
   mutex mu_;
-  Status status_ TF_GUARDED_BY(mu_);
-  typedef absl::flat_hash_map<string, Hook*> HookTable;
+  absl::Status status_ TF_GUARDED_BY(mu_);
+  typedef absl::flat_hash_map<std::string, Hook*> HookTable;
   HookTable hook_table_ TF_GUARDED_BY(mu_);
 
-  void PurgeTable(const Status& s, HookTable* table);
+  void PurgeTable(const absl::Status& s, HookTable* table);
 };
 }  // namespace tensorflow
 #endif  // TENSORFLOW_CORE_COMMON_RUNTIME_BUF_RENDEZVOUS_H_

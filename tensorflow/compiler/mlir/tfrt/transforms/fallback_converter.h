@@ -15,12 +15,27 @@ limitations under the License.
 #ifndef TENSORFLOW_COMPILER_MLIR_TFRT_TRANSFORMS_FALLBACK_CONVERTER_H_
 #define TENSORFLOW_COMPILER_MLIR_TFRT_TRANSFORMS_FALLBACK_CONVERTER_H_
 
+#include <cstdint>
+
+#include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringRef.h"
+#include "mlir/IR/Builders.h"  // from @llvm-project
+#include "mlir/IR/Location.h"  // from @llvm-project
 #include "mlir/IR/Operation.h"  // from @llvm-project
 #include "mlir/IR/Value.h"  // from @llvm-project
+#include "mlir/IR/ValueRange.h"  // from @llvm-project
+#include "mlir/Support/LLVM.h"  // from @llvm-project
 #include "mlir/Transforms/DialectConversion.h"  // from @llvm-project
 
 namespace tensorflow {
 namespace tfrt_compiler {
+
+inline llvm::StringRef GetDefaultCpuDeviceName() {
+  static constexpr char kCpuDeviceName[] =
+      "/job:localhost/replica:0/task:0/device:CPU:0";
+  return kCpuDeviceName;
+}
 
 class FallbackConverter : public mlir::TypeConverter {
  public:
@@ -31,6 +46,10 @@ class FallbackConverter : public mlir::TypeConverter {
   int64_t GetNextFallbackKey() const { return fallback_ops_.size(); }
 
   void RegisterFallbackOp(mlir::Operation *op) { fallback_ops_.push_back(op); }
+
+  void ReplaceFallbackOp(int64_t key, mlir::Operation *op) {
+    fallback_ops_[key] = op;
+  }
 
   llvm::ArrayRef<mlir::Operation *> GetFallbackOps() const {
     return fallback_ops_;
@@ -60,15 +79,14 @@ mlir::Value ConvertFallbackTensorToCoreRTTensorHandle(
 // Convert operands that might be !tfrt_fallback.tf_tensor for corert operations
 // that take only !corert.tensorhandle.
 mlir::LogicalResult ConvertCoreRTOperands(
-    mlir::Operation *op, llvm::ArrayRef<mlir::Value> operands,
+    mlir::Operation *op, mlir::ValueRange operands,
     llvm::SmallVectorImpl<mlir::Value> *new_operands,
     mlir::ConversionPatternRewriter &rewriter);
 
 // Convert operands that might be !corert.tensorhandle for fallback operations
 // that take only !tfrt_fallback.tf_tensor.
 mlir::LogicalResult ConvertFallbackOperands(
-    mlir::Operation *op, llvm::StringRef device,
-    llvm::ArrayRef<mlir::Value> operands,
+    mlir::Operation *op, llvm::StringRef device, mlir::ValueRange operands,
     llvm::SmallVectorImpl<mlir::Value> *new_operands,
     mlir::ConversionPatternRewriter &rewriter);
 

@@ -1,0 +1,133 @@
+/* Copyright 2017 The OpenXLA Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+==============================================================================*/
+
+#include "xla/service/hlo_buffer.h"
+
+#include <algorithm>
+#include <cstdint>
+#include <ostream>
+#include <string>
+#include <vector>
+
+#include "absl/algorithm/container.h"
+#include "absl/container/flat_hash_set.h"
+#include "absl/log/check.h"
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
+#include "absl/strings/str_cat.h"
+#include "absl/strings/str_format.h"
+#include "absl/strings/str_join.h"
+#include "xla/hlo/ir/hlo_instruction.h"
+#include "xla/hlo/ir/hlo_opcode.h"
+#include "xla/service/buffer_value.h"
+#include "xla/service/hlo_value.h"
+
+namespace xla {
+
+absl::StatusOr<BufferValue::Color> HloBuffer::ComputeColorSlowPath() const {
+  // Invariant: All values in the buffer should have the same color.
+  BufferValue::Color result = values()[0]->color();
+  for (const HloValue* value : values()) {
+    if (result != value->color()) {
+      std::string details = absl::StrFormat(
+          "Not all HloValues in the HloBuffer have the same color. "
+          "Buffer id=%d has %d values:",
+          id(), values().size());
+      for (const HloValue* v : values()) {
+        absl::StrAppendFormat(&details, "\n  value %d color=%d defined at %s",
+                              v->id(), v->color(),
+                              v->defining_position().ToString());
+      }
+      return absl::FailedPreconditionError(details);
+    }
+  }
+  return result;
+}
+
+bool HloBuffer::operator==(const HloBuffer& other) const {
+  bool equal = id() == other.id();
+  if (equal) {
+    // DCHECK because these comparisons are expensive (linear time).
+    DCHECK(values_ == other.values_);
+  }
+  return equal;
+}
+
+std::vector<HloPosition> HloBuffer::ComputePositions() const {
+  std::vector<HloPosition> positions;
+  for (const HloValue* value : values_) {
+    positions.insert(positions.end(), value->positions().begin(),
+                     value->positions().end());
+  }
+  // Remove duplicates and sort positions.
+  absl::c_sort(positions);
+  positions.erase(std::unique(positions.begin(), positions.end()),
+                  positions.end());
+  return positions;
+}
+
+std::string HloBuffer::ToString() const {
+  return absl::StrCat(
+      "HloBuffer ", id_, ", values: ",
+      absl::StrJoin(values_, ", ",
+                    [](std::string* result, const HloValue* value) {
+                      result->append(value->ToShortString());
+                    }));
+}
+
+std::string HloBuffer::ToDebugString() const {
+  return absl::StrCat(
+      "HloBuffer id: ", id_, "\nvalues:\n\n",
+      absl::StrJoin(values_, "\n\n",
+                    [](std::string* result, const HloValue* value) {
+                      result->append(value->ToString());
+                    }));
+}
+
+std::ostream& operator<<(std::ostream& out, const HloBuffer& buffer) {
+  out << buffer.ToString();
+  return out;
+}
+
+int64_t HloBuffer::ComputeSize(const BufferValue::SizeFunction& size_fn) const {
+  int64_t max_size = 0;
+  for (const HloValue* value : values_) {
+    max_size = std::max(max_size, size_fn(*value));
+  }
+  return max_size;
+}
+
+bool HloBuffer::IsHeapPressureImpacting(
+    const HloValue& value, bool alloc_constants,
+    const absl::flat_hash_set<const HloValue*>* buffers_to_assign) {
+  if (!alloc_constants &&
+      value.instruction()->opcode() == HloOpcode::kConstant) {
+    return false;
+  }
+  if (buffers_to_assign != nullptr && !buffers_to_assign->contains(&value)) {
+    return false;
+  }
+  return true;
+}
+
+bool HloBuffer::IsHeapPressureImpacting(
+    bool alloc_constants,
+    const absl::flat_hash_set<const HloValue*>* buffers_to_assign) const {
+  return absl::c_any_of(values_, [&](const HloValue* value) {
+    return IsHeapPressureImpacting(*value, alloc_constants, buffers_to_assign);
+  });
+}
+
+}  // namespace xla

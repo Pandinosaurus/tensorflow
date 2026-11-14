@@ -30,6 +30,8 @@ limitations under the License.
 #include "tensorflow/core/grappler/clusters/virtual_cluster.h"
 #include "tensorflow/core/grappler/costs/graph_memory.h"
 #include "tensorflow/core/grappler/costs/graph_properties.h"
+#include "tensorflow/core/grappler/costs/op_context.h"
+#include "tensorflow/core/grappler/costs/op_level_cost_estimator.h"
 #include "tensorflow/core/grappler/costs/utils.h"
 #include "tensorflow/core/grappler/graph_topology_view.h"
 #include "tensorflow/core/grappler/grappler_item.h"
@@ -56,10 +58,11 @@ const char* kRecomputeTriggerNodePrefix = "RecomputeTrigger";
 // recomputed.
 const char* kRecomputeHint = "_recompute_hint";
 
-// Ops which we wouldn't mind recomputing to save memory.
-// TODO(allenl): Replace this list with a cost model.
-std::unordered_set<string> GetCheapToRecomputeOps() {
-  std::unordered_set<string> cheap_ops = {"Add",
+// Fallback static list of ops known to be cheap to recompute, used when
+// shape information is unavailable for dynamic cost estimation.
+const std::unordered_set<std::string>& GetCheapToRecomputeOps() {
+  static const auto* cheap_ops =
+      new std::unordered_set<std::string>{"Add",
                                           "AddN",
                                           "BiasAdd",
                                           "Cast",
@@ -83,7 +86,40 @@ std::unordered_set<string> GetCheapToRecomputeOps() {
                                           "Sub",
                                           "Tile",
                                           "Transpose"};
-  return cheap_ops;
+  return *cheap_ops;
+}
+
+// Compute cost threshold in nanoseconds: ops with estimated compute time
+// below this are considered cheap to recompute. 100 microseconds is roughly
+// the cost of an element-wise op on a ~1M element tensor.
+constexpr int64_t kRecomputeCostThresholdNs = 100000;  // 100us
+
+// Determines whether a node is cheap to recompute using a dynamic cost model.
+// Falls back to the static op list when shape information is unavailable.
+bool IsCheapToRecompute(
+    const NodeDef& node, const GraphProperties& properties,
+    const std::unordered_map<std::string, const NodeDef*>& name_to_node,
+    const OpLevelCostEstimator& estimator) {
+  if (GetCheapToRecomputeOps().count(node.op()) == 0) {
+    return false;
+  }
+
+  // Try dynamic cost estimation if input properties are available.
+  if (properties.HasInputProperties(node.name())) {
+    const auto& input_properties = properties.GetInputProperties(node.name());
+    OpInfo op_info =
+        BuildOpInfoWithoutDevice(node, name_to_node, input_properties);
+    OpContext op_context;
+    op_context.name = node.name();
+    op_context.op_info = op_info;
+    Costs costs = estimator.PredictCosts(op_context);
+    if (!costs.inaccurate) {
+      return costs.compute_time.count() < kRecomputeCostThresholdNs;
+    }
+  }
+
+  // Fallback to the static allowlist when cost estimation is unavailable.
+  return true;
 }
 
 // Find recomputable ops which feed into target nodes.
@@ -109,7 +145,7 @@ std::unordered_set<const NodeDef*> FindCandidateRecomputeNodes(
       continue;
     }
     bool has_target_input = false;
-    for (const string& input_name : node.input()) {
+    for (const std::string& input_name : node.input()) {
       // Don't recompute nodes which depend on target nodes.
       const NodeDef* input_node = node_map.GetNode(input_name);
       if (is_target(*input_node)) {
@@ -143,7 +179,7 @@ void connected_subgraph(const NodeMap& node_map, bool collect_inputs,
     }
     if (collect_inputs) {
       // Add inputs and outputs to this subgraph if they are candidates
-      for (const string& input_name_raw : current_node->input()) {
+      for (const std::string& input_name_raw : current_node->input()) {
         const NodeDef* input_node = node_map.GetNode(input_name_raw);
         if (expanded_nodes->count(input_node) == 0 &&
             is_candidate(*input_node)) {
@@ -328,7 +364,7 @@ AddRecomputeControlDependencyNodes(
   // topologically and zipper merging with the sorted recomputed nodes.
   std::vector<const NodeDef*> target_inputs_topological;
   for (const NodeDef* target_node : target_nodes) {
-    for (const string& target_input_name_raw : target_node->input()) {
+    for (const std::string& target_input_name_raw : target_node->input()) {
       const NodeDef* target_input = node_map.GetNode(target_input_name_raw);
       // If this node has already had one of its inputs recomputed during this
       // rewriting pass, we ignore that recomputed node here (it will not be in
@@ -359,7 +395,7 @@ AddRecomputeControlDependencyNodes(
     new_trigger_node->set_device(original_recomputed_node->device());
     if (current_trigger_node != nullptr) {
       *new_trigger_node->add_input() =
-          strings::StrCat("^", current_trigger_node->name());
+          absl::StrCat("^", current_trigger_node->name());
     }
     current_trigger_node = new_trigger_node;
     triggers[original_recomputed_node] = current_trigger_node;
@@ -370,7 +406,7 @@ AddRecomputeControlDependencyNodes(
                  ->second;
          ++target_input_iterator) {
       *current_trigger_node->add_input() =
-          strings::StrCat("^", (*target_input_iterator)->name());
+          absl::StrCat("^", (*target_input_iterator)->name());
       VLOG(2) << "  Recomputation trigger " << current_trigger_node->name()
               << " depends on " << (*target_input_iterator)->name();
     }
@@ -378,9 +414,9 @@ AddRecomputeControlDependencyNodes(
   return triggers;
 }
 
-string RecomputedOrOriginalNodeName(
-    const std::unordered_set<string>& recomputed_node_names,
-    const string& original_node_name) {
+std::string RecomputedOrOriginalNodeName(
+    const std::unordered_set<std::string>& recomputed_node_names,
+    const std::string& original_node_name) {
   if (recomputed_node_names.find(original_node_name) ==
       recomputed_node_names.end()) {
     return original_node_name;
@@ -397,7 +433,7 @@ void RecomputeSubgraph(
     const std::unordered_set<NodeDef*>& target_nodes, const NodeMap& node_map,
     const std::unordered_map<const NodeDef*, int>& components,
     GraphDef* graph) {
-  std::unordered_set<string> recomputed_node_names;
+  std::unordered_set<std::string> recomputed_node_names;
   VLOG(1) << "Recomputing a " << recomputed_source_nodes.size()
           << " node subgraph";
   std::unordered_map<const NodeDef*, int> recomputed_node_components =
@@ -419,7 +455,7 @@ void RecomputeSubgraph(
     copied_node->set_op(original_node->op());
     *copied_node->mutable_attr() = original_node->attr();
     copied_node->set_device(original_node->device());
-    for (const string& original_input_name : original_node->input()) {
+    for (const std::string& original_input_name : original_node->input()) {
       // Set inputs which are internal to the copied subgraph to their copied
       // versions.
       *copied_node->add_input() = RecomputedOrOriginalNodeName(
@@ -428,21 +464,22 @@ void RecomputeSubgraph(
     // Each recomputed node gets a control dependency to prevent it from being
     // recomputed immediately.
     *copied_node->add_input() =
-        strings::StrCat("^", triggers[original_node]->name());
+        absl::StrCat("^", triggers[original_node]->name());
   }
   // Set the inputs of nodes in the target subgraph to the recomputed nodes
   // where applicable.
   for (NodeDef* target_node : target_nodes) {
-    for (string& target_input_name : *target_node->mutable_input()) {
+    for (std::string& target_input_name : *target_node->mutable_input()) {
       target_input_name = RecomputedOrOriginalNodeName(recomputed_node_names,
                                                        target_input_name);
     }
   }
 }
 
-void RecomputationRewritingPass(RewriterConfig::MemOptType optimization_level,
-                                const string& recomputation_targets_name_scope,
-                                GraphDef* graph, const GrapplerItem& item) {
+void RecomputationRewritingPass(
+    RewriterConfig::MemOptType optimization_level,
+    const std::string& recomputation_targets_name_scope, GraphDef* graph,
+    const GrapplerItem& item) {
   // The topological numberings and NodeMap will be stale as soon as we start
   // modifying the graph in RecomputeSubgraph. However, RecomputeSubgraph only
   // looks up nodes which were in the original graph, and preserves the graph
@@ -455,7 +492,7 @@ void RecomputationRewritingPass(RewriterConfig::MemOptType optimization_level,
   std::vector<RecomputedSubGraph> recomputed_subgraphs;
   // Do not recompute nodes which are fed, since the recomputed node would not
   // take on the fed value (i.e. gradients would be incorrect).
-  std::unordered_set<string> feeds;
+  std::unordered_set<std::string> feeds;
   for (const auto& feed : item.feed) {
     feeds.insert(NodeName(feed.first));
   }
@@ -474,18 +511,36 @@ void RecomputationRewritingPass(RewriterConfig::MemOptType optimization_level,
 
   if (optimization_level == RewriterConfig::RECOMPUTATION_HEURISTICS ||
       optimization_level == RewriterConfig::HEURISTICS) {
-    // TODO(allenl): Handle ResNet-like architectures better. Right now all of
-    // the cheap forward ops get grouped into a single subgraph which must
-    // execute before gradients start executing (unless layers are manually
-    // separated by identity ops).
-    std::unordered_set<string> cheap_to_recompute_ops =
-        GetCheapToRecomputeOps();
+    // Use dynamic cost estimation when shape information is available,
+    // falling back to the static op list otherwise.
+    GraphProperties properties(item);
+    bool has_properties =
+        properties
+            .InferStatically(/*assume_valid_feeds=*/false,
+                             /*aggressive_shape_inference=*/false,
+                             /*include_tensor_values=*/false)
+            .ok();
+    if (!has_properties) {
+      VLOG(1) << "Shape inference failed for recomputation cost model; "
+              << "falling back to static op list.";
+    }
+    // Build name-to-node map for OpInfo construction.
+    std::unordered_map<std::string, const NodeDef*> name_to_node;
+    for (const auto& node : graph->node()) {
+      name_to_node[node.name()] = &node;
+    }
+    OpLevelCostEstimator estimator;
     recomputed_subgraphs = GetOpGroupsToRecompute(
         graph, node_map,
-        [&cheap_to_recompute_ops, &feeds, &is_target](const NodeDef& node) {
-          return !is_target(node) && feeds.count(node.name()) == 0 &&
-                 (cheap_to_recompute_ops.count(node.op()) > 0 ||
-                  node.attr().count(kRecomputeHint) > 0);
+        [&properties, &name_to_node, &estimator, &feeds, &is_target,
+         has_properties](const NodeDef& node) {
+          if (is_target(node) || feeds.count(node.name()) != 0) return false;
+          if (node.attr().count(kRecomputeHint) > 0) return true;
+          if (has_properties) {
+            return IsCheapToRecompute(node, properties, name_to_node,
+                                      estimator);
+          }
+          return GetCheapToRecomputeOps().count(node.op()) > 0;
         },
         is_target);
   } else if (optimization_level == RewriterConfig::MANUAL) {
@@ -517,7 +572,7 @@ bool SchedulingPass(Cluster* cluster, std::unique_ptr<GraphMemory>* memory_ptr,
   // Look for AddN nodes (and equivalent) and record input names.
   MutableGraphView view(&item->graph);
 
-  std::unordered_map<string, std::unordered_set<NodeDef*>> addn_list;
+  std::unordered_map<std::string, std::unordered_set<NodeDef*>> addn_list;
   for (NodeDef& node : *item->graph.mutable_node()) {
     if (!IsAddN(node) && node.op() != "AccumulateNV2") {
       continue;
@@ -528,8 +583,8 @@ bool SchedulingPass(Cluster* cluster, std::unique_ptr<GraphMemory>* memory_ptr,
     }
     for (const auto& input : view.GetFanins(node, false)) {
       if (input.node->device() == node.device()) {
-        string tensor_name =
-            strings::StrCat(input.node->name(), ":", input.port_id);
+        std::string tensor_name =
+            absl::StrCat(input.node->name(), ":", input.port_id);
         addn_list[tensor_name].insert(&node);
       }
     }
@@ -541,10 +596,10 @@ bool SchedulingPass(Cluster* cluster, std::unique_ptr<GraphMemory>* memory_ptr,
 
   if ((*memory_ptr) == nullptr) {
     memory_ptr->reset(new GraphMemory(*item));
-    Status s = (*memory_ptr)->InferStatically(cluster->GetDevices());
+    absl::Status s = (*memory_ptr)->InferStatically(cluster->GetDevices());
     if (!s.ok()) {
       memory_ptr->reset();
-      VLOG(1) << "Failed to infer memory usage: " << s.error_message();
+      VLOG(1) << "Failed to infer memory usage: " << s.message();
       return false;
     }
   }
@@ -552,7 +607,7 @@ bool SchedulingPass(Cluster* cluster, std::unique_ptr<GraphMemory>* memory_ptr,
 
   std::unordered_set<NodeDef*> addn_to_rewrite;
   for (const auto& device : cluster->GetDevices()) {
-    const string& name = device.first;
+    const std::string& name = device.first;
     const DeviceProperties& prop = device.second;
     if (prop.memory_size() <= 0) {
       VLOG(1) << "Available memory unknown for device " << name;
@@ -565,7 +620,7 @@ bool SchedulingPass(Cluster* cluster, std::unique_ptr<GraphMemory>* memory_ptr,
     }
 
     for (const auto& live : mem_usage.live_tensors) {
-      string tensor_name = strings::StrCat(live.node, ":", live.output_id);
+      std::string tensor_name = absl::StrCat(live.node, ":", live.output_id);
       auto it = addn_list.find(tensor_name);
       if (it != addn_list.end()) {
         addn_to_rewrite.insert(it->second.begin(), it->second.end());
@@ -577,21 +632,23 @@ bool SchedulingPass(Cluster* cluster, std::unique_ptr<GraphMemory>* memory_ptr,
     return false;
   }
   GraphProperties properties(*item);
-  Status s = properties.InferStatically(/*assume_valid_feeds=*/false,
-                                        /*aggressive_shape_inference=*/false,
-                                        /*include_tensor_values=*/false);
+  absl::Status s =
+      properties.InferStatically(/*assume_valid_feeds=*/false,
+                                 /*aggressive_shape_inference=*/false,
+                                 /*include_tensor_values=*/false);
   if (!s.ok()) {
-    VLOG(1) << "Failed to infer shapes: " << s.error_message();
+    VLOG(1) << "Failed to infer shapes: " << s.message();
     return false;
   }
 
   // It's ok to use immutable GraphTopologyView here, because we do not destroy
   // any of the nodes in the underlying graph, we only add new nodes.
   GraphTopologyView graph_topology;
-  Status initialized_topology = graph_topology.InitializeFromGraph(item->graph);
+  absl::Status initialized_topology =
+      graph_topology.InitializeFromGraph(item->graph);
   if (!initialized_topology.ok()) {
     VLOG(1) << "Failed to initialize graph topology view: "
-            << initialized_topology.error_message();
+            << initialized_topology.message();
     return false;
   }
 
@@ -627,8 +684,8 @@ bool SchedulingPass(Cluster* cluster, std::unique_ptr<GraphMemory>* memory_ptr,
     std::vector<int> input_topo_index;
 
     for (int i = 0; i < node->input_size(); ++i) {
-      const string& input = node->input(i);
-      const string node_name = NodeName(input);
+      const std::string& input = node->input(i);
+      const std::string node_name = NodeName(input);
       const NodeDef* node = view.GetNode(node_name);
       input_topo_index.push_back(topo_order.at(node));
     }
@@ -646,8 +703,8 @@ bool SchedulingPass(Cluster* cluster, std::unique_ptr<GraphMemory>* memory_ptr,
       }
     }
     CHECK_LE(0, min_input_id);
-    std::vector<string> pre_ctrl_deps;
-    std::vector<string> post_ctrl_deps;
+    std::vector<std::string> pre_ctrl_deps;
+    std::vector<std::string> post_ctrl_deps;
     for (int i = node->input_size() - 1; i >= 0; --i) {
       if (!IsControlInput(node->input(i))) {
         // control inputs are always last.
@@ -662,8 +719,8 @@ bool SchedulingPass(Cluster* cluster, std::unique_ptr<GraphMemory>* memory_ptr,
       }
     }
 
-    const string& device = node->device();
-    const string tmp_var_name = strings::StrCat(node->name(), "/tmp_var");
+    const std::string& device = node->device();
+    const std::string tmp_var_name = absl::StrCat(node->name(), "/tmp_var");
     if (view.GetNode(tmp_var_name) != nullptr) {
       VLOG(1) << "Temporary variable already exists " << tmp_var_name;
       return false;
@@ -678,7 +735,7 @@ bool SchedulingPass(Cluster* cluster, std::unique_ptr<GraphMemory>* memory_ptr,
     *(*tmp_var->mutable_attr())["shape"].mutable_shape() = shape;
     (*tmp_var->mutable_attr())["var_name"].set_s(tmp_var->name());
 
-    for (const string& ctrl_dep : pre_ctrl_deps) {
+    for (const std::string& ctrl_dep : pre_ctrl_deps) {
       *tmp_var->add_input() = ctrl_dep;
     }
     *tmp_var->add_input() =
@@ -686,14 +743,14 @@ bool SchedulingPass(Cluster* cluster, std::unique_ptr<GraphMemory>* memory_ptr,
 
     // Initialize it to zero
     NodeDef* zeros = item->graph.add_node();
-    zeros->set_name(strings::StrCat(node->name(), "/tmp_var_zeros"));
+    zeros->set_name(absl::StrCat(node->name(), "/tmp_var_zeros"));
     zeros->set_op("ZerosLike");
     zeros->set_device(device);
     (*zeros->mutable_attr())["T"].set_type(dtype);
     *zeros->add_input() = node->input(min_input_id);
 
     NodeDef* initialize = item->graph.add_node();
-    initialize->set_name(strings::StrCat(node->name(), "/tmp_var_initializer"));
+    initialize->set_name(absl::StrCat(node->name(), "/tmp_var_initializer"));
     initialize->set_op("Assign");
     initialize->set_device(device);
     (*initialize->mutable_attr())["T"].set_type(dtype);
@@ -705,11 +762,10 @@ bool SchedulingPass(Cluster* cluster, std::unique_ptr<GraphMemory>* memory_ptr,
     // Add the assignadd nodes
     std::vector<NodeDef*> accumulates;
     for (int i = 0; i < node->input_size(); ++i) {
-      const string& input = node->input(i);
+      const std::string& input = node->input(i);
       if (!IsControlInput(input)) {
         NodeDef* accumulate = item->graph.add_node();
-        accumulate->set_name(
-            strings::StrCat(node->name(), "/tmp_var_accum_", i));
+        accumulate->set_name(absl::StrCat(node->name(), "/tmp_var_accum_", i));
         accumulate->set_op("AssignAdd");
         accumulate->set_device(device);
         (*accumulate->mutable_attr())["T"].set_type(dtype);
@@ -730,7 +786,7 @@ bool SchedulingPass(Cluster* cluster, std::unique_ptr<GraphMemory>* memory_ptr,
     for (const NodeDef* accum : accumulates) {
       *node->add_input() = AsControlDependency(accum->name());
     }
-    for (const string& ctrl_dep : post_ctrl_deps) {
+    for (const std::string& ctrl_dep : post_ctrl_deps) {
       *node->add_input() = ctrl_dep;
     }
 
@@ -740,16 +796,16 @@ bool SchedulingPass(Cluster* cluster, std::unique_ptr<GraphMemory>* memory_ptr,
   return updated_graph;
 }
 
-Status BuildSwapPair(NodeDef* node, int input_to_swap,
-                     const std::unordered_map<string, const NodeDef*>& name_map,
-                     GraphDef* graph,
-                     std::pair<NodeDef*, NodeDef*>* swap_pair) {
-  string task, device;
+absl::Status BuildSwapPair(
+    NodeDef* node, int input_to_swap,
+    const std::unordered_map<std::string, const NodeDef*>& name_map,
+    GraphDef* graph, std::pair<NodeDef*, NodeDef*>* swap_pair) {
+  std::string task, device;
   if (!DeviceNameUtils::SplitDeviceName(node->device(), &task, &device) ||
       !absl::StrContains(device, DEVICE_GPU)) {
-    return errors::InvalidArgument("Can't swap input ", input_to_swap,
-                                   " of node ", node->name(),
-                                   " since it is not on GPU");
+    return absl::InvalidArgumentError(
+        absl::StrCat("Can't swap input ", input_to_swap, " of node ",
+                     node->name(), " since it is not on GPU"));
   }
   const OpDef* op_def;
   TF_RETURN_IF_ERROR(OpRegistry::Global()->LookUpOpDef(node->op(), &op_def));
@@ -757,18 +813,19 @@ Status BuildSwapPair(NodeDef* node, int input_to_swap,
   TF_RETURN_IF_ERROR(
       InputTypeForNode(*node, *op_def, input_to_swap, &input_type));
   if (IsRefType(input_type)) {
-    return errors::InvalidArgument("Can't swap input ", input_to_swap,
-                                   " of node ", node->name(),
-                                   " since it expects a reference");
+    return absl::InvalidArgumentError(
+        absl::StrCat("Can't swap input ", input_to_swap, " of node ",
+                     node->name(), " since it expects a reference"));
   }
 
-  string tensor_to_swap = strings::StrCat(node->name(), "_", input_to_swap);
-  string swap_out_name = strings::StrCat("swap_out_", tensor_to_swap);
-  string swap_in_name = strings::StrCat("swap_in_", tensor_to_swap);
+  std::string tensor_to_swap = absl::StrCat(node->name(), "_", input_to_swap);
+  std::string swap_out_name = absl::StrCat("swap_out_", tensor_to_swap);
+  std::string swap_in_name = absl::StrCat("swap_in_", tensor_to_swap);
   if (name_map.find(swap_out_name) != name_map.end() ||
       name_map.find(swap_in_name) != name_map.end()) {
-    return errors::InvalidArgument("Input ", input_to_swap, " of node ",
-                                   node->name(), " is already swapped");
+    return absl::InvalidArgumentError(absl::StrCat("Input ", input_to_swap,
+                                                   " of node ", node->name(),
+                                                   " is already swapped"));
   }
 
   // Force the tensor to be copied to cpu.
@@ -785,7 +842,7 @@ Status BuildSwapPair(NodeDef* node, int input_to_swap,
   // Colocate the swap_out_ and swap_in_ nodes with the node itself.
   swap_out_node->set_device(node->device());
   swap_in_node->set_device(node->device());
-  string coloc_group = strings::StrCat("loc@", tensor_to_swap);
+  std::string coloc_group = absl::StrCat("loc@", tensor_to_swap);
   (*swap_out_node->mutable_attr())["_class"].mutable_list()->add_s(coloc_group);
   (*swap_in_node->mutable_attr())["_class"].mutable_list()->add_s(coloc_group);
   (*node->mutable_attr())["_class"].mutable_list()->add_s(coloc_group);
@@ -794,7 +851,7 @@ Status BuildSwapPair(NodeDef* node, int input_to_swap,
   (*swap_out_node->mutable_attr())["T"].set_type(input_type);
   *swap_pair = std::make_pair(swap_out_node, swap_in_node);
 
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 struct SwapInfo {
@@ -804,16 +861,16 @@ struct SwapInfo {
 
 static const NodeDef* FindSwapInTrigger(
     const NodeDef* node, const SwapInfo& swap_info,
-    const std::unordered_map<string, const NodeDef*>& name_map,
+    const std::unordered_map<std::string, const NodeDef*>& name_map,
     const std::unordered_map<const NodeDef*, Costs::NanoSeconds>&
         execution_times) {
   // max_trigger_time stores the time before which the swap operation needs to
   // be started in order to load the data back onto the accelerator without
   // delaying the downstream computation.
   Costs::NanoSeconds max_trigger_time(0);
-  std::set<string> possible_inputs;
+  std::set<std::string> possible_inputs;
   for (int i = 0; i < node->input_size(); ++i) {
-    const string input_node_name = NodeName(node->input(i));
+    const std::string input_node_name = NodeName(node->input(i));
     auto it1 = name_map.find(input_node_name);
     if (it1 == name_map.end()) {
       return nullptr;
@@ -829,7 +886,7 @@ static const NodeDef* FindSwapInTrigger(
   }
 
   for (const int i : swap_info.inputs_to_swap) {
-    const string input_node_name = NodeName(node->input(i));
+    const std::string input_node_name = NodeName(node->input(i));
     possible_inputs.erase(input_node_name);
   }
   if (possible_inputs.empty()) {
@@ -839,10 +896,10 @@ static const NodeDef* FindSwapInTrigger(
   max_trigger_time -= swap_info.time_to_swap;
 
   std::map<Costs::NanoSeconds, const NodeDef*> candidates;
-  std::set<string> already_processed;
+  std::set<std::string> already_processed;
 
   while (!possible_inputs.empty()) {
-    const string input_node_name = *possible_inputs.begin();
+    const std::string input_node_name = *possible_inputs.begin();
     possible_inputs.erase(possible_inputs.begin());
     already_processed.insert(input_node_name);
     auto it1 = name_map.find(input_node_name);
@@ -864,8 +921,8 @@ static const NodeDef* FindSwapInTrigger(
     if (it2->second < max_trigger_time) {
       candidates[it2->second] = input_node;
     } else {
-      for (const string& fanin : input_node->input()) {
-        string name = NodeName(fanin);
+      for (const std::string& fanin : input_node->input()) {
+        std::string name = NodeName(fanin);
         if (already_processed.find(name) == already_processed.end()) {
           possible_inputs.insert(name);
         }
@@ -980,14 +1037,14 @@ struct MemInfo {
 static bool IdentifySwappingCandidates(
     Cluster* cluster, GrapplerItem* item,
     std::unique_ptr<GraphMemory>* memory_ptr,
-    std::unordered_set<string>* skip_list,
+    std::unordered_set<std::string>* skip_list,
     std::unordered_map<NodeDef*, SwapInfo>* nodes_to_swap) {
   if ((*memory_ptr) == nullptr) {
     memory_ptr->reset(new GraphMemory(*item));
-    Status s = (*memory_ptr)->InferStatically(cluster->GetDevices());
+    absl::Status s = (*memory_ptr)->InferStatically(cluster->GetDevices());
     if (!s.ok()) {
       memory_ptr->reset();
-      VLOG(1) << "Failed to infer memory usage: " << s.error_message();
+      VLOG(1) << "Failed to infer memory usage: " << s.message();
       return false;
     }
   }
@@ -995,7 +1052,7 @@ static bool IdentifySwappingCandidates(
 
   bool updated_graph = false;
   for (const auto& device : cluster->GetDevices()) {
-    const string& name = device.first;
+    const std::string& name = device.first;
     const DeviceProperties& prop = device.second;
     if (prop.type() != "GPU") {
       continue;
@@ -1011,7 +1068,7 @@ static bool IdentifySwappingCandidates(
     }
     int64_t required_savings = mem_usage.used_memory - prop.memory_size();
 
-    std::unordered_map<string, Costs::NanoSeconds> op_completion_times;
+    std::unordered_map<std::string, Costs::NanoSeconds> op_completion_times;
     {
       VirtualCluster vcluster(cluster->GetDevices());
       if (!vcluster.Provision().ok()) {
@@ -1021,7 +1078,8 @@ static bool IdentifySwappingCandidates(
         return false;
       }
       RunMetadata metadata;
-      Status s = vcluster.Run(item->graph, item->feed, item->fetch, &metadata);
+      absl::Status s =
+          vcluster.Run(item->graph, item->feed, item->fetch, &metadata);
       if (!s.ok() && s.code() != error::RESOURCE_EXHAUSTED) {
         return false;
       }
@@ -1088,8 +1146,8 @@ static bool IdentifySwappingCandidates(
           valid = false;
           break;
         }
-        string input_name =
-            strings::StrCat(input.node->name(), ":", input.port_id);
+        std::string input_name =
+            absl::StrCat(input.node->name(), ":", input.port_id);
         if (skip_list->find(input_name) != skip_list->end()) {
           valid = false;
           break;
@@ -1148,7 +1206,8 @@ static bool IdentifySwappingCandidates(
 
 bool SwappingPass(RewriterConfig::MemOptType optimization_level,
                   Cluster* cluster, std::unique_ptr<GraphMemory>* memory,
-                  GrapplerItem* item, std::unordered_set<string>* skip_list) {
+                  GrapplerItem* item,
+                  std::unordered_set<std::string>* skip_list) {
   std::unordered_map<NodeDef*, SwapInfo> nodes_to_swap;
   if (optimization_level == RewriterConfig::DEFAULT_MEM_OPT ||
       optimization_level == RewriterConfig::SWAPPING_HEURISTICS ||
@@ -1205,7 +1264,7 @@ bool SwappingPass(RewriterConfig::MemOptType optimization_level,
     return false;
   }
 
-  std::unordered_map<string, const NodeDef*> name_map;
+  std::unordered_map<std::string, const NodeDef*> name_map;
   for (const auto& node : item->graph.node()) {
     name_map[node.name()] = &node;
   }
@@ -1233,7 +1292,7 @@ bool SwappingPass(RewriterConfig::MemOptType optimization_level,
 
     // Swap all the tensors that are marked with the 'swap_to_host' attribute.
     for (int input_id : swap_info.inputs_to_swap) {
-      string input_name = strings::StrCat(node->name(), ":", input_id);
+      std::string input_name = absl::StrCat(node->name(), ":", input_id);
       if (skip_list->find(input_name) != skip_list->end()) {
         continue;
       } else {
@@ -1259,8 +1318,8 @@ bool SwappingPass(RewriterConfig::MemOptType optimization_level,
       *node->mutable_input(input_id) = swap_nodes.second->name();
 
       // Add the control dependencies needed to delay the execution of the swap.
-      out_trigger->add_input(strings::StrCat("^", swap_nodes.first->name()));
-      swap_nodes.second->add_input(strings::StrCat("^", in_trigger->name()));
+      out_trigger->add_input(absl::StrCat("^", swap_nodes.first->name()));
+      swap_nodes.second->add_input(absl::StrCat("^", in_trigger->name()));
 
       // Make sure we won't try to swap the swap nodes in subsequent passes.
       skip_list->insert(swap_nodes.first->name());
@@ -1271,11 +1330,11 @@ bool SwappingPass(RewriterConfig::MemOptType optimization_level,
 }
 
 bool CrossesTaskOrCpuGpuBoundary(const NodeDef& node1, const NodeDef& node2) {
-  string task1;
-  string device1;
+  std::string task1;
+  std::string device1;
   DeviceNameUtils::SplitDeviceName(node1.device(), &task1, &device1);
-  string task2;
-  string device2;
+  std::string task2;
+  std::string device2;
   DeviceNameUtils::SplitDeviceName(node2.device(), &task2, &device2);
   return task1 != task2 ||
          (absl::StrContains(device1, DEVICE_CPU) &&
@@ -1295,9 +1354,9 @@ void RelaxAssignNodes(const std::set<int>& nodes_to_relax,
 }
 
 // TODO(rmlarsen): Add distributed TF test.
-Status FindAssignNodesToRelax(const GraphDef& graph,
-                              std::set<int>* nodes_to_relax) {
-  std::unordered_set<string> devices;
+absl::Status FindAssignNodesToRelax(const GraphDef& graph,
+                                    std::set<int>* nodes_to_relax) {
+  std::unordered_set<std::string> devices;
   std::vector<int> assign_nodes;
   bool found_send = false;
   for (int i = 0; i < graph.node_size(); ++i) {
@@ -1313,7 +1372,7 @@ Status FindAssignNodesToRelax(const GraphDef& graph,
   }
   if (!found_send && devices.size() == 1) {
     nodes_to_relax->insert(assign_nodes.begin(), assign_nodes.end());
-    return Status::OK();
+    return absl::OkStatus();
   }
 
   GraphTopologyView graph_view;
@@ -1373,13 +1432,14 @@ Status FindAssignNodesToRelax(const GraphDef& graph,
       }
     }
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 }  // namespace
 
-Status MemoryOptimizer::Optimize(Cluster* cluster, const GrapplerItem& item,
-                                 GraphDef* optimized_graph) {
+absl::Status MemoryOptimizer::Optimize(Cluster* cluster,
+                                       const GrapplerItem& item,
+                                       GraphDef* optimized_graph) {
   std::set<int> nodes_to_relax;
   TF_RETURN_IF_ERROR(FindAssignNodesToRelax(item.graph, &nodes_to_relax));
 
@@ -1388,7 +1448,7 @@ Status MemoryOptimizer::Optimize(Cluster* cluster, const GrapplerItem& item,
        optimization_level_ == RewriterConfig::HEURISTICS ||
        optimization_level_ == RewriterConfig::MANUAL);
   if (!run_recomputation_pass && nodes_to_relax.empty() && item.fetch.empty()) {
-    return errors::Aborted("Nothing to do.");
+    return absl::AbortedError("Nothing to do.");
   }
 
   GrapplerItem optimized_item(item);
@@ -1400,7 +1460,7 @@ Status MemoryOptimizer::Optimize(Cluster* cluster, const GrapplerItem& item,
                                &optimized_item.graph, item);
   }
 
-  std::unordered_set<string> skip_list;
+  std::unordered_set<std::string> skip_list;
   // Bound the number of rewrite passes to avoid long processing times on graphs
   // that simply won't fit in memory.
   // SchedulingPass() and SwappingPass() rely on defined fetches in order to
@@ -1439,7 +1499,7 @@ Status MemoryOptimizer::Optimize(Cluster* cluster, const GrapplerItem& item,
   }
 
   optimized_graph->Swap(&optimized_item.graph);
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 }  // end namespace grappler

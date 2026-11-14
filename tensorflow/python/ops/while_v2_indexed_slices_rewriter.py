@@ -14,14 +14,12 @@
 # =============================================================================
 """Methods for rewriting while_v2 grad functions with IndexedSlices output."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 from tensorflow.python.framework import constant_op
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import func_graph
-from tensorflow.python.framework import ops
+from tensorflow.python.framework import indexed_slices
+from tensorflow.python.framework import tensor
+from tensorflow.python.framework import tensor_conversion
 from tensorflow.python.framework import tensor_shape
 from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import gen_resource_variable_ops
@@ -68,7 +66,7 @@ def rewrite_grad_indexed_slices(grads, body_grad_graph, loop_vars,
   structured_outputs = body_grad_graph.structured_outputs[3:]
 
   for forward_input, output in zip(inputs_with_grads, structured_outputs):
-    if not isinstance(output, ops.IndexedSlices):
+    if not isinstance(output, indexed_slices.IndexedSlices):
       continue
 
     if forward_input.dtype == dtypes.resource:
@@ -84,7 +82,7 @@ def rewrite_grad_indexed_slices(grads, body_grad_graph, loop_vars,
 
 
 def _get_tensor_index_in_iterable(iterable, t):
-  """Returns index of first occurence of `t`, raises ValueError if not found."""
+  """Returns index of first occurrence of `t`, raises ValueError if not found."""
   for i, elem in enumerate(iterable):
     if t is elem:
       return i
@@ -99,7 +97,7 @@ def _rewrite_output_as_tensor(body_grad_graph, grad_output_slices):
     grad_output_slices: IndexedSlices output of body_grad_graph.
   """
   with body_grad_graph.as_default():
-    new_output = ops.convert_to_tensor_v2(grad_output_slices)
+    new_output = tensor_conversion.convert_to_tensor_v2(grad_output_slices)
 
   idx = _get_tensor_index_in_iterable(body_grad_graph.structured_outputs,
                                       grad_output_slices)
@@ -144,7 +142,7 @@ def _rewrite_input_as_indexed_slices(body_grad_graph, grad_output_slices,
   # TODO(skyewm): considering pruning body_grad_graph to remove the old
   # computation.
   with body_grad_graph.as_default():
-    input_slices = ops.IndexedSlices(
+    input_slices = indexed_slices.IndexedSlices(
         values=body_grad_graph.capture(init_slices.values, allowlisted=True),
         indices=body_grad_graph.capture(init_slices.indices, allowlisted=True),
         dense_shape=body_grad_graph.capture(
@@ -177,8 +175,8 @@ def _create_grad_indexed_slices_init(grad_output_slices, forward_input):
   Returns:
     Zeros IndexedSlices, created in current Graph.
   """
-  assert isinstance(grad_output_slices, ops.IndexedSlices)
-  assert isinstance(forward_input, ops.Tensor)
+  assert isinstance(grad_output_slices, indexed_slices.IndexedSlices)
+  assert isinstance(forward_input, tensor.Tensor)
   values_out = grad_output_slices.values
   indices_out = grad_output_slices.indices
 
@@ -209,7 +207,8 @@ def _create_grad_indexed_slices_init(grad_output_slices, forward_input):
   else:
     shape = array_ops.shape(forward_input, name="shape_init")
 
-  return ops.IndexedSlices(values=values, indices=indices, dense_shape=shape)
+  return indexed_slices.IndexedSlices(
+      values=values, indices=indices, dense_shape=shape)
 
 
 def _rewrite_grad_indexed_slices_output(old_output_slices, new_input_slices):
@@ -243,7 +242,7 @@ def _rewrite_grad_indexed_slices_output(old_output_slices, new_input_slices):
 
   values = rewrite(old_output_slices.values.op, new_input_slices.values)
   indices = rewrite(old_output_slices.indices.op, new_input_slices.indices)
-  return ops.IndexedSlices(
+  return indexed_slices.IndexedSlices(
       values=values, indices=indices, dense_shape=new_input_slices.dense_shape)
 
 

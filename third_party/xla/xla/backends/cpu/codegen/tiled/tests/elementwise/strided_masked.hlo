@@ -1,0 +1,54 @@
+// RUN: fusion_to_xtile %s | FileCheck %s
+// RUN: fusion_to_xtile %s | fusion_compiler_opt \
+// RUN:   --xtile-cpu-xtile-to-vector --xla-simplify-arith \
+// RUN:   | FileCheck %s --check-prefix=CHECK-VECTOR
+// RUN: fusion_to_xtile %s | fusion_compiler_opt \
+// RUN:   --xtile-cpu-xtile-to-vector --xtile-cpu-vector-to-llvm \
+// RUN:   | FileCheck %s --check-prefix=CHECK-LLVM
+// RUN: test_correctness %s
+fusion {
+  p0 = f32[10] parameter(0)
+  ROOT pad = f32[3] slice(p0), slice={[1:6:2]}
+}
+
+ENTRY main {
+  p0 = f32[10] parameter(0)
+  ROOT fusion = f32[3] fusion(p0), kind=kLoop, calls=fusion,
+    backend_config={
+      "fusion_backend_config":{
+        "block_level_fusion_config":{
+          "output_tiles":[{"sizes":["16"]}],
+          "num_ctas":"1"
+        }
+      }
+    }
+}
+// CHECK-LABEL: xtile.entry_func @wrapped_fusion
+// CHECK-SAME:    %[[ARG0:[^:]+]]: memref<10xf32>,
+// CHECK-SAME:    %[[ARG1:[^:]+]]: memref<3xf32>,
+// CHECK-SAME:    %[[PID:[^:]+]]: index {xla.range = [0 : index, 0 : index]})
+// CHECK:         %[[C1:.*]] = arith.constant 1 : index
+// CHECK:         %[[EXT:.*]] = xtile.extract %[[ARG0]][%[[C1]]] [16] [2] : memref<10xf32> -> tensor<16xf32>
+// CHECK:         %[[C0:.*]] = arith.constant 0 : index
+// CHECK:         xtile.insert %[[EXT]] into %[[ARG1]][%[[C0]]] [16] [1] : tensor<16xf32> -> memref<3xf32>
+// CHECK:       xtile.return
+
+// CHECK-VECTOR:       #indexing_map = #xla.indexing_map<"(d0) -> (d0 * 2 + 1)
+// CHECK-VECTOR-LABEL: func.func @wrapped_fusion_impl(
+// CHECK-VECTOR-DAG:       %[[C0:.*]] = arith.constant 0 : index
+// CHECK-VECTOR-DAG:       %[[C1:.*]] = arith.constant 1 : index
+// CHECK-VECTOR-DAG:       %[[C5:.*]] = arith.constant 5 : index
+// CHECK-VECTOR:           %[[ALLOCA:.*]] = memref.alloca() : memref<16xf32>
+// CHECK-VECTOR:           scf.for %[[IV:.*]] = %[[C0]] to %[[C5]] step %[[C1]]
+// CHECK-VECTOR:             %[[INDEX:.*]] = xla.apply_indexing #indexing_map(%[[IV]])
+// CHECK-VECTOR:             %[[VAL:.*]] = memref.load %arg0[%[[INDEX]]] : memref<10xf32>
+// CHECK-VECTOR:             memref.store %[[VAL]], %[[ALLOCA]][%[[IV]]]
+// CHECK-VECTOR:           %[[READ_MASK:.*]] = vector.constant_mask [5] : vector<16xi1>
+// CHECK-VECTOR:           %[[READ:.*]] = vector.transfer_read %[[ALLOCA]][%{{.*}}], %{{.*}}, %[[READ_MASK]] {in_bounds = [true]} : memref<16xf32>, vector<16xf32>
+// CHECK-VECTOR:           %[[MASK:.*]] = vector.constant_mask [3] : vector<16xi1>
+// CHECK-VECTOR:           vector.transfer_write %[[READ]], %arg1[%{{.*}}], %[[MASK]] : vector<16xf32>, memref<3xf32>
+
+// CHECK-LLVM-LABEL: llvm.func internal @wrapped_fusion_impl
+// CHECK-LLVM:       llvm.alloca
+// CHECK-LLVM:       llvm.intr.masked.store
+

@@ -17,7 +17,9 @@ limitations under the License.
 #define TENSORFLOW_PYTHON_CLIENT_TF_SESSION_HELPER_H_
 
 // Must be included first
-#include "tensorflow/python/lib/core/numpy.h"
+// clang-format off
+#include "xla/tsl/python/lib/core/numpy.h" //NOLINT
+// clang-format on
 
 #include "tensorflow/c/c_api.h"
 #include "tensorflow/core/framework/graph.pb.h"
@@ -32,13 +34,13 @@ namespace tensorflow {
 
 // A NameVector is a vector of tensor or operation names, as borrowed
 // C strings.
-typedef tensorflow::gtl::InlinedVector<const char*, 8> NameVector;
+typedef absl::InlinedVector<const char*, 8UL> NameVector;
 
 // A PyObjectVector is a vector of borrowed pointers to PyObjects.
-typedef tensorflow::gtl::InlinedVector<PyObject*, 8> PyObjectVector;
+typedef absl::InlinedVector<PyObject*, 8UL> PyObjectVector;
 
 // A TF_TensorVector is a vector of borrowed pointers to TF_Tensors.
-typedef gtl::InlinedVector<TF_Tensor*, 8> TF_TensorVector;
+typedef absl::InlinedVector<TF_Tensor*, 8UL> TF_TensorVector;
 
 TF_Session* TF_NewSessionRef(TF_Graph* graph, const TF_SessionOptions* opts,
                              TF_Status* status);
@@ -122,14 +124,16 @@ void TF_Reset_wrapper(const TF_SessionOptions* opt,
 // Convenience wrapper around EqualGraphDef to make it easier to wrap.
 // Returns an explanation if a difference is found, or the empty string
 // for no difference.
-string EqualGraphDefWrapper(const string& actual, const string& expected);
+std::string EqualGraphDefWrapper(const std::string& actual,
+                                 const std::string& expected);
 
 // Convenience wrapper around AreAttrValuesEqual to make it easier to wrap.
 // The actual and expected strings must correspond to a serialized binary
 // representation of two AttrValue proto instances.
 // Returns an explanation if a difference is found, or the empty string
 // for no difference.
-string EqualAttrValueWrapper(const string& actual, const string& expected);
+std::string EqualAttrValueWrapper(const std::string& actual,
+                                  const std::string& expected);
 
 // Gets shape from C API Graph object.
 //
@@ -137,7 +141,7 @@ string EqualAttrValueWrapper(const string& actual, const string& expected);
 // dimension".  Sets unknown_shape to false.
 //
 // If shape is unknown, sets unknown_shape to true.
-tensorflow::gtl::InlinedVector<int64_t, 6> TF_GraphGetTensorShapeHelper(
+absl::InlinedVector<int64_t, 6UL> TF_GraphGetTensorShapeHelper(
     TF_Graph* graph, TF_Output output, TF_Status* status, bool* unknown_shape);
 
 // Runs the graph associated with the session starting with the supplied inputs.
@@ -242,7 +246,8 @@ void TF_GraphSetTensorShape_wrapper(TF_Graph* graph, TF_Output output,
                                     bool unknown_shape, TF_Status* status);
 
 // Returns the string representations of the missing unused input mappings.
-std::vector<string> TF_ImportGraphDefResultsMissingUnusedInputMappings_wrapper(
+std::vector<std::string>
+TF_ImportGraphDefResultsMissingUnusedInputMappings_wrapper(
     TF_ImportGraphDefResults* results);
 
 // If evaluation was possible, returns the numpy ndarray of the evaluated

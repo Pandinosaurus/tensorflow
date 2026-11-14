@@ -16,9 +16,12 @@ limitations under the License.
 #ifndef TENSORFLOW_LITE_PROFILING_MEMORY_USAGE_MONITOR_H_
 #define TENSORFLOW_LITE_PROFILING_MEMORY_USAGE_MONITOR_H_
 
+#include <cstdint>
 #include <memory>
 #include <thread>  // NOLINT(build/c++11)
 
+#include "absl/base/thread_annotations.h"
+#include "absl/synchronization/mutex.h"
 #include "absl/synchronization/notification.h"
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
@@ -38,7 +41,7 @@ class MemoryUsageMonitor {
   // implementations.
   class Sampler {
    public:
-    virtual ~Sampler() {}
+    virtual ~Sampler() = default;
     virtual bool IsSupported() { return MemoryUsage::IsSupported(); }
     virtual MemoryUsage GetMemoryUsage() {
       return tflite::profiling::memory::GetMemoryUsage();
@@ -48,16 +51,17 @@ class MemoryUsageMonitor {
     }
   };
 
-  static constexpr float kInvalidMemUsageMB = -1.0f;
+  static constexpr int64_t kInvalidMemUsageMB = -1;
+  static constexpr int64_t kInvalidMemUsageBytes =
+      kInvalidMemUsageMB * 1024 * 1024;
 
   explicit MemoryUsageMonitor(int sampling_interval_ms = 50)
-      : MemoryUsageMonitor(sampling_interval_ms,
-                           std::unique_ptr<Sampler>(new Sampler())) {}
+      : MemoryUsageMonitor(sampling_interval_ms, std::make_unique<Sampler>()) {}
   MemoryUsageMonitor(int sampling_interval_ms,
                      std::unique_ptr<Sampler> sampler);
   ~MemoryUsageMonitor() { StopInternal(); }
 
-  void Start();
+  void Start() ABSL_LOCKS_EXCLUDED(mutex_);
   void Stop();
 
   // For simplicity, we will return kInvalidMemUsageMB for the either following
@@ -65,11 +69,37 @@ class MemoryUsageMonitor {
   // 1. getting memory usage isn't supported on the platform.
   // 2. the memory usage is being monitored (i.e. we've created the
   // 'check_memory_thd_'.
-  float GetPeakMemUsageInMB() const {
-    if (!is_supported_ || check_memory_thd_ != nullptr) {
+  float GetPeakMemUsageInMB() const ABSL_LOCKS_EXCLUDED(mutex_) {
+    if (!is_supported_) {
       return kInvalidMemUsageMB;
     }
-    return peak_max_rss_kb_ / 1024.0;
+    absl::MutexLock lock(mutex_);
+    return BytesToMegabytes(peak_mem_footprint_bytes_);
+  }
+
+  float GetCurrentInUseMemoryInMB() const ABSL_LOCKS_EXCLUDED(mutex_) {
+    int64_t in_use_mem_bytes =
+        sampler_->GetMemoryUsage().in_use_allocated_bytes;
+    if (in_use_mem_bytes < 0) {
+      return kInvalidMemUsageMB;
+    }
+    return BytesToMegabytes(in_use_mem_bytes);
+  }
+
+  float GetPeakInUseMemoryInMB() const ABSL_LOCKS_EXCLUDED(mutex_) {
+    if (!is_supported_) {
+      return kInvalidMemUsageMB;
+    }
+    absl::MutexLock lock(mutex_);
+    return BytesToMegabytes(peak_in_use_mem_bytes_);
+  }
+
+  float GetPeakPrivateFootprintInMB() const ABSL_LOCKS_EXCLUDED(mutex_) {
+    if (!is_supported_) {
+      return kInvalidMemUsageMB;
+    }
+    absl::MutexLock lock(mutex_);
+    return BytesToMegabytes(peak_private_footprint_bytes_);
   }
 
   MemoryUsageMonitor(MemoryUsageMonitor&) = delete;
@@ -78,14 +108,23 @@ class MemoryUsageMonitor {
   MemoryUsageMonitor& operator=(const MemoryUsageMonitor&&) = delete;
 
  private:
+  inline float BytesToMegabytes(int64_t bytes) const {
+    return bytes / 1024.0 / 1024.0;
+  }
   void StopInternal();
 
+  mutable absl::Mutex mutex_;
   std::unique_ptr<Sampler> sampler_ = nullptr;
   bool is_supported_ = false;
   std::unique_ptr<absl::Notification> stop_signal_ = nullptr;
   absl::Duration sampling_interval_;
   std::unique_ptr<std::thread> check_memory_thd_ = nullptr;
-  int64_t peak_max_rss_kb_ = static_cast<int64_t>(kInvalidMemUsageMB * 1024);
+  int64_t peak_mem_footprint_bytes_ ABSL_GUARDED_BY(mutex_) =
+      kInvalidMemUsageBytes;
+  int64_t peak_in_use_mem_bytes_ ABSL_GUARDED_BY(mutex_) =
+      kInvalidMemUsageBytes;
+  int64_t peak_private_footprint_bytes_ ABSL_GUARDED_BY(mutex_) =
+      kInvalidMemUsageBytes;
 };
 
 }  // namespace memory

@@ -33,14 +33,13 @@ References:
     [Ionescu et al., 2015](https://arxiv.org/abs/1509.07838)
     ([pdf](https://arxiv.org/pdf/1509.07838.pdf))
 """
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
+import numpy as np
 
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import ops
 from tensorflow.python.ops import array_ops
-from tensorflow.python.ops import control_flow_ops
+from tensorflow.python.ops import array_ops_stack
+from tensorflow.python.ops import cond
 from tensorflow.python.ops import gen_linalg_ops
 from tensorflow.python.ops import linalg_ops
 from tensorflow.python.ops import math_ops
@@ -48,17 +47,19 @@ from tensorflow.python.ops.linalg import linalg_impl as _linalg
 
 
 @ops.RegisterGradient("MatrixInverse")
-def _MatrixInverseGrad(op, grad):
+def _MatrixInverseGrad(op: ops.Operation, grad):
   """Gradient for MatrixInverse."""
   ainv = op.outputs[0]
+  op_adjoint = op.get_attr("adjoint")
   return -math_ops.matmul(  # pylint: disable=invalid-unary-operand-type
       ainv,
-      math_ops.matmul(grad, ainv, adjoint_b=True),
-      adjoint_a=True)
+      math_ops.matmul(grad, ainv, adjoint_a=op_adjoint,
+                      adjoint_b=not op_adjoint),
+      adjoint_a=not op_adjoint)
 
 
 @ops.RegisterGradient("Einsum")
-def _EinsumGrad(op, grad):
+def _EinsumGrad(op: ops.Operation, grad):
   """Gradient for Einsum."""
   ellipsis = "..."
 
@@ -139,7 +140,8 @@ def _EinsumGrad(op, grad):
     # labels. If the same label appears multiple times, get the left-most axis.
     reduced_axes = [_GetAxisFromLabel(subscripts, s) for s in reduced_subs]
     # Get the corresponding dimensions for each reduced axis.
-    reduced_dims = array_ops.stack([input_shape[ax] for ax in reduced_axes])
+    reduced_dims = array_ops_stack.stack(
+        [input_shape[ax] for ax in reduced_axes])
     return reduced_subs, reduced_dims, reduced_axes
 
   def _GetGradReduced(output_grad, output_subs, input_subs, input_shape,
@@ -373,19 +375,68 @@ def _EinsumGrad(op, grad):
 
 
 @ops.RegisterGradient("MatrixDeterminant")
-def _MatrixDeterminantGrad(op, grad):
-  """Gradient for MatrixDeterminant."""
+def _MatrixDeterminantGrad(op: ops.Operation, grad):
+  """Gradient for MatrixDeterminant.
+
+  The holomorphic derivative of det(A) is the cofactor matrix, i.e.
+  det(A) * A^{-T} for invertible A, so under the reverse-mode convention the
+  gradient is its elementwise conjugate, conj(det(A)) * A^{-H}. For real A
+  this is the transpose of the classical adjugate, adj(A)^T. Rather than
+  forming A^{-1}, which does not exist for singular matrices, the same
+  quantity is evaluated from the SVD ``A = U @ diag(s) @ V^H``:
+
+    conj(det(A)) * A^{-H} = conj(det(U))*det(V) * U @ diag(prod_except) @ V^H
+
+  where ``prod_except[i]`` is the product of all singular values except s[i],
+  formed from exclusive left/right cumulative products so that a zero singular
+  value introduces no division by zero. The result agrees with the classical
+  formula for invertible A, extends continuously to singular A, and supports
+  batched matrices. Evaluating the product this way is also more accurate for
+  nearly singular A, where forming A^{-1} amplifies rounding error by the
+  condition number.
+
+  Note: second-order gradients differentiate through the SVD, whose gradient
+  (like that of `tf.linalg.svd`) is only well-defined when the singular
+  values are distinct.
+  """
   a = op.inputs[0]
   c = op.outputs[0]
-  a_adj_inv = linalg_ops.matrix_inverse(a, adjoint=True)
-  multipliers = array_ops.reshape(grad * c,
-                                  array_ops.concat([array_ops.shape(c), [1, 1]],
-                                                   0))
-  return multipliers * a_adj_inv
+  # The adjugate is derived from the SVD, which stays defined when A is
+  # singular and matrix_inverse would fail.
+  s, u, v = gen_linalg_ops.svd(a, full_matrices=True, compute_uv=True)
+  # prod_except[i] = product of all s[j] for j != i.  Use exclusive left/right
+  # cumulative products so that zero singular values are handled correctly
+  # (no division by zero).
+  ones = array_ops.ones_like(s[..., :1])
+  cumprod_left = array_ops.concat(
+      [ones, math_ops.cumprod(s[..., :-1], axis=-1)], axis=-1
+  )
+  cumprod_right = array_ops.concat(
+      [math_ops.cumprod(s[..., 1:], axis=-1, reverse=True), ones], axis=-1
+  )
+  prod_except = cumprod_left * cumprod_right  # [..., n]
+  # Phase correction carried by the unitary factors: from
+  # det(A) = det(U) * prod(s) * conj(det(V)) it follows that
+  # conj(det(A)) = conj(det(U)) * prod(s) * det(V), so the factor multiplying
+  # U @ diag(prod_except) @ V^H is conj(det(U)) * det(V). For real A both
+  # determinants are +/-1 and the conjugations are no-ops.
+  sign_uv = math_ops.conj(gen_linalg_ops.matrix_determinant(u)) * (
+      gen_linalg_ops.matrix_determinant(v)
+  )  # [...]
+  # conj(det(A)) * A^{-H} = sign_uv * U @ diag(prod_except) @ V^H
+  # Use adjoint_b=True (conjugate transpose) so this is correct for both
+  # real and complex matrices.
+  a_adj_t = sign_uv[..., None, None] * math_ops.matmul(
+      u * math_ops.cast(prod_except[..., None, :], u.dtype), v, adjoint_b=True
+  )
+  multipliers = array_ops.reshape(
+      grad, array_ops.concat([array_ops.shape(c), [1, 1]], 0)
+  )
+  return multipliers * a_adj_t
 
 
 @ops.RegisterGradient("MatrixSquareRoot")
-def _MatrixSquareRootGrad(op, grad):
+def _MatrixSquareRootGrad(op: ops.Operation, grad):
   """Gradient for MatrixSquareRoot."""
 
   # Let A be an m x m square matrix (or batch of matrices)
@@ -450,18 +501,44 @@ def _MatrixSquareRootGrad(op, grad):
 
 
 @ops.RegisterGradient("LogMatrixDeterminant")
-def _LogMatrixDeterminantGrad(op, _, grad_b):
-  """Gradient for LogMatrixDeterminant."""
+def _LogMatrixDeterminantGrad(op: ops.Operation, _, grad_b):
+  """Gradient for LogMatrixDeterminant.
+
+  The gradient of log|det(A)| with respect to A is A^{-H}. This is undefined
+  for a singular A, where log|det(A)| is -inf, so the adjoint of the
+  Moore-Penrose pseudoinverse is used in place of A^{-H} to keep the backward
+  pass finite. The value it produces for an exactly singular input should be
+  treated as undefined. The pseudoinverse is evaluated from the SVD
+  ``A = U @ diag(s) @ V^H`` as ``pinv(A)^H = U @ diag(pinv(s)) @ V^H``, where
+  singular values below the standard cutoff are treated as zero. This also
+  supports complex matrices, which `linalg.pinv` does not.
+  """
   a = op.inputs[0]
   c = op.outputs[1]
-  a_adj_inv = linalg_ops.matrix_inverse(a, adjoint=True)
+  s, u, v = gen_linalg_ops.svd(a, full_matrices=True, compute_uv=True)
+  # The raw Svd op returns singular values in the input dtype; they are real
+  # even for complex matrices.
+  s = math_ops.real(s)
+  # Standard pseudoinverse cutoff: singular values below
+  # n * eps * max(s) are treated as zero rather than inverted.
+  eps = np.finfo(a.dtype.real_dtype.as_numpy_dtype).eps
+  n = math_ops.cast(array_ops.shape(a)[-1], s.dtype)
+  cutoff = eps * n * math_ops.reduce_max(s, axis=-1, keepdims=True)
+  s_pinv = array_ops.where_v2(
+      s > cutoff, math_ops.reciprocal(s), array_ops.zeros_like(s)
+  )
+  # pinv(A)^H = U @ diag(pinv(s)) @ V^H, finite for singular A where
+  # matrix_inverse would fail.
+  a_pinv_adj = math_ops.matmul(
+      u * math_ops.cast(s_pinv[..., None, :], u.dtype), v, adjoint_b=True
+  )
   multipliers = array_ops.reshape(
       grad_b, array_ops.concat([array_ops.shape(c), [1, 1]], 0))
-  return multipliers * a_adj_inv
+  return multipliers * a_pinv_adj
 
 
 @ops.RegisterGradient("Cholesky")
-def _CholeskyGrad(op, grad):
+def _CholeskyGrad(op: ops.Operation, grad):
   """Gradient for Cholesky."""
 
   # Gradient is l^{-H} @ ((l^{H} @ grad) * (tril(ones)-1/2*eye)) @ l^{-1}
@@ -487,7 +564,7 @@ def _CholeskyGrad(op, grad):
 
 
 @ops.RegisterGradient("Qr")
-def _QrGrad(op, dq, dr):
+def _QrGrad(op: ops.Operation, dq, dr):
   """Gradient for Qr."""
 
   # The methodology is explained in detail in https://arxiv.org/abs/2009.10071
@@ -555,7 +632,7 @@ def _QrGrad(op, dq, dr):
 
 
 @ops.RegisterGradient("MatrixSolve")
-def _MatrixSolveGrad(op, grad):
+def _MatrixSolveGrad(op: ops.Operation, grad):
   """Gradient for MatrixSolve."""
   a = op.inputs[0]
   adjoint_a = op.get_attr("adjoint")
@@ -569,7 +646,7 @@ def _MatrixSolveGrad(op, grad):
 
 
 @ops.RegisterGradient("MatrixSolveLs")
-def _MatrixSolveLsGrad(op, grad):
+def _MatrixSolveLsGrad(op: ops.Operation, grad):
   """Gradients for MatrixSolveLs."""
 
   # TODO(rmlarsen): The implementation could be more efficient:
@@ -577,8 +654,8 @@ def _MatrixSolveLsGrad(op, grad):
   #      recomputing it here.
   #   b) Implement a symmetric rank-k update op instead of computing
   #      x*z + transpose(x*z). This pattern occurs other places in TensorFlow.
-
-  def _Overdetermined(op, grad):
+  # pylint: disable=g-doc-args
+  def _Overdetermined(op: ops.Operation, grad):
     """Gradients for the overdetermined case of MatrixSolveLs.
 
     This is the backprop for the solution to the normal equations of the first
@@ -603,7 +680,8 @@ def _MatrixSolveLsGrad(op, grad):
     grad_b = math_ops.matmul(a, z)
     return (grad_a, grad_b, None)
 
-  def _Underdetermined(op, grad):
+  # pylint: disable=g-doc-args
+  def _Underdetermined(op: ops.Operation, grad):
     """Gradients for the underdetermined case of MatrixSolveLs.
 
     This is the backprop for the solution to the normal equations of the second
@@ -642,13 +720,13 @@ def _MatrixSolveLsGrad(op, grad):
     # We have to defer determining the shape to runtime and use
     # conditional execution of the appropriate graph.
     matrix_shape = array_ops.shape(op.inputs[0])[-2:]
-    return control_flow_ops.cond(matrix_shape[-2] >= matrix_shape[-1],
-                                 lambda: _Overdetermined(op, grad),
-                                 lambda: _Underdetermined(op, grad))
+    return cond.cond(matrix_shape[-2] >= matrix_shape[-1],
+                     lambda: _Overdetermined(op, grad),
+                     lambda: _Underdetermined(op, grad))
 
 
 @ops.RegisterGradient("BandedTriangularSolve")
-def _BandedTriangularSolveGrad(op, grad):
+def _BandedTriangularSolveGrad(op: ops.Operation, grad):
   """Gradient for BandedTriangularSolve."""
   a = op.inputs[0]
   b = op.inputs[1]
@@ -681,7 +759,7 @@ def _BandedTriangularSolveGrad(op, grad):
 
 
 @ops.RegisterGradient("MatrixTriangularSolve")
-def _MatrixTriangularSolveGrad(op, grad):
+def _MatrixTriangularSolveGrad(op: ops.Operation, grad):
   """Gradient for MatrixTriangularSolve."""
   a = op.inputs[0]
   b = op.inputs[1]
@@ -713,12 +791,13 @@ def _MatrixTriangularSolveGrad(op, grad):
 # To avoid nan in cases with degenerate eigenvalues or
 # degenerate/zero singular values in calculations of
 # f and s_inv_mat, we introduce a Lorentz broadening.
-def _SafeReciprocal(x, epsilon=1E-20):
+def _SafeReciprocal(x, epsilon=1e-20):
   return x * math_ops.reciprocal(x * x + epsilon)
 
 
+# pylint: disable=g-doc-args
 @ops.RegisterGradient("Eig")
-def _EigGrad(op, grad_e, grad_v):
+def _EigGrad(op: ops.Operation, grad_e, grad_v):
   """Gradient for Eig.
 
   Based on eq. 4.77 from paper by
@@ -772,7 +851,7 @@ def _EigGrad(op, grad_e, grad_v):
 
 
 @ops.RegisterGradient("SelfAdjointEigV2")
-def _SelfAdjointEigV2Grad(op, grad_e, grad_v):
+def _SelfAdjointEigV2Grad(op: ops.Operation, grad_e, grad_v):
   """Gradient for SelfAdjointEigV2."""
   e = op.outputs[0]
   compute_v = op.get_attr("compute_v")
@@ -814,7 +893,7 @@ def _SelfAdjointEigV2Grad(op, grad_e, grad_v):
 
 
 @ops.RegisterGradient("Svd")
-def _SvdGrad(op, grad_s, grad_u, grad_v):
+def _SvdGrad(op: ops.Operation, grad_s, grad_u, grad_v):
   """Gradient for the singular value decomposition."""
 
   # The derivation for the compute_uv=False case, and most of
@@ -962,7 +1041,7 @@ def _RightShift(x):
 
 
 @ops.RegisterGradient("TridiagonalMatMul")
-def _TridiagonalMatMulGrad(op, grad):
+def _TridiagonalMatMulGrad(op: ops.Operation, grad):
   """Gradient for TridiagonalMatMul."""
   superdiag_conj = array_ops.matrix_transpose(op.inputs[0], conjugate=True)
   maindiag_conj = array_ops.matrix_transpose(op.inputs[1], conjugate=True)
@@ -983,7 +1062,7 @@ def _TridiagonalMatMulGrad(op, grad):
 
 
 @ops.RegisterGradient("TridiagonalSolve")
-def _TridiagonalSolveGrad(op, grad):
+def _TridiagonalSolveGrad(op: ops.Operation, grad):
   """Gradient for TridiagonalSolveGrad."""
   diags = op.inputs[0]
   x = op.outputs[0]
@@ -1033,7 +1112,7 @@ def _TransposeTridiagonalMatrix(diags):
     subdiag_pad = array_ops.concat((zeros, array_ops.constant([[1, 0]])),
                                    axis=0)
     subdiag = array_ops.pad(diags[..., 0, :-1], subdiag_pad)
-  return array_ops.stack([superdiag, diag, subdiag], axis=-2)
+  return array_ops_stack.stack([superdiag, diag, subdiag], axis=-2)
 
 
 def _MatmulExtractingThreeDiagonals(x, y_tr):
@@ -1072,4 +1151,4 @@ def _MatmulExtractingThreeDiagonals(x, y_tr):
         (zeros, array_ops.constant([[1, 0], [0, 0]])), axis=0)
     subdiag = math_ops.reduce_sum(
         x * array_ops.pad(y_tr[..., :-1, :], subdiag_pad), axis=-1)
-  return array_ops.stack([superdiag, diag, subdiag], axis=-2)
+  return array_ops_stack.stack([superdiag, diag, subdiag], axis=-2)

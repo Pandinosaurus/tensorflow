@@ -17,17 +17,22 @@ limitations under the License.
 #include "tensorflow/core/util/autotune_maps/autotune_serialize.h"
 
 #include <map>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
+#include "xla/status_macros.h"
+#include "xla/stream_executor/dnn.h"
+#include "xla/stream_executor/gpu/gpu_init.h"
+#include "xla/stream_executor/platform_manager.h"
+#include "xla/tsl/lib/strings/proto_serialization.h"
+#include "xla/tsl/protobuf/dnn.pb.h"
+#include "tensorflow/core/platform/str_util.h"
 #include "tensorflow/core/util/activation_mode.h"
 #include "tensorflow/core/util/autotune_maps/autotune_map.pb.h"
-#include "tensorflow/core/util/autotune_maps/autotune_maps_utils.h"
 #include "tensorflow/core/util/autotune_maps/conv_autotune_maps.h"
 #include "tensorflow/core/util/autotune_maps/conv_parameters.h"
 #include "tensorflow/core/util/autotune_maps/conv_parameters.pb.h"
-#include "tensorflow/stream_executor/dnn.h"
-#include "tensorflow/stream_executor/dnn.pb.h"
 
 namespace tensorflow {
 
@@ -38,34 +43,44 @@ using stream_executor::dnn::AlgorithmConfigProto;
 using stream_executor::dnn::AlgorithmDesc;
 using stream_executor::dnn::AlgorithmProto;
 
-ConvMapProto ConvMapToProto() {
+template <typename Op>
+absl::StatusOr<ConvMapProto> ConvMapToProto(
+    const AutotuneMap<ConvParameters, AutotuneEntry<Op>>& autotune_map) {
   ConvMapProto proto;
 
   // Deterministically sort the entries in autotune maps
   // according to the serialized string of ConvParametersProto in order to
   // enable deterministic serialization. The actual order is meaningless.
   //
-  // This step also filters out dupilicate entries (only device_id's are
+  // This step also filters out duplicate entries (only device_id's are
   // different) in the autotune maps. So that there is only one entry for a
   // convolution operation with a specific GPU device type.
-  std::map<string, ConvMapProto::Entry> sorted_map;
+  std::map<std::string, ConvMapProto::Entry> sorted_map;
 
-  for (auto const &p : AutotuneConv::GetInstance()->GetMap()) {
-    const AlgorithmConfig &config = p.second;
-    // Skip entries that use cuDNN Frontend API because currently they cannot be
-    // serialized.
-    if (config.algorithm().value().IsExecutionPlan()) {
-      continue;
-    }
+  for (auto const &p : autotune_map.GetMap()) {
     const ConvParameters &params = p.first;
     const ConvParametersProto &params_proto = params.proto();
+    VLOG(1) << "Reading: " << params.ToString();
 
     ConvMapProto::Entry kv;
-    VLOG(1) << "Reading: " << p.first.ToString();
     *kv.mutable_key() = params_proto;
-    *kv.mutable_value() = config.ToProto();
-    sorted_map.insert(std::make_pair(
-        autotune_maps_utils::SerializeProtoDeterministic(params_proto), kv));
+
+    if (p.second.is_algorithm_config()) {
+      *kv.mutable_value() = p.second.GetAlgorithmConfig().ToProto();
+    } else {
+      const auto &runners = p.second.GetOpRunners();
+      *kv.mutable_value()->mutable_algorithm() =
+          runners.primary->ToAlgorithmDesc().ToProto();
+      if (runners.no_scratch_fallback) {
+        *kv.mutable_value()->mutable_algorithm_no_scratch() =
+            runners.no_scratch_fallback->ToAlgorithmDesc().ToProto();
+      }
+    }
+
+    std::string serialized_params;
+    TF_RET_CHECK(
+        tsl::SerializeToStringDeterministic(params_proto, &serialized_params));
+    sorted_map.insert(std::make_pair(std::move(serialized_params), kv));
   }
 
   for (auto const &p : sorted_map) {
@@ -75,83 +90,124 @@ ConvMapProto ConvMapToProto() {
   return proto;
 }
 
-Status PopulateConvMap(const ConvMapProto &m) {
-  // Map device_id's to corresponding device_identifiers.
-  std::vector<string> device_ids_map =
-      autotune_maps_utils::GetDeviceIdToIdentifierMap();
-  // Map device_identifiers to device_ids whose corresponding GPU devices have
-  // the given device_identifier.
-  std::unordered_map<string, std::vector<int>> device_identifiers_map;
+template <typename Op>
+absl::Status PopulateConvMap(
+    const ConvMapProto& m,
+    AutotuneMap<ConvParameters, AutotuneEntry<Op>>* autotune_map) {
+  if (m.kv_pairs().empty()) {
+    return absl::OkStatus();
+  }
+
+  // Get the list of all GPU StreamExecutors.
+  TF_ASSIGN_OR_RETURN(
+      se::Platform * platform,
+      se::PlatformManager::PlatformWithName(se::GpuPlatformName()));
+  std::vector<std::string> device_descs;
+  for (int i = 0; i < platform->VisibleDeviceCount(); i++) {
+    TF_ASSIGN_OR_RETURN(std::unique_ptr<se::DeviceDescription> device_desc,
+                        platform->DescriptionForDevice(i));
+    device_descs.push_back(
+        DeviceIdentifierForAutotuning(device_desc->model_str()));
+  }
+
+  std::set<std::string> unmatched_device_descs;
   for (const ConvMapProto::Entry &kv : m.kv_pairs()) {
     const ConvParametersProto &params_proto = kv.key();
-    // Abort loading process whenever there is an entry whose version number
+    // Abort the loading process whenever there is an entry whose version number
     // doesn't match runtime version because the autotune results may be
     // incorrect.
     if (params_proto.version() != ConvParameters::kVersion) {
       VLOG(1) << "ConvParametersProto with the incompatible version:"
               << params_proto.DebugString();
-      return errors::Aborted(
+      return absl::AbortedError(absl::StrCat(
           "Aborted because the loaded autotune results for convolution "
           "operations have a version different "
           "from runtime's version. Expected version: ",
           ConvParameters::kVersion,
-          ". Actual version: ", params_proto.version());
+          ". Actual version: ", params_proto.version()));
     }
 
     const AlgorithmConfigProto &algorithm_config_proto = kv.value();
-    auto iter = device_identifiers_map.find(params_proto.device_identifier());
-    std::vector<int> device_ids;
-    if (iter == device_identifiers_map.end()) {
-      for (int i = 0; i < device_ids_map.size(); i++) {
-        if (device_ids_map[i] == params_proto.device_identifier()) {
-          device_ids.push_back(i);
-        }
+    const AlgorithmDesc primary(algorithm_config_proto.algorithm());
+    const std::optional<AlgorithmDesc> fallback =
+        algorithm_config_proto.has_algorithm_no_scratch()
+            ? std::optional<AlgorithmDesc>(
+                  AlgorithmDesc(algorithm_config_proto.algorithm_no_scratch()))
+            : std::nullopt;
+
+    bool devices_matched = false;
+    for (int ordinal = 0; ordinal < device_descs.size(); ordinal++) {
+      const std::string &desc_str = device_descs[ordinal];
+      if (desc_str != params_proto.device_identifier()) {
+        continue;
       }
-      device_identifiers_map.insert(
-          std::make_pair(params_proto.device_identifier(), device_ids));
-    } else {
-      device_ids = iter->second;
+      devices_matched = true;
+
+      AutotuneEntry<Op> entry;
+#if TENSORFLOW_USE_ROCM
+      // ROCm doesn't yet support the OpRunner-based API, so for the time being
+      // we still need legacy AlgorithmDesc entries in the autotune map.
+      // Long-term, this should be folded into the next case.
+      entry = AutotuneEntry<Op>(AlgorithmConfig(algorithm_config_proto));
+#else
+      entry = AutotuneEntry<Op>(primary, fallback);
+#endif
+
+      autotune_map->Insert(ConvParameters(ordinal, params_proto), entry);
     }
-    for (int device_id : device_ids) {
-      AutotuneConv::GetInstance()->Insert(
-          ConvParameters(device_id, params_proto),
-          AlgorithmConfig(algorithm_config_proto));
+
+    if (!devices_matched) {
+      unmatched_device_descs.insert(params_proto.device_identifier());
     }
   }
-  return Status::OK();
+
+  if (!unmatched_device_descs.empty()) {
+    LOG(WARNING) << "Unmatched device id's from AoT autotuning data: "
+                 << absl::StrJoin(unmatched_device_descs, ", ")
+                 << "; existing devices: " << absl::StrJoin(device_descs, ", ");
+  }
+
+  return absl::OkStatus();
 }
 
 }  // namespace
 #endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 
-Status SerializeAutotuneMaps(std::string *output) {
+absl::Status SerializeAutotuneMaps(std::string *output) {
   AutotuneMapsProto proto;
 #if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
-  *proto.mutable_conv_map() = ConvMapToProto();
+  TF_ASSIGN_OR_RETURN(*proto.mutable_conv_map(),
+                      ConvMapToProto(*ConvAutotuneMap::GetInstance()));
+  TF_ASSIGN_OR_RETURN(*proto.mutable_fused_conv_map(),
+                      ConvMapToProto(*FusedConvAutotuneMap::GetInstance()));
 #endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM
-  *output = autotune_maps_utils::SerializeProtoDeterministic(proto);
-  return Status::OK();
+  TF_RET_CHECK(tsl::SerializeToStringDeterministic(proto, output));
+  return absl::OkStatus();
 }
 
-Status LoadSerializedAutotuneMaps(absl::string_view s) {
+absl::Status LoadSerializedAutotuneMaps(absl::string_view s) {
 #if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
   AutotuneMapsProto proto;
   // The explicit string conversion here is a workaround for
   // resolving the issue that OSS proto library's ParseFromString only accepts
   // std::string.
-  if (!proto.ParseFromString(string(s))) {
-    return errors::InvalidArgument(
+  if (!proto.ParseFromString(s)) {
+    return absl::InvalidArgumentError(
         "Failed to parse the autotune maps from string.");
   }
-  TF_RETURN_IF_ERROR(PopulateConvMap(proto.conv_map()));
+  TF_RETURN_IF_ERROR(
+      PopulateConvMap(proto.conv_map(), ConvAutotuneMap::GetInstance()));
+  TF_RETURN_IF_ERROR(PopulateConvMap(proto.fused_conv_map(),
+                                     FusedConvAutotuneMap::GetInstance()));
   // TODO(b/189530096): Populate autotune maps for more ops.
 #endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 void ResetAutotuneMaps() {
 #if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
-  AutotuneConv::GetInstance()->ClearMap();
+  ConvAutotuneMap::GetInstance()->ClearMap();
+  FusedConvAutotuneMap::GetInstance()->ClearMap();
 #endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 }
 

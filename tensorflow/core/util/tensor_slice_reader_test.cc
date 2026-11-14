@@ -15,10 +15,18 @@ limitations under the License.
 
 #include "tensorflow/core/util/tensor_slice_reader.h"
 
+#include <functional>
+#include <memory>
+#include <string>
 #include <utility>
 #include <vector>
 
+#include "absl/status/status.h"
+#include "absl/strings/match.h"
+#include "tensorflow/core/framework/tensor.h"
+#include "tensorflow/core/framework/tensor_shape.h"
 #include "tensorflow/core/framework/tensor_shape.pb.h"
+#include "tensorflow/core/framework/tensor_slice.h"
 #include "tensorflow/core/framework/types.h"
 #include "tensorflow/core/framework/versions.pb.h"
 #include "tensorflow/core/lib/core/status_test_util.h"
@@ -61,7 +69,8 @@ namespace {
 void SimpleFloatHelper(
     const TensorSliceWriter::CreateBuilderFunction& create_function,
     TensorSliceReader::OpenTableFunction open_function) {
-  const string fname_base = io::JoinPath(testing::TmpDir(), "float_checkpoint");
+  const std::string fname_base =
+      io::JoinPath(testing::TmpDir(), "float_checkpoint");
 
   TensorShape shape({4, 5});
 
@@ -72,7 +81,7 @@ void SimpleFloatHelper(
   //   .   .   .   .   .
   //   .   .   .   .   .
   {
-    const string fname = strings::StrCat(fname_base, "_0");
+    const std::string fname = absl::StrCat(fname_base, "_0");
     TensorSliceWriter writer(fname, create_function);
     const float data[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9};
     TensorSlice slice = TensorSlice::ParseOrDie("0,2:-");
@@ -94,7 +103,7 @@ void SimpleFloatHelper(
   //   .   .   .   .   .
   //   .   .   .  18  19
   {
-    const string fname = strings::StrCat(fname_base, "_1");
+    const std::string fname = absl::StrCat(fname_base, "_1");
     TensorSliceWriter writer(fname, create_function);
     // slice #0
     {
@@ -118,7 +127,7 @@ void SimpleFloatHelper(
   //   .   .   .   .   .
 
   // Now we need to read the tensor slices
-  const string filepattern = strings::StrCat(fname_base, "_*");
+  const std::string filepattern = absl::StrCat(fname_base, "_*");
   TensorSliceReader reader(filepattern, std::move(open_function));
   TF_EXPECT_OK(reader.status());
   EXPECT_EQ(2, reader.num_files());
@@ -185,8 +194,9 @@ template <typename T, typename U>
 void SimpleIntXHelper(
     const TensorSliceWriter::CreateBuilderFunction& create_function,
     TensorSliceReader::OpenTableFunction open_function,
-    const string& checkpoint_file) {
-  const string fname_base = io::JoinPath(testing::TmpDir(), checkpoint_file);
+    const std::string& checkpoint_file) {
+  const std::string fname_base =
+      io::JoinPath(testing::TmpDir(), checkpoint_file);
 
   TensorShape shape({4, 5});
 
@@ -197,7 +207,7 @@ void SimpleIntXHelper(
   //   .   .   .   .   .
   //   .   .   .   .   .
   {
-    const string fname = strings::StrCat(fname_base, "_0");
+    const std::string fname = absl::StrCat(fname_base, "_0");
     TensorSliceWriter writer(fname, create_function);
     const T data[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9};
     TensorSlice slice = TensorSlice::ParseOrDie("0,2:-");
@@ -219,7 +229,7 @@ void SimpleIntXHelper(
   //   .   .   .   .   .
   //   .   .   .  18  19
   {
-    const string fname = strings::StrCat(fname_base, "_1");
+    const std::string fname = absl::StrCat(fname_base, "_1");
     TensorSliceWriter writer(fname, create_function);
     // slice #0
     {
@@ -243,7 +253,7 @@ void SimpleIntXHelper(
   //   .   .   .   .   .
 
   // Now we need to read the tensor slices
-  const string filepattern = strings::StrCat(fname_base, "_*");
+  const std::string filepattern = absl::StrCat(fname_base, "_*");
   TensorSliceReader reader(filepattern, std::move(open_function));
   TF_EXPECT_OK(reader.status());
   EXPECT_EQ(2, reader.num_files());
@@ -309,11 +319,11 @@ void SimpleIntXHelper(
                                        #TYPE "_checkpoint");          \
   }
 
-TEST_SIMPLE_INT(int32, int32)
+TEST_SIMPLE_INT(int32_t, int32_t)
 TEST_SIMPLE_INT(int64_t, int64_t)
-TEST_SIMPLE_INT(int16, int32)
-TEST_SIMPLE_INT(int8, int32)
-TEST_SIMPLE_INT(uint8, int32)
+TEST_SIMPLE_INT(int16_t, int32_t)
+TEST_SIMPLE_INT(int8_t, int32_t)
+TEST_SIMPLE_INT(uint8_t, int32_t)
 
 // Modifies the SavedTensorSlices messages in a checkpoint to allow creating
 // malformed or unsupported checkpoints.
@@ -328,7 +338,7 @@ void MutateSavedTensorSlices(
   {
     std::unique_ptr<RandomAccessFile> file;
     TF_CHECK_OK(Env::Default()->NewRandomAccessFile(fname, &file));
-    uint64 file_size;
+    uint64_t file_size;
     TF_CHECK_OK(Env::Default()->GetFileSize(fname, &file_size));
     table::Table* t;
     TF_CHECK_OK(table::Table::Open(options, file.get(), file_size, &t));
@@ -356,11 +366,12 @@ void MutateSavedTensorSlices(
 }
 
 TEST(TensorSliceReaderTest, MissingTensorType) {
-  const string fname = io::JoinPath(testing::TmpDir(), "invalid_checkpoint");
+  const std::string fname =
+      io::JoinPath(testing::TmpDir(), "invalid_checkpoint");
   TensorSliceWriter writer(fname, CreateTableTensorSliceBuilder);
-  const int32 data[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9};
-  TensorShape shape({4, 5});
-  TensorSlice slice = TensorSlice::ParseOrDie("0,2:-");
+  const int32_t data[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9};
+  TensorShape shape({2, 5});
+  TensorSlice slice(2);
   TF_CHECK_OK(writer.Add("test", shape, slice, data));
   TF_CHECK_OK(writer.Finish());
 
@@ -380,15 +391,17 @@ TEST(TensorSliceReaderTest, MissingTensorType) {
   // unset (invalid) type.
   EXPECT_TRUE(reader.HasTensor("test", nullptr, nullptr));
   std::unique_ptr<Tensor> tensor;
-  EXPECT_FALSE(reader.GetTensor("test", &tensor).ok());
+  absl::Status s = reader.GetTensor("test", &tensor);
+  EXPECT_EQ(s.code(), absl::StatusCode::kInvalidArgument) << s;
 }
 
 TEST(TensorSliceReaderTest, UnsupportedTensorType) {
-  const string fname = io::JoinPath(testing::TmpDir(), "int32_ref_checkpoint");
+  const std::string fname =
+      io::JoinPath(testing::TmpDir(), "int32_ref_checkpoint");
   TensorSliceWriter writer(fname, CreateTableTensorSliceBuilder);
-  const int32 data[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9};
-  TensorShape shape({4, 5});
-  TensorSlice slice = TensorSlice::ParseOrDie("0,2:-");
+  const int32_t data[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9};
+  TensorShape shape({2, 5});
+  TensorSlice slice(2);
   TF_CHECK_OK(writer.Add("test", shape, slice, data));
   TF_CHECK_OK(writer.Finish());
 
@@ -408,14 +421,15 @@ TEST(TensorSliceReaderTest, UnsupportedTensorType) {
   // unsupported type.
   EXPECT_TRUE(reader.HasTensor("test", nullptr, nullptr));
   std::unique_ptr<Tensor> tensor;
-  EXPECT_FALSE(reader.GetTensor("test", &tensor).ok());
+  absl::Status s = reader.GetTensor("test", &tensor);
+  EXPECT_EQ(s.code(), absl::StatusCode::kInvalidArgument) << s;
 }
 
 TEST(TensorSliceReaderTest, NegativeTensorShapeDimension) {
-  const string fname =
+  const std::string fname =
       io::JoinPath(testing::TmpDir(), "negative_dim_checkpoint");
   TensorSliceWriter writer(fname, CreateTableTensorSliceBuilder);
-  const int32 data[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9};
+  const int32_t data[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9};
   TF_CHECK_OK(writer.Add("test", TensorShape({4, 5}),
                          TensorSlice::ParseOrDie("0,2:-"), data));
   TF_CHECK_OK(writer.Finish());
@@ -437,10 +451,10 @@ TEST(TensorSliceReaderTest, NegativeTensorShapeDimension) {
 }
 
 TEST(TensorSliceReaderTest, InvalidTensorSlice) {
-  const string fname =
+  const std::string fname =
       io::JoinPath(testing::TmpDir(), "invalid_slice_checkpoint");
   TensorSliceWriter writer(fname, CreateTableTensorSliceBuilder);
-  const int32 data[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9};
+  const int32_t data[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9};
   TF_CHECK_OK(writer.Add("test", TensorShape({4, 5}),
                          TensorSlice::ParseOrDie("0,2:-"), data));
   TF_CHECK_OK(writer.Finish());
@@ -460,12 +474,11 @@ TEST(TensorSliceReaderTest, InvalidTensorSlice) {
 }
 
 TEST(TensorSliceReaderTest, MissingTensorData) {
-  const string fname =
+  const std::string fname =
       io::JoinPath(testing::TmpDir(), "missing_data_checkpoint");
   TensorSliceWriter writer(fname, CreateTableTensorSliceBuilder);
-  const int32 data[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9};
-  TF_ASSERT_OK(writer.Add("test", TensorShape({4, 5}),
-                          TensorSlice::ParseOrDie("0,2:-"), data));
+  const int32_t data[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9};
+  TF_ASSERT_OK(writer.Add("test", TensorShape({2, 5}), TensorSlice(2), data));
   TF_ASSERT_OK(writer.Finish());
 
   MutateSavedTensorSlices(fname, [&](SavedTensorSlices sts) {
@@ -483,13 +496,15 @@ TEST(TensorSliceReaderTest, MissingTensorData) {
   // data.
   EXPECT_TRUE(reader.HasTensor("test", nullptr, nullptr));
   std::unique_ptr<Tensor> tensor;
-  EXPECT_FALSE(reader.GetTensor("test", &tensor).ok());
+  absl::Status s = reader.GetTensor("test", &tensor);
+  EXPECT_EQ(s.code(), absl::StatusCode::kNotFound) << s;
 }
 
 void CachedTensorSliceReaderTesterHelper(
     const TensorSliceWriter::CreateBuilderFunction& create_function,
     const TensorSliceReader::OpenTableFunction& open_function) {
-  const string fname_base = io::JoinPath(testing::TmpDir(), "float_checkpoint");
+  const std::string fname_base =
+      io::JoinPath(testing::TmpDir(), "float_checkpoint");
 
   TensorShape shape({4, 5});
 
@@ -500,7 +515,7 @@ void CachedTensorSliceReaderTesterHelper(
   //   .   .   .   .   .
   //   .   .   .   .   .
   {
-    const string fname = strings::StrCat(fname_base, "_0");
+    const std::string fname = absl::StrCat(fname_base, "_0");
     TensorSliceWriter writer(fname, create_function);
     const float data[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9};
     TensorSlice slice = TensorSlice::ParseOrDie("0,2:-");
@@ -522,7 +537,7 @@ void CachedTensorSliceReaderTesterHelper(
   //   .   .   .   .   .
   //   .   .   .  18  19
   {
-    const string fname = strings::StrCat(fname_base, "_1");
+    const std::string fname = absl::StrCat(fname_base, "_1");
     TensorSliceWriter writer(fname, create_function);
     // slice #0
     {
@@ -547,7 +562,7 @@ void CachedTensorSliceReaderTesterHelper(
 
   // Now we need to read the tensor slices
   TensorSliceReaderCache cache;
-  const string filepattern = strings::StrCat(fname_base, "_*");
+  const std::string filepattern = absl::StrCat(fname_base, "_*");
   const TensorSliceReader* reader = cache.GetReader(
       filepattern, open_function, TensorSliceReader::kLoadAllShards);
   EXPECT_TRUE(reader != nullptr);
@@ -578,14 +593,14 @@ TEST(CachedTensorSliceReaderTest, SimpleFloat) {
                                       OpenTableTensorSliceReader);
 }
 
-static void VersionTest(const VersionDef& versions, const string& error) {
-  const string path = io::JoinPath(testing::TmpDir(), "checkpoint");
+static void VersionTest(const VersionDef& versions, const std::string& error) {
+  const std::string path = io::JoinPath(testing::TmpDir(), "checkpoint");
 
   {
     // Prepare an empty checkpoint with some version information
     SavedTensorSlices sts;
     *sts.mutable_meta()->mutable_versions() = versions;
-    string contents;
+    std::string contents;
     EXPECT_TRUE(sts.SerializeToString(&contents));
 
     // Write it to disk
@@ -600,8 +615,8 @@ static void VersionTest(const VersionDef& versions, const string& error) {
   // Read it back in and verify that we get the expected error
   TensorSliceReader reader(path, OpenTableTensorSliceReader);
   EXPECT_TRUE(reader.status().code() == error::INVALID_ARGUMENT &&
-              absl::StartsWith(reader.status().error_message(), error))
-      << "Expected error starting with '" << errors::InvalidArgument(error)
+              absl::StartsWith(reader.status().message(), error))
+      << "Expected error starting with '" << absl::InvalidArgumentError(error)
       << "', got '" << reader.status() << "'";
 }
 
@@ -632,9 +647,77 @@ TEST(CheckpointVersionTest, BadConsumer) {
   versions.add_bad_consumers(TF_CHECKPOINT_VERSION);
   VersionTest(
       versions,
-      strings::StrCat(
+      absl::StrCat(
           "Checkpoint disallows consumer version ", TF_CHECKPOINT_VERSION,
           ".  Please upgrade TensorFlow: this version is likely buggy."));
+}
+
+// Positive control: valid full slice checkpoint succeeds.
+TEST(TensorSliceReaderTest, GetTensorFullSliceControlSucceeds) {
+  const std::string fname =
+      io::JoinPath(testing::TmpDir(), "full_slice_checkpoint");
+  TensorSliceWriter writer(fname, CreateTableTensorSliceBuilder);
+  const float data[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9};
+  TensorShape shape({2, 5});
+  TensorSlice full_slice(2);
+  TF_CHECK_OK(writer.Add("test", shape, full_slice, data));
+  TF_CHECK_OK(writer.Finish());
+
+  TensorSliceReader reader(fname, OpenTableTensorSliceReader);
+  TF_EXPECT_OK(reader.status());
+  std::unique_ptr<tensorflow::Tensor> tensor;
+  TF_ASSERT_OK(reader.GetTensor("test", &tensor));
+  ASSERT_NE(tensor, nullptr);
+  EXPECT_EQ(tensor->shape(), shape);
+  const auto tensor_data = tensor->flat<float>();
+  for (int i = 0; i < 10; ++i) {
+    EXPECT_FLOAT_EQ(tensor_data(i), data[i]);
+  }
+}
+
+TEST(TensorSliceReaderTest, GetTensorExplicitFullSliceSucceeds) {
+  const std::string fname =
+      io::JoinPath(testing::TmpDir(), "explicit_full_slice_checkpoint");
+  TensorSliceWriter writer(fname, CreateTableTensorSliceBuilder);
+  const float data[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9};
+  TensorShape shape({2, 5});
+  TensorSlice full_slice = TensorSlice::ParseOrDie("0,2:0,5");
+  // Explicit extents cover the tensor without IsFull() shorthand.
+  EXPECT_FALSE(full_slice.IsFull());
+  TF_CHECK_OK(writer.Add("test", shape, full_slice, data));
+  TF_CHECK_OK(writer.Finish());
+
+  TensorSliceReader reader(fname, OpenTableTensorSliceReader);
+  TF_EXPECT_OK(reader.status());
+  std::unique_ptr<tensorflow::Tensor> tensor;
+  TF_ASSERT_OK(reader.GetTensor("test", &tensor));
+  ASSERT_NE(tensor, nullptr);
+  EXPECT_EQ(tensor->shape(), shape);
+  const auto tensor_data = tensor->flat<float>();
+  for (int i = 0; i < 10; ++i) {
+    EXPECT_FLOAT_EQ(tensor_data(i), data[i]);
+  }
+}
+
+TEST(TensorSliceReaderTest, GetTensorRejectsSinglePartialSlice) {
+  const std::string fname =
+      io::JoinPath(testing::TmpDir(), "single_partial_slice_checkpoint");
+  TensorSliceWriter writer(fname, CreateTableTensorSliceBuilder);
+  const float data[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9};
+  TensorShape shape({4, 5});
+  TensorSlice partial_slice = TensorSlice::ParseOrDie("0,2:-");
+  TF_CHECK_OK(writer.Add("test", shape, partial_slice, data));
+  TF_CHECK_OK(writer.Finish());
+
+  TensorSliceReader reader(fname, OpenTableTensorSliceReader);
+  TF_EXPECT_OK(reader.status());
+  std::unique_ptr<tensorflow::Tensor> tensor;
+  absl::Status s = reader.GetTensor("test", &tensor);
+  EXPECT_EQ(s.code(), absl::StatusCode::kUnimplemented) << s;
+  EXPECT_TRUE(
+      absl::StrContains(s.message(), "Sliced checkpoints are not supported"))
+      << s;
+  EXPECT_EQ(tensor, nullptr);
 }
 
 }  // namespace

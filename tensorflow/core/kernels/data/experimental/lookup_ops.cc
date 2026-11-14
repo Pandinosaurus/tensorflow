@@ -13,16 +13,20 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include <algorithm>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include "absl/log/log.h"
+#include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
 #include "tensorflow/core/data/root_dataset.h"
 #include "tensorflow/core/framework/dataset.h"
 #include "tensorflow/core/framework/function_handle_cache.h"
 #include "tensorflow/core/framework/op_kernel.h"
+#include "tensorflow/core/framework/op_requires.h"
 #include "tensorflow/core/framework/register_types.h"
 #include "tensorflow/core/framework/tensor.h"
 #include "tensorflow/core/framework/tensor_shape.h"
@@ -32,6 +36,7 @@ limitations under the License.
 #include "tensorflow/core/kernels/lookup_util.h"
 #include "tensorflow/core/lib/core/errors.h"
 #include "tensorflow/core/lib/core/status.h"
+#include "tensorflow/core/lib/gtl/cleanup.h"
 #include "tensorflow/core/lib/io/inputbuffer.h"
 #include "tensorflow/core/lib/strings/numbers.h"
 #include "tensorflow/core/lib/strings/str_util.h"
@@ -53,15 +58,15 @@ class DatasetIterator
 
   ~DatasetIterator() override {}
 
-  Status Init(OpKernelContext* ctx) {
+  absl::Status Init(OpKernelContext* ctx) {
     data::IteratorContext::Params params(ctx);
-    function_handle_cache_ = absl::make_unique<FunctionHandleCache>(params.flr);
+    function_handle_cache_ = std::make_unique<FunctionHandleCache>(params.flr);
     params.function_handle_cache = function_handle_cache_.get();
     params.resource_mgr = &resource_mgr_;
     cancellation_manager_ =
-        absl::make_unique<CancellationManager>(ctx->cancellation_manager());
+        std::make_unique<CancellationManager>(ctx->cancellation_manager());
     params.cancellation_manager = cancellation_manager_.get();
-    iterator_ctx_ = absl::make_unique<data::IteratorContext>(std::move(params));
+    iterator_ctx_ = std::make_unique<data::IteratorContext>(std::move(params));
 
     DatasetBase* finalized_dataset;
     TF_RETURN_IF_ERROR(
@@ -70,7 +75,7 @@ class DatasetIterator
         iterator_ctx_.get(), nullptr, "LookupTable", &iterator_));
     core::ScopedUnref unref(finalized_dataset);
     Next();
-    return Status::OK();
+    return absl::OkStatus();
   }
 
   void Next() override {
@@ -78,7 +83,7 @@ class DatasetIterator
     tensors_.clear();
     status_ = iterator_->GetNext(iterator_ctx_.get(), &tensors_, &end_of_input);
     if (status_.ok() && end_of_input) {
-      status_ = errors::OutOfRange("end of iterator");
+      status_ = absl::OutOfRangeError("end of iterator");
     }
   }
 
@@ -88,7 +93,7 @@ class DatasetIterator
 
   const Tensor& values() const override { return tensors_[1]; }
 
-  Status status() const override { return status_; }
+  absl::Status status() const override { return status_; }
 
   int64_t total_size() const override {
     int64_t size = dataset_->Cardinality();
@@ -106,14 +111,14 @@ class DatasetIterator
   std::unique_ptr<CancellationManager> cancellation_manager_;
   std::unique_ptr<data::IteratorBase> iterator_;
   std::vector<Tensor> tensors_;
-  Status status_;
+  absl::Status status_;
 };
 
 std::unique_ptr<InitializerSerializer> MakeDatasetInitializerSerializer(
     OpKernelContext* ctx, data::DatasetBase* dataset) {
   dataset->Ref();
   auto unref_dataset = [dataset] { dataset->Unref(); };
-  return absl::make_unique<InitializerSerializer>(
+  return std::make_unique<InitializerSerializer>(
       [dataset, resource_manager = ctx->resource_manager(),
        device_name = ctx->device()->attributes().name()](
           GraphDefBuilder* builder, Node* table, Node** out) {
@@ -128,11 +133,11 @@ std::unique_ptr<InitializerSerializer> MakeDatasetInitializerSerializer(
         *out = ops::BinaryOp("InitializeTableFromDataset", table, dataset_node,
                              builder->opts());
         if (*out == nullptr) {
-          return errors::Internal(
-              "Failed to create InitializeTableFromDataset op: ",
-              builder->opts().StatusToString());
+          return absl::InternalError(
+              absl::StrCat("Failed to create InitializeTableFromDataset op: ",
+                           builder->opts().StatusToString()));
         }
-        return Status::OK();
+        return absl::OkStatus();
       },
       /*cleanup=*/std::move(unref_dataset));
 }
@@ -146,33 +151,47 @@ void InitializeTableFromDataset(OpKernelContext* ctx,
   auto cleanup = gtl::MakeCleanup([done = std::move(done)]() { done(); });
   // Assert that the dataset types match up to that expected in the table.
   const auto& dataset_types = dataset->output_dtypes();
-  OP_REQUIRES(
+  OP_REQUIRES_ASYNC(
       ctx, dataset_types.size() == 2,
-      errors::InvalidArgument("Dataset should have two output types only"));
-  OP_REQUIRES(ctx, dataset_types[0] == table->key_dtype(),
-              errors::InvalidArgument(
-                  "Key dtype expected: ", table->key_dtype(),
-                  " but obtained: ", dataset_types[0], " from the dataset"));
-  OP_REQUIRES(ctx, dataset_types[1] == table->value_dtype(),
-              errors::InvalidArgument(
-                  "Value dtype expected: ", table->value_dtype(),
-                  " but obtained: ", dataset_types[1], " from the dataset"));
+      absl::InvalidArgumentError("Dataset should have two output types only"),
+      []() {});
+  OP_REQUIRES_ASYNC(
+      ctx, dataset_types[0] == table->key_dtype(),
+      absl::InvalidArgumentError(absl::StrCat(
+          "Key dtype expected: ", DataTypeString(table->key_dtype()),
+          " but obtained: ", DataTypeString(dataset_types[0]),
+          " from the dataset")),
+      []() {});
+  OP_REQUIRES_ASYNC(
+      ctx, dataset_types[1] == table->value_dtype(),
+      absl::InvalidArgumentError(absl::StrCat(
+          "Value dtype expected: ", DataTypeString(table->value_dtype()),
+          " but obtained: ", DataTypeString(dataset_types[1]),
+          " from the dataset")),
+      []() {});
   // Assert that the dataset output shapes are scalars.
   const auto& dataset_shapes = dataset->output_shapes();
-  OP_REQUIRES(
+  OP_REQUIRES_ASYNC(
       ctx, dataset_shapes.size() == 2,
-      errors::InvalidArgument("Dataset should have two output shapes only"));
-  OP_REQUIRES(ctx, dataset_shapes[0].IsCompatibleWith(PartialTensorShape({})),
-              errors::InvalidArgument("Expected scalar for key. Obtained: ",
-                                      dataset_shapes[0].DebugString()));
-  OP_REQUIRES(ctx, dataset_shapes[1].IsCompatibleWith(PartialTensorShape({})),
-              errors::InvalidArgument("Expected scalar for key. Obtained: ",
-                                      dataset_shapes[1].DebugString()));
+      absl::InvalidArgumentError("Dataset should have two output shapes only"),
+      []() {});
+  OP_REQUIRES_ASYNC(ctx,
+                    dataset_shapes[0].IsCompatibleWith(PartialTensorShape({})),
+                    absl::InvalidArgumentError(
+                        absl::StrCat("Expected scalar for key. Obtained: ",
+                                     dataset_shapes[0].DebugString())),
+                    []() {});
+  OP_REQUIRES_ASYNC(ctx,
+                    dataset_shapes[1].IsCompatibleWith(PartialTensorShape({})),
+                    absl::InvalidArgumentError(
+                        absl::StrCat("Expected scalar for key. Obtained: ",
+                                     dataset_shapes[1].DebugString())),
+                    []() {});
   DatasetIterator iter(dataset);
-  OP_REQUIRES_OK(ctx, iter.Init(ctx));
-  Status s =
+  OP_REQUIRES_OK_ASYNC(ctx, iter.Init(ctx), []() {});
+  absl::Status s =
       table->Initialize(iter, MakeDatasetInitializerSerializer(ctx, dataset));
-  if (errors::IsFailedPrecondition(s) && table->is_initialized()) {
+  if (absl::IsFailedPrecondition(s) && table->is_initialized()) {
     LOG(INFO) << "Table already initialized from dataset.";
     return;
   }
@@ -186,20 +205,23 @@ class InitializeTableFromDatasetOp : public AsyncOpKernel {
         background_worker_(ctx->env(), "initialize_table_from_dataset") {}
 
   void ComputeAsync(OpKernelContext* ctx, DoneCallback done) override {
+    auto cleanup = gtl::MakeCleanup([&done]() { done(); });
     lookup::InitializableLookupTable* table;
     OP_REQUIRES_OK_ASYNC(
-        ctx, GetInitializableLookupTable("table_handle", ctx, &table), done);
+        ctx, GetInitializableLookupTable("table_handle", ctx, &table), []() {});
     core::ScopedUnref unref_me(table);
     data::DatasetBase* dataset;
     OP_REQUIRES_OK_ASYNC(
-        ctx, GetDatasetFromVariantTensor(ctx->input(1), &dataset), done);
+        ctx, GetDatasetFromVariantTensor(ctx->input(1), &dataset), []() {});
+    cleanup.release();
     background_worker_.Schedule([ctx, dataset, table, done]() {
       InitializeTableFromDataset(ctx, dataset, table, done);
     });
   }
 
  private:
-  TF_DISALLOW_COPY_AND_ASSIGN(InitializeTableFromDatasetOp);
+  InitializeTableFromDatasetOp(const InitializeTableFromDatasetOp&) = delete;
+  void operator=(const InitializeTableFromDatasetOp&) = delete;
 
   data::BackgroundWorker background_worker_;
 };

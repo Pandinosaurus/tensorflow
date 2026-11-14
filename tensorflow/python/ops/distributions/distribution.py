@@ -14,16 +14,11 @@
 # ==============================================================================
 """Base classes for probability distributions."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import abc
 import contextlib
 import types
 
 import numpy as np
-import six
 
 from tensorflow.python.eager import context
 from tensorflow.python.framework import dtypes
@@ -69,8 +64,7 @@ _DISTRIBUTION_PUBLIC_METHOD_WRAPPERS = [
 ]
 
 
-@six.add_metaclass(abc.ABCMeta)
-class _BaseDistribution(object):
+class _BaseDistribution(metaclass=abc.ABCMeta):
   """Abstract base class needed for resolving subclass hierarchy."""
   pass
 
@@ -199,21 +193,24 @@ class _DistributionMeta(abc.ABCMeta):
         continue
       class_attr_value = _copy_fn(base_attr_value)
       class_attr_docstring = tf_inspect.getdoc(base_attr_value)
-      if class_attr_docstring is None:
-        raise ValueError(
-            "Expected base class fn to contain a docstring: %s.%s"
-            % (base.__name__, attr))
-      class_attr_value.__doc__ = _update_docstring(
-          class_attr_value.__doc__,
-          ("Additional documentation from `%s`:\n\n%s"
-           % (classname, class_special_attr_docstring)))
+      if (
+          class_attr_docstring is not None
+          and class_attr_value.__doc__ is not None
+      ):
+        class_attr_value.__doc__ = _update_docstring(
+            class_attr_value.__doc__,
+            (
+                "Additional documentation from `%s`:\n\n%s"
+                % (classname, class_special_attr_docstring)
+            ),
+        )
       attrs[attr] = class_attr_value
 
     return abc.ABCMeta.__new__(mcs, classname, baseclasses, attrs)
 
 
 @tf_export(v1=["distributions.ReparameterizationType"])
-class ReparameterizationType(object):
+class ReparameterizationType:
   """Instances of this class represent how sampling is reparameterized.
 
   Two static instances exist in the distributions library, signifying
@@ -275,9 +272,8 @@ tf_export(v1=["distributions.NOT_REPARAMETERIZED"]).export_constant(
     __name__, "NOT_REPARAMETERIZED")
 
 
-@six.add_metaclass(_DistributionMeta)
 @tf_export(v1=["distributions.Distribution"])
-class Distribution(_BaseDistribution):
+class Distribution(_BaseDistribution, metaclass=_DistributionMeta):
   """A generic probability distribution base class.
 
   `Distribution` is a base class for constructing and organizing properties

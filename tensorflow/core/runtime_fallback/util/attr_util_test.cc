@@ -14,7 +14,11 @@ limitations under the License.
 ==============================================================================*/
 #include "tensorflow/core/runtime_fallback/util/attr_util.h"
 
-#include "llvm/Support/Error.h"
+#include <memory>
+#include <string>
+#include <vector>
+
+#include <gmock/gmock.h>
 #include "tensorflow/core/framework/attr_value.pb.h"
 #include "tensorflow/core/framework/node_def_util.h"
 #include "tensorflow/core/framework/tensor.h"
@@ -68,14 +72,14 @@ INSTANTIATE_TEST_SUITE_P(
 
 TEST_P(ParseTfDataTypeTest, Ok) {
   DataType data_type;
-  ASSERT_EQ(ParseTfDataType(GetParam().str_val, &data_type), Status::OK());
+  ASSERT_EQ(ParseTfDataType(GetParam().str_val, &data_type), absl::OkStatus());
   EXPECT_EQ(data_type, GetParam().dtype);
 }
 
 TEST(ParseTfDataTypeTest, ReturnsInvalidArgument) {
   DataType data_type;
   EXPECT_EQ(ParseTfDataType("DT_BFLOAT16_REF", &data_type),
-            errors::InvalidArgument(
+            absl::InvalidArgumentError(
                 "Unsupported dtype, DT_BFLOAT16_REF in ParseTfDataType."));
 }
 
@@ -206,7 +210,7 @@ TEST(UtilsTest, ParseTensorAttrValueOk) {
                                 int_val: 1
                                 int_val: 1
                                 int_val: 1)pb";
-  ASSERT_EQ(ParseTensorAttrValue(tensor_str, &tensor), Status::OK());
+  ASSERT_EQ(ParseTensorAttrValue(tensor_str, &tensor), absl::OkStatus());
   EXPECT_EQ(tensor.dtype(), DT_INT32);
   EXPECT_EQ(tensor.NumElements(), 4);
 }
@@ -214,57 +218,58 @@ TEST(UtilsTest, ParseTensorAttrValueOk) {
 TEST(UtilsTest, ParseTensorAttrValueReturnsInvalidArgument) {
   tensorflow::Tensor tensor;
   std::string tensor_str = R"pb(foobar)pb";
-  EXPECT_EQ(
-      ParseTensorAttrValue(tensor_str, &tensor),
-      errors::InvalidArgument("Could not parse tensor value from \"foobar\""));
+  EXPECT_EQ(ParseTensorAttrValue(tensor_str, &tensor),
+            absl::InvalidArgumentError(
+                "Could not parse tensor value from \"foobar\""));
 }
 
 TEST(UtilsTest, ParseTensorShapeAttrValueOk) {
   std::vector<int64_t> dims;
-  ASSERT_THAT(ParseTensorShapeAttrValue("[1,2,3]", &dims), Status::OK());
+  ASSERT_THAT(ParseTensorShapeAttrValue("[1,2,3]", &dims), absl::OkStatus());
   EXPECT_THAT(dims, ElementsAre(Eq(1), Eq(2), Eq(3)));
 }
 
 TEST(UtilsTest, ParseTensorShapeAttrValueInvalidArgument) {
   std::vector<int64_t> dims;
-  EXPECT_EQ(
-      ParseTensorShapeAttrValue("foobar", &dims),
-      errors::InvalidArgument("Tensor shape attribute must be a string of the "
-                              "form [1,2...], instead got \"foobar\""));
+  EXPECT_EQ(ParseTensorShapeAttrValue("foobar", &dims),
+            absl::InvalidArgumentError(
+                "Tensor shape attribute must be a string of the "
+                "form [1,2...], instead got \"foobar\""));
 }
 
 TEST(UtilsTest, ParseTensorShapeAttrValueInvalidArgumentEmptyString) {
   std::vector<int64_t> dims;
-  EXPECT_EQ(ParseTensorShapeAttrValue("", &dims),
-            errors::InvalidArgument("Tensor shape attribute must be a string "
-                                    "of the form [1,2...], instead got \"\""));
+  EXPECT_EQ(
+      ParseTensorShapeAttrValue("", &dims),
+      absl::InvalidArgumentError("Tensor shape attribute must be a string "
+                                 "of the form [1,2...], instead got \"\""));
 }
 
 TEST(UtilsTest, ParseBoolAttrValueOk) {
   bool bool_val;
-  ASSERT_THAT(ParseBoolAttrValue("false", &bool_val), Status::OK());
+  ASSERT_THAT(ParseBoolAttrValue("false", &bool_val), absl::OkStatus());
   EXPECT_FALSE(bool_val);
 
-  ASSERT_THAT(ParseBoolAttrValue("true", &bool_val), Status::OK());
+  ASSERT_THAT(ParseBoolAttrValue("true", &bool_val), absl::OkStatus());
   EXPECT_TRUE(bool_val);
 }
 
 TEST(UtilsTest, ParseBoolAttrValueInvalidArgument) {
   bool bool_val;
   EXPECT_EQ(ParseBoolAttrValue("foobar", &bool_val),
-            errors::InvalidArgument("Could not parse bool from \"foobar\""));
+            absl::InvalidArgumentError("Could not parse bool from \"foobar\""));
 }
 
 TEST(UtilsTest, ParseIntAttrValueOk) {
   int64_t int_val;
-  ASSERT_THAT(ParseIntAttrValue("42", &int_val), Status::OK());
+  ASSERT_THAT(ParseIntAttrValue("42", &int_val), absl::OkStatus());
   EXPECT_EQ(int_val, 42);
 }
 
 TEST(UtilsTest, ParseIntAttrValueInvalidArgument) {
   int64_t int_val;
   EXPECT_EQ(ParseIntAttrValue("foobar", &int_val),
-            errors::InvalidArgument("Could not parse int from \"foobar\""));
+            absl::InvalidArgumentError("Could not parse int from \"foobar\""));
 }
 
 TEST(UtilsTest, IsUnusedAttributeOk) {
@@ -277,10 +282,18 @@ TEST(UtilsTest, IsUnusedAttributeOk) {
 TEST(UtilsTest, FillAttrValueMapOk) {
   tfrt::OpAttrs attrs;
   attrs.SetArray("shape", tfrt::ArrayRef<int64_t>{2, 2});
-  attrs.SetArray("values", tfrt::ArrayRef<int64_t>{2});
+  attrs.SetArray("values", tfrt::ArrayRef<float>{2});
+  attrs.SetArray("flags", tfrt::ArrayRef<bool>{false, true});
+  attrs.SetArray("baz", tfrt::ArrayRef<char>{'a'});
+
   attrs.Set<bool>("transpose_a", false);
   attrs.Set<bool>("transpose_b", true);
-  attrs.Set<int64_t>("result_segment_sizes", 1);
+  attrs.Set<int64_t>("result_segment_sizes", 2);  // unused
+  attrs.Set<float>("foo", 2);
+  attrs.Set<int64_t>("bar", 2);
+
+  tfrt::AggregateAttr aggAttr;
+  attrs.Set<tfrt::AggregateAttr>("aggAttr", aggAttr);
 
   AttrValueMap map;
   auto host_context = CreateTestHostContext();
@@ -289,12 +302,18 @@ TEST(UtilsTest, FillAttrValueMapOk) {
   ASSERT_FALSE(llvm::errorToBool(
       FillAttrValueMap(attrs.freeze(), host_context.get(), &map)));
 
-  EXPECT_THAT(map,
-              UnorderedElementsAre(
-                  Pair(Eq("shape"), EqualsProto(R"pb(list { i: 2 i: 2 })pb")),
-                  Pair(Eq("values"), EqualsProto(R"pb(list { i: 2 })pb")),
-                  Pair(Eq("transpose_a"), EqualsProto(R"pb(b: false)pb")),
-                  Pair(Eq("transpose_b"), EqualsProto(R"pb(b: true)pb"))));
+  EXPECT_THAT(
+      map,
+      UnorderedElementsAre(
+          Pair(Eq("shape"), EqualsProto(R"pb(list { i: 2 i: 2 })pb")),
+          Pair(Eq("values"), EqualsProto(R"pb(list { f: 2 })pb")),
+          Pair(Eq("flags"), EqualsProto(R"pb(list { b: false b: true })pb")),
+          Pair(Eq("baz"), EqualsProto(R"pb(s: "a")pb")),
+          Pair(Eq("transpose_a"), EqualsProto(R"pb(b: false)pb")),
+          Pair(Eq("transpose_b"), EqualsProto(R"pb(b: true)pb")),
+          Pair(Eq("foo"), EqualsProto(R"pb(f: 2)pb")),
+          Pair(Eq("bar"), EqualsProto(R"pb(i: 2)pb")),
+          Pair(Eq("aggAttr"), EqualsProto(R"pb(list {})pb"))));
 }
 
 }  // namespace

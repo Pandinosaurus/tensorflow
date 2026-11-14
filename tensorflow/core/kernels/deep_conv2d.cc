@@ -82,7 +82,7 @@ static int64_t GetDirectConvCost(int filter_rows, int filter_cols, int in_depth,
 static bool ReadBoolFromEnvVar(const char* env_var_name, bool default_val) {
   const char* tf_env_var_val = getenv(env_var_name);
   if (tf_env_var_val != nullptr) {
-    StringPiece tf_env_var_val_str(tf_env_var_val);
+    absl::string_view tf_env_var_val_str(tf_env_var_val);
     if (tf_env_var_val_str == "0") {
       return false;
     }
@@ -1065,7 +1065,7 @@ struct DeepConv2D<CPUDevice, T> {
           packed_tile_per_tile_size + gemm_out_per_tile_size;
 
       const int64_t num_tiles_cache = std::max(
-          int64{4}, (cache_size - total_fixed_cost) / total_per_tile_cost);
+          int64_t{4}, (cache_size - total_fixed_cost) / total_per_tile_cost);
       const int64_t num_tiles = std::min(num_tiles_cache, col_tiles);
 
       // Allocate temporary buffer 'buffer1', which is first used for copying

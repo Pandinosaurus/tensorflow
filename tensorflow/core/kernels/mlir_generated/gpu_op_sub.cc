@@ -13,7 +13,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
+#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
+#include "tensorflow/core/framework/types.pb.h"
 #include "tensorflow/core/kernels/mlir_generated/base_gpu_op.h"
 
 namespace tensorflow {
@@ -21,17 +22,21 @@ namespace tensorflow {
 GENERATE_AND_REGISTER_BINARY_GPU_KERNEL(Sub, DT_HALF);
 GENERATE_AND_REGISTER_BINARY_GPU_KERNEL(Sub, DT_FLOAT);
 GENERATE_AND_REGISTER_BINARY_GPU_KERNEL(Sub, DT_DOUBLE);
+
 GENERATE_AND_REGISTER_BINARY_GPU_KERNEL(Sub, DT_INT64);
+
 GENERATE_AND_REGISTER_BINARY_GPU_KERNEL3(Sub, DT_INT32, DT_INT32, DT_UINT32,
                                          DT_UINT32);
 GENERATE_AND_REGISTER_BINARY_GPU_KERNEL3(Sub, DT_INT64, DT_INT64, DT_UINT64,
                                          DT_UINT64);
+
 GENERATE_AND_REGISTER_BINARY_GPU_KERNEL(Sub, DT_COMPLEX64);
 GENERATE_AND_REGISTER_BINARY_GPU_KERNEL(Sub, DT_COMPLEX128);
 
-// This kernel is JIT-compiled.
-#if defined(MLIR_GENERATED_EXPERIMENTAL_KERNELS_ENABLED)
+// These kernels are JIT-compiled.
+GENERATE_AND_REGISTER_BINARY_JIT_GPU_KERNEL(Sub, DT_INT8);
 GENERATE_AND_REGISTER_BINARY_JIT_GPU_KERNEL(Sub, DT_INT16);
-#endif
+GENERATE_AND_REGISTER_BINARY_JIT_GPU_KERNEL(Sub, DT_UINT8);
+GENERATE_AND_REGISTER_BINARY_JIT_GPU_KERNEL(Sub, DT_UINT16);
 
 }  // namespace tensorflow

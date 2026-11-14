@@ -12,8 +12,10 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
-
 #include "tensorflow/core/data/service/utils.h"
+
+#include <memory>
+#include <string>
 
 #include "tensorflow/core/data/service/common.pb.h"
 #include "tensorflow/core/lib/io/record_reader.h"
@@ -25,29 +27,30 @@ limitations under the License.
 namespace tensorflow {
 namespace data {
 
-Status WriteDatasetDef(const std::string& path, const DatasetDef& dataset_def) {
+absl::Status WriteDatasetDef(const std::string& path,
+                             const DatasetDef& dataset_def) {
   std::unique_ptr<WritableFile> file;
   TF_RETURN_IF_ERROR(Env::Default()->NewWritableFile(path, &file));
   io::RecordWriter writer(file.get());
   TF_RETURN_IF_ERROR(writer.WriteRecord(dataset_def.SerializeAsString()));
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-Status ReadDatasetDef(const std::string& path, DatasetDef& dataset_def) {
+absl::Status ReadDatasetDef(const std::string& path, DatasetDef& dataset_def) {
   if (path.empty()) {
-    return errors::InvalidArgument("Path is empty");
+    return absl::InvalidArgumentError("Path is empty");
   }
   TF_RETURN_IF_ERROR(Env::Default()->FileExists(path));
   std::unique_ptr<RandomAccessFile> file;
   TF_RETURN_IF_ERROR(Env::Default()->NewRandomAccessFile(path, &file));
   io::RecordReader reader(file.get());
-  uint64 offset = 0;
+  uint64_t offset = 0;
   tstring record;
   TF_RETURN_IF_ERROR(reader.ReadRecord(&offset, &record));
   if (!dataset_def.ParseFromString(record)) {
-    return errors::DataLoss("Failed to parse dataset definition");
+    return absl::DataLossError("Failed to parse dataset definition");
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 }  // namespace data

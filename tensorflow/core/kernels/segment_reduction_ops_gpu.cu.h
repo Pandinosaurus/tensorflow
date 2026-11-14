@@ -13,20 +13,33 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#ifndef TENSORFLOW_CORE_KERNELS_SEGMENT_REDUCTION_OPS_GPU_CU_H_
+#define TENSORFLOW_CORE_KERNELS_SEGMENT_REDUCTION_OPS_GPU_CU_H_
+
 #if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 
 #define EIGEN_USE_GPU
 
+#include "xla/tsl/platform/statusor.h"
+#include "tensorflow/core/common_runtime/gpu/gpu_event_mgr.h"
+#include "tensorflow/core/framework/bounds_check.h"
 #include "tensorflow/core/framework/register_types.h"
 #include "tensorflow/core/kernels/gpu_prim.h"
 #include "tensorflow/core/kernels/gpu_prim_helpers.h"
 #include "tensorflow/core/kernels/segment_reduction_ops.h"
 #include "tensorflow/core/lib/core/bits.h"
+#include "tensorflow/core/lib/gtl/cleanup.h"
 #include "tensorflow/core/util/determinism.h"
 #include "tensorflow/core/util/env_var.h"
 #include "tensorflow/core/util/gpu_device_functions.h"
 #include "tensorflow/core/util/gpu_kernel_helper.h"
+#include "tensorflow/core/util/gpu_launch_config.h"
+#include "tensorflow/core/util/gpu_solvers.h"  // For ScratchSpace
 #include "tensorflow/core/util/permutation_input_iterator.h"
+
+#if (defined(TENSORFLOW_USE_ROCM) && TENSORFLOW_USE_ROCM)
+#include "tensorflow/core/platform/rocm.h"
+#endif
 
 namespace tensorflow {
 
@@ -43,13 +56,60 @@ using GPUDevice = Eigen::GpuDevice;
   };
 DEFINE_REDUCE_UPDATE_OP_GPU(AtomicSum, GpuAtomicAdd(dest, value))
 DEFINE_REDUCE_UPDATE_OP_GPU(AtomicProd, GpuAtomicMul(dest, value))
-DEFINE_REDUCE_UPDATE_OP_GPU(AtomicMax, GpuAtomicMax(dest, value))
-DEFINE_REDUCE_UPDATE_OP_GPU(AtomicMin, GpuAtomicMin(dest, value))
 DEFINE_REDUCE_UPDATE_OP_GPU(NonAtomicSum, *dest += value)
 DEFINE_REDUCE_UPDATE_OP_GPU(NonAtomicProd, *dest *= value)
-DEFINE_REDUCE_UPDATE_OP_GPU(NonAtomicMax, *dest = max(*dest, value))
-DEFINE_REDUCE_UPDATE_OP_GPU(NonAtomicMin, *dest = min(*dest, value))
 #undef DEFINE_REDUCE_UPDATE_OP_GPU
+
+// Unlike Sum/Prod, Max/Min need NaN-propagating semantics to match
+// functor::Max/Min (used by the deterministic segment-reduction path, and by
+// the CPU kernels): a segment containing a NaN must reduce to NaN. Plain
+// max()/min()/GpuAtomicMax/GpuAtomicMin silently drop NaN instead, since any
+// comparison against NaN is false. GpuAtomicMax/Min already implement
+// floating-point types via a CAS loop around a caller-supplied combine
+// function, so reuse that same mechanism with functor::Max/Min's
+// NaN-propagating combine instead of plain max()/min(); integer types have
+// no NaN to worry about, so they keep using the plain atomic.
+struct AtomicMaxOpGpu {
+  template <typename T>
+  EIGEN_DEVICE_FUNC EIGEN_STRONG_INLINE void operator()(T* dest,
+                                                        const T& value) {
+    if constexpr (Eigen::NumTraits<T>::IsInteger) {
+      GpuAtomicMax(dest, value);
+    } else {
+      detail::GpuAtomicCasHelper(
+          dest, [value](T a) { return functor::Max()(a, value); });
+    }
+  }
+};
+
+struct AtomicMinOpGpu {
+  template <typename T>
+  EIGEN_DEVICE_FUNC EIGEN_STRONG_INLINE void operator()(T* dest,
+                                                        const T& value) {
+    if constexpr (Eigen::NumTraits<T>::IsInteger) {
+      GpuAtomicMin(dest, value);
+    } else {
+      detail::GpuAtomicCasHelper(
+          dest, [value](T a) { return functor::Min()(a, value); });
+    }
+  }
+};
+
+struct NonAtomicMaxOpGpu {
+  template <typename T>
+  EIGEN_DEVICE_FUNC EIGEN_STRONG_INLINE void operator()(T* dest,
+                                                        const T& value) {
+    *dest = functor::Max()(*dest, value);
+  }
+};
+
+struct NonAtomicMinOpGpu {
+  template <typename T>
+  EIGEN_DEVICE_FUNC EIGEN_STRONG_INLINE void operator()(T* dest,
+                                                        const T& value) {
+    *dest = functor::Min()(*dest, value);
+  }
+};
 
 template <typename ReduceOp>
 struct ReduceUpdateOpFor {};
@@ -65,6 +125,8 @@ DEFINE_REDUCE_UPDATE_OP_FOR(functor::Prod, AtomicProdOpGpu, NonAtomicProdOpGpu)
 DEFINE_REDUCE_UPDATE_OP_FOR(functor::Max, AtomicMaxOpGpu, NonAtomicMaxOpGpu)
 DEFINE_REDUCE_UPDATE_OP_FOR(functor::Min, AtomicMinOpGpu, NonAtomicMinOpGpu)
 #undef DEFINE_REDUCE_UPDATE_OP_FOR
+
+// PR#61339: MSVC does not support compound-assignment operators on device
 
 // SortedSegmentReductionFunctor kernel reduces input data just as
 // UnsortedSegmentReductionCustomKernel does except that input data
@@ -111,15 +173,18 @@ __global__ void SortedSegmentReductionCustomKernel(
       // Decide whether to write result to global memory. Result is only written
       // to global memory if we move to another segment. Otherwise we can keep
       // accumulating locally.
-      if (current_output_segment_id > last_output_segment_id) {
-        const Index output_index =
-            last_output_segment_id * inner_dim_size + segment_offset;
-        // Decide whether to write result to global memory using atomic
-        // operations.
-        if (last_output_segment_id == first_segment_id) {
-          AtomicReductionF()(output + output_index, reduce_res);
-        } else {
-          ReductionF()(output + output_index, reduce_res);
+      if (last_output_segment_id < current_output_segment_id) {
+        if (last_output_segment_id >= 0 &&
+            last_output_segment_id < output_outer_dim_size) {
+          const Index output_index =
+              last_output_segment_id * inner_dim_size + segment_offset;
+          // Decide whether to write result to global memory using atomic
+          // operations.
+          if (last_output_segment_id == first_segment_id) {
+            AtomicReductionF()(output + output_index, reduce_res);
+          } else {
+            ReductionF()(output + output_index, reduce_res);
+          }
         }
         reduce_res = initial_value;
       }
@@ -132,9 +197,12 @@ __global__ void SortedSegmentReductionCustomKernel(
     // For the last result in a strip, always write using atomic operations
     // due to possible race conditions with threads computing
     // the following strip.
-    const Index output_index =
-        last_output_segment_id * inner_dim_size + segment_offset;
-    AtomicReductionF()(output + output_index, reduce_res);
+    if (last_output_segment_id >= 0 &&
+        last_output_segment_id < output_outer_dim_size) {
+      const Index output_index =
+          last_output_segment_id * inner_dim_size + segment_offset;
+      AtomicReductionF()(output + output_index, reduce_res);
+    }
   }
 }
 
@@ -154,7 +222,7 @@ __global__ void SegmentMeanNormalizeKernel(
 }
 
 template <typename SegmentId, typename Index, typename T>
-Status LaunchSegmentMeanNormalizeKernel(
+absl::Status LaunchSegmentMeanNormalizeKernel(
     const GPUDevice& d, SegmentId nsegments, Index ninner,
     const Index* __restrict__ segment_offsets,  // [nsegments + 1]
     T* __restrict__ output) {                   // [nsegments, ninner]
@@ -165,6 +233,37 @@ Status LaunchSegmentMeanNormalizeKernel(
                          config.block_count, config.thread_per_block, 0,
                          d.stream(), nsegments, ninner, segment_offsets,
                          output);
+}
+
+template <typename SegmentId, typename Index, typename T>
+__global__ void SegmentSetEmptyKernel(
+    SegmentId nsegments, Index ninner,
+    const Index* __restrict__ segment_offsets,  // [nsegments + 1]
+    const T empty_value,
+    T* __restrict__ output) {  // [nsegments, ninner]
+  for (SegmentId seg : GpuGridRangeY(nsegments)) {
+    SegmentId segment_size = segment_offsets[seg + 1] - segment_offsets[seg];
+    if (segment_size == 0) {
+      for (Index i : GpuGridRangeX(ninner)) {
+        output[seg * ninner + i] = empty_value;
+      }
+    }
+  }
+}
+
+template <typename SegmentId, typename Index, typename T>
+absl::Status LaunchSegmentSetEmptyKernel(
+    const GPUDevice& d, SegmentId nsegments, Index ninner,
+    const Index* __restrict__ segment_offsets,  // [nsegments + 1]
+    const T empty_value,
+    T* __restrict__ output) {  // [nsegments, ninner]
+  Gpu2DLaunchConfig config = GetGpu2DLaunchConfig(
+      ninner, nsegments, d, SegmentSetEmptyKernel<SegmentId, Index, T>,
+      /*dynamic_shared_memory_size=*/0, /*block_size_limit=*/0);
+  return GpuLaunchKernel(SegmentSetEmptyKernel<SegmentId, Index, T>,
+                         config.block_count, config.thread_per_block, 0,
+                         d.stream(), nsegments, ninner, segment_offsets,
+                         empty_value, output);
 }
 
 // UnsortedSegmentSumKernel processes 'input_total_size' elements.
@@ -190,12 +289,12 @@ __global__ void UnsortedSegmentCustomKernel(
   }
 }
 
-template <typename Tindex, typename Tsegmentids>
+template <typename Toffsets, typename Tsegmentids>
 __global__ void SegmentOffsetsKernel(
-    Tindex size, Tsegmentids nsegments,
+    Toffsets size, Tsegmentids nsegments,
     const Tsegmentids* __restrict__ segment_ids,  // [size]
-    Tindex* __restrict__ segment_offsets) {       // [nsegments + 1]
-  GPU_1D_KERNEL_LOOP(i, size + 1) {
+    Toffsets* __restrict__ segment_offsets) {     // [nsegments + 1]
+  for (Toffsets i : GpuGridRangeX(size + 1)) {
     // IDs are clipped to [-1, nsegments] so that out-of-bounds IDs are ignored.
     // Note that we can't report invalid IDs from the GPU without incurring
     // additional overhead.
@@ -220,15 +319,18 @@ __global__ void SegmentOffsetsKernel(
 // start index of the first valid ID (e.g., 0 if all IDs are valid), and the
 // value at segment_offsets[nsegments] is set to the end index of the last valid
 // ID (e.g., nsegments if all IDs are valid).
-template <typename Tindex, typename Tsegmentids>
-Status LaunchSegmentOffsetsKernel(const GPUDevice& d, Tindex size,
-                                  Tsegmentids nsegments,
-                                  const Tsegmentids* segment_ids,  // [size]
-                                  Tindex* segment_offsets) {  // [nsegments + 1]
-  GpuLaunchConfig config = GetGpuLaunchConfig(
-      size + 1, d, &SegmentOffsetsKernel<Tindex, Tsegmentids>,
-      /*dynamic_shared_memory_size=*/0, /*block_size_limit=*/0);
-  return GpuLaunchKernel(SegmentOffsetsKernel<Tindex, Tsegmentids>,
+template <typename Toffsets, typename Tsegmentids>
+absl::Status LaunchSegmentOffsetsKernel(
+    const GPUDevice& d, Toffsets size, Tsegmentids nsegments,
+    const Tsegmentids* segment_ids,  // [size]
+    Toffsets* segment_offsets) {     // [nsegments + 1]
+  TF_ASSIGN_OR_RETURN(
+      GpuLaunchConfig64 config,
+      GetGpuLaunchConfig64(size + 1, d,
+                           &SegmentOffsetsKernel<Toffsets, Tsegmentids>,
+                           /*dynamic_shared_memory_size=*/0,
+                           /*block_size_limit=*/0));
+  return GpuLaunchKernel(SegmentOffsetsKernel<Toffsets, Tsegmentids>,
                          config.block_count, config.thread_per_block, 0,
                          d.stream(), size, nsegments, segment_ids,
                          segment_offsets);
@@ -279,41 +381,43 @@ __device__ T ReduceBlockAlongCols(ReduceOp reduce_op, const T& value,
 // provided; otherwise it is indexed indirectly via indices and can have any
 // size (as long as it spans at least the maximum value in indices). This also
 // applies to the weights vector.
-template <typename Treducevec, typename Tvec, typename Tindex,
-          typename Tsegmentids, typename ReduceOp, typename Tinit>
+template <typename Treducevec, typename Tvec, typename Toffsets,
+          typename Tindices, typename Tsegmentids, typename ReduceOp,
+          typename Tinit, typename Tweights>
 __global__ void SegmentReduceVectorKernel(
-    Tindex nouter, Tindex ninner_vec, Tsegmentids nsegments, ReduceOp reduce_op,
-    Tinit initial_value, Tinit empty_segment_value, bool is_mean, bool is_sqrtn,
-    const Tvec* __restrict__ input_vec,          // [nouter or any, ninner_vec]
-    const Tindex* __restrict__ segment_offsets,  // [nsegments + 1]
-    const Tindex* __restrict__ indices,          // [nouter] (optional)
-    const Tinit* __restrict__ weights,           // [nouter or any] (optional)
-    Tvec* __restrict__ output_vec) {             // [nsegments, ninner_vec]
+    Toffsets nouter, Toffsets ninner_vec, Tsegmentids nsegments,
+    ReduceOp reduce_op, Tinit initial_value, Tinit empty_segment_value,
+    bool is_mean, bool is_sqrtn,
+    const Tvec* __restrict__ input_vec,  // [nouter or any, ninner_vec]
+    const Toffsets* __restrict__ segment_offsets,  // [nsegments + 1]
+    const Tindices* __restrict__ indices,          // [nouter] (optional)
+    const Tweights* __restrict__ weights,          // [nouter or any] (optional)
+    Tvec* __restrict__ output_vec) {               // [nsegments, ninner_vec]
   const int num_blocks_x = (ninner_vec - 1) / blockDim.x + 1;
   // Grid-stride loop over inner dimension blocks.
-  for (Tindex blk_x = blockIdx.x; blk_x < num_blocks_x; blk_x += gridDim.x) {
-    const Tindex x = threadIdx.x + blk_x * blockDim.x;
-    const Tindex y = threadIdx.y;
+  for (Toffsets blk_x = blockIdx.x; blk_x < num_blocks_x; blk_x += gridDim.x) {
+    const Toffsets x = threadIdx.x + blk_x * blockDim.x;
+    const Toffsets y = threadIdx.y;
     const bool x_ok = x < ninner_vec;
     // Grid-stride loop over segment blocks, each processing one segment.
     for (Tsegmentids seg = blockIdx.y; seg < nsegments; seg += gridDim.y) {
       // Load segment range.
-      const Tindex begin = segment_offsets[seg];
-      const Tindex end = segment_offsets[seg + 1];
+      const Toffsets begin = segment_offsets[seg];
+      const Toffsets end = segment_offsets[seg + 1];
       // Reduce over the segment.
       Treducevec result = Treducevec(initial_value);
       // Loop over the segment, reducing blockDim.y elements at a time.
-      for (Tindex y_offset = begin; y_offset < end; y_offset += blockDim.y) {
+      for (Toffsets y_offset = begin; y_offset < end; y_offset += blockDim.y) {
         const bool y_ok = (y_offset + y) < end;
         // Perform indirect lookup if required.
-        const Tindex y_idx =
+        const Toffsets y_idx =
             indices && y_ok ? indices[y_offset + y] : y_offset + y;
         const int64_t input_idx = static_cast<int64_t>(y_idx) * ninner_vec + x;
         // Load the input row from global mem.
         Treducevec block_result =
             x_ok && y_ok ? input_vec[input_idx] : Tvec(initial_value);
         // Apply weights if provided.
-        if (weights && y_ok) block_result *= Tvec(weights[y_idx]);
+        if (weights && y_ok) block_result = block_result * Tvec(weights[y_idx]);
         // Reduce along the columns of the block, returning result in first row.
         block_result = ReduceBlockAlongCols(reduce_op, block_result, x_ok);
         if (y == 0 && x_ok) {
@@ -326,12 +430,13 @@ __global__ void SegmentReduceVectorKernel(
           // Empty segment.
           result = Treducevec(empty_segment_value);
         } else {
-          typename RealTypeIfComplex<Tinit>::type total_weight(end - begin);
+          Tweights total_weight(end - begin);
           // Normalize the results if necessary.
           if (is_mean) {
-            result /= Treducevec(total_weight);
+            result = result / Treducevec(total_weight);
           } else if (is_sqrtn) {
-            result /= Treducevec(sqrt(total_weight));
+            result =
+                result / Treducevec(sqrt(static_cast<double>(total_weight)));
           }
         }
         // Cast from Treducevec to Tvec.
@@ -349,66 +454,67 @@ __global__ void SegmentReduceVectorKernel(
 // If indices is not nullptr, input rows are accessed indirectly as
 // input[indices[i]], instead of input[i].
 // Note: Treducevec is to allow reducing in higher precision than Tvec.
-template <typename Treducevec, typename Tvec, typename Tindex,
-          typename Tsegmentids, typename ReduceOp, typename Tinit>
-Status LaunchSegmentReduceVectorKernel(
-    const GPUDevice& d, Tindex nouter, Tindex ninner_vec, Tsegmentids nsegments,
-    ReduceOp reduce_op, Tinit initial_value, Tinit empty_segment_value,
-    bool is_mean, bool is_sqrtn,
-    const Tvec* input_vec,          // [nouter or any, ninner_vec]
-    const Tindex* segment_offsets,  // [nsegments + 1]
-    const Tindex* indices,          // [nouter] (optional)
-    const Tinit* weights,           // [nouter or any] (optional)
-    Tvec* output_vec) {             // [nsegments, ninner_vec]
+template <typename Treducevec, typename Tvec, typename Toffsets,
+          typename Tindices, typename Tsegmentids, typename ReduceOp,
+          typename Tinit, typename Tweights>
+absl::Status LaunchSegmentReduceVectorKernel(
+    const GPUDevice& d, Toffsets nouter, Toffsets ninner_vec,
+    Tsegmentids nsegments, ReduceOp reduce_op, Tinit initial_value,
+    Tinit empty_segment_value, bool is_mean, bool is_sqrtn,
+    const Tvec* input_vec,            // [nouter or any, ninner_vec]
+    const Toffsets* segment_offsets,  // [nsegments + 1]
+    const Tindices* indices,          // [nouter] (optional)
+    const Tweights* weights,          // [nouter or any] (optional)
+    Tvec* output_vec) {               // [nsegments, ninner_vec]
   static constexpr const int kMaxGridX = (1u << 31) - 1;
   static constexpr const int kMaxGridY = (1u << 16) - 1;
   const int max_block_size = 1024;  // Can be tuned for perf (<= 1024)
   const int min_block_size = 64;    // Can be tuned for perf
-  const Tindex ninner_pow2 = Tindex(1) << Log2Ceiling64(ninner_vec);
+  const Toffsets ninner_pow2 = Toffsets(1) << Log2Ceiling64(ninner_vec);
   // This is a heuristic that first allocates threads in the block to the inner
   // (x) dimension (which is most efficient) and then allocates the rest to the
   // reduction (y) dimension (which is less efficient but increases
   // parallelism).
-  int block_x = std::min(ninner_pow2, static_cast<Tindex>(max_block_size));
-  const Tindex avg_reduce_size =
-      Eigen::divup(nouter, static_cast<Tindex>(nsegments));
-  const Tindex avg_reduce_size_pow2 = Tindex(1)
-                                      << Log2Ceiling64(avg_reduce_size);
+  int block_x = std::min(ninner_pow2, static_cast<Toffsets>(max_block_size));
+  const Toffsets avg_reduce_size =
+      Eigen::divup(nouter, static_cast<Toffsets>(nsegments));
+  const Toffsets avg_reduce_size_pow2 = Toffsets(1)
+                                        << Log2Ceiling64(avg_reduce_size);
   dim3 block(
       block_x,
-      std::min(static_cast<Tindex>(Eigen::divup(min_block_size, block_x)),
+      std::min(static_cast<Toffsets>(Eigen::divup(min_block_size, block_x)),
                avg_reduce_size_pow2));
-  dim3 grid(std::min(Eigen::divup(ninner_vec, static_cast<Tindex>(block.x)),
-                     static_cast<Tindex>(kMaxGridX)),
+  dim3 grid(std::min(Eigen::divup(ninner_vec, static_cast<Toffsets>(block.x)),
+                     static_cast<Toffsets>(kMaxGridX)),
             std::min(nsegments, static_cast<Tsegmentids>(kMaxGridY)));
   unsigned shared_memory_bytes = block.x * block.y * sizeof(Treducevec);
   return GpuLaunchKernel(
-      SegmentReduceVectorKernel<Treducevec, Tvec, Tindex, Tsegmentids, ReduceOp,
-                                Tinit>,
+      SegmentReduceVectorKernel<Treducevec, Tvec, Toffsets, Tindices,
+                                Tsegmentids, ReduceOp, Tinit, Tweights>,
       grid, block, shared_memory_bytes, d.stream(), nouter, ninner_vec,
       nsegments, reduce_op, initial_value, empty_segment_value, is_mean,
       is_sqrtn, input_vec, segment_offsets, indices, weights, output_vec);
 }
 
-template <typename Tvec, typename Treducevec, typename Tindex,
+template <typename Tvec, typename Treducevec, typename Toffsets,
           typename Tsegmentids, typename Tinit>
 __global__ void SegmentReduceEpilogueKernel(
     Tsegmentids nsegments, Tinit empty_segment_value, bool is_mean,
     bool is_sqrtn,
-    const Treducevec* __restrict__ output_raw,   // [nsegments]
-    const Tindex* __restrict__ segment_offsets,  // [nsegments + 1]
-    Tvec* __restrict__ output) {                 // [nsegments]
-  GPU_1D_KERNEL_LOOP(seg, nsegments) {
-    Tindex segment_size = segment_offsets[seg + 1] - segment_offsets[seg];
+    const Treducevec* __restrict__ output_raw,     // [nsegments]
+    const Toffsets* __restrict__ segment_offsets,  // [nsegments + 1]
+    Tvec* __restrict__ output) {                   // [nsegments]
+  for (Tsegmentids seg : GpuGridRangeX(nsegments)) {
+    Toffsets segment_size = segment_offsets[seg + 1] - segment_offsets[seg];
     Treducevec val = output_raw[seg];
     if (segment_size == 0) {
       // Empty segment.
       val = Treducevec(empty_segment_value);
     } else if (is_mean) {
-      val /= Treducevec(segment_size);
+      val = val / Treducevec(segment_size);
     } else if (is_sqrtn) {
-      val /= Treducevec(
-          sqrt(typename RealTypeIfComplex<Tinit>::type(segment_size)));
+      val = val / Treducevec(sqrt(static_cast<double>(
+                      typename RealTypeIfComplex<Tinit>::type(segment_size))));
     }
     // Cast from Treducevec to Tvec.
     output[seg] = static_cast<Tvec>(val);
@@ -419,24 +525,27 @@ __global__ void SegmentReduceEpilogueKernel(
 // Tvec. If Tvec == Treducevec, this is safe to call with output_raw == output.
 // Note that Treducevec is the type that was used for the reduction, which may
 // be a higher-precision type than the output type Tvec (e.g., float vs. half).
-template <typename Tvec, typename Treducevec, typename Tindex,
+template <typename Tvec, typename Treducevec, typename Toffsets,
           typename Tsegmentids, typename Tinit>
-Status LaunchSegmentReduceEpilogueKernel(
+absl::Status LaunchSegmentReduceEpilogueKernel(
     const GPUDevice& d, Tsegmentids nsegments, Tinit empty_segment_value,
     bool is_mean, bool is_sqrtn,
-    const Treducevec* output_raw,   // [nsegments]
-    const Tindex* segment_offsets,  // [nsegments + 1]
-    Tvec* output) {                 // [nsegments]
-  GpuLaunchConfig config = GetGpuLaunchConfig(
-      nsegments, d,
-      &SegmentReduceEpilogueKernel<Tvec, Treducevec, Tindex, Tsegmentids,
-                                   Tinit>,
-      /*dynamic_shared_memory_size=*/0, /*block_size_limit=*/0);
-  return GpuLaunchKernel(
-      SegmentReduceEpilogueKernel<Tvec, Treducevec, Tindex, Tsegmentids, Tinit>,
-      config.block_count, config.thread_per_block, 0, d.stream(), nsegments,
-      empty_segment_value, is_mean, is_sqrtn, output_raw, segment_offsets,
-      output);
+    const Treducevec* output_raw,     // [nsegments]
+    const Toffsets* segment_offsets,  // [nsegments + 1]
+    Tvec* output) {                   // [nsegments]
+  TF_ASSIGN_OR_RETURN(
+      GpuLaunchConfig64 config,
+      GetGpuLaunchConfig64(
+          nsegments, d,
+          &SegmentReduceEpilogueKernel<Tvec, Treducevec, Toffsets, Tsegmentids,
+                                       Tinit>,
+          /*dynamic_shared_memory_size=*/0,
+          /*block_size_limit=*/0));
+  return GpuLaunchKernel(SegmentReduceEpilogueKernel<Tvec, Treducevec, Toffsets,
+                                                     Tsegmentids, Tinit>,
+                         config.block_count, config.thread_per_block, 0,
+                         d.stream(), nsegments, empty_segment_value, is_mean,
+                         is_sqrtn, output_raw, segment_offsets, output);
 }
 
 template <typename Tto>
@@ -447,57 +556,64 @@ struct CastFunctor {
   }
 };
 
-template <typename Treducevec, typename Tvec, typename Tindex, typename Tinit>
+template <typename Treducevec, typename Tvec, typename Tindices,
+          typename Tweights>
 struct LookupAndScaleAndCastInputsFunctor {
   LookupAndScaleAndCastInputsFunctor(const Tvec* input_vec,
-                                     const Tindex* indices,
-                                     const Tinit* weights)
+                                     const Tindices* indices,
+                                     const Tweights* weights)
       : input_vec_(input_vec), indices_(indices), weights_(weights) {}
 
-  __device__ Treducevec operator()(Tindex idx) const {
+  template <typename Toffsets>
+  __device__ Treducevec operator()(Toffsets idx) const {
     if (indices_) idx = indices_[idx];
     Treducevec result = static_cast<Treducevec>(input_vec_[idx]);
-    if (weights_) result *= Tvec(weights_[idx]);
+    if (weights_) result = result * Tvec(weights_[idx]);
     return result;
   }
 
  private:
   const Tvec* __restrict__ input_vec_;
-  const Tindex* __restrict__ indices_;
-  const Tinit* __restrict__ weights_;
+  const Tindices* __restrict__ indices_;
+  const Tweights* __restrict__ weights_;
 };
 
-template <typename Treducevec, typename Tvec, typename Tindex, typename Tinit>
+template <typename Treducevec, typename Tvec, typename Toffsets,
+          typename Tindices, typename Tweights>
 struct CastIterator {
   using FunctorTy =
-      LookupAndScaleAndCastInputsFunctor<Treducevec, Tvec, Tindex, Tinit>;
-  using InputIteratorTy = gpuprim::CountingInputIterator<Tindex>;
+      LookupAndScaleAndCastInputsFunctor<Treducevec, Tvec, Tindices, Tweights>;
+  using InputIteratorTy = gpuprim::CountingInputIterator<Toffsets>;
   using IteratorTy =
       gpuprim::TransformInputIterator<Treducevec, FunctorTy, InputIteratorTy>;
 };
 
-template <typename Treducevec, typename Tvec, typename Tindex, typename Tinit>
-typename CastIterator<Treducevec, Tvec, Tindex, Tinit>::IteratorTy
+template <typename Treducevec, typename Toffsets, typename Tvec,
+          typename Tindices, typename Tweights>
+typename CastIterator<Treducevec, Tvec, Toffsets, Tindices,
+                      Tweights>::IteratorTy
 MakeLookupAndScaleAndCastInputsIterator(const Tvec* input_vec,
-                                        const Tindex* indices,
-                                        const Tinit* weights) {
-  using CastIteratorTy = CastIterator<Treducevec, Tvec, Tindex, Tinit>;
+                                        const Tindices* indices,
+                                        const Tweights* weights) {
+  using CastIteratorTy =
+      CastIterator<Treducevec, Tvec, Toffsets, Tindices, Tweights>;
   typename CastIteratorTy::FunctorTy functor(input_vec, indices, weights);
   return typename CastIteratorTy::IteratorTy(
-      typename CastIteratorTy::InputIteratorTy(Tindex(0)), functor);
+      typename CastIteratorTy::InputIteratorTy(Toffsets(0)), functor);
 }
 
-template <typename Treducevec, typename Tvec, typename Tindex,
-          typename Tsegmentids, typename ReduceOp, typename Tinit>
-Status SegmentReduceGPUImplNoInnerDim(
-    OpKernelContext* ctx, Tindex nouter, Tsegmentids nsegments,
+template <typename Treducevec, typename Tvec, typename Toffsets,
+          typename Tindices, typename Tsegmentids, typename ReduceOp,
+          typename Tinit, typename Tweights>
+absl::Status SegmentReduceGPUImplNoInnerDim(
+    OpKernelContext* ctx, Toffsets nouter, Tsegmentids nsegments,
     ReduceOp reduce_op, Tinit initial_value, Tinit empty_segment_value,
     bool is_mean, bool is_sqrtn,
-    const Tvec* input_vec,          // [nouter or any]
-    const Tindex* segment_offsets,  // [nsegments + 1]
-    const Tindex* indices,          // [nouter] (optional)
-    const Tinit* weights,           // [nouter or any] (optional)
-    Tvec* output_vec) {             // [nsegments]
+    const Tvec* input_vec,            // [nouter or any]
+    const Toffsets* segment_offsets,  // [nsegments + 1]
+    const Tindices* indices,          // [nouter] (optional)
+    const Tweights* weights,          // [nouter or any] (optional)
+    Tvec* output_vec) {               // [nsegments]
   // Here we use gpuprim::DeviceSegmentedReduce (which is optimized for this
   // shape) and add the additional required functionality using fancy input
   // iterators and an epilogue kernel.
@@ -506,7 +622,7 @@ Status SegmentReduceGPUImplNoInnerDim(
   // when Tvec != Treducevec; the result is only used if Tvec == Treducevec.
   Treducevec* output_raw_ptr = reinterpret_cast<Treducevec*>(output_vec);
   Tensor output_raw;
-  bool need_temp_output = !std::is_same<Tvec, Treducevec>::value;
+  bool need_temp_output = !std::is_same_v<Tvec, Treducevec>;
   if (need_temp_output) {
     // Note: We must allocate and reinterpret as bytes because Treducevec may
     // be a vector type and they are not supported as Tensor dtypes.
@@ -515,14 +631,15 @@ Status SegmentReduceGPUImplNoInnerDim(
         TensorShape({static_cast<int64_t>(nsegments * sizeof(Treducevec))}),
         &output_raw));
     output_raw_ptr =
-        reinterpret_cast<Treducevec*>(output_raw.flat<int8>().data());
+        reinterpret_cast<Treducevec*>(output_raw.flat<int8_t>().data());
   }
-  auto input_iter = MakeLookupAndScaleAndCastInputsIterator<Treducevec>(
-      input_vec, indices, weights);
+  auto input_iter =
+      MakeLookupAndScaleAndCastInputsIterator<Treducevec, Toffsets>(
+          input_vec, indices, weights);
   TF_RETURN_IF_ERROR(GpuSegmentedReduce(ctx, nsegments, reduce_op,
                                         Treducevec(initial_value), input_iter,
                                         segment_offsets, output_raw_ptr));
-  bool need_epilogue = !std::is_same<Tvec, Treducevec>::value ||
+  bool need_epilogue = !std::is_same_v<Tvec, Treducevec> ||
                        initial_value != empty_segment_value || is_mean ||
                        is_sqrtn;
   if (need_epilogue) {
@@ -532,19 +649,20 @@ Status SegmentReduceGPUImplNoInnerDim(
         device, nsegments, empty_segment_value, is_mean, is_sqrtn,
         output_raw_ptr, segment_offsets, output_vec));
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-template <typename Treducevec, typename Tvec, typename Tindex,
-          typename Tsegmentids, typename ReduceOp, typename Tinit>
-Status SegmentReduceGPUImpl(
-    OpKernelContext* ctx, Tindex nouter, Tindex ninner_vec,
+template <typename Treducevec, typename Tvec, typename Toffsets,
+          typename Tindices, typename Tsegmentids, typename ReduceOp,
+          typename Tinit, typename Tweights>
+absl::Status SegmentReduceGPUImpl(
+    OpKernelContext* ctx, Toffsets nouter, Toffsets ninner_vec,
     Tsegmentids nsegments, ReduceOp reduce_op, Tinit initial_value,
     Tinit empty_segment_value, bool is_mean, bool is_sqrtn,
     const Tvec* input_vec,           // [nouter or any, ninner_vec]
     const Tsegmentids* segment_ids,  // [nouter]
-    const Tindex* indices,           // [nouter] (optional)
-    const Tinit* weights,            // [nouter or any] (optional)
+    const Tindices* indices,         // [nouter] (optional)
+    const Tweights* weights,         // [nouter or any] (optional)
     Tvec* output_vec) {              // [nsegments, ninner_vec]
   const GPUDevice& device = ctx->eigen_gpu_device();
 
@@ -552,7 +670,8 @@ Status SegmentReduceGPUImpl(
     // Just set output to empty_segment_value.
     GPUDevice d = ctx->template eigen_device<GPUDevice>();
     int64_t output_size = static_cast<int64_t>(nsegments) * ninner_vec;
-    GpuLaunchConfig config = GetGpuLaunchConfig(output_size, d);
+    TF_ASSIGN_OR_RETURN(GpuLaunchConfig64 config,
+                        GetGpuLaunchConfig64(output_size, d));
     return GpuLaunchKernel(SetToValue<Tvec, Tinit>, config.block_count,
                            config.thread_per_block, 0, d.stream(), output_size,
                            output_vec, empty_segment_value);
@@ -560,15 +679,15 @@ Status SegmentReduceGPUImpl(
 
   // Allocate and compute segment_offsets.
   Tensor segment_offsets;
-  TF_RETURN_IF_ERROR(ctx->allocate_temp(DataTypeToEnum<Tindex>::value,
+  TF_RETURN_IF_ERROR(ctx->allocate_temp(DataTypeToEnum<Toffsets>::value,
                                         TensorShape({nsegments + 1}),
                                         &segment_offsets));
-  Tindex* segment_offsets_ptr = segment_offsets.flat<Tindex>().data();
+  Toffsets* segment_offsets_ptr = segment_offsets.flat<Toffsets>().data();
   TF_RETURN_IF_ERROR(LaunchSegmentOffsetsKernel(
       device, nouter, nsegments, segment_ids, segment_offsets_ptr));
 
-  const Tindex avg_reduce_size =
-      Eigen::divup(nouter, static_cast<Tindex>(nsegments));
+  const Toffsets avg_reduce_size =
+      Eigen::divup(nouter, static_cast<Toffsets>(nsegments));
   // This avg_reduce_size threshold is a performance heuristic.
   if (ninner_vec == 1 && avg_reduce_size >= 512) {
     // Here we use a gpuprim-based implementation that doesn't support an
@@ -591,18 +710,19 @@ template <typename Treduce>
 struct SegmentReduceGPUVectorized {
   template <int vec_size>
   struct Impl {
-    template <typename T, typename Tindex, typename Tsegmentids,
-              typename ReduceOp>
-    Status operator()(OpKernelContext* ctx, Tindex nouter, Tindex ninner,
-                      Tsegmentids nsegments, ReduceOp reduce_op,
-                      T initial_value, T empty_segment_value, bool is_mean,
-                      bool is_sqrtn, const T* input,
-                      const Tsegmentids* segment_ids, const Tindex* indices,
-                      const T* weights, T* output) {
+    template <typename T, typename Toffsets, typename Tindices,
+              typename Tsegmentids, typename ReduceOp, typename Tweights>
+    absl::Status operator()(OpKernelContext* ctx, Toffsets nouter,
+                            Toffsets ninner, Tsegmentids nsegments,
+                            ReduceOp reduce_op, T initial_value,
+                            T empty_segment_value, bool is_mean, bool is_sqrtn,
+                            const T* input, const Tsegmentids* segment_ids,
+                            const Tindices* indices, const Tweights* weights,
+                            T* output) {
       DCHECK_EQ(ninner % vec_size, 0);
       DCHECK_EQ(reinterpret_cast<std::uintptr_t>(input) % vec_size, 0);
       DCHECK_EQ(reinterpret_cast<std::uintptr_t>(output) % vec_size, 0);
-      Tindex ninner_vec = ninner / vec_size;
+      Toffsets ninner_vec = ninner / vec_size;
       using Tvec = AlignedVector<T, vec_size>;
       using Treducevec = AlignedVector<Treduce, vec_size>;
       const Tvec* input_vec = reinterpret_cast<const Tvec*>(input);
@@ -625,18 +745,18 @@ struct SegmentReduceGPUVectorized {
 // input[indices[i]], instead of input[i].
 // The implementation is deterministic.
 // Note: Treduce is to allow reducing in higher precision than T.
-template <typename Treduce, typename T, typename Tindex, typename Tsegmentids,
-          typename ReduceOp>
-Status SegmentReduceGPU(OpKernelContext* ctx, Tindex nouter, Tindex ninner,
-                        Tsegmentids nsegments, ReduceOp reduce_op,
-                        T initial_value, T empty_segment_value, bool is_mean,
-                        bool is_sqrtn,
-                        const T* input,  // [nouter or any, ninner]
-                        const Tsegmentids* segment_ids,  // [nouter]
-                        const Tindex* indices,           // [nouter] (optional)
-                        const T* weights,  // [nouter or any] (optional)
-                        T* output) {       // [nsegments, ninner]
-  if (ninner == 0 || nsegments == 0) return Status::OK();
+template <typename Treduce, typename T, typename Toffsets, typename Tindices,
+          typename Tsegmentids, typename ReduceOp, typename Tweights>
+absl::Status SegmentReduceGPU(
+    OpKernelContext* ctx, Toffsets nouter, Toffsets ninner,
+    Tsegmentids nsegments, ReduceOp reduce_op, T initial_value,
+    T empty_segment_value, bool is_mean, bool is_sqrtn,
+    const T* input,                  // [nouter or any, ninner]
+    const Tsegmentids* segment_ids,  // [nouter]
+    const Tindices* indices,         // [nouter] (optional)
+    const Tweights* weights,         // [nouter or any] (optional)
+    T* output) {                     // [nsegments, ninner]
+  if (ninner == 0 || nsegments == 0) return absl::OkStatus();
   return DispatchToVectorized<
       T, SegmentReduceGPUVectorized<Treduce>::template Impl>(
       MinAlignmentOf(input, output, ninner), ctx, nouter, ninner, nsegments,
@@ -644,32 +764,35 @@ Status SegmentReduceGPU(OpKernelContext* ctx, Tindex nouter, Tindex ninner,
       segment_ids, indices, weights, output);
 }
 
-template <typename SegmentId, typename Index, typename T>
+template <typename SegmentId, typename Index, typename Tweights>
 __global__ void SegmentWeightsKernel(
     SegmentId nsegments, SparseSegmentReductionOperation operation,
     const Index* __restrict__ segment_offsets,  // [nsegments + 1]
-    T* __restrict__ weights) {                  // [nsegments]
-  GPU_1D_KERNEL_LOOP(i, nsegments) {
+    Tweights* __restrict__ weights) {           // [nsegments]
+  for (SegmentId i : GpuGridRangeX(nsegments)) {
     Index segment_size = segment_offsets[i + 1] - segment_offsets[i];
     segment_size = max(segment_size, Index(1));  // Avoid division by zero
     if (operation == SparseSegmentReductionOperation::kMean) {
-      weights[i] = T(1) / static_cast<T>(segment_size);
+      weights[i] = Tweights(1) / static_cast<Tweights>(segment_size);
     } else if (operation == SparseSegmentReductionOperation::kSqrtN) {
-      weights[i] = T(1) / sqrt(static_cast<T>(segment_size));
+      weights[i] = Tweights(1) / sqrt(static_cast<Tweights>(segment_size));
     }
   }
 }
 
-template <typename SegmentId, typename Index, typename T>
-Status LaunchSegmentWeightsKernel(
+template <typename SegmentId, typename Index, typename Tweights>
+absl::Status LaunchSegmentWeightsKernel(
     const GPUDevice& d, SegmentId nsegments,
     SparseSegmentReductionOperation operation,
     const Index* segment_offsets,  // [nsegments + 1]
-    T* weights) {                  // [nsegments]
-  GpuLaunchConfig config = GetGpuLaunchConfig(
-      nsegments, d, &SegmentWeightsKernel<SegmentId, Index, T>,
-      /*dynamic_shared_memory_size=*/0, /*block_size_limit=*/0);
-  return GpuLaunchKernel(SegmentWeightsKernel<SegmentId, Index, T>,
+    Tweights* weights) {           // [nsegments]
+  TF_ASSIGN_OR_RETURN(
+      GpuLaunchConfig64 config,
+      GetGpuLaunchConfig64(nsegments, d,
+                           &SegmentWeightsKernel<SegmentId, Index, Tweights>,
+                           /*dynamic_shared_memory_size=*/0,
+                           /*block_size_limit=*/0));
+  return GpuLaunchKernel(SegmentWeightsKernel<SegmentId, Index, Tweights>,
                          config.block_count, config.thread_per_block, 0,
                          d.stream(), nsegments, operation, segment_offsets,
                          weights);
@@ -683,6 +806,11 @@ struct ReduceType {
 // Sum fp16 values using an fp32 accumulator to avoid numerical issues.
 template <>
 struct ReduceType<functor::Sum, Eigen::half> {
+  using type = float;
+};
+
+template <>
+struct ReduceType<functor::Sum, Eigen::bfloat16> {
   using type = float;
 };
 
@@ -713,26 +841,21 @@ void SegmentReductionFunctor<
   const Index num_segments = output.size() / input_inner_dim_size;
 
   bool use_deterministic_kernels =
-#if defined(PLATFORM_WINDOWS)
-      // See comment in segment_reduction_ops_gpu_0.cu.cc regarding Windows CI
-      // build error.
-      false;
-#else
       UseDeterministicSegmentReductions() ||
       (OpDeterminismRequired() && !ReduceOpIsAssociative<ReductionF, T>::value);
-#endif
 
   // TODO(benbarsdell): If there are no performance concerns with the new
-  // deterministic kernels, remove this runtime check and only compile the old
-  // non-deterministic kernels on Windows (as a workaround for the build failure
-  // issue).
+  // deterministic kernels, remove this runtime check and the old
+  // non-deterministic kernels.
   if (!use_deterministic_kernels) {
     // Set 'output' to initial value.
-    GpuLaunchConfig config = GetGpuLaunchConfig(output.size(), d);
-    const T InitialValue = InitialValueF()();
-    TF_CHECK_OK(GpuLaunchKernel(SetToValue<T>, config.block_count,
-                                config.thread_per_block, 0, d.stream(),
-                                output.size(), output.data(), InitialValue));
+    absl::StatusOr<GpuLaunchConfig64> config =
+        GetGpuLaunchConfig64(output.size(), d);
+    OP_REQUIRES_OK(ctx, config.status());
+    const T initial_value = InitialValueF()();
+    TF_CHECK_OK(GpuLaunchKernel(SetToValue<T>, config->block_count,
+                                config->thread_per_block, 0, d.stream(),
+                                output.size(), output.data(), initial_value));
     if (data_size == 0 || segment_ids_shape.num_elements() == 0) {
       return;
     }
@@ -745,18 +868,20 @@ void SegmentReductionFunctor<
     const Index total_stripe_count =
         input_inner_dim_size * input_outer_dim_num_stripe;
 
-    config = GetGpuLaunchConfig(total_stripe_count, d);
+    config = GetGpuLaunchConfig64(total_stripe_count, d);
+    OP_REQUIRES_OK(ctx, config.status());
     TF_CHECK_OK(GpuLaunchKernel(
         SortedSegmentReductionCustomKernel<
             T, Index, OuterDimTileSize,
             typename ReduceUpdateOpFor<ReductionF>::nonatomic_op,
             typename ReduceUpdateOpFor<ReductionF>::atomic_op>,
-        config.block_count, config.thread_per_block, 0, d.stream(),
+        config->block_count, config->thread_per_block, 0, d.stream(),
         input_outer_dim_size, input_inner_dim_size, output_rows,
         segment_ids.data(), data, output.data(), total_stripe_count,
-        InitialValue));
+        initial_value));
 
-    if (is_mean) {
+    const T empty_value = EmptySegmentValueF()();
+    if (is_mean || initial_value != empty_value) {
       Tensor segment_offsets;
       OP_REQUIRES_OK(ctx, ctx->allocate_temp(DataTypeToEnum<Index>::value,
                                              TensorShape({num_segments + 1}),
@@ -766,15 +891,21 @@ void SegmentReductionFunctor<
                               d, input_outer_dim_size, num_segments,
                               segment_ids.data(), segment_offsets_ptr));
 
-      OP_REQUIRES_OK(ctx, LaunchSegmentMeanNormalizeKernel(
-                              d, num_segments, input_inner_dim_size,
-                              segment_offsets_ptr, output.data()));
+      if (is_mean) {
+        OP_REQUIRES_OK(ctx, LaunchSegmentMeanNormalizeKernel(
+                                d, num_segments, input_inner_dim_size,
+                                segment_offsets_ptr, output.data()));
+      }
+      if (initial_value != empty_value) {
+        OP_REQUIRES_OK(
+            ctx, LaunchSegmentSetEmptyKernel(
+                     d, num_segments, input_inner_dim_size, segment_offsets_ptr,
+                     empty_value, output.data()));
+      }
     }
   } else {
-    // See comment in segment_reduction_ops_gpu_0.cu.cc regarding Windows CI
-    // build error.
-#if !defined(PLATFORM_WINDOWS)
     using Treduce = typename ReduceType<ReductionF, T>::type;
+    using Tweights = typename RealTypeIfComplex<T>::type;
     OP_REQUIRES_OK(
         ctx,
         SegmentReduceGPU<Treduce>(
@@ -782,14 +913,7 @@ void SegmentReductionFunctor<
             ReductionF(), InitialValueF()(), EmptySegmentValueF()(),
             /*is_mean=*/is_mean, /*is_sqrtn=*/false, data, segment_ids.data(),
             /*indices=*/static_cast<const Index*>(nullptr),
-            /*weights=*/static_cast<T*>(nullptr), output.data()));
-#else
-    // Note: Shouldn't reach here because use_deterministic_kernels is always
-    // false on Windows.
-    OP_REQUIRES(ctx, false,
-                errors::Unimplemented("Deterministic segment reductions are "
-                                      "not implemented on Windows."));
-#endif
+            /*weights=*/static_cast<Tweights*>(nullptr), output.data()));
   }
 }
 
@@ -805,15 +929,9 @@ struct UnsortedSegmentFunctor<GPUDevice, T, Index, InitialValueF, ReductionF> {
     }
 
     bool use_deterministic_kernels =
-#if defined(PLATFORM_WINDOWS)
-        // See comment in segment_reduction_ops_gpu_0.cu.cc regarding Windows CI
-        // build error.
-        false;
-#else
         UseDeterministicSegmentReductions() ||
         (!ReduceOpIsAssociative<ReductionF, T>::value &&
          OpDeterminismRequired());
-#endif
 
     bool determinism_requirement_met =
         use_deterministic_kernels ||
@@ -822,7 +940,7 @@ struct UnsortedSegmentFunctor<GPUDevice, T, Index, InitialValueF, ReductionF> {
         DisableSegmentReductionOpDeterminismExceptions();
     OP_REQUIRES(
         ctx, determinism_requirement_met,
-        errors::Unimplemented(
+        absl::UnimplementedError(
             "Deterministic GPU implementation of unsorted segment reduction op"
             " not available."));
 
@@ -837,31 +955,30 @@ struct UnsortedSegmentFunctor<GPUDevice, T, Index, InitialValueF, ReductionF> {
     const Index num_segments = output.size() / input_inner_dim_size;
 
     // TODO(benbarsdell): If there are no performance concerns with the new
-    // deterministic kernels, remove this runtime check and only compile the old
-    // non-deterministic kernels on Windows (as a workaround for the build
-    // failure issue).
+    // deterministic kernels, remove this runtime check and the old
+    // non-deterministic kernels.
     if (!use_deterministic_kernels) {
       // Set 'output' to initial value.
       GPUDevice d = ctx->template eigen_device<GPUDevice>();
-      GpuLaunchConfig config = GetGpuLaunchConfig(output.size(), d);
+      absl::StatusOr<GpuLaunchConfig64> config =
+          GetGpuLaunchConfig64(output.size(), d);
+      OP_REQUIRES_OK(ctx, config.status());
       TF_CHECK_OK(GpuLaunchKernel(
-          SetToValue<T>, config.block_count, config.thread_per_block, 0,
+          SetToValue<T>, config->block_count, config->thread_per_block, 0,
           d.stream(), output.size(), output.data(), InitialValueF()()));
       const int64_t data_size = data.size();
       if (data_size == 0 || segment_ids_shape.num_elements() == 0) {
         return;
       }
-      config = GetGpuLaunchConfig(data_size, d);
+      config = GetGpuLaunchConfig64(data_size, d);
+      OP_REQUIRES_OK(ctx, config.status());
       TF_CHECK_OK(GpuLaunchKernel(
           UnsortedSegmentCustomKernel<
               T, Index, typename ReduceUpdateOpFor<ReductionF>::atomic_op>,
-          config.block_count, config.thread_per_block, 0, d.stream(),
+          config->block_count, config->thread_per_block, 0, d.stream(),
           input_outer_dim_size, input_inner_dim_size, output_outer_dim_size,
           unsorted_segment_ids.data(), data.data(), output.data()));
     } else {
-      // See comment in segment_reduction_ops_gpu_0.cu.cc regarding Windows CI
-      // build error.
-#if !defined(PLATFORM_WINDOWS)
       // Allocate temporary space and sort segment_ids, then call the sorted
       // implem.
       Tensor segment_ids;
@@ -887,6 +1004,7 @@ struct UnsortedSegmentFunctor<GPUDevice, T, Index, InitialValueF, ReductionF> {
                             /*indices_in=*/static_cast<const Index*>(nullptr),
                             /*indices_out=*/sorted_indices_ptr));
       using Treduce = typename ReduceType<ReductionF, T>::type;
+      using Tweights = typename RealTypeIfComplex<T>::type;
       OP_REQUIRES_OK(
           ctx,
           SegmentReduceGPU<Treduce>(
@@ -895,21 +1013,13 @@ struct UnsortedSegmentFunctor<GPUDevice, T, Index, InitialValueF, ReductionF> {
               /*empty_segment_value=*/InitialValueF()(), /*is_mean=*/false,
               /*is_sqrtn=*/false, /*input=*/data.data(),
               /*segment_ids=*/segment_ids_ptr, /*indices=*/sorted_indices_ptr,
-              /*weights=*/static_cast<T*>(nullptr), output.data()));
-#else
-      // Note: Shouldn't reach here because use_deterministic_kernels is always
-      // false on Windows.
-      OP_REQUIRES(
-          ctx, false,
-          errors::Unimplemented("Deterministic unsorted segment reductions are "
-                                "not implemented on Windows."));
-#endif
+              /*weights=*/static_cast<Tweights*>(nullptr), output.data()));
     }
   }
 };
 
 template <typename T, typename Index, typename SegmentId>
-Status SparseSegmentReductionFunctor<T, Index, SegmentId>::operator()(
+absl::Status SparseSegmentReductionFunctor<T, Index, SegmentId>::operator()(
     OpKernelContext* context, bool is_mean, bool is_sqrtn, T default_value,
     typename TTypes<T, 2>::ConstTensor input,
     typename TTypes<Index>::ConstVec indices,
@@ -917,6 +1027,7 @@ Status SparseSegmentReductionFunctor<T, Index, SegmentId>::operator()(
     typename TTypes<T, 2>::Tensor output) {
   using ReduceOp = functor::Sum;
   using Treduce = typename ReduceType<ReduceOp, T>::type;
+  using Tweights = typename RealTypeIfComplex<T>::type;
   Index nouter = segment_ids.size();
   Index ninner = input.dimension(1);
   SegmentId nsegments = output.dimension(0);
@@ -927,8 +1038,48 @@ Status SparseSegmentReductionFunctor<T, Index, SegmentId>::operator()(
       /*empty_segment_value=*/default_value,
       /*is_mean=*/is_mean, /*is_sqrtn=*/is_sqrtn,
       /*input=*/input.data(), /*segment_ids=*/segment_ids.data(),
-      /*indices=*/indices.data(), /*weights=*/static_cast<T*>(nullptr),
+      /*indices=*/indices.data(), /*weights=*/static_cast<Tweights*>(nullptr),
       /*output=*/output.data());
+}
+
+// Finds the position of an out-of-range `indices` value (against `noutput`)
+// and/or `segment_ids` value (against `nsegments`), if any. `bad_index_pos`
+// and `bad_segment_pos` must already be initialized to
+// std::numeric_limits<int32_t>::max(); a value is left unchanged if no
+// violation of that kind is found, or set to the position of one such
+// violation (not necessarily the first in `i` order) otherwise.
+template <typename Index, typename SegmentId>
+__global__ void SparseSegmentGradBoundsCheckKernel(
+    Index nouter, Index noutput, SegmentId nsegments,
+    const Index* __restrict__ indices_vec,      // [nouter]
+    const SegmentId* __restrict__ segment_vec,  // [nouter]
+    int32_t* __restrict__ bad_index_pos,        // [1]
+    int32_t* __restrict__ bad_segment_pos) {    // [1]
+  for (Index i : GpuGridRangeX(nouter)) {
+    if (!FastBoundsCheck(indices_vec[i], noutput)) {
+      GpuAtomicMin(bad_index_pos, static_cast<int32_t>(i));
+    }
+    if (!FastBoundsCheck(segment_vec[i], nsegments)) {
+      GpuAtomicMin(bad_segment_pos, static_cast<int32_t>(i));
+    }
+  }
+}
+
+template <typename Index, typename SegmentId>
+absl::Status LaunchSparseSegmentGradBoundsCheckKernel(
+    const GPUDevice& d, Index nouter, Index noutput, SegmentId nsegments,
+    const Index* indices_vec, const SegmentId* segment_vec,
+    int32_t* bad_index_pos, int32_t* bad_segment_pos) {
+  TF_ASSIGN_OR_RETURN(
+      GpuLaunchConfig64 config,
+      GetGpuLaunchConfig64(
+          nouter, d, &SparseSegmentGradBoundsCheckKernel<Index, SegmentId>,
+          /*dynamic_shared_memory_size=*/0,
+          /*block_size_limit=*/0));
+  return GpuLaunchKernel(SparseSegmentGradBoundsCheckKernel<Index, SegmentId>,
+                         config.block_count, config.thread_per_block, 0,
+                         d.stream(), nouter, noutput, nsegments, indices_vec,
+                         segment_vec, bad_index_pos, bad_segment_pos);
 }
 
 template <typename T, typename Index, typename SegmentId>
@@ -938,22 +1089,133 @@ struct SparseSegmentGradFunctor<GPUDevice, T, Index, SegmentId> {
                   typename TTypes<T>::ConstMatrix input_flat,
                   typename TTypes<Index>::ConstVec indices_vec,
                   typename TTypes<SegmentId>::ConstVec segment_vec,
-                  typename TTypes<T>::Matrix output_flat) {
+                  Tensor* output) {
     const GPUDevice& device = context->eigen_gpu_device();
 
+    auto output_flat = output->flat_outer_dims<T>();
     const SegmentId nsegments = input_flat.dimension(0);
     const Index ninner = input_flat.dimension(1);
     const Index nouter = indices_vec.dimension(0);
     const Index noutput = output_flat.dimension(0);
 
+    // The CPU functor bounds-checks every `indices` value against `noutput`
+    // and every `segment_ids` value against `nsegments` before using them to
+    // read/write `input`/`output`, returning an InvalidArgumentError on
+    // failure. This GPU path performed no such validation, so an
+    // out-of-range indices or segment_ids value caused an out-of-bounds
+    // read or write on the device instead of a normal, recoverable error.
+    // Validate here, without copying the full `indices`/`segment_ids`
+    // arrays to the host: a device-side kernel does the O(nouter) scan, and
+    // only a couple of small flags come back over the (synchronous) D2H
+    // transfer in the common, valid-input case.
+    if (nouter > 0) {
+      // The bounds-check kernel below packs each violation's position into
+      // an int32 (matching SparseSegmentGradV2Functor's existing
+      // `nouter`/`ninner` handling above, which notes that neither is
+      // expected to be huge), so reject inputs where a position wouldn't
+      // fit rather than silently truncating it.
+      OP_REQUIRES(
+          context,
+          static_cast<int64_t>(nouter) <= std::numeric_limits<int32_t>::max(),
+          absl::InvalidArgumentError(
+              absl::StrCat("Indices vector of length ", nouter,
+                           " is too large to fit in int32.")));
+
+      se::Stream* stream = context->op_device_context()->stream();
+      OP_REQUIRES(context, stream != nullptr,
+                  absl::InternalError("No GPU stream available."));
+
+      // Fast check, matching the CPU functor: `segment_vec` is assumed
+      // sorted in non-decreasing order, so its last element is the maximum
+      // segment id. A single element is enough to validate `nsegments`
+      // against the well-formed/sorted case and produce the same
+      // "Invalid number of segments" message the CPU functor uses for it.
+      ScratchSpace<SegmentId> last_segment_id_host(context, 1,
+                                                   /*on_host=*/true);
+      OP_REQUIRES_OK(
+          context,
+          stream->Memcpy(
+              last_segment_id_host.mutable_data(),
+              stream_executor::DeviceAddressBase(
+                  const_cast<SegmentId*>(segment_vec.data()) + (nouter - 1),
+                  sizeof(SegmentId)),
+              sizeof(SegmentId)));
+      OP_REQUIRES_OK(context, stream->BlockHostUntilDone());
+      OP_REQUIRES(context, *last_segment_id_host.data() + 1 <= nsegments,
+                  absl::InvalidArgumentError("Invalid number of segments"));
+
+      // Full per-element validation, matching the CPU functor: catches
+      // malformed input that isn't actually sorted (so the fast check above
+      // can't tell it's invalid from the last element alone). Runs as a
+      // device-side scan; `bad_positions` only ever carries 2 int32s back to
+      // the host, regardless of `nouter`.
+      Tensor bad_positions;
+      OP_REQUIRES_OK(context, context->allocate_temp(DT_INT32, TensorShape({2}),
+                                                     &bad_positions));
+      int32_t* const bad_positions_ptr = bad_positions.flat<int32_t>().data();
+      int32_t* const bad_index_pos_ptr = bad_positions_ptr;
+      int32_t* const bad_segment_pos_ptr = bad_positions_ptr + 1;
+      stream_executor::DeviceAddressBase bad_positions_device(
+          bad_positions_ptr, 2 * sizeof(int32_t));
+      OP_REQUIRES_OK(context,
+                     stream->Memset32(&bad_positions_device,
+                                      std::numeric_limits<int32_t>::max(),
+                                      2 * sizeof(int32_t)));
+      OP_REQUIRES_OK(context, LaunchSparseSegmentGradBoundsCheckKernel(
+                                  device, nouter, noutput, nsegments,
+                                  indices_vec.data(), segment_vec.data(),
+                                  bad_index_pos_ptr, bad_segment_pos_ptr));
+      ScratchSpace<int32_t> bad_positions_host(context, 2, /*on_host=*/true);
+      OP_REQUIRES_OK(context,
+                     stream->Memcpy(bad_positions_host.mutable_data(),
+                                    bad_positions_device, 2 * sizeof(int32_t)));
+      OP_REQUIRES_OK(context, stream->BlockHostUntilDone());
+      const int32_t bad_index_pos = bad_positions_host.data()[0];
+      const int32_t bad_segment_pos = bad_positions_host.data()[1];
+
+      if (bad_index_pos != std::numeric_limits<int32_t>::max()) {
+        ScratchSpace<Index> bad_index_host(context, 1, /*on_host=*/true);
+        OP_REQUIRES_OK(
+            context, stream->Memcpy(bad_index_host.mutable_data(),
+                                    stream_executor::DeviceAddressBase(
+                                        const_cast<Index*>(indices_vec.data()) +
+                                            bad_index_pos,
+                                        sizeof(Index)),
+                                    sizeof(Index)));
+        OP_REQUIRES_OK(context, stream->BlockHostUntilDone());
+        OP_REQUIRES(context, false,
+                    absl::InvalidArgumentError(
+                        absl::StrCat("Index ", *bad_index_host.data(),
+                                     " out of range [0, ", noutput, ").")));
+      }
+      if (bad_segment_pos != std::numeric_limits<int32_t>::max()) {
+        ScratchSpace<SegmentId> bad_segment_host(context, 1,
+                                                 /*on_host=*/true);
+        OP_REQUIRES_OK(
+            context,
+            stream->Memcpy(bad_segment_host.mutable_data(),
+                           stream_executor::DeviceAddressBase(
+                               const_cast<SegmentId*>(segment_vec.data()) +
+                                   bad_segment_pos,
+                               sizeof(SegmentId)),
+                           sizeof(SegmentId)));
+        OP_REQUIRES_OK(context, stream->BlockHostUntilDone());
+        OP_REQUIRES(context, false,
+                    absl::InvalidArgumentError(
+                        absl::StrCat("Segment id ", *bad_segment_host.data(),
+                                     " out of range [0, ", nsegments, ").")));
+      }
+    }
+
     // Allocate and compute segment weights (for Mean/SqrtN operations only).
     Tensor weights;
-    T* weights_ptr = nullptr;
+    using Tweights = typename RealTypeIfComplex<T>::type;
+    Tweights* weights_ptr = nullptr;
     if (operation != SparseSegmentReductionOperation::kSum) {
       OP_REQUIRES_OK(
-          context, context->allocate_temp(DataTypeToEnum<T>::value,
+          context, context->allocate_temp(DataTypeToEnum<Tweights>::value,
                                           TensorShape({nsegments}), &weights));
-      weights_ptr = weights.flat<T>().data();
+      weights_ptr = weights.flat<Tweights>().data();
       // Allocate and compute segment_offsets.
       Tensor segment_offsets;
       OP_REQUIRES_OK(context,
@@ -998,7 +1260,7 @@ struct SparseSegmentGradFunctor<GPUDevice, T, Index, SegmentId> {
 
     // Compute the gradient using a weighted SegmentReduceGPU with the segment
     // IDs and indices swapped.
-    using ReduceOp = gpuprim::Sum;
+    using ReduceOp = functor::Sum;
     using Treduce = typename ReduceType<ReduceOp, T>::type;
     OP_REQUIRES_OK(
         context,
@@ -1016,7 +1278,364 @@ struct SparseSegmentGradFunctor<GPUDevice, T, Index, SegmentId> {
   }
 };
 
+template <typename TindicesCompact>
+struct EdgeIndicatorFunctor {
+  EdgeIndicatorFunctor(const TindicesCompact* sorted_indices)
+      : sorted_indices_(sorted_indices) {}
+
+  template <typename Idx>
+  __device__ bool operator()(Idx idx) const {
+    return idx == 0 ? false : sorted_indices_[idx] != sorted_indices_[idx - 1];
+  }
+
+ private:
+  const TindicesCompact* __restrict__ sorted_indices_;
+};
+
+template <typename Toffsets, typename EdgeIndicatorIter,
+          typename TindicesCompact, typename Tindices>
+__global__ void ScatterUniqueIndicesKernel(
+    Toffsets nouter,
+    EdgeIndicatorIter sorted_indices_edge_indicator,     // [nouter]
+    const TindicesCompact* __restrict__ sorted_indices,  // [nouter]
+    const Toffsets* __restrict__ sorted_indices_ids,     // [nouter]
+    Tindices* __restrict__ sorted_unique_indices) {      // [num_unique]
+  for (Toffsets i : GpuGridRangeX(nouter)) {
+    if (i == 0 || sorted_indices_edge_indicator[i]) {
+      sorted_unique_indices[sorted_indices_ids[i]] =
+          static_cast<Tindices>(sorted_indices[i]);
+    }
+  }
+}
+
+template <typename Toffsets, typename EdgeIndicatorIter,
+          typename TindicesCompact, typename Tindices>
+absl::Status LaunchScatterUniqueIndicesKernel(
+    const GPUDevice& d, Toffsets nouter,
+    EdgeIndicatorIter sorted_indices_edge_indicator,     // [nouter]
+    const TindicesCompact* __restrict__ sorted_indices,  // [nouter]
+    const Toffsets* __restrict__ sorted_indices_ids,     // [nouter]
+    Tindices* __restrict__ sorted_unique_indices) {      // [num_unique]
+  TF_ASSIGN_OR_RETURN(
+      GpuLaunchConfig64 config,
+      GetGpuLaunchConfig64(
+          nouter, d,
+          &ScatterUniqueIndicesKernel<Toffsets, EdgeIndicatorIter,
+                                      TindicesCompact, Tindices>,
+          /*dynamic_shared_memory_size=*/0,
+          /*block_size_limit=*/0));
+  return GpuLaunchKernel(ScatterUniqueIndicesKernel<Toffsets, EdgeIndicatorIter,
+                                                    TindicesCompact, Tindices>,
+                         config.block_count, config.thread_per_block, 0,
+                         d.stream(), nouter, sorted_indices_edge_indicator,
+                         sorted_indices, sorted_indices_ids,
+                         sorted_unique_indices);
+}
+
+template <typename T, typename Tindices, typename Tsegmentids>
+struct SparseSegmentGradV2Functor<GPUDevice, T, Tindices, Tsegmentids> {
+  void operator()(OpKernelContext* context,
+                  SparseSegmentReductionOperation operation,
+                  typename TTypes<T>::ConstMatrix input_flat,
+                  typename TTypes<Tindices>::ConstVec indices_vec,
+                  typename TTypes<Tsegmentids>::ConstVec segment_vec,
+                  const TensorShape& dense_output_shape,
+                  typename AsyncOpKernel::DoneCallback done) {
+    const GPUDevice& device = context->eigen_gpu_device();
+
+    const int64_t nsegments = input_flat.dimension(0);
+    const int64_t ninner64 = input_flat.dimension(1);
+    const int64_t nouter64 = indices_vec.dimension(0);
+    // Note: nouter and ninner are not expected to be huge, so we use int32 to
+    // save memory bandwidth.
+    using Toffsets = int32_t;
+    OP_REQUIRES_ASYNC(context, nouter64 <= std::numeric_limits<Toffsets>::max(),
+                      absl::InvalidArgumentError(
+                          absl::StrCat("Indices vector of length ", nouter64,
+                                       " is too large to fit in int32.")),
+                      done);
+    const Toffsets nouter = static_cast<Toffsets>(nouter64);
+    OP_REQUIRES_ASYNC(context, ninner64 <= std::numeric_limits<Toffsets>::max(),
+                      absl::InvalidArgumentError(absl::StrCat(
+                          "Inner data dimension of size ", ninner64,
+                          " is too large to fit in int32.")),
+                      done);
+    const Toffsets ninner = static_cast<Toffsets>(ninner64);
+
+    // Cast indices to 32-bit to save memory bandwidth (the cost of the cast is
+    // worth it because the vector is used multiple times).
+    // Note that we can currently assume int32 is safe because the op's dense
+    // output_dim0 input is always int32.
+    using TindicesCompact = int32_t;
+    Tensor tmp_indices_internal;
+    const TindicesCompact* indices_internal_ptr;
+    if constexpr (std::is_same_v<Tindices, TindicesCompact>) {
+      indices_internal_ptr = indices_vec.data();
+    } else {
+      OP_REQUIRES_OK_ASYNC(
+          context,
+          context->allocate_temp(DataTypeToEnum<TindicesCompact>::value,
+                                 TensorShape({nouter}), &tmp_indices_internal),
+          done);
+      auto indices_vec_internal = tmp_indices_internal.flat<TindicesCompact>();
+      indices_vec_internal.device(device) =
+          indices_vec.template cast<TindicesCompact>();
+      indices_internal_ptr = indices_vec_internal.data();
+    }
+
+    // Cast segment IDs to smallest possible type to save memory bandwidth.
+    if (nsegments <= std::numeric_limits<int16_t>::max()) {
+      CastSegmentIdsThenImpl<Toffsets, TindicesCompact, int16_t>(
+          context, operation, nouter, ninner, nsegments, input_flat.data(),
+          tmp_indices_internal, indices_internal_ptr, segment_vec,
+          dense_output_shape, done);
+    } else if (sizeof(Tsegmentids) > sizeof(int32_t) &&
+               nsegments <= std::numeric_limits<int32_t>::max()) {
+      CastSegmentIdsThenImpl<Toffsets, TindicesCompact, int32_t>(
+          context, operation, nouter, ninner, nsegments, input_flat.data(),
+          tmp_indices_internal, indices_internal_ptr, segment_vec,
+          dense_output_shape, done);
+    } else {
+      Impl<Toffsets, TindicesCompact, Tsegmentids>(
+          context, operation, nouter, ninner, nsegments, input_flat.data(),
+          tmp_indices_internal, indices_internal_ptr, Tensor(),
+          segment_vec.data(), dense_output_shape, done);
+    }
+  }
+
+ private:
+  using Tweights = typename RealTypeIfComplex<T>::type;
+
+  template <typename Toffsets, typename TindicesCompact,
+            typename Tsegmentids_internal>
+  void CastSegmentIdsThenImpl(
+      OpKernelContext* context, SparseSegmentReductionOperation operation,
+      Toffsets nouter, Toffsets ninner, Tsegmentids_internal nsegments,
+      const T* input, Tensor indices_tensor, const TindicesCompact* indices,
+      typename TTypes<Tsegmentids>::ConstVec segment_vec,
+      const TensorShape& dense_output_shape,
+      typename AsyncOpKernel::DoneCallback done) {
+    const GPUDevice& device = context->eigen_gpu_device();
+    Tensor tmp_segment_internal;
+    OP_REQUIRES_OK_ASYNC(
+        context,
+        context->allocate_temp(DataTypeToEnum<Tsegmentids_internal>::value,
+                               TensorShape({nouter}), &tmp_segment_internal),
+        done);
+    auto segment_vec_internal =
+        tmp_segment_internal.flat<Tsegmentids_internal>();
+    segment_vec_internal.device(device) =
+        segment_vec.template cast<Tsegmentids_internal>();
+
+    Impl<Toffsets, TindicesCompact, Tsegmentids_internal>(
+        context, operation, nouter, ninner, nsegments, input, indices_tensor,
+        indices, tmp_segment_internal, segment_vec_internal.data(),
+        dense_output_shape, done);
+  }
+
+  template <typename Toffsets, typename TindicesCompact,
+            typename Tsegmentids_internal>
+  void Impl(OpKernelContext* context, SparseSegmentReductionOperation operation,
+            Toffsets nouter, Toffsets ninner, Tsegmentids_internal nsegments,
+            const T* input, Tensor indices_tensor,
+            const TindicesCompact* indices, Tensor segment_ids_tensor,
+            const Tsegmentids_internal* segment_ids,
+            const TensorShape& dense_output_shape,
+            typename AsyncOpKernel::DoneCallback done) {
+    auto cleanup = gtl::MakeCleanup([&done]() { done(); });
+    const int64_t dense_output_dim0 = dense_output_shape.dim_size(0);
+
+    // Allocate and compute segment weights (for Mean/SqrtN operations only).
+    Tensor tmp_weights;
+    Tweights* weights_ptr = nullptr;
+    if (operation != SparseSegmentReductionOperation::kSum) {
+      ComputeSegmentWeights(context, operation, nsegments, nouter, segment_ids,
+                            &tmp_weights);
+      if (!context->status().ok()) return;
+      weights_ptr = tmp_weights.flat<Tweights>().data();
+    }
+
+    const TindicesCompact* sorted_indices_ptr = indices;
+    const Tsegmentids_internal* permuted_segment_ptr = segment_ids;
+    Tensor tmp_sorted_indices;
+    Tensor tmp_permuted_segment;
+    if (dense_output_dim0 > 1) {
+      // Sort indices and permute segments.
+      OP_REQUIRES_OK_ASYNC(
+          context,
+          context->allocate_temp(DataTypeToEnum<TindicesCompact>::value,
+                                 TensorShape({nouter}), &tmp_sorted_indices),
+          []() {});
+      TindicesCompact* tmp_sorted_indices_ptr =
+          tmp_sorted_indices.flat<TindicesCompact>().data();
+      OP_REQUIRES_OK_ASYNC(
+          context,
+          context->allocate_temp(DataTypeToEnum<Tsegmentids_internal>::value,
+                                 TensorShape({nouter}), &tmp_permuted_segment),
+          []() {});
+      Tsegmentids_internal* tmp_permuted_segment_ptr =
+          tmp_permuted_segment.flat<Tsegmentids_internal>().data();
+      OP_REQUIRES_OK_ASYNC(
+          context,
+          GpuRadixSort(context, nouter,
+                       /*keys_in=*/indices,
+                       /*keys_out=*/tmp_sorted_indices_ptr,
+                       /*indices_in=*/segment_ids,
+                       /*indices_out=*/tmp_permuted_segment_ptr,
+                       /*num_bits=*/Log2Ceiling64(dense_output_dim0)),
+          []() {});
+      sorted_indices_ptr = tmp_sorted_indices_ptr;
+      permuted_segment_ptr = tmp_permuted_segment_ptr;
+      // The original tensors are no longer needed.
+      indices_tensor = Tensor();
+      indices = nullptr;
+      segment_ids_tensor = Tensor();
+      segment_ids = nullptr;
+    }
+
+    using CountIter = gpuprim::CountingInputIterator<Toffsets>;
+    using EdgeIndicatorIter = gpuprim::TransformInputIterator<
+        Toffsets, EdgeIndicatorFunctor<TindicesCompact>, CountIter>;
+    EdgeIndicatorIter sorted_indices_edge_indicator(
+        CountIter(0),
+        EdgeIndicatorFunctor<TindicesCompact>(sorted_indices_ptr));
+
+    Tensor tmp_sorted_indices_unique_ids;
+    OP_REQUIRES_OK_ASYNC(context,
+                         context->allocate_temp(DataTypeToEnum<Toffsets>::value,
+                                                TensorShape({nouter}),
+                                                &tmp_sorted_indices_unique_ids),
+                         []() {});
+    Toffsets* sorted_indices_unique_ids_ptr =
+        tmp_sorted_indices_unique_ids.flat<Toffsets>().data();
+    OP_REQUIRES_OK_ASYNC(
+        context,
+        GpuInclusivePrefixSum(context, nouter, sorted_indices_edge_indicator,
+                              sorted_indices_unique_ids_ptr),
+        []() {});
+
+    se::Stream* stream = context->op_device_context()->stream();
+    OP_REQUIRES_ASYNC(context, stream,
+                      absl::InternalError("No GPU stream available."), []() {});
+
+    // Copy the last element of sorted_indices_unique_ids back to the host to
+    // obtain num_unique.
+    ScratchSpace<Toffsets> last_idx_host(context, 1, /*on_host=*/true);
+    OP_REQUIRES_OK_ASYNC(
+        context,
+        stream->Memcpy(
+            last_idx_host.mutable_data(),
+            stream_executor::DeviceAddressBase(
+                const_cast<Toffsets*>(sorted_indices_unique_ids_ptr) +
+                    (nouter - 1),
+                sizeof(*last_idx_host.data())),
+            sizeof(*last_idx_host.data())),
+        []() {});
+
+    auto async_finish_computation =
+        [this, context, dense_output_shape, nouter, ninner, input,
+         indices_tensor, tmp_sorted_indices, sorted_indices_ptr,
+         tmp_sorted_indices_unique_ids, sorted_indices_unique_ids_ptr,
+         segment_ids_tensor, tmp_permuted_segment, permuted_segment_ptr,
+         sorted_indices_edge_indicator, tmp_weights, weights_ptr, last_idx_host,
+         done]() -> void {
+      auto cb_cleanup = gtl::MakeCleanup([&done]() { done(); });
+      const GPUDevice& device = context->eigen_gpu_device();
+      Toffsets num_unique = (*last_idx_host.data()) + 1;
+
+      std::unique_ptr<se::ActivateContext> scoped_activation =
+          context->op_device_context()->stream()->parent()->Activate();
+
+      TensorShape output_shape = dense_output_shape;
+      OP_REQUIRES_OK_ASYNC(
+          context, output_shape.SetDimWithStatus(0, num_unique), []() {});
+      Tensor* output = nullptr;
+      T* output_ptr;
+      OP_REQUIRES_OK_ASYNC(
+          context, context->allocate_output(0, output_shape, &output), []() {});
+      output_ptr = output->flat<T>().data();
+
+      // Compute the gradient using a weighted SegmentReduceGPU with the segment
+      // IDs and indices swapped.
+      using ReduceOp = functor::Sum;
+      using Treduce = typename ReduceType<ReduceOp, T>::type;
+      OP_REQUIRES_OK_ASYNC(context,
+                           SegmentReduceGPU<Treduce>(
+                               context, /*nouter=*/nouter,
+                               /*ninner=*/ninner,
+                               /*nsegments=*/num_unique,
+                               /*reduce_op=*/ReduceOp(),
+                               /*initial_value=*/T(0),
+                               /*empty_segment_value=*/T(0),
+                               /*is_mean=*/false, /*is_sqrtn=*/false,
+                               /*input=*/input,
+                               /*segment_ids=*/sorted_indices_unique_ids_ptr,
+                               /*indices=*/permuted_segment_ptr,
+                               /*weights=*/weights_ptr,
+                               /*output=*/output_ptr),
+                           []() {});
+
+      Tensor* sorted_unique_indices = nullptr;
+      Tindices* sorted_unique_indices_ptr;
+      OP_REQUIRES_OK_ASYNC(
+          context,
+          context->allocate_output(1, TensorShape({num_unique}),
+                                   &sorted_unique_indices),
+          []() {});
+      sorted_unique_indices_ptr =
+          sorted_unique_indices->flat<Tindices>().data();
+
+      OP_REQUIRES_OK_ASYNC(
+          context,
+          LaunchScatterUniqueIndicesKernel(
+              device, nouter, sorted_indices_edge_indicator, sorted_indices_ptr,
+              sorted_indices_unique_ids_ptr, sorted_unique_indices_ptr),
+          []() {});
+    };
+
+    cleanup.release();
+    context->device()
+        ->tensorflow_accelerator_device_info()
+        ->event_mgr->ThenExecute(stream, async_finish_computation);
+  }
+
+  template <typename Tsegmentids_internal, typename Toffsets>
+  void ComputeSegmentWeights(OpKernelContext* context,
+                             SparseSegmentReductionOperation operation,
+                             Tsegmentids_internal nsegments, Toffsets nouter,
+                             const Tsegmentids_internal* segment_ids,
+                             Tensor* tmp_weights) {
+    const GPUDevice& device = context->eigen_gpu_device();
+    OP_REQUIRES_OK_ASYNC(
+        context,
+        context->allocate_temp(DataTypeToEnum<Tweights>::value,
+                               TensorShape({nsegments}), tmp_weights),
+        []() {});
+    Tweights* weights_ptr = tmp_weights->flat<Tweights>().data();
+    // Allocate and compute segment_offsets.
+    Tensor tmp_segment_offsets;
+    OP_REQUIRES_OK_ASYNC(context,
+                         context->allocate_temp(DataTypeToEnum<Toffsets>::value,
+                                                TensorShape({nsegments + 1}),
+                                                &tmp_segment_offsets),
+                         []() {});
+    Toffsets* segment_offsets_ptr = tmp_segment_offsets.flat<Toffsets>().data();
+    OP_REQUIRES_OK_ASYNC(
+        context,
+        LaunchSegmentOffsetsKernel(device, nouter, nsegments, segment_ids,
+                                   segment_offsets_ptr),
+        []() {});
+    // Compute the weights based on the segment sizes using segment_offsets.
+    OP_REQUIRES_OK_ASYNC(
+        context,
+        LaunchSegmentWeightsKernel(device, nsegments, operation,
+                                   segment_offsets_ptr, weights_ptr),
+        []() {});
+  }
+};
+
 }  // namespace functor
 }  // namespace tensorflow
 
 #endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM
+#endif  // TENSORFLOW_CORE_KERNELS_SEGMENT_REDUCTION_OPS_GPU_CU_H_

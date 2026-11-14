@@ -15,6 +15,8 @@ limitations under the License.
 #ifndef TENSORFLOW_C_EXPERIMENTAL_OPS_GEN_COMMON_CONTROLLER_H_
 #define TENSORFLOW_C_EXPERIMENTAL_OPS_GEN_COMMON_CONTROLLER_H_
 
+#include <vector>
+
 #include "tensorflow/c/experimental/ops/gen/common/path_config.h"
 #include "tensorflow/c/experimental/ops/gen/common/source_code.h"
 #include "tensorflow/c/experimental/ops/gen/model/op_spec.h"
@@ -30,7 +32,8 @@ class Controller {
  public:
   explicit Controller(PathConfig path_config, Env* env = Env::Default());
   virtual ~Controller();
-  const void WriteFile(const string& file_path, const SourceCode& code) const;
+  const void WriteFile(const std::string& file_path,
+                       const SourceCode& code) const;
   const std::vector<OpSpec>& GetModelOps() const;
 
  private:

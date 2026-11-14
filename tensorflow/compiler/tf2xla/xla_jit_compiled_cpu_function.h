@@ -17,13 +17,17 @@ limitations under the License.
 #define TENSORFLOW_COMPILER_TF2XLA_XLA_JIT_COMPILED_CPU_FUNCTION_H_
 
 #include <memory>
+#include <string>
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"
+#include "absl/log/check.h"
+#include "tensorflow/compiler/tf2xla/encoded_buffer_allocation_info.h"
 #include "tensorflow/compiler/tf2xla/tf2xla.pb.h"
-#include "tensorflow/compiler/tf2xla/xla_compiled_cpu_function.h"
-#include "tensorflow/compiler/xla/client/local_client.h"
-#include "tensorflow/compiler/xla/cpu_function_runtime.h"
-#include "tensorflow/compiler/xla/statusor.h"
+#include "tensorflow/compiler/tf2xla/xla_compiled_cpu_function_thunks.h"
+#include "xla/backends/cpu/buffer_allocation_info.h"
+#include "xla/client/local_client.h"
+#include "xla/service/cpu/executable.pb.h"
 #include "tensorflow/core/framework/graph.pb.h"
 #include "tensorflow/core/platform/types.h"
 
@@ -43,7 +47,7 @@ class XlaJitCompiledCpuFunction {
   // `config` specifies the portion of the graph to compile, via feeds and
   // fetches. Each feed is a positional input argument for the compiled
   // function, while each fetch is a positional output argument.
-  static StatusOr<std::unique_ptr<XlaJitCompiledCpuFunction>> Compile(
+  static absl::StatusOr<std::unique_ptr<XlaJitCompiledCpuFunction>> Compile(
       const GraphDef& graph_def, const tf2xla::Config& config,
       const xla::ExecutableBuildOptions& build_options);
 
@@ -58,27 +62,41 @@ class XlaJitCompiledCpuFunction {
     return static_data_;
   }
 
+  const xla::LocalExecutable& LocalExecutable() const {
+    CHECK(executable_);  // Crash ok
+    return *executable_;
+  }
+
  private:
-  XlaJitCompiledCpuFunction() {}
+  XlaJitCompiledCpuFunction() : compilation_result_proto_(nullptr) {}
 
   // The executable holds the underlying function.
   std::unique_ptr<xla::LocalExecutable> executable_;
+
+  // The compilation result proto.
+  std::unique_ptr<xla::cpu::CompilationResultProto> compilation_result_proto_;
+
+  // Function library symbol map used to construct AotCompiledFunctionLibrary
+  absl::flat_hash_map<std::string, void*> function_library_symbol_map_;
 
   // The static data is backed by the rest of the state in this class.
   XlaCompiledCpuFunction::StaticData static_data_;
 
   // The backing array for buffer infos.
-  std::vector<xla::cpu_function_runtime::BufferInfo> buffer_infos_;
+  std::vector<xla::cpu::BufferAllocationInfo> buffer_infos_;
 
   // The backing array for the arg index table.
-  std::vector<int32> arg_index_table_;
+  std::vector<int32_t> arg_index_table_;
+
+  // The backing array for the result index table.
+  std::vector<int32_t> result_index_table_;
 
   // The backing arrays of arg and result names. We hold the actual strings in
   // nonempty_*_names_, and hold arrays of pointers in *_names_ for the static
   // data to refer to.
-  std::vector<string> nonempty_arg_names_;
-  std::vector<string> nonempty_variable_names_;
-  std::vector<string> nonempty_result_names_;
+  std::vector<std::string> nonempty_arg_names_;
+  std::vector<std::string> nonempty_variable_names_;
+  std::vector<std::string> nonempty_result_names_;
   std::vector<const char*> arg_names_;
   std::vector<const char*> variable_names_;
   std::vector<const char*> result_names_;

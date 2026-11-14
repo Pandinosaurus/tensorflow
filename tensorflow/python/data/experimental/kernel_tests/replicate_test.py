@@ -13,10 +13,6 @@
 # limitations under the License.
 # ==============================================================================
 """Tests for the private `replicate()` transformation."""
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 from absl.testing import parameterized
 
 from tensorflow.core.protobuf import cluster_pb2
@@ -55,6 +51,13 @@ class LocalReplicateTest(test_base.DatasetTestBase, parameterized.TestCase):
     self._device0 = "/device:CPU:0"
     self._device1 = "/device:CPU:1"
     self._device2 = "/device:CPU:2"
+
+  def tearDown(self):
+    super().tearDown()
+    # Clear the current device scope to avoid polluting other test cases.
+    ops.device(None).__enter__()
+    # Reset the context to avoid polluting other test cases.
+    context._reset_context()
 
   @combinations.generate(test_base.default_test_combinations())
   def testBasic(self):
@@ -257,9 +260,6 @@ class EagerClusterReplicateTest(test_base.DatasetTestBase,
   def setUp(self):
     super(EagerClusterReplicateTest, self).setUp()
 
-    if context.context().use_tfrt:
-      self.skipTest("b/171412104: This test requires distributed support.")
-
     # TODO(b/171412104): Move create server to __init__ once tfrt support it.
     self._cached_server1 = server_lib.Server.create_local_server()
     self._cached_server2 = server_lib.Server.create_local_server()
@@ -276,6 +276,13 @@ class EagerClusterReplicateTest(test_base.DatasetTestBase,
                 self._cached_server1_target, self._cached_server2_target
             ],
             task_index=0))
+
+  def tearDown(self):
+    super().tearDown()
+    # Clear the current device scope to avoid polluting other test cases.
+    ops.device(None).__enter__()
+    # Reset the context to avoid polluting other test cases.
+    context._reset_context()
 
   @combinations.generate(
       combinations.combine(tf_api_version=[2], mode=["eager"]))
@@ -346,6 +353,13 @@ class GraphClusterReplicateTest(test_base.DatasetTestBase,
     self._device1 = "/job:worker/replica:0/task:1/device:CPU:0"
     self._device2 = "/job:worker/replica:0/task:2/device:CPU:0"
     self._target = worker[0].target
+
+  def tearDown(self):
+    super().tearDown()
+    # Clear the current device scope to avoid polluting other test cases.
+    ops.device(None).__enter__()
+    # Reset the context to avoid polluting other test cases.
+    context._reset_context()
 
   @combinations.generate(
       combinations.combine(tf_api_version=[1], mode=["graph"]))

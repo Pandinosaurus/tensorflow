@@ -23,8 +23,10 @@ limitations under the License.
 #include <vector>
 
 #include "tensorflow/core/framework/op_kernel.h"
+#include "tensorflow/core/framework/op_requires.h"
 #include "tensorflow/core/framework/register_types.h"
 #include "tensorflow/core/framework/tensor.h"
+#include "tensorflow/core/framework/tensor_shape.h"
 #include "tensorflow/core/framework/tensor_util.h"
 #include "tensorflow/core/framework/types.h"
 #include "tensorflow/core/lib/gtl/inlined_vector.h"
@@ -38,15 +40,16 @@ namespace functor {
 
 template <>
 struct ReshapeSparseTensorFunctor<CPUDevice> {
-  Status operator()(OpKernelContext *context, const TensorShape &input_shape,
-                    const TensorShape &output_shape,
-                    typename TTypes<int64_t>::ConstMatrix input_indices,
-                    typename TTypes<int64_t>::Matrix output_indices) const {
+  absl::Status operator()(
+      OpKernelContext *context, const TensorShape &input_shape,
+      const TensorShape &output_shape,
+      typename TTypes<int64_t>::ConstMatrix input_indices,
+      typename TTypes<int64_t>::Matrix output_indices) const {
     (void)context;  // Unused (only used in GPU implementation)
     const int64_t input_rank = input_shape.dims();
     const int64_t output_rank = output_shape.dims();
     const int64_t nnz = input_indices.dimension(0);
-    gtl::InlinedVector<int64_t, 8> input_strides(input_rank);
+    absl::InlinedVector<int64_t, 8> input_strides(input_rank);
     if (input_rank > 0) {
       input_strides[input_rank - 1] = 1;
       for (int d = input_rank - 2; d >= 0; --d) {
@@ -54,7 +57,7 @@ struct ReshapeSparseTensorFunctor<CPUDevice> {
       }
     }
 
-    gtl::InlinedVector<int64_t, 8> output_strides(output_rank);
+    absl::InlinedVector<int64_t, 8> output_strides(output_rank);
     if (output_rank > 0) {
       output_strides[output_rank - 1] = 1;
       for (int d = output_rank - 2; d >= 0; --d) {
@@ -73,7 +76,7 @@ struct ReshapeSparseTensorFunctor<CPUDevice> {
         id %= output_strides[j];
       }
     }
-    return Status::OK();
+    return absl::OkStatus();
   }
 };
 
@@ -86,20 +89,22 @@ void ReshapeSparseTensor(OpKernelContext *context,
                          const Tensor &target_shape_in, int output_indices_idx,
                          int output_shape_idx) {
   OP_REQUIRES(context, TensorShapeUtils::IsMatrix(input_indices_in.shape()),
-              errors::InvalidArgument(
+              absl::InvalidArgumentError(absl::StrCat(
                   "Input indices should be a matrix but received shape ",
-                  input_indices_in.shape().DebugString()));
+                  input_indices_in.shape().DebugString())));
   OP_REQUIRES(context, TensorShapeUtils::IsVector(input_shape_in.shape()),
-              errors::InvalidArgument(
+              absl::InvalidArgumentError(absl::StrCat(
                   "Input shape should be a vector but received shape ",
-                  input_shape_in.shape().DebugString()));
+                  input_shape_in.shape().DebugString())));
   OP_REQUIRES(context, TensorShapeUtils::IsVector(target_shape_in.shape()),
-              errors::InvalidArgument(
+              absl::InvalidArgumentError(absl::StrCat(
                   "Target shape should be a vector but received shape ",
-                  target_shape_in.shape().DebugString()));
+                  target_shape_in.shape().DebugString())));
 
   const int64_t output_rank = target_shape_in.NumElements();
-  const TensorShape input_shape(input_shape_in.vec<int64_t>());
+  TensorShape input_shape;
+  OP_REQUIRES_OK(context, TensorShape::BuildTensorShape(
+                              input_shape_in.vec<int64_t>(), &input_shape));
   const int64_t dense_size = input_shape.num_elements();
   const int64_t nnz = input_indices_in.shape().dim_size(0);
 
@@ -112,45 +117,45 @@ void ReshapeSparseTensor(OpKernelContext *context,
   for (int d = 0; d < output_rank; ++d) {
     const int64_t size = target_shape(d);
     if (size == -1) {
-      OP_REQUIRES(
-          context, unknown_index == -1,
-          errors::InvalidArgument("only one output dimension may be -1, "
-                                  "not both ",
-                                  unknown_index, " and ", d));
+      OP_REQUIRES(context, unknown_index == -1,
+                  absl::InvalidArgumentError(
+                      absl::StrCat("only one output dimension may be -1, "
+                                   "not both ",
+                                   unknown_index, " and ", d)));
       unknown_index = d;
-      output_shape.AddDim(1);
+      OP_REQUIRES_OK(context, output_shape.AddDimWithStatus(1));
     } else {
       OP_REQUIRES(context, size >= 0,
-                  errors::InvalidArgument("size ", d,
-                                          " must be non-negative, not ", size));
+                  absl::InvalidArgumentError(absl::StrCat(
+                      "size ", d, " must be non-negative, not ", size)));
       product *= size;
-      output_shape.AddDim(size);
+      OP_REQUIRES_OK(context, output_shape.AddDimWithStatus(size));
     }
   }
   if (unknown_index != -1) {
     OP_REQUIRES(
         context, product > 0,
-        errors::InvalidArgument("reshape cannot infer the missing "
-                                "input size for an empty tensor unless all "
-                                "specified input sizes are non-zero"));
+        absl::InvalidArgumentError("reshape cannot infer the missing "
+                                   "input size for an empty tensor unless all "
+                                   "specified input sizes are non-zero"));
     const int64_t missing = dense_size / product;
     OP_REQUIRES(
         context, product * missing == dense_size,
-        errors::InvalidArgument(
+        absl::InvalidArgumentError(absl::StrCat(
             "Input to reshape is a SparseTensor with ", dense_size,
             " dense values, but the requested shape requires a multiple of ",
             product, ". input_shape=", input_shape.DebugString(),
-            " output_shape=", output_shape.DebugString()));
+            " output_shape=", output_shape.DebugString())));
     output_shape.set_dim(unknown_index, missing);
   }
 
-  OP_REQUIRES(
-      context, output_shape.num_elements() == dense_size,
-      errors::InvalidArgument("Input to reshape is a tensor with ", dense_size,
-                              " dense values, but the requested shape has ",
-                              output_shape.num_elements(),
-                              ". input_shape=", input_shape.DebugString(),
-                              " output_shape=", output_shape.DebugString()));
+  OP_REQUIRES(context, output_shape.num_elements() == dense_size,
+              absl::InvalidArgumentError(
+                  absl::StrCat("Input to reshape is a tensor with ", dense_size,
+                               " dense values, but the requested shape has ",
+                               output_shape.num_elements(),
+                               ". input_shape=", input_shape.DebugString(),
+                               " output_shape=", output_shape.DebugString())));
 
   // Optimize for reshaping to the same shape.
   if (input_shape == output_shape) {
@@ -176,10 +181,10 @@ void ReshapeSparseTensor(OpKernelContext *context,
   if (nnz > 0) {
     OP_REQUIRES(
         context, dense_size > 0 && product > 0,
-        errors::InvalidArgument(
+        absl::InvalidArgumentError(absl::StrCat(
             "Input tensor has ", nnz, " non zero elements but input shape (",
             input_shape.DebugString(), ") or output shape (",
-            output_shape.DebugString(), ") is empty"));
+            output_shape.DebugString(), ") is empty")));
     OP_REQUIRES_OK(context, functor::ReshapeSparseTensorFunctor<Device>()(
                                 context, input_shape, output_shape,
                                 input_indices_in.matrix<int64_t>(),

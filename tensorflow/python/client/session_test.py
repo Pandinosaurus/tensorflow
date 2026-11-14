@@ -13,10 +13,6 @@
 # limitations under the License.
 # ==============================================================================
 """Tests for tensorflow.python.client.session.Session."""
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import collections
 import os
 import random
@@ -27,7 +23,6 @@ import warnings
 
 import numpy as np
 import six
-from six.moves import xrange  # pylint: disable=redefined-builtin
 
 from tensorflow.core.framework import attr_value_pb2
 from tensorflow.core.lib.core import error_codes_pb2
@@ -42,8 +37,10 @@ from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import errors
 from tensorflow.python.framework import function
 from tensorflow.python.framework import importer
+from tensorflow.python.framework import indexed_slices
 from tensorflow.python.framework import ops
 from tensorflow.python.framework import sparse_tensor
+from tensorflow.python.framework import stack
 from tensorflow.python.framework import tensor_util
 from tensorflow.python.framework import test_util
 from tensorflow.python.framework import versions
@@ -58,7 +55,9 @@ from tensorflow.python.ops import math_ops
 # Import resource_variable_ops for the variables-to-tensor implicit conversion.
 from tensorflow.python.ops import resource_variable_ops  # pylint: disable=unused-import
 from tensorflow.python.ops import state_ops
+from tensorflow.python.ops import variable_v1
 from tensorflow.python.ops import variables
+from tensorflow.python.ops import while_loop
 from tensorflow.python.platform import googletest
 from tensorflow.python.training import server_lib
 from tensorflow.python.util import compat
@@ -83,13 +82,50 @@ class SessionTest(test_util.TensorFlowTestCase):
     super(SessionTest, self).setUp()
     warnings.simplefilter('always')
 
+  @test_util.run_v1_only('Session is a v1 feature')
+  def testSessionNoneRaisesRuntimeError(self):
+    with ops.Graph().as_default():
+      sess = session.Session()
+      c = constant_op.constant(42.0)
+      sess._session = None
+      with self.assertRaisesRegex(RuntimeError, 'Session is not available'):
+        sess.run(c)
+
+  @test_util.run_v1_only('Session is a v1 feature')
+  def testPartialRunSetupSessionNoneRaisesRuntimeError(self):
+    with ops.Graph().as_default():
+      sess = session.Session()
+      c = constant_op.constant(42.0)
+      sess._session = None
+      with self.assertRaisesRegex(RuntimeError, 'Session is not available'):
+        sess.partial_run_setup([c], [])
+
+  @test_util.run_v1_only('Session is a v1 feature')
+  def testPartialRunSessionNoneRaisesRuntimeError(self):
+    with ops.Graph().as_default():
+      sess = session.Session()
+      c = constant_op.constant(42.0)
+      handle = sess.partial_run_setup([c], [])
+      sess._session = None
+      with self.assertRaisesRegex(RuntimeError, 'Session is not available'):
+        sess.partial_run(handle, c)
+
+  @test_util.run_v1_only('Session is a v1 feature')
+  def testMakeCallableSessionNoneRaisesRuntimeError(self):
+    with ops.Graph().as_default():
+      sess = session.Session()
+      c = constant_op.constant(42.0)
+      sess._session = None
+      with self.assertRaisesRegex(RuntimeError, 'Session is not available'):
+        sess.make_callable(c)
+
   def testUseExistingGraph(self):
     with ops.Graph().as_default() as g, ops.device('/cpu:0'):
       a = constant_op.constant(6.0, shape=[1, 1])
       b = constant_op.constant(7.0, shape=[1, 1])
       c = math_ops.matmul(a, b, name='matmul')
     with session.Session(graph=g):
-      result = c.eval()
+      result = self.evaluate(c)
       self.assertAllEqual(result, [[42.0]])
 
   def testUseDefaultGraph(self):
@@ -98,7 +134,7 @@ class SessionTest(test_util.TensorFlowTestCase):
       b = constant_op.constant(7.0, shape=[1, 1])
       c = math_ops.matmul(a, b, name='matmul')
       with session.Session():
-        result = c.eval()
+        result = self.evaluate(c)
         self.assertAllEqual(result, [[42.0]])
 
   def testCreate(self):
@@ -111,7 +147,7 @@ class SessionTest(test_util.TensorFlowTestCase):
       copy_val = copy.eval({'W1:0': arr})
       self.assertAllEqual(arr, copy_val)
       # Test without feed.
-      copy_val = copy.eval()
+      copy_val = self.evaluate(copy)
       self.assertAllEqual(
           np.asarray(
               [[10.0, 10.0, 10.0], [10.0, 10.0, 10.0]], dtype=np.float32),
@@ -179,7 +215,7 @@ class SessionTest(test_util.TensorFlowTestCase):
     with session.Session():
       a = array_ops.placeholder(dtypes.float32)
       with self.assertRaisesOpError(lambda e: e.op == a.op):
-        a.eval()
+        self.evaluate(a)
 
   def testErrorCodeWithNoNodeDef(self):
     with session.Session() as s:
@@ -210,7 +246,7 @@ class SessionTest(test_util.TensorFlowTestCase):
                 e.op._original_op._original_op == a.op)
 
       with self.assertRaisesOpError(exc_predicate):
-        c.eval()
+        self.evaluate(c)
 
   def testFetchNone(self):
     with session.Session() as s:
@@ -578,7 +614,7 @@ class SessionTest(test_util.TensorFlowTestCase):
       self.assertAllEqual([[4.0, 4.0, 4.0]], results_with_list[0])
       results_with_single = s.run(c)
       self.assertAllEqual([[4.0, 4.0, 4.0]], results_with_single)
-      results_with_get = c.eval()
+      results_with_get = self.evaluate(c)
       self.assertAllEqual([[4.0, 4.0, 4.0]], results_with_get)
       a_val, b_val = s.run([a, b])  # Test multiple fetches.
       self.assertAllEqual([[1.0, 1.0]], a_val)
@@ -852,7 +888,7 @@ class SessionTest(test_util.TensorFlowTestCase):
       indices = np.array([[3, 2, 0], [4, 5, 1]]).astype(np.int64)
       values = np.array([1.0, 2.0]).astype(np.float32)
       dense_shape = np.array([7, 9, 2]).astype(np.int64)
-      ind = ops.IndexedSlices(
+      ind = indexed_slices.IndexedSlices(
           constant_op.constant(values), constant_op.constant(indices),
           constant_op.constant(dense_shape))
       # Single fetch, use as tuple
@@ -887,7 +923,7 @@ class SessionTest(test_util.TensorFlowTestCase):
       values = np.array([1.0, 2.0]).astype(np.float32)
       indices = np.array([[3, 2, 0], [4, 5, 1]]).astype(np.int64)
       dense_shape = np.array([7, 9, 2]).astype(np.int64)
-      ind = ops.IndexedSlices(
+      ind = indexed_slices.IndexedSlices(
           array_ops.placeholder(dtype=np.float32, shape=(2,)),
           array_ops.placeholder(dtype=np.int64, shape=(2, 3)),
           array_ops.placeholder(dtype=np.int64, shape=(3,)),
@@ -895,7 +931,8 @@ class SessionTest(test_util.TensorFlowTestCase):
       ind_values = array_ops.identity(ind.values)
       ind_indices = array_ops.identity(ind.indices)
       ind_dense_shape = array_ops.identity(ind.dense_shape)
-      ind2 = ops.IndexedSlices(ind_values, ind_indices, ind_dense_shape)
+      ind2 = indexed_slices.IndexedSlices(ind_values, ind_indices,
+                                          ind_dense_shape)
       # Feed with tuple
       values_out, indices_out, dense_shape_out = s.run(
           [ind_values, ind_indices, ind_dense_shape], {
@@ -905,16 +942,15 @@ class SessionTest(test_util.TensorFlowTestCase):
       self.assertAllEqual(indices_out, indices)
       self.assertAllEqual(dense_shape_out, dense_shape)
       # Feed with IndexedSlicesValue
-      values_out, indices_out, dense_shape_out = s.run(
-          [ind_values, ind_indices, ind_dense_shape], {
-              ind: ops.IndexedSlicesValue(values, indices, dense_shape)
-          })
+      values_out, indices_out, dense_shape_out = s.run([
+          ind_values, ind_indices, ind_dense_shape
+      ], {ind: indexed_slices.IndexedSlicesValue(values, indices, dense_shape)})
       self.assertAllEqual(values_out, values)
       self.assertAllEqual(indices_out, indices)
       self.assertAllEqual(dense_shape_out, dense_shape)
       # Feed with IndexedSlicesValue, fetch IndexedSlicesValue
       ind2_out = s.run(ind2, {
-          ind: ops.IndexedSlicesValue(values, indices, dense_shape)
+          ind: indexed_slices.IndexedSlicesValue(values, indices, dense_shape)
       })
       self.assertAllEqual(ind2_out.values, values)
       self.assertAllEqual(ind2_out.indices, indices)
@@ -925,7 +961,7 @@ class SessionTest(test_util.TensorFlowTestCase):
       indices = np.array([[3, 2, 0], [4, 5, 1]]).astype(np.int64)
       values = np.array([1.0, 2.0]).astype(np.float32)
       dense_shape = None
-      ind = ops.IndexedSlices(
+      ind = indexed_slices.IndexedSlices(
           constant_op.constant(values), constant_op.constant(indices), None)
       # Single fetch, use as tuple
       ind_out = s.run(ind)
@@ -959,12 +995,12 @@ class SessionTest(test_util.TensorFlowTestCase):
       values = np.array([1.0, 2.0]).astype(np.float32)
       indices = np.array([[3, 2, 0], [4, 5, 1]]).astype(np.int64)
       dense_shape = None
-      ind = ops.IndexedSlices(
+      ind = indexed_slices.IndexedSlices(
           array_ops.placeholder(dtype=np.float32, shape=(2,)),
           array_ops.placeholder(dtype=np.int64, shape=(2, 3)), None)
       ind_values = array_ops.identity(ind.values)
       ind_indices = array_ops.identity(ind.indices)
-      ind2 = ops.IndexedSlices(ind_values, ind_indices)
+      ind2 = indexed_slices.IndexedSlices(ind_values, ind_indices)
       # Feed with tuple
       values_out, indices_out = s.run([ind_values, ind_indices], {
           ind: (values, indices)
@@ -973,13 +1009,13 @@ class SessionTest(test_util.TensorFlowTestCase):
       self.assertAllEqual(indices_out, indices)
       # Feed with IndexedSlicesValue
       values_out, indices_out = s.run([ind_values, ind_indices], {
-          ind: ops.IndexedSlicesValue(values, indices, dense_shape)
+          ind: indexed_slices.IndexedSlicesValue(values, indices, dense_shape)
       })
       self.assertAllEqual(values_out, values)
       self.assertAllEqual(indices_out, indices)
       # Feed with IndexedSlicesValue, fetch IndexedSlicesValue
       ind2_out = s.run(ind2, {
-          ind: ops.IndexedSlicesValue(values, indices, dense_shape)
+          ind: indexed_slices.IndexedSlicesValue(values, indices, dense_shape)
       })
       self.assertAllEqual(ind2_out.values, values)
       self.assertAllEqual(ind2_out.indices, indices)
@@ -1005,25 +1041,25 @@ class SessionTest(test_util.TensorFlowTestCase):
       c = math_ops.matmul(a, b)
       v = variables.Variable(c, name='testExtendWithStatefulOperations_v')
       v.initializer.run()
-      v_val = v.eval()
+      v_val = self.evaluate(v)
       self.assertAllEqual([[4.0, 4.0, 4.0]], v_val)
       d = constant_op.constant(3.0, shape=[2, 3])
       e = math_ops.matmul(a, d)
       assign_e_to_v = state_ops.assign(v, e)
       # Extend will happen here.
-      e_val = e.eval()
+      e_val = self.evaluate(e)
       self.assertAllEqual([[6.0, 6.0, 6.0]], e_val)
-      v_val = v.eval()
+      v_val = self.evaluate(v)
       self.assertAllEqual([[4.0, 4.0, 4.0]], v_val)
       s.run(assign_e_to_v)
-      v_val = v.eval()
+      v_val = self.evaluate(v)
       self.assertAllEqual([[6.0, 6.0, 6.0]], v_val)
 
   def testExtendWithGroupBy(self):
     with session.Session() as s:
       a = constant_op.constant(1.0, shape=[1, 2])
       p = variables.Variable(a, name='testExtendWithGroupBy_p')
-      a_val = a.eval()  # Force an Extend after this op.
+      a_val = self.evaluate(a)  # Force an Extend after this op.
       self.assertAllEqual([[1.0, 1.0]], a_val)
 
       b = constant_op.constant(2.0, shape=[1, 2])
@@ -1042,7 +1078,7 @@ class SessionTest(test_util.TensorFlowTestCase):
       b = constant_op.constant(2.0, shape=[2, 3])
       c = math_ops.matmul(a, b)
 
-      c_val = c.eval()
+      c_val = self.evaluate(c)
       self.assertAllEqual([[4.0, 4.0, 4.0]], c_val)
 
       fed_c_val = c.eval(feed_dict={a.name: [[4.0, 4.0]]})
@@ -1053,22 +1089,22 @@ class SessionTest(test_util.TensorFlowTestCase):
     with session.Session():
       a = constant_op.constant(1.0, shape=[1, 2])
       b = constant_op.constant(2.0, shape=[1, 2], name='b')
-      v = variables.VariableV1(a, a.dtype)
+      v = variable_v1.VariableV1(a, a.dtype)
       assign_a_to_v = state_ops.assign(v, a)
 
-      assign_a_to_v.eval()
+      self.evaluate(assign_a_to_v)
 
-      v_val = v.eval()
+      v_val = self.evaluate(v)
       self.assertAllEqual([[1.0, 1.0]], v_val)
 
       assign_b_to_v = state_ops.assign(v, b)
 
-      assign_b_to_v.eval()
-      v_val = v.eval()
+      self.evaluate(assign_b_to_v)
+      v_val = self.evaluate(v)
       self.assertAllEqual([[2.0, 2.0]], v_val)
 
       assign_b_to_v.eval(feed_dict={'b:0': [[3.0, 3.0]]})
-      v_val = v.eval()
+      v_val = self.evaluate(v)
       self.assertAllEqual([[3.0, 3.0]], v_val)
 
   def testDefaultGraph(self):
@@ -1081,17 +1117,17 @@ class SessionTest(test_util.TensorFlowTestCase):
       c = math_ops.matmul(a, b)
       v = variables.Variable(c, name='testDefaultGraph_v')
       v.initializer.run()
-      v_val = v.eval()
+      v_val = self.evaluate(v)
       self.assertAllEqual([[4.0, 4.0, 4.0]], v_val)
       d = constant_op.constant(3.0, shape=[2, 3])
       e = math_ops.matmul(a, d)
       assign_e_to_v = state_ops.assign(v, e)
-      e_val = e.eval()
+      e_val = self.evaluate(e)
       self.assertAllEqual([[6.0, 6.0, 6.0]], e_val)
-      v_val = v.eval()
+      v_val = self.evaluate(v)
       self.assertAllEqual([[4.0, 4.0, 4.0]], v_val)
       s.run(assign_e_to_v)
-      v_val = v.eval()
+      v_val = self.evaluate(v)
       self.assertAllEqual([[6.0, 6.0, 6.0]], v_val)
       self.assertEqual(ops.get_default_graph(), s.graph)
 
@@ -1109,18 +1145,18 @@ class SessionTest(test_util.TensorFlowTestCase):
 
       assign_c_to_v = state_ops.assign(v, c)
       v.initializer.run()
-      assign_c_to_v.eval()
-      v_val = v.eval()
+      self.evaluate(assign_c_to_v)
+      v_val = self.evaluate(v)
       self.assertAllEqual([[4.0, 4.0, 4.0]], v_val)
       d = constant_op.constant(3.0, shape=[2, 3])
       e = math_ops.matmul(a, d)
       assign_e_to_v = state_ops.assign(v, e)
-      e_val = e.eval()
+      e_val = self.evaluate(e)
       self.assertAllEqual([[6.0, 6.0, 6.0]], e_val)
-      v_val = v.eval()
+      v_val = self.evaluate(v)
       self.assertAllEqual([[4.0, 4.0, 4.0]], v_val)
       s.run(assign_e_to_v)
-      v_val = v.eval()
+      v_val = self.evaluate(v)
       self.assertAllEqual([[6.0, 6.0, 6.0]], v_val)
       self.assertEqual(ops.get_default_graph(), s.graph)
 
@@ -1170,7 +1206,7 @@ class SessionTest(test_util.TensorFlowTestCase):
       with ops.colocate_with(x):
         y = array_ops.placeholder(dtype=dtypes.float32)
       with ops.device('/cpu:0'):
-        z = control_flow_ops.while_loop(
+        z = while_loop.while_loop(
             lambda x, y: x < 10, lambda x, y: (x + 1, x * y), [x, y])
       with graph._attr_scope({'_a': attr_value_pb2.AttrValue(b=False)}):
         gradients_impl.gradients(z, [x, y])
@@ -1304,7 +1340,7 @@ class SessionTest(test_util.TensorFlowTestCase):
   @test_util.run_v1_only('b/120545219')
   def testNotEntered(self):
     # pylint: disable=protected-access
-    self.assertIsNone(ops._default_session_stack.get_default())
+    self.assertIsNone(stack._default_session_stack.get_default())
     # pylint: enable=protected-access
     with ops.device('/cpu:0'):
       sess = session.Session()
@@ -1331,7 +1367,7 @@ class SessionTest(test_util.TensorFlowTestCase):
       sess.close()
 
   @test_util.run_v1_only('b/120545219')
-  def testMultipleInteractiveSessionsWarning(self):
+  def testMultipleInteractiveSessionsError(self):
     # Reinitialize the global state to ensure that the expected warnings will
     # be emitted.
     session.InteractiveSession._active_session_count = 0  # pylint: disable=protected-access
@@ -1340,21 +1376,27 @@ class SessionTest(test_util.TensorFlowTestCase):
     sess.run(constant_op.constant(4.0))  # Run so that the session is "opened".
     sess.close()
     # Opening and closing interactive sessions serially should not warn.
-    with warnings.catch_warnings(record=True) as w:
+    with self.assertNoLogs(level='ERROR'):
       sess = session.InteractiveSession()
       sess.close()
-    self.assertEqual(0, len(w))
 
-    with warnings.catch_warnings(record=True) as w:
+    with self.assertNoLogs(level='ERROR'):
       sess = session.InteractiveSession()
-    self.assertEqual(0, len(w))
-    with warnings.catch_warnings(record=True) as w:
+
+    with self.assertLogs(level='ERROR') as log_output:
       sess2 = session.InteractiveSession()
-    self.assertEqual(1, len(w))
-    self.assertIn('An interactive session is already active. This can cause '
-                  'out-of-memory errors in some cases. You must explicitly '
-                  'call `InteractiveSession.close()` to release resources '
-                  'held by the other session(s).', str(w[0].message))
+
+    self.assertLen(log_output.output, 1)
+
+    self.assertIn(
+        'An interactive session is already active. This can cause'
+        ' out-of-memory errors or some other unexpected errors (due to'
+        ' the unpredictable timing of garbage collection) in some cases.'
+        ' You must explicitly call `InteractiveSession.close()` to release'
+        ' resources held by the other session(s). Please use `tf.Session()`'
+        ' if you intend to productionize.',
+        log_output.output[0],
+    )
     sess2.close()
     sess.close()
 
@@ -1374,10 +1416,10 @@ class SessionTest(test_util.TensorFlowTestCase):
     b = constant_op.constant(1.0, shape=[1, 2])
 
     # Only run the valid op, this should work.
-    b.eval()
+    self.evaluate(b)
 
     with self.assertRaises(errors.InvalidArgumentError):
-      a.eval()
+      self.evaluate(a)
     sess.close()
 
   @test_util.run_v1_only('b/120545219')
@@ -1570,7 +1612,7 @@ class SessionTest(test_util.TensorFlowTestCase):
         size = 1
         for s in shape:
           size *= s
-        c_list = np.array([compat.as_bytes(str(i)) for i in xrange(size)],
+        c_list = np.array([compat.as_bytes(str(i)) for i in range(size)],
                           dtype=np.object_).reshape(shape) if size > 0 else []
         c = constant_op.constant(c_list)
         self.assertAllEqual(c, c_list)
@@ -1581,7 +1623,7 @@ class SessionTest(test_util.TensorFlowTestCase):
         size = 1
         for s in shape:
           size *= s
-        c_list = np.array([compat.as_bytes(str(i)) for i in xrange(size)],
+        c_list = np.array([compat.as_bytes(str(i)) for i in range(size)],
                           dtype=np.object_).reshape(shape)
         feed_t = array_ops.placeholder(dtype=dtypes.string, shape=shape)
         c = array_ops.identity(feed_t)
@@ -1778,7 +1820,7 @@ class SessionTest(test_util.TensorFlowTestCase):
         b = math_ops.add(a, a)
         c = array_ops.identity(b)
         d = math_ops.multiply(c, c)
-      for step in xrange(120):
+      for step in range(120):
         run_metadata = config_pb2.RunMetadata()
         sess.run(
             d,
@@ -1820,7 +1862,7 @@ class SessionTest(test_util.TensorFlowTestCase):
     with self.assertRaisesRegex(AssertionError, 'Nesting violated'):
       sess1_controller.__exit__(None, None, None)
 
-    ops._default_session_stack.reset()
+    stack._default_session_stack.reset()
 
   def testInteractiveSessionNesting(self):
     sess1 = session.InteractiveSession()
@@ -1833,11 +1875,11 @@ class SessionTest(test_util.TensorFlowTestCase):
     c = constant_op.constant(37)
     sess = session.Session()
     with sess.as_default():
-      self.assertEqual(37, c.eval())
+      self.assertEqual(37, self.evaluate(c))
 
     # Ensure that the session remains valid even when it is not captured.
     with session.Session().as_default():
-      self.assertEqual(37, c.eval())
+      self.assertEqual(37, self.evaluate(c))
 
   def testReentry(self):
     sess = session.Session()
@@ -2106,6 +2148,21 @@ class SessionTest(test_util.TensorFlowTestCase):
       sess = session.Session()
       self.assertEqual(
           sess._config.graph_options.rewrite_options.min_graph_nodes, -1)
+
+  @test_util.run_v1_only('b/120545219')
+  def testNegativeIntraOpParallelismThreadsRaisesError(self):
+    with ops.Graph().as_default():
+      config_pb = config_pb2.ConfigProto(intra_op_parallelism_threads=-1)
+      with self.assertRaisesRegex(
+          ValueError, r'config\.intra_op_parallelism_threads.*must be >= 0.*-1'
+      ):
+        session.Session(config=config_pb)
+
+  @test_util.run_v1_only('b/120545219')
+  def testNegativeInterOpParallelismThreadsIsAllowed(self):
+    with ops.Graph().as_default():
+      config_pb = config_pb2.ConfigProto(inter_op_parallelism_threads=-1)
+      session.Session(config=config_pb).close()
 
 
 if __name__ == '__main__':

@@ -50,9 +50,9 @@ class StringJoinOp : public OpKernel {
         } else {
           OP_REQUIRES(
               context, input_shape == input.shape(),
-              errors::InvalidArgument(
+              absl::InvalidArgumentError(absl::StrCat(
                   "Input shapes do not match: ", input_shape.DebugString(),
-                  " vs. ", input.shape().DebugString()));
+                  " vs. ", input.shape().DebugString())));
         }
       }
     }
@@ -62,7 +62,7 @@ class StringJoinOp : public OpKernel {
                                                      &output_tensor));
     auto output_flat = output_tensor->flat<tstring>();
 
-    std::vector<StringPiece> strings(input_list.size());
+    std::vector<absl::string_view> strings(input_list.size());
     for (size_t i = 0; i < input_shape.num_elements(); ++i) {
       for (int j = 0; j < input_list.size(); ++j) {
         strings[j] = (is_scalar[j]) ? inputs[j](0) : inputs[j](i);
@@ -72,7 +72,7 @@ class StringJoinOp : public OpKernel {
   }
 
  private:
-  string separator_;
+  std::string separator_;
 };
 
 REGISTER_KERNEL_BUILDER(Name("StringJoin").Device(DEVICE_CPU), StringJoinOp);

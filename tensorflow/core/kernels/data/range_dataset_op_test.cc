@@ -14,7 +14,20 @@ limitations under the License.
 ==============================================================================*/
 #include "tensorflow/core/kernels/data/range_dataset_op.h"
 
+#include <cstdint>
+#include <memory>
+#include <vector>
+
+#include "absl/status/status.h"
+#include "xla/tsl/lib/core/status_test_util.h"
 #include "tensorflow/core/data/dataset_test_base.h"
+#include "tensorflow/core/data/name_utils.h"
+#include "tensorflow/core/data/serialization_utils.h"
+#include "tensorflow/core/framework/dataset.h"
+#include "tensorflow/core/framework/partial_tensor_shape.h"
+#include "tensorflow/core/framework/tensor_shape.h"
+#include "tensorflow/core/framework/variant_tensor_data.h"
+#include "tensorflow/core/platform/test.h"
 
 namespace tensorflow {
 namespace data {
@@ -28,6 +41,16 @@ RangeDatasetParams PositiveStepRangeDatasetParams() {
 
 RangeDatasetParams NegativeStepRangeDatasetParams() {
   return RangeDatasetParams(/*start=*/10, /*stop=*/0, /*step=*/-3);
+}
+
+RangeDatasetParams Int32OverflowRangeDatasetParames() {
+  return RangeDatasetParams(/*start=*/2'147'483'647LL, /*stop=*/2'147'483'649LL,
+                            /*step=*/1);
+}
+
+RangeDatasetParams UnsignedInt32OverflowRangeDatasetParames() {
+  return RangeDatasetParams(/*start=*/4'294'967'295LL, /*stop=*/4'294'967'297LL,
+                            /*step=*/1);
 }
 
 RangeDatasetParams ZeroStepRangeDatasetParams() {
@@ -50,7 +73,15 @@ std::vector<GetNextTestCase<RangeDatasetParams>> GetNextTestCases() {
            CreateTensors<int64_t>(TensorShape({}), {{0}, {3}, {6}, {9}})},
           {/*dataset_params=*/NegativeStepRangeDatasetParams(),
            /*expected_outputs=*/
-           CreateTensors<int64_t>(TensorShape({}), {{10}, {7}, {4}, {1}})}};
+           CreateTensors<int64_t>(TensorShape({}), {{10}, {7}, {4}, {1}})},
+          {/*dataset_params=*/Int32OverflowRangeDatasetParames(),
+           /*expected_outputs=*/
+           CreateTensors<int64_t>(TensorShape({}),
+                                  {{2'147'483'647LL}, {2'147'483'648LL}})},
+          {/*dataset_params=*/UnsignedInt32OverflowRangeDatasetParames(),
+           /*expected_outputs=*/
+           CreateTensors<int64_t>(TensorShape({}),
+                                  {{4'294'967'295LL}, {4'294'967'296LL}})}};
 }
 
 ITERATOR_GET_NEXT_TEST_P(RangeDatasetOpTest, RangeDatasetParams,
@@ -138,7 +169,7 @@ ITERATOR_SAVE_AND_RESTORE_TEST_P(RangeDatasetOpTest, RangeDatasetParams,
 TEST_F(RangeDatasetOpTest, ZeroStep) {
   auto range_dataset_params = ZeroStepRangeDatasetParams();
   EXPECT_EQ(Initialize(range_dataset_params).code(),
-            tensorflow::error::INVALID_ARGUMENT);
+            absl::StatusCode::kInvalidArgument);
 }
 
 TEST_F(RangeDatasetOpTest, SplitProviderPositiveStep) {
@@ -172,6 +203,57 @@ TEST_F(RangeDatasetOpTest, SplitProviderEmpty) {
   TF_EXPECT_OK(CheckSplitProviderShardedIteration(
       params, /*num_shards=*/3, /*shard_index=*/2,
       CreateTensors<int64_t>(TensorShape({}), {})));
+}
+
+template <typename Tag>
+struct AccessResult {
+  static typename Tag::type ptr;
+};
+template <typename Tag>
+typename Tag::type AccessResult<Tag>::ptr;
+
+template <typename Tag, typename Tag::type p>
+struct AccessRob {
+  struct Filler {
+    Filler() { AccessResult<Tag>::ptr = p; }
+  };
+  static Filler filler;
+};
+template <typename Tag, typename Tag::type p>
+typename AccessRob<Tag, p>::Filler AccessRob<Tag, p>::filler;
+
+struct MakeIteratorInternalTag {
+  typedef std::unique_ptr<IteratorBase> (DatasetBase::*type)(
+      const std::string&) const;
+};
+template class AccessRob<MakeIteratorInternalTag,
+                         &DatasetBase::MakeIteratorInternal>;
+
+TEST_F(RangeDatasetOpTest, UninitializedIteratorRestore) {
+  auto dataset_params = PositiveStepRangeDatasetParams();
+  TF_ASSERT_OK(Initialize(dataset_params));
+
+  std::vector<const DatasetBase*> inputs;
+  const DatasetBase* target_dataset = dataset_;
+  while (target_dataset->type_string() != "RangeDataset") {
+    inputs.clear();
+    TF_ASSERT_OK(target_dataset->InputDatasets(&inputs));
+    ASSERT_FALSE(inputs.empty());
+    target_dataset = inputs[0];
+  }
+
+  auto method = AccessResult<MakeIteratorInternalTag>::ptr;
+  auto iterator = (target_dataset->*method)("test_prefix");
+
+  IteratorContext iter_ctx(IteratorContext::Params(iterator_ctx_.get()));
+  std::vector<const VariantTensorData*> data;
+  VariantTensorDataReader reader(data);
+  absl::Status s = iterator->Restore(&iter_ctx, &reader);
+
+  EXPECT_EQ(s.code(), absl::StatusCode::kFailedPrecondition);
+  EXPECT_EQ(s.message(),
+            "`Initialize` should be called before saving/restoring from "
+            "tf.data checkpoints.");
 }
 
 }  // namespace

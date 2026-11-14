@@ -1,0 +1,211 @@
+// Copyright 2026 The OpenXLA Authors. All Rights Reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+// ==============================================================================
+// RUN: xla-opt %s -split-input-file -verify-diagnostics -triton-xla-lower-xtile | FileCheck %s
+
+xtile.entry_func @extract_insert_no_layout(%input: memref<1024xf32, #nvvm.memory_space<global>>,
+                         %output: memref<32xf32, #nvvm.memory_space<global>>,
+                         %tile_id: index) {
+  %tile = xtile.extract %input[%tile_id][1][1] : memref<1024xf32, #nvvm.memory_space<global>> -> tensor<1xf32>
+  xtile.insert %tile into %output[%tile_id][1][1] : tensor<1xf32> -> memref<32xf32, #nvvm.memory_space<global>>
+  xtile.return
+}
+
+// CHECK: func.func @extract_insert_no_layout(%[[ARG0:.*]]: !tt.ptr<f32>, %[[ARG1:.*]]: !tt.ptr<f32>) {
+// CHECK:   %[[PID:.*]] = tt.get_program_id x : i32
+// CHECK:   %[[PID_IDX:.*]] = arith.index_cast %[[PID]] : i32 to index
+// CHECK:   %[[TILE:.*]] = triton_xla.extract from %[[ARG0]] as memref<1024xf32, #xtile.layout<[0]>> [%[[PID_IDX]]] [1] [1] : tensor<1xf32>
+// CHECK:   triton_xla.insert %[[TILE]] into %[[ARG1]] as memref<32xf32, #xtile.layout<[0]>> [%[[PID_IDX]]] [1] [1] : tensor<1xf32>
+// CHECK:   return
+// CHECK: }
+
+// -----
+
+!arg_type = memref<1024x32x1x1xbf16, #xtile.layout<[2, 3, 0, 1]>, #nvvm.memory_space<global>>
+xtile.entry_func @layout_preserved(%input: !arg_type,
+                                   %tile_id: index) {
+  %c_0 = arith.constant 0 : index
+  %tile = xtile.extract %input[%tile_id, %c_0, %c_0, %c_0][1, 1, 1, 1][1, 1, 1, 1] : !arg_type -> tensor<1x1x1x1xbf16>
+  xtile.return
+}
+
+// CHECK: func.func @layout_preserved(%[[ARG0:.*]]: !tt.ptr<bf16>) {
+// CHECK:   %[[PID:.*]] = tt.get_program_id x : i32
+// CHECK:   %[[PID_IDX:.*]] = arith.index_cast %[[PID]] : i32 to index
+// CHECK:   %[[TILE:.*]] = triton_xla.extract from %[[ARG0]]
+// CHECK-SAME: as memref<1024x32x1x1xbf16, #xtile.layout<[3, 2, 0, 1]>>
+// CHECK-SAME: [%[[PID_IDX]], 0, 0, 0]
+// CHECK-SAME: [1, 1, 1, 1] [1, 1, 1, 1] : tensor<1x1x1x1xbf16>
+// CHECK:   return
+// CHECK: }
+
+// -----
+
+!memref_type = memref<32xf64, #nvvm.memory_space<global>>
+// CHECK:func.func @scalar_insert_extract(
+// CHECK-SAME: %[[ARG0:.*]]: !tt.ptr<f64>, %[[ARG1:.*]]: !tt.ptr<f64>) {
+xtile.entry_func @scalar_insert_extract(%input: !memref_type,
+                                        %output: !memref_type,
+                                        %tile_id: index) {
+  // CHECK: %[[SCALAR_VALUE:.*]] = tt.load %[[ARG0]] : !tt.ptr<f64>
+  %tile = xtile.extract %input[%tile_id][1][1] : !memref_type -> tensor<f64>
+  // CHECK: tt.store %[[ARG1]], %[[SCALAR_VALUE]] : !tt.ptr<f64>
+  xtile.insert %tile into %output[%tile_id][1][1] : tensor<f64> -> !memref_type
+  xtile.return
+}
+
+// -----
+
+!memref_type = memref<32xf64, #nvvm.memory_space<global>>
+// CHECK-LABEL: func.func @collective_entry_signal_and_rank_only(
+// CHECK-SAME: %[[ARG0:.*]]: !tt.ptr<f64>, %[[ARG1:.*]]: !tt.ptr<f64>, %[[SIG:.*]]: !tt.ptr<i64>, %[[RANK:.*]]: i32) {
+xtile.entry_func @collective_entry_signal_and_rank_only(
+    %input: !memref_type,
+    %output: !memref_type,
+    %signal_buffers: memref<2xi64>,
+    %rank: index {xla.range = [0 : index, 1 : index]},
+    %tile_id: index) attributes {has_rank, has_signal_buffer} {
+  // CHECK: %[[RANK_IDX:.*]] = arith.index_cast %[[RANK]] {xla.range = [0 : index, 1 : index]} : i32 to index
+  // CHECK: %[[TILE:.*]] = triton_xla.extract from %[[ARG0]] as memref<32xf64, #xtile.layout<[0]>> [%[[RANK_IDX]]] [1] [1] : tensor<1xf64>
+  %tile = xtile.extract %input[%rank][1][1] : !memref_type -> tensor<1xf64>
+  // CHECK: triton_xla.insert %[[TILE]] into %[[ARG1]]
+  xtile.insert %tile into %output[%tile_id][1][1] : tensor<1xf64> -> !memref_type
+  xtile.return
+}
+
+// -----
+
+// CHECK-LABEL: func.func @fold_transpose_into_ptr
+// CHECK-SAME: (%[[ARG0:.*]]: memref<32x16xf64, #xtile.layout<[0, 1]>>)
+func.func @fold_transpose_into_ptr(
+    %arg0: memref<32x16xf64, #xtile.layout<[0, 1]>>) -> !tt.ptr<f64> {
+  %transposed = memref.transpose %arg0 (d0, d1) -> (d1, d0)
+    : memref<32x16xf64, #xtile.layout<[0, 1]>> to memref<16x32xf64>
+  // CHECK: %[[PTR:.*]] = triton_xla.memref_to_ptr %[[ARG0]] from memref<32x16xf64, #xtile.layout<[0, 1]>> to <f64>
+  %ptr = triton_xla.memref_to_ptr %transposed from memref<16x32xf64> to !tt.ptr<f64>
+  // CHECK: return %[[PTR]] : !tt.ptr<f64>
+  return %ptr : !tt.ptr<f64>
+}
+
+// -----
+
+// CHECK-LABEL: @mask_lowers_to_stable_hlo(%arg0: tensor<32xf64>, %arg1: f64) -> tensor<32xf64>
+func.func @mask_lowers_to_stable_hlo(%arg0: tensor<32xf64>, %arg1: f64) -> tensor<32xf64> {
+  // CHECK: %[[BOUND:.*]] = arith.constant dense<10> : tensor<32xi32>
+  // CHECK: %[[IDX:.*]] = stablehlo.iota dim = 0 : tensor<32xi32>
+  // CHECK: %[[IDX_BROADCASTED:.*]] = stablehlo.broadcast_in_dim %[[IDX]],
+  // CHECK-SAME: dims = [0] : (tensor<32xi32>) -> tensor<32xi32>
+  // CHECK: %[[MASK:.*]] = arith.cmpi slt, %[[IDX_BROADCASTED]], %[[BOUND]]
+  // CHECK-SAME: : tensor<32xi32>
+  // CHECK: %[[INIT:.*]] = tensor.from_elements %arg1 : tensor<f64>
+  // CHECK: %[[INIT_TENSOR:.*]] = stablehlo.broadcast_in_dim %[[INIT]],
+  // CHECK-SAME: dims = [] : (tensor<f64>) -> tensor<32xf64>
+  // CHECK: %[[RESULT:.*]] = arith.select %[[MASK]], %arg0, %[[INIT_TENSOR]]
+  // CHECK-SAME: : tensor<32xi1>, tensor<32xf64>
+  %paded = xtile.mask %arg0 bounds [10], %arg1 : tensor<32xf64>
+  // CHECK: return %[[RESULT]] : tensor<32xf64>
+  return %paded : tensor<32xf64>
+}
+
+// -----
+
+// CHECK-LABEL: @select_buffer_test
+func.func @select_buffer_test(%src: memref<2xi64>, %replica_id: index) -> memref<128xf32> {
+  // CHECK-SAME: (%[[SRC:.*]]: memref<2xi64>, %[[REPLICA_ID:.*]]: index) -> memref<128xf32> {
+  // CHECK: %[[PTR:.*]] = triton_xla.memref_to_ptr %[[SRC]] from memref<2xi64> to <i64>
+  // CHECK: %[[REPLICA_I64:.*]] = arith.index_cast %[[REPLICA_ID]] : index to i64
+  // CHECK: %[[ADDR:.*]] = tt.addptr %[[PTR]], %[[REPLICA_I64]] : !tt.ptr<i64>, i64
+  // CHECK: %[[LOADED_ADDR:.*]] = tt.load %[[ADDR]] : !tt.ptr<i64>
+  // CHECK: %[[FINAL_PTR:.*]] = tt.int_to_ptr %[[LOADED_ADDR]] {tt.divisibility = 16 : i32} : i64 -> !tt.ptr<f32>
+  // CHECK: %[[RES_MEMREF:.*]] = triton_xla.ptr_to_memref %[[FINAL_PTR]] from <f32> to memref<128xf32>
+  %0 = xtile.select_buffer %src[%replica_id] : memref<2xi64> -> memref<128xf32>
+  // CHECK: return %[[RES_MEMREF]] : memref<128xf32>
+  return %0 : memref<128xf32>
+}
+
+// -----
+
+xtile.entry_func @tile_id_range_preserved(
+    %input: memref<8xf32, #nvvm.memory_space<global>>,
+    %output: memref<8xf32, #nvvm.memory_space<global>>,
+    %tile_id: index {xla.range = [0 : index, 7 : index]}) {
+  %tile = xtile.extract %input[%tile_id][1][1] : memref<8xf32, #nvvm.memory_space<global>> -> tensor<1xf32>
+  xtile.insert %tile into %output[%tile_id][1][1] : tensor<1xf32> -> memref<8xf32, #nvvm.memory_space<global>>
+  xtile.return
+}
+
+// CHECK-LABEL: func.func @tile_id_range_preserved
+// CHECK:         %[[PID:.*]] = tt.get_program_id x : i32
+// CHECK-NEXT:    %[[PID_IDX:.*]] = arith.index_cast %[[PID]] {xla.range = [0 : index, 7 : index]} : i32 to index
+
+// -----
+
+// CHECK-LABEL: @select_buffer_with_offset_test
+func.func @select_buffer_with_offset_test(%src: memref<2xi64>, %replica_id: index, %offset: index) -> memref<128xf32> {
+  // CHECK-SAME: (%[[SRC:.*]]: memref<2xi64>, %[[REPLICA_ID:.*]]: index, %[[OFFSET:.*]]: index) -> memref<128xf32> {
+  // CHECK: %[[PTR:.*]] = triton_xla.memref_to_ptr %[[SRC]] from memref<2xi64> to <i64>
+  // CHECK: %[[REPLICA_I64:.*]] = arith.index_cast %[[REPLICA_ID]] : index to i64
+  // CHECK: %[[ADDR:.*]] = tt.addptr %[[PTR]], %[[REPLICA_I64]] : !tt.ptr<i64>, i64
+  // CHECK: %[[LOADED_ADDR:.*]] = tt.load %[[ADDR]] : !tt.ptr<i64>
+  // CHECK: %[[BASE_PTR:.*]] = tt.int_to_ptr %[[LOADED_ADDR]] {tt.divisibility = 16 : i32} : i64 -> !tt.ptr<f32>
+  // CHECK: %[[OFFSET_I64:.*]] = arith.index_cast %[[OFFSET]] : index to i64
+  // CHECK: %[[FINAL_PTR:.*]] = tt.addptr %[[BASE_PTR]], %[[OFFSET_I64]] : !tt.ptr<f32>, i64
+  // CHECK: %[[RES_MEMREF:.*]] = triton_xla.ptr_to_memref %[[FINAL_PTR]] from <f32> to memref<128xf32>
+  %0 = xtile.select_buffer %src[%replica_id] offset %offset : memref<2xi64> -> memref<128xf32>
+  // CHECK: return %[[RES_MEMREF]] : memref<128xf32>
+  return %0 : memref<128xf32>
+}
+
+// -----
+
+// CHECK-LABEL: func.func @collective_entry_with_scratch_signal_and_rank(
+// CHECK-SAME:    %[[IN:[^:]+]]: !tt.ptr<f32>, %[[OUT:[^:]+]]: !tt.ptr<f32>,
+// CHECK-SAME:    %[[REMOTE_USED:[^:]+]]: !tt.ptr<i64>, %{{[^:]+}}: !tt.ptr<i64>,
+// CHECK-SAME:    %[[SIG_BUFS:[^:]+]]: !tt.ptr<i64>, %[[RANK:[^:]+]]: i32) {
+xtile.entry_func @collective_entry_with_scratch_signal_and_rank(
+    %input: memref<8xf32>,
+    %output: memref<8xf32>,
+    %remote_used: memref<2xi64>,
+    %remote_unused: memref<2xi64>,
+    %signal_buffers: memref<2xi64>,
+    %rank: index,
+    %tile_id: index) attributes {
+      has_rank, has_signal_buffer, num_scratch_buffers = 2 : i32} {
+  // CHECK: %[[RANK_IDX:.*]] = arith.index_cast %[[RANK]] : i32 to index
+  // CHECK-NOT: triton_xla.ptr_to_memref
+  // CHECK: %[[RANK_I64:.*]] = arith.index_cast %[[RANK_IDX]] : index to i64
+  // CHECK: %[[ADDPTR:.*]] = tt.addptr %[[REMOTE_USED]], %[[RANK_I64]] : !tt.ptr<i64>, i64
+  // CHECK: %[[BASE_I64:.*]] = tt.load %[[ADDPTR]] : !tt.ptr<i64>
+  // CHECK: %[[BASE_PTR:.*]] = tt.int_to_ptr %[[BASE_I64]] {tt.divisibility = 16 : i32} : i64 -> !tt.ptr<f32>
+  // CHECK: %[[OFF_I64:.*]] = arith.index_cast %{{.*}} : index to i64
+  // CHECK: %[[SLOT_PTR:.*]] = tt.addptr %[[BASE_PTR]], %[[OFF_I64]] : !tt.ptr<f32>, i64
+  // CHECK: triton_xla.insert %{{.*}} into %[[SLOT_PTR]] as memref<8xf32, #xtile.layout<[0]>>
+  // CHECK: tt.store %[[SIG_BUFS]]
+  %c0_i64 = arith.constant 0 : i64
+  %tile = xtile.extract %input[%tile_id][1][1] : memref<8xf32> -> tensor<1xf32>
+  %slot = xtile.select_buffer %remote_used[%rank] offset %tile_id : memref<2xi64> -> memref<8xf32>
+  xtile.insert %tile into %slot[%tile_id][1][1] : tensor<1xf32> -> memref<8xf32>
+  xtile.insert %tile into %output[%tile_id][1][1] : tensor<1xf32> -> memref<8xf32>
+  %sig_ptr = triton_xla.memref_to_ptr %signal_buffers from memref<2xi64> to !tt.ptr<i64>
+  tt.store %sig_ptr, %c0_i64 : !tt.ptr<i64>
+  xtile.return
+}
+
+// -----
+
+func.func @unlowered_xtile_op_fails(%arg0: memref<16xf32>) -> memref<16xi32> {
+  // expected-error@+1 {{'xtile.memref_bitcast' op unlowered xtile op}}
+  %0 = xtile.memref_bitcast %arg0 : memref<16xf32> -> memref<16xi32>
+  return %0 : memref<16xi32>
+}

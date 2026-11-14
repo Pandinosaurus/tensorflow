@@ -13,10 +13,6 @@
 # limitations under the License.
 # ==============================================================================
 """Tests for `tf.data.Dataset.window()`."""
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 from absl.testing import parameterized
 import numpy as np
 
@@ -24,7 +20,6 @@ from tensorflow.python.data.kernel_tests import checkpoint_test_base
 from tensorflow.python.data.kernel_tests import test_base
 from tensorflow.python.data.ops import dataset_ops
 from tensorflow.python.data.util import nest
-from tensorflow.python.eager import context
 from tensorflow.python.framework import combinations
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import errors
@@ -229,10 +224,9 @@ class WindowTest(test_base.DatasetTestBase, parameterized.TestCase):
         dataset, expected_output=[np.float32([1., 2.]),
                                   np.float32([2., 3.])])
 
-  @combinations.generate(test_base.default_test_combinations())
+  # Eager-only because the test enumerates the dataset.
+  @combinations.generate(test_base.eager_only_combinations())
   def testNestedOutput(self):
-    if not context.executing_eagerly():
-      self.skipTest("self.evaluate() does not work with a dataset")
     dataset = dataset_ops.Dataset.range(100)
     dataset = dataset_ops.Dataset.zip((dataset, dataset)).window(10)
     for i, nested_dataset in enumerate(dataset):

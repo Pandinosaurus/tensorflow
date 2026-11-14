@@ -14,8 +14,13 @@ limitations under the License.
 ==============================================================================*/
 #include "tensorflow/core/distributed_runtime/worker_session.h"
 
-#include "tensorflow/core/lib/monitoring/collection_registry.h"
+#include <memory>
+#include <unordered_map>
+#include <utility>
+#include <vector>
+
 #include "tensorflow/core/lib/monitoring/gauge.h"
+#include "tsl/platform/stacktrace.h"
 
 namespace tensorflow {
 
@@ -38,49 +43,63 @@ class WorkerFreeListCache : public WorkerCacheInterface {
     }
   }
 
-  void ListWorkers(std::vector<string>* workers) const override {
+  void ListWorkers(std::vector<std::string>* workers) const override {
     wrapped_->ListWorkers(workers);
   }
 
-  void ListWorkersInJob(const string& job_name,
-                        std::vector<string>* workers) const override {
+  void ListWorkersInJob(const std::string& job_name,
+                        std::vector<std::string>* workers) const override {
     wrapped_->ListWorkersInJob(job_name, workers);
   }
 
-  WorkerInterface* GetOrCreateWorker(const string& target) override {
-    mutex_lock l(mu_);
-    auto p = workers_.find(target);
-    if (p != workers_.end()) {
-      return p->second.worker;
+  WorkerInterface* GetOrCreateWorker(const std::string& target) override {
+    {
+      // Fast path if worker has been created.
+      tf_shared_lock l(mu_);
+      auto p = workers_.find(target);
+      if (p != workers_.end()) {
+        return p->second.worker;
+      }
     }
-    WorkerState state;
-    state.worker = wrapped_->GetOrCreateWorker(target);
-    if (state.worker != nullptr) {
-      workers_.insert(std::make_pair(target, state));
+    {
+      // Slow path if worker hasn't been created.
+      mutex_lock l(mu_);
+      auto p = workers_.find(target);
+      if (p != workers_.end()) {
+        return p->second.worker;
+      }
+      WorkerState state;
+      state.worker = wrapped_->GetOrCreateWorker(target);
+      if (state.worker != nullptr) {
+        workers_.insert(std::make_pair(target, state));
+      }
+      return state.worker;
     }
-    return state.worker;
   }
 
-  Status GetEagerClientCache(
+  absl::Status GetEagerClientCache(
       std::unique_ptr<eager::EagerClientCache>* eager_client_cache) override {
     return wrapped_->GetEagerClientCache(eager_client_cache);
   }
 
-  Status GetCoordinationClientCache(std::unique_ptr<CoordinationClientCache>*
-                                        coordination_client_cache) override {
+  absl::Status GetCoordinationClientCache(
+      std::unique_ptr<CoordinationClientCache>* coordination_client_cache)
+      override {
     return wrapped_->GetCoordinationClientCache(coordination_client_cache);
   }
 
-  void ReleaseWorker(const string& target, WorkerInterface* worker) override {
+  void ReleaseWorker(const std::string& target,
+                     WorkerInterface* worker) override {
     // TODO(jeff,sanjay): Should decrement ref-count when we implement eviction.
   }
 
-  bool GetDeviceLocalityNonBlocking(const string& device,
+  bool GetDeviceLocalityNonBlocking(const std::string& device,
                                     DeviceLocality* locality) override {
     return wrapped_->GetDeviceLocalityNonBlocking(device, locality);
   }
 
-  void GetDeviceLocalityAsync(const string& device, DeviceLocality* locality,
+  void GetDeviceLocalityAsync(const std::string& device,
+                              DeviceLocality* locality,
                               StatusCallback done) override {
     wrapped_->GetDeviceLocalityAsync(device, locality, done);
   }
@@ -104,33 +123,34 @@ class WorkerFreeListCache : public WorkerCacheInterface {
 
   // TODO(jeff,sanjay): Eviction when the map becomes too big.
   mutex mu_;
-  std::unordered_map<string, WorkerState> workers_ TF_GUARDED_BY(mu_);
+  std::unordered_map<std::string, WorkerState> workers_ TF_GUARDED_BY(mu_);
 };
 
 }  // namespace
 
 WorkerSession::WorkerSession(
-    const string& session_name, const string& worker_name,
+    const std::string& session_name, const std::string& worker_name,
     std::unique_ptr<WorkerCacheInterface> worker_cache,
     std::unique_ptr<DeviceMgr> device_mgr, std::unique_ptr<GraphMgr> graph_mgr,
-    std::unique_ptr<DynamicDeviceMgr> remote_device_mgr)
+    std::unique_ptr<DynamicDeviceMgr> remote_device_mgr,
+    DistributedFunctionLibraryRuntimeCreator cluster_flr_creator)
     : session_name_(session_name),
       worker_name_(worker_name),
       worker_cache_(new WorkerFreeListCache(std::move(worker_cache))),
       graph_mgr_(std::move(graph_mgr)),
-      cluster_flr_(new ClusterFunctionLibraryRuntime(
+      cluster_flr_(cluster_flr_creator(
           this, !session_name.empty(),
           remote_device_mgr ? remote_device_mgr.get() : nullptr)),
       device_mgr_(std::move(device_mgr)),
       borrowed_device_mgr_(nullptr),
       remote_device_mgr_(std::move(remote_device_mgr)) {
   // Starts exporting metrics through a platform-specific monitoring API (if
-  // provided). For builds using "tensorflow/core/platform/default", this is
-  // currently a no-op.
+  // provided). For builds using "tensorflow/compiler/xla/tsl/platform/default",
+  // this is currently a no-op.
   worker_session_created->GetCell()->Set(true);
 }
 
-Status WorkerSession::UpdateWorkerCacheAndDevices(
+absl::Status WorkerSession::UpdateWorkerCacheAndDevices(
     std::unique_ptr<WorkerCacheInterface> new_worker_cache,
     std::vector<std::unique_ptr<Device>> added_remote_devices,
     const std::vector<Device*>& removed_remote_devices) {
@@ -142,43 +162,48 @@ Status WorkerSession::UpdateWorkerCacheAndDevices(
   TF_RETURN_IF_ERROR(remote_device_mgr_->RemoveDevices(removed_remote_devices));
   TF_RETURN_IF_ERROR(
       remote_device_mgr_->AddDevices(std::move(added_remote_devices)));
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 /* static */
 std::shared_ptr<WorkerSession> WorkerSession::CreateWithBorrowedDeviceMgr(
-    const string& session_name, const string& worker_name,
+    const std::string& session_name, const std::string& worker_name,
     std::unique_ptr<WorkerCacheInterface> worker_cache,
     DeviceMgr* borrowed_device_mgr, std::unique_ptr<GraphMgr> graph_mgr,
-    std::unique_ptr<DynamicDeviceMgr> remote_device_mgr) {
+    std::unique_ptr<DynamicDeviceMgr> remote_device_mgr,
+    DistributedFunctionLibraryRuntimeCreator cluster_flr_creator) {
   return std::shared_ptr<WorkerSession>(new WorkerSession(
       session_name, worker_name, std::move(worker_cache), borrowed_device_mgr,
-      std::move(graph_mgr), std::move(remote_device_mgr)));
+      std::move(graph_mgr), std::move(remote_device_mgr),
+      std::move(cluster_flr_creator)));
 }
 
 WorkerSession::WorkerSession(
-    const string& session_name, const string& worker_name,
+    const std::string& session_name, const std::string& worker_name,
     std::unique_ptr<WorkerCacheInterface> worker_cache,
     DeviceMgr* borrowed_device_mgr, std::unique_ptr<GraphMgr> graph_mgr,
-    std::unique_ptr<DynamicDeviceMgr> remote_device_mgr)
+    std::unique_ptr<DynamicDeviceMgr> remote_device_mgr,
+    DistributedFunctionLibraryRuntimeCreator cluster_flr_creator)
     : session_name_(session_name),
       worker_name_(worker_name),
       worker_cache_(new WorkerFreeListCache(std::move(worker_cache))),
       graph_mgr_(std::move(graph_mgr)),
-      cluster_flr_(new ClusterFunctionLibraryRuntime(
-          this, !session_name.empty(), remote_device_mgr.get())),
+      cluster_flr_(cluster_flr_creator(this, !session_name.empty(),
+                                       remote_device_mgr.get())),
       device_mgr_(nullptr),
       borrowed_device_mgr_(borrowed_device_mgr),
       remote_device_mgr_(std::move(remote_device_mgr)) {
   // Starts exporting metrics through a platform-specific monitoring API (if
-  // provided). For builds using "tensorflow/core/platform/default", this is
-  // currently a no-op.
+  // provided). For builds using "tensorflow/compiler/xla/tsl/platform/default",
+  // this is currently a no-op.
   worker_session_created->GetCell()->Set(true);
 }
 
 WorkerSession::~WorkerSession() {
+  VLOG(1) << "WorkerSession::~WorkerSession @@stacktrace\n "
+          << tsl::CurrentStackTrace();
   if (graph_mgr_) {
-    Status s = graph_mgr_->DeregisterAll();
+    absl::Status s = graph_mgr_->DeregisterAll();
     if (!s.ok()) {
       LOG(WARNING) << "Error during worker session deletion: " << s;
     }

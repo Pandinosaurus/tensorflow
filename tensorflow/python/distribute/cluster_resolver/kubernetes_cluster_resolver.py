@@ -14,14 +14,28 @@
 # ==============================================================================
 """Implementation of Cluster Resolvers for Kubernetes."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
+import enum
 
 from tensorflow.python.distribute.cluster_resolver.cluster_resolver import ClusterResolver
 from tensorflow.python.distribute.cluster_resolver.cluster_resolver import format_master_url
 from tensorflow.python.training import server_lib
 from tensorflow.python.util.tf_export import tf_export
+
+
+@tf_export('distribute.cluster_resolver.KubernetesExecutableLocation')
+class ExecutableLocation(enum.Enum):
+  """Defines where the executable runs on.
+
+  This is used to determine how to resolve the configuration
+  to talk with the kube api server.
+
+  `WITHIN_CLUSTER` means that the TensorFlow code you are running is running
+  in a pod within the cluster itself.
+  `OFF_CLUSTER` means any other enviroment outside the cluster.
+  """
+
+  WITHIN_CLUSTER = 0
+  OFF_CLUSTER = 1
 
 
 @tf_export('distribute.cluster_resolver.KubernetesClusterResolver')
@@ -59,11 +73,14 @@ class KubernetesClusterResolver(ClusterResolver):
     ```
   """
 
-  def __init__(self,
-               job_to_label_mapping=None,
-               tf_server_port=8470,
-               rpc_layer='grpc',
-               override_client=None):
+  def __init__(
+      self,
+      job_to_label_mapping=None,
+      tf_server_port=8470,
+      rpc_layer='grpc',
+      override_client=None,
+      executable_location=ExecutableLocation.WITHIN_CLUSTER,
+  ):
     """Initializes a new KubernetesClusterResolver.
 
     This initializes a new Kubernetes ClusterResolver. The ClusterResolver
@@ -84,17 +101,29 @@ class KubernetesClusterResolver(ClusterResolver):
         between tasks in Kubernetes. Defaults to 'grpc'.
       override_client: The Kubernetes client (usually automatically retrieved
         using `from kubernetes import client as k8sclient`). If you pass this
-        in, you are responsible for setting Kubernetes credentials manually.
+        in, you are responsible for setting Kubernetes credentials manually and
+        calling `k8sconfig.load_kube_config()` or
+        `k8sconfig.load_incluster_config()` before using this ClusterResolver.
+      executable_location: Parameter that specifies whether or not this
+        TensorFlow code is running from within a K8S cluster or not.
 
     Raises:
       ImportError: If the Kubernetes Python client is not installed and no
         `override_client` is passed in.
       RuntimeError: If autoresolve_task is not a boolean or a callable.
+      ValueError: If `executable_location` is not a valid value.
     """
     try:
       from kubernetes import config as k8sconfig  # pylint: disable=g-import-not-at-top
 
-      k8sconfig.load_kube_config()
+      if not override_client:
+        if executable_location == ExecutableLocation.OFF_CLUSTER:
+          k8sconfig.load_kube_config()
+        elif executable_location == ExecutableLocation.WITHIN_CLUSTER:
+          k8sconfig.load_incluster_config()
+        else:
+          raise ValueError('The executable location provided is invalid.')
+
     except ImportError:
       if not override_client:
         raise ImportError('The Kubernetes Python client must be installed '
@@ -108,6 +137,7 @@ class KubernetesClusterResolver(ClusterResolver):
     self._job_to_label_mapping = job_to_label_mapping
     self._tf_server_port = tf_server_port
     self._override_client = override_client
+    self._executable_location = executable_location
 
     self.task_type = None
     self.task_id = None
@@ -160,7 +190,13 @@ class KubernetesClusterResolver(ClusterResolver):
       from kubernetes import config as k8sconfig  # pylint: disable=g-import-not-at-top
       from kubernetes import client as k8sclient  # pylint: disable=g-import-not-at-top
 
-      k8sconfig.load_kube_config()
+      # Objects created before executable_location existed have no such
+      # attribute. For them, keep loading the kubeconfig file as before.
+      executable_location = getattr(self, '_executable_location', None)
+      if executable_location == ExecutableLocation.WITHIN_CLUSTER:
+        k8sconfig.load_incluster_config()
+      else:
+        k8sconfig.load_kube_config()
       client = k8sclient.CoreV1Api()
 
     cluster_map = {}

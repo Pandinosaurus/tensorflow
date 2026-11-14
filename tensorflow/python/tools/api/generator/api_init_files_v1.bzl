@@ -1,9 +1,27 @@
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
 """TensorFlow V1 API __init__.py files."""
 
 # keep sorted
 TENSORFLOW_API_INIT_FILES_V1 = [
     # BEGIN GENERATED FILES
     "__init__.py",
+    "__internal__/__init__.py",
+    "__internal__/types/__init__.py",
+    "__internal__/types/data/__init__.py",
     "app/__init__.py",
     "audio/__init__.py",
     "autograph/__init__.py",
@@ -24,8 +42,10 @@ TENSORFLOW_API_INIT_FILES_V1 = [
     "distribute/experimental/__init__.py",
     "distributions/__init__.py",
     "dtypes/__init__.py",
+    "dtypes/experimental/__init__.py",
     "errors/__init__.py",
     "experimental/__init__.py",
+    "experimental/extension_type/__init__.py",
     "feature_column/__init__.py",
     "gfile/__init__.py",
     "io/gfile/__init__.py",
@@ -35,16 +55,12 @@ TENSORFLOW_API_INIT_FILES_V1 = [
     "queue/__init__.py",
     "initializers/__init__.py",
     "layers/__init__.py",
-    "layers/experimental/__init__.py",
     "linalg/__init__.py",
     "linalg/experimental/__init__.py",
     "lite/__init__.py",
     "lite/constants/__init__.py",
     "lite/experimental/__init__.py",
     "lite/experimental/authoring/__init__.py",
-    "lite/experimental/microfrontend/__init__.py",
-    "lite/experimental/microfrontend/python/__init__.py",
-    "lite/experimental/microfrontend/python/ops/__init__.py",
     "logging/__init__.py",
     "lookup/__init__.py",
     "lookup/experimental/__init__.py",
@@ -64,6 +80,7 @@ TENSORFLOW_API_INIT_FILES_V1 = [
     "profiler/__init__.py",
     "python_io/__init__.py",
     "quantization/__init__.py",
+    "quantization/experimental/__init__.py",
     "ragged/__init__.py",
     "random/__init__.py",
     "random/experimental/__init__.py",
@@ -87,6 +104,7 @@ TENSORFLOW_API_INIT_FILES_V1 = [
     "summary/__init__.py",
     "sysconfig/__init__.py",
     "test/__init__.py",
+    "test/experimental/__init__.py",
     "tpu/experimental/embedding/__init__.py",
     "tpu/experimental/__init__.py",
     "tpu/__init__.py",
@@ -106,6 +124,7 @@ KERAS_API_INIT_FILES_V1 = [
     "__init__.py",
     "keras/__init__.py",
     "keras/__internal__/__init__.py",
+    "keras/__internal__/layers/__init__.py",
     "keras/__internal__/legacy/__init__.py",
     "keras/__internal__/legacy/layers/__init__.py",
     "keras/__internal__/legacy/layers/experimental/__init__.py",
@@ -148,7 +167,6 @@ KERAS_API_INIT_FILES_V1 = [
     "keras/losses/__init__.py",
     "keras/metrics/__init__.py",
     "keras/mixed_precision/__init__.py",
-    "keras/mixed_precision/experimental/__init__.py",
     "keras/models/__init__.py",
     "keras/optimizers/__init__.py",
     "keras/optimizers/schedules/__init__.py",
@@ -159,6 +177,5 @@ KERAS_API_INIT_FILES_V1 = [
     "keras/preprocessing/text/__init__.py",
     "keras/regularizers/__init__.py",
     "keras/utils/__init__.py",
-    "keras/wrappers/__init__.py",
-    "keras/wrappers/scikit_learn/__init__.py",
+    "keras/utils/legacy/__init__.py",
 ]

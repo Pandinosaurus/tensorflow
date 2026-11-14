@@ -16,7 +16,7 @@ limitations under the License.
 
 #include <stddef.h>
 
-#include "tensorflow/lite/c/common.h"
+#include "tensorflow/lite/core/c/common.h"
 #include "tensorflow/lite/kernels/internal/optimized/neon_check.h"
 #include "tensorflow/lite/kernels/kernel_util.h"
 
@@ -55,12 +55,35 @@ TfLiteStatus Prepare(TfLiteContext* context, TfLiteNode* node) {
 
   OpContext op_context(context, node);
 
-  TF_LITE_ENSURE(context, op_context.input->type == kTfLiteUInt8 ||
-                              op_context.input->type == kTfLiteInt8 ||
-                              op_context.input->type == kTfLiteInt16 ||
-                              op_context.input->type == kTfLiteFloat16);
+  TF_LITE_ENSURE(context, op_context.input != nullptr);
 
-  if (op_context.input->type == kTfLiteInt16) {
+  bool is_supported_type = op_context.input->type == kTfLiteInt2 ||
+                           op_context.input->type == kTfLiteInt4 ||
+                           op_context.input->type == kTfLiteUInt4 ||
+                           op_context.input->type == kTfLiteUInt8 ||
+                           op_context.input->type == kTfLiteInt8 ||
+                           op_context.input->type == kTfLiteInt16 ||
+                           op_context.input->type == kTfLiteFloat16;
+#if defined(TFLITE_ENABLE_EXTRA_REFERENCE_KERNELS)
+  is_supported_type = is_supported_type ||
+                      op_context.input->type == kTfLiteFloat8E4M3FN ||
+                      op_context.input->type == kTfLiteFloat8E5M2;
+#endif
+  TF_LITE_ENSURE(context, is_supported_type);
+
+  if (const TfLiteBlockwiseQuantizationV2* blockwise_params =
+          GetBlockwiseQuantizationV2(op_context.input)) {
+    TF_LITE_ENSURE(context, op_context.input->type != kTfLiteFloat16);
+    TF_LITE_ENSURE_OK(context,
+                      ValidateBlockwiseQuantizationV2(context, op_context.input,
+                                                      blockwise_params));
+  } else if (op_context.input->quantization.type != kTfLiteNoQuantization &&
+             op_context.input->quantization.type != kTfLiteAffineQuantization) {
+    TF_LITE_KERNEL_LOG(
+        context, "DEQUANTIZE does not support %s quantization of its input.",
+        GetName(op_context.input->quantization.type));
+    return kTfLiteError;
+  } else if (op_context.input->type == kTfLiteInt16) {
     TF_LITE_ENSURE_EQ(context, op_context.input->params.zero_point, 0);
   }
 

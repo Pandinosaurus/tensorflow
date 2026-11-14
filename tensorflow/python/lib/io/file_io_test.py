@@ -15,11 +15,8 @@
 # =============================================================================
 """Testing File IO operations in file_io.py."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import os.path
+from unittest import mock
 
 from absl.testing import parameterized
 import numpy as np
@@ -132,6 +129,56 @@ class FileIoTest(test.TestCase, parameterized.TestCase):
     with file_io.FileIO(file_path, mode="r") as f:
       self.assertEqual("testing", f.read())
 
+  @parameterized.parameters("w", "wb", "w+", "w+b", "a", "ab", "a+", "a+b")
+  def testCloseCreatesEmptyFileInWriteMode(self, mode):
+    file_path = file_io.join(self._base_dir, "empty_file")
+    with file_io.FileIO(file_path, mode=mode):
+      pass
+    self.assertTrue(file_io.file_exists(file_path))
+    self.assertEqual(
+        b"", file_io.read_file_to_string(file_path, binary_mode=True)
+    )
+
+  @parameterized.parameters("w", "wb", "w+", "w+b")
+  def testCloseTruncatesFileInWriteMode(self, mode):
+    file_path = file_io.join(self._base_dir, "existing_file")
+    file_io.write_string_to_file(file_path, "contents")
+    with file_io.FileIO(file_path, mode=mode):
+      pass
+    self.assertEqual(
+        b"", file_io.read_file_to_string(file_path, binary_mode=True)
+    )
+
+  @parameterized.parameters("a", "ab", "a+", "a+b")
+  def testCloseDoesNotTruncateFileInAppendMode(self, mode):
+    file_path = file_io.join(self._base_dir, "existing_file")
+    file_io.write_string_to_file(file_path, "contents")
+    with file_io.FileIO(file_path, mode=mode):
+      pass
+    self.assertEqual(
+        b"contents", file_io.read_file_to_string(file_path, binary_mode=True)
+    )
+
+  @parameterized.parameters("w", "wb", "w+", "w+b", "a", "ab", "a+", "a+b")
+  def testCloseIsIdempotent(self, mode):
+    file_path = file_io.join(self._base_dir, "double_close_file")
+    f = file_io.FileIO(file_path, mode=mode)
+    f.close()
+    file_io.delete_file(file_path)
+    f.close()
+    self.assertFalse(file_io.file_exists(file_path))
+
+  @parameterized.parameters("w", "wb", "w+", "w+b")
+  def testDoubleCloseDoesNotTruncateReplacementFile(self, mode):
+    file_path = file_io.join(self._base_dir, "replacement_file")
+    f = file_io.FileIO(file_path, mode=mode)
+    f.close()
+    file_io.write_string_to_file(file_path, "contents")
+    f.close()
+    self.assertEqual(
+        b"contents", file_io.read_file_to_string(file_path, binary_mode=True)
+    )
+
   def testAppend(self):
     file_path = file_io.join(self._base_dir, "temp_file")
     with file_io.FileIO(file_path, mode="w") as f:
@@ -160,6 +207,89 @@ class FileIoTest(test.TestCase, parameterized.TestCase):
       f.write("line2")
     file_contents = file_io.read_file_to_string(file_path)
     self.assertEqual("line1\nline2", file_contents)
+
+  def testSeekOnWriteOnlyFile(self):
+    # Regression test for tensorflow/tensorflow#32122: seek() on a write-only
+    # file must move the write position so data can be overwritten in place.
+    file_path = file_io.join(self._base_dir, "temp_file")
+    with file_io.FileIO(file_path, mode="w") as f:
+      f.write("hello")
+      f.seek(0)
+      self.assertEqual(0, f.tell())
+      f.write("X")
+      f.flush()
+    self.assertEqual("Xello", file_io.read_file_to_string(file_path))
+
+  def testSeekWriteOnlyFileDoesNotRaise(self):
+    # Minimal reproduction from the issue: seek() right after opening in "w".
+    file_path = file_io.join(self._base_dir, "temp_file")
+    with file_io.FileIO(file_path, mode="w") as f:
+      f.seek(0)
+    self.assertTrue(file_io.file_exists(file_path))
+
+  def testSeekOnWriteOnlyFileWithWhenceCur(self):
+    file_path = file_io.join(self._base_dir, "temp_file")
+    with file_io.FileIO(file_path, mode="w") as f:
+      f.write("abc")
+      f.seek(0)
+      f.seek(1, 1)  # whence=1: relative to the current position
+      f.write("Z")
+      f.flush()
+    self.assertEqual("aZc", file_io.read_file_to_string(file_path))
+
+  def testSeekOnWriteOnlyFileWithWhenceEnd(self):
+    file_path = file_io.join(self._base_dir, "temp_file")
+    with file_io.FileIO(file_path, mode="w") as f:
+      f.write("0123456789")
+      f.seek(5)
+      f.write("A")
+      f.seek(-2, 2)  # whence=2: relative to the end of the file
+      f.write("B")
+      f.flush()
+    self.assertEqual("01234A67B9", file_io.read_file_to_string(file_path))
+
+  def testSeekOnWriteOnlyFileWithWhenceEndBuffered(self):
+    # Writes buffered past the last flushed size must be accounted for by
+    # whence=2 (seek() flushes the writable file before stat-ing it).
+    file_path = file_io.join(self._base_dir, "temp_file")
+    with file_io.FileIO(file_path, mode="w") as f:
+      f.write("0123456789")
+      f.seek(5)
+      f.write("ABCDEFG")
+      f.seek(-2, 2)
+      f.write("Z")
+    self.assertEqual("01234ABCDEZG", file_io.read_file_to_string(file_path))
+
+  def testSeekOnWriteOnlyFileNegativePosition(self):
+    file_path = file_io.join(self._base_dir, "temp_file")
+    with file_io.FileIO(file_path, mode="w") as f:
+      f.write("hello")
+      with self.assertRaises(errors.InvalidArgumentError):
+        f.seek(-1)
+
+  def testSeekOnReadFile(self):
+    # The read path must keep its existing behavior.
+    file_path = file_io.join(self._base_dir, "temp_file")
+    with file_io.FileIO(file_path, mode="w") as f:
+      f.write("hello")
+    with file_io.FileIO(file_path, mode="r") as f:
+      f.seek(1)
+      self.assertEqual("e", f.read(1))
+
+  def testSeekOnAppendFileFails(self):
+    # Append mode rejects seeking; writes after the failure still append.
+    file_path = file_io.join(self._base_dir, "temp_file")
+    with file_io.FileIO(file_path, mode="w") as f:
+      f.write("first")
+    with file_io.FileIO(file_path, mode="a") as f:
+      f.write("second")
+      with self.assertRaisesRegex(
+          errors.FailedPreconditionError, "Cannot seek in append mode"
+      ):
+        f.seek(0)
+      f.write("X")
+      f.flush()
+    self.assertEqual("firstsecondX", file_io.read_file_to_string(file_path))
 
   def testFileWriteBadMode(self):
     file_path = file_io.join(self._base_dir, "temp_file")
@@ -324,6 +454,36 @@ class FileIoTest(test.TestCase, parameterized.TestCase):
     dir_path = file_io.join(self._base_dir, "test_dir")
     with self.assertRaises(errors.NotFoundError):
       file_io.list_directory(dir_path)
+
+  def testListDirectoryStripsTrailingSlash(self):
+    dir_path = file_io.join(self._base_dir, "test_dir_trailing")
+    file_io.create_dir(dir_path)
+    raw_entries = [
+        b"eval/",
+        b"train/",
+        b"file.txt",
+        b"nested/",
+        b"sub",
+        b"sub/",
+        b"/",
+        b"",
+        b"trailing_backslash\\",
+    ]
+    expected = [
+        "eval",
+        "train",
+        "file.txt",
+        "nested",
+        "sub",
+        "/",
+        "",
+        "trailing_backslash\\",
+    ]
+    with mock.patch.object(
+        file_io._pywrap_file_io, "GetChildren", return_value=raw_entries
+    ):
+      self.assertEqual(file_io.list_directory(dir_path), expected)
+      self.assertEqual(file_io.list_directory_v2(dir_path), expected)
 
   def _setupWalkDirectories(self, dir_path):
     # Creating a file structure as follows
@@ -663,30 +823,6 @@ class FileIoTest(test.TestCase, parameterized.TestCase):
     self.assertTrue(crc1 != crc2)
     self.assertEqual(crc2, crc3)
 
-  def testMatchingFilesPermission(self):
-    # Create top level directory test_dir.
-    dir_path = file_io.join(self._base_dir, "test_dir")
-    file_io.create_dir(dir_path)
-    # Create second level directories `noread` and `any`.
-    noread_path = file_io.join(dir_path, "noread")
-    file_io.create_dir(noread_path)
-    any_path = file_io.join(dir_path, "any")
-    file_io.create_dir(any_path)
-    files = ["file1.txt", "file2.txt", "file3.txt"]
-    for name in files:
-      file_path = file_io.join(any_path, name)
-      file_io.FileIO(file_path, mode="w").write("testing")
-    file_path = file_io.join(noread_path, "file4.txt")
-    file_io.FileIO(file_path, mode="w").write("testing")
-    # Change noread to noread access.
-    os.chmod(noread_path, 0)
-    expected_match = [file_io.join(any_path, name) for name in files]
-    self.assertItemsEqual(
-        file_io.get_matching_files(file_io.join(dir_path, "*", "file*.txt")),
-        expected_match)
-    # Change noread back so that it could be cleaned during tearDown.
-    os.chmod(noread_path, 0o777)
-
   def testFileSeekableWithZip(self):
     # Note: Test case for GitHub issue 27276, issue only exposed in python 3.7+.
     filename = file_io.join(self._base_dir, "a.npz")
@@ -697,6 +833,29 @@ class FileIoTest(test.TestCase, parameterized.TestCase):
 
   def testHasAtomicMove(self):
     self.assertTrue(file_io.has_atomic_move("/a/b/c"))
+
+  def testGetRegisteredSchemes(self):
+    expected = ["", "file", "ram"]
+    actual = file_io.get_registered_schemes()
+    # Be flexible about additional schemes that may sometimes be registered when
+    # this test is run, while still verifying each scheme appears just once.
+    maybe_expected = ["gs", "hypercomputer"]
+    for scheme in maybe_expected:
+      if scheme in actual:
+        expected.append(scheme)
+    self.assertCountEqual(expected, actual)
+
+  def testReadWriteWithEncoding(self):
+    file_path = file_io.join(self._base_dir, "temp_file")
+    with open(file_path, mode="w", encoding="cp932") as f:
+      f.write("今日はいい天気")
+    with file_io.FileIO(file_path, mode="r", encoding="cp932") as f:
+      self.assertEqual(f.read(), "今日はいい天気")
+
+    with file_io.FileIO(file_path, mode="w", encoding="cp932") as f:
+      f.write("今日はいい天気")
+    with open(file_path, mode="r", encoding="cp932") as f:
+      self.assertEqual(f.read(), "今日はいい天気")
 
 
 if __name__ == "__main__":

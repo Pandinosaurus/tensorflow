@@ -1,0 +1,200 @@
+/* Copyright 2019 The TensorFlow Authors. All Rights Reserved.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+==============================================================================*/
+
+#include "tsl/platform/unbounded_work_queue.h"
+
+#include <functional>
+#include <memory>
+#include <utility>
+
+#include "absl/synchronization/mutex.h"
+#include "absl/synchronization/notification.h"
+#include "absl/time/time.h"
+#include "xla/tsl/platform/env.h"
+#include "xla/tsl/platform/test.h"
+#include "tsl/platform/blocking_counter.h"
+#include "tsl/platform/cpu_info.h"
+#include "tsl/platform/platform.h"
+#include "tsl/platform/random.h"
+#include "tsl/platform/thread_annotations.h"
+
+namespace tsl {
+namespace {
+
+class UnboundedWorkQueueTest : public ::testing::Test {
+ protected:
+  UnboundedWorkQueueTest()
+      : work_queue_(
+            std::make_unique<UnboundedWorkQueue>(Env::Default(), "test")) {}
+  ~UnboundedWorkQueueTest() override = default;
+
+  void RunMultipleCopiesOfClosure(const int num_closures,
+                                  std::function<void()> fn) {
+    for (int i = 0; i < num_closures; ++i) {
+      work_queue_ptr_->Schedule([this, fn]() {
+        fn();
+        absl::MutexLock l(mu_);
+        ++closure_count_;
+        cond_var_.SignalAll();
+      });
+    }
+  }
+
+  void BlockUntilClosuresDone(const int num_closures) {
+    absl::MutexLock l(mu_);
+    while (closure_count_ < num_closures) {
+      cond_var_.Wait(&mu_);
+    }
+  }
+
+  void ResetQueue() { work_queue_.reset(); }
+
+  int NumClosuresExecuted() {
+    absl::MutexLock l(mu_);
+    return closure_count_;
+  }
+
+ private:
+  absl::Mutex mu_;
+  int closure_count_ TF_GUARDED_BY(mu_) = 0;
+  absl::CondVar cond_var_;
+  std::unique_ptr<UnboundedWorkQueue> work_queue_;
+  // `std::unique_ptr::reset()` sets `work_queue_` to nullptr before invoking
+  // `~UnboundedWorkQueue()`, so closures that schedule nested work during
+  // `ResetQueue()` use this cached pointer to avoid racing on `work_queue_`.
+  UnboundedWorkQueue* const work_queue_ptr_ = work_queue_.get();
+};
+
+TEST_F(UnboundedWorkQueueTest, SingleClosure) {
+  constexpr int num_closures = 1;
+  RunMultipleCopiesOfClosure(num_closures, []() {});
+  BlockUntilClosuresDone(num_closures);
+}
+
+TEST_F(UnboundedWorkQueueTest, MultipleClosures) {
+  constexpr int num_closures = 10;
+  RunMultipleCopiesOfClosure(num_closures, []() {});
+  BlockUntilClosuresDone(num_closures);
+}
+
+TEST_F(UnboundedWorkQueueTest, MultipleClosuresSleepingRandomly) {
+  constexpr int num_closures = 1000;
+  RunMultipleCopiesOfClosure(num_closures, []() {
+    Env::Default()->SleepForMicroseconds(random::New64() % 10);
+  });
+  BlockUntilClosuresDone(num_closures);
+}
+
+TEST_F(UnboundedWorkQueueTest, NestedClosures) {
+  constexpr int num_closures = 10;
+  // Run `num_closures` closures, each of which runs `num_closures` closures.
+  RunMultipleCopiesOfClosure(num_closures, [=]() {
+    RunMultipleCopiesOfClosure(num_closures, []() {});
+  });
+  BlockUntilClosuresDone(num_closures * num_closures + num_closures);
+}
+
+TEST_F(UnboundedWorkQueueTest, RacyDestructor) {
+  constexpr int num_closures = 100;
+  // Run `num_closures` closures, then delete `work_queue_`.
+  RunMultipleCopiesOfClosure(num_closures, []() {});
+  ResetQueue();
+  EXPECT_EQ(NumClosuresExecuted(), num_closures);
+}
+
+TEST_F(UnboundedWorkQueueTest, NestedClosureDuringDestructor) {
+  constexpr int num_closures = 10;
+  absl::Notification started;
+  RunMultipleCopiesOfClosure(1, [&]() {
+    started.Notify();
+    Env::Default()->SleepForMicroseconds(1000);
+    RunMultipleCopiesOfClosure(num_closures, []() {});
+  });
+  started.WaitForNotification();
+  ResetQueue();
+  EXPECT_EQ(NumClosuresExecuted(), num_closures + 1);
+}
+
+// Confirm pool grows so that threads on UnboundedWorkQueue do not wait
+// indefinitely. (b/566567502).
+TEST(UnboundedWorkQueueOptionsTest, BlockingClosuresExceedingNumCpus) {
+  // Start more closures than the default pool to confirm it grows to
+  // accommodate additional work.
+  const int num_closures = port::NumSchedulableCPUs() + 5;
+
+  BlockingCounter all_started(num_closures);
+  absl::Notification may_exit;
+
+  {
+    UnboundedWorkQueue queue(Env::Default(), "blocking_test");
+    for (int i = 0; i < num_closures; ++i) {
+      queue.Schedule([&]() {
+        all_started.DecrementCount();
+        may_exit.WaitForNotification();
+      });
+    }
+
+    // Wait for all closures to start.
+    EXPECT_TRUE(
+        all_started.WaitFor(absl::ToChronoMilliseconds(absl::Seconds(20))));
+
+    // Notify them all to finish.
+    may_exit.Notify();
+    // queue going out of scope should wait for all to finish.
+  }
+}
+
+TEST(UnboundedWorkQueueOptionsTest, DestructorWaitsForCallbackDestruction) {
+  absl::Notification callback_running;
+  bool capture_destroyed = false;
+  {
+    UnboundedWorkQueue queue(Env::Default(), "callback_destruction_test");
+    auto on_destroy = std::shared_ptr<void>(nullptr, [&](void*) {
+      Env::Default()->SleepForMicroseconds(10000);
+      capture_destroyed = true;
+    });
+    queue.Schedule([&callback_running, on_destroy = std::move(on_destroy)]() {
+      callback_running.Notify();
+    });
+    callback_running.WaitForNotification();
+  }
+  EXPECT_TRUE(capture_destroyed);
+}
+
+TEST(UnboundedWorkQueueOptionsTest, CustomStackSize) {
+  ThreadOptions thread_options;
+  thread_options.stack_size = 2 * 1024 * 1024;  // 2 MB
+  UnboundedWorkQueue queue(Env::Default(), "custom_stack_test", thread_options);
+  BlockingCounter counter(10);
+  for (int i = 0; i < 10; ++i) {
+    queue.Schedule([&counter]() { counter.DecrementCount(); });
+  }
+  counter.Wait();
+}
+
+TEST(UnboundedWorkQueueOptionsDeathTest, DefaultThreadOptions) {
+  if (kIsOpenSource) {
+    GTEST_SKIP() << "Default ThreadOptions are only rejected internally.";
+  }
+  EXPECT_DEATH(
+      {
+        UnboundedWorkQueue queue(Env::Default(), "default_options_test",
+                                 ThreadOptions{});
+      },
+      "Requires valid ThreadOptions");
+}
+
+}  // namespace
+}  // namespace tsl

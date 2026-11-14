@@ -28,15 +28,15 @@ static Graph* Resize(const char* algorithm, int batches, int width,
   in.flat<float>().setRandom();
 
   Tensor out_size(DT_INT32, TensorShape({2}));
-  auto out_size_flat = out_size.flat<int32>();
+  auto out_size_flat = out_size.flat<int32_t>();
   out_size_flat(0) = width * 2;
   out_size_flat(1) = height * 2;
 
   Node* ret;
-  Status s = NodeBuilder(g->NewName("n"), algorithm)
-                 .Input(test::graph::Constant(g, in))
-                 .Input(test::graph::Constant(g, out_size))
-                 .Finalize(g, &ret);
+  absl::Status s = NodeBuilder(g->NewName("n"), algorithm)
+                       .Input(test::graph::Constant(g, in))
+                       .Input(test::graph::Constant(g, out_size))
+                       .Finalize(g, &ret);
   assert(s.ok());
   return g;
 }

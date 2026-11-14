@@ -1,5 +1,4 @@
-# Lint as: python3
-# Copyright 2020 The TensorFlow Authors. All Rights Reserved.
+# Copyright 2024 The AI Edge Authors. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -22,10 +21,6 @@ python build_docs.py --output_dir=/path/to/output
 ```
 
 """
-
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
 
 import pathlib
 

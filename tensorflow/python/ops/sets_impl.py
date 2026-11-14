@@ -14,10 +14,6 @@
 # ==============================================================================
 """Implementation of tf.sets."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import ops
 from tensorflow.python.framework import sparse_tensor
@@ -39,7 +35,8 @@ def set_size(a, validate_indices=True):
   Args:
     a: `SparseTensor`, with indices sorted in row-major order.
     validate_indices: Whether to validate the order and range of sparse indices
-      in `a`.
+      in `a`. Note that setting this to `false` allows for undefined behavior
+      when calling this function with invalid indices.
 
   Returns:
     `int32` `Tensor` of set sizes. For `a` ranked `n`, this is a `Tensor` with

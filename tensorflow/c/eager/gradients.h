@@ -38,7 +38,7 @@ namespace gradients {
 //     grad_outputs[1] = grad_inputs[0];
 //     grad_outputs[0]->Ref();
 //     grad_outputs[1]->Ref();
-//     return Status::OK();
+//     return OkStatus();
 //   }
 //   ~AddGradientFunction() override {}
 // };
@@ -54,17 +54,18 @@ namespace gradients {
 // }
 class GradientFunction {
  public:
-  virtual Status Compute(AbstractContext* ctx,
-                         absl::Span<AbstractTensorHandle* const> grad_outputs,
-                         absl::Span<AbstractTensorHandle*> grad_inputs) = 0;
-  virtual ~GradientFunction() {}
+  virtual absl::Status Compute(
+      AbstractContext* ctx,
+      absl::Span<AbstractTensorHandle* const> grad_outputs,
+      absl::Span<AbstractTensorHandle*> grad_inputs) = 0;
+  virtual ~GradientFunction() = default;
 };
 
 // Metadata from the forward operation that is made available to the
 // gradient registerer to instantiate a GradientFunction.
 struct ForwardOperation {
  public:
-  string op_name;
+  std::string op_name;
   std::vector<AbstractTensorHandle*> inputs;
   std::vector<AbstractTensorHandle*> outputs;
   std::vector<int64_t> skip_input_indices;
@@ -77,13 +78,14 @@ using GradientFunctionFactory =
 // Map from op name to a `GradientFunctionFactory`.
 class GradientRegistry {
  public:
-  Status Register(const string& op,
-                  GradientFunctionFactory gradient_function_factory);
-  Status Lookup(const ForwardOperation& op,
-                std::unique_ptr<GradientFunction>* gradient_function) const;
+  absl::Status Register(const std::string& op,
+                        GradientFunctionFactory gradient_function_factory);
+  absl::Status Lookup(
+      const ForwardOperation& op,
+      std::unique_ptr<GradientFunction>* gradient_function) const;
 
  private:
-  absl::flat_hash_map<string, GradientFunctionFactory> registry_;
+  absl::flat_hash_map<std::string, GradientFunctionFactory> registry_;
 };
 
 // TODO(srbs): Figure out if we can avoid declaring this in the public header.
@@ -109,6 +111,9 @@ class TapeTensor {
  public:
   explicit TapeTensor(AbstractTensorHandle* handle);
   TapeTensor(const TapeTensor& other);
+  TapeTensor& operator=(const TapeTensor& other);
+  TapeTensor(TapeTensor&& other) noexcept;
+  TapeTensor& operator=(TapeTensor&& other) noexcept;
   ~TapeTensor();
 
   int64_t GetID() const;
@@ -149,7 +154,7 @@ class Tape : protected eager::GradientTape<AbstractTensorHandle,
   void RecordOperation(absl::Span<AbstractTensorHandle* const> inputs,
                        absl::Span<AbstractTensorHandle* const> outputs,
                        GradientFunction* gradient_function,
-                       const string& op_name = "");
+                       const std::string& op_name = "");
   // Returns whether any tensor in a list of tensors is being watched and has
   // a trainable dtype.
   bool ShouldRecord(
@@ -163,7 +168,7 @@ class Tape : protected eager::GradientTape<AbstractTensorHandle,
   // tensors with respect to the source tensors. The output gradients are used
   // if not empty and not null. The result is populated with one tensor per
   // target element.
-  Status ComputeGradient(
+  absl::Status ComputeGradient(
       AbstractContext* ctx, absl::Span<AbstractTensorHandle* const> targets,
       absl::Span<AbstractTensorHandle* const> sources,
       absl::Span<AbstractTensorHandle* const> output_gradients,

@@ -14,25 +14,22 @@ limitations under the License.
 ==============================================================================*/
 #include "tensorflow/compiler/mlir/tfr/integration/tfr_decompose_ctx.h"
 
+#include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "absl/types/span.h"
-#include "mlir/IR/Builders.h"  // from @llvm-project
-#include "mlir/IR/BuiltinTypes.h"  // from @llvm-project
-#include "mlir/IR/Dialect.h"  // from @llvm-project
 #include "mlir/IR/MLIRContext.h"  // from @llvm-project
-#include "tensorflow/compiler/xla/test.h"
+#include "xla/hlo/testlib/test.h"
 #include "tensorflow/core/framework/attr_value.pb.h"
 #include "tensorflow/core/framework/common_shape_fns.h"
 #include "tensorflow/core/framework/function.pb.h"
 #include "tensorflow/core/framework/graph.pb.h"
 #include "tensorflow/core/framework/node_def_builder.h"
-#include "tensorflow/core/framework/types.h"
+#include "tensorflow/core/framework/op.h"
 #include "tensorflow/core/framework/types.pb.h"
-#include "tensorflow/core/lib/core/status_test_util.h"
 #include "tensorflow/core/platform/test.h"
-#include "tensorflow/stream_executor/lib/statusor.h"
 
 using testing::ElementsAreArray;
 using testing::Test;
@@ -63,15 +60,15 @@ constexpr char tfr_raw_text[] = R"(
 
 tfr.func @tf__my_add_n(%values: !tfr.tensor_list,
                        %n: i64 {tfr.name="N"}) -> !tfr.tensor {
-  %index = constant 0 : index
-  %cst = constant 1 : i64
-  %eq = cmpi "eq", %n, %cst : i64
+  %index = arith.constant 0 : index
+  %cst = arith.constant 1 : i64
+  %eq = arith.cmpi "eq", %n, %cst : i64
   %v1 = tfr.get_element %values[%index] : (!tfr.tensor_list, index) -> !tfr.tensor
   %res = scf.if %eq -> !tfr.tensor {
     scf.yield %v1 : !tfr.tensor
   } else {
-    %step = index_cast %cst : i64 to index
-    %end = index_cast %n : i64 to index
+    %step = arith.index_cast %cst : i64 to index
+    %end = arith.index_cast %n : i64 to index
     %reduce = scf.for %i = %step to %end step %step iter_args(%reduce_iter=%v1) -> !tfr.tensor {
       %v = tfr.get_element %values[%i] : (!tfr.tensor_list, index) -> !tfr.tensor
       %reduce_next =  tfr.call @tf__risc_add_dummy(%reduce_iter, %v) : (!tfr.tensor, !tfr.tensor) -> !tfr.tensor
@@ -117,7 +114,7 @@ TEST_F(TFRDecomposeContextTest, FLOAT_1_ins) {
   auto decomposed = test_ctx_->ExpandNode(test_node, "test");
   EXPECT_TRUE(decomposed.ok());
   std::vector<NodeAndType> expected_results{{"Identity", DT_FLOAT}};
-  EXPECT_THAT(NodesSequenceOf(decomposed.ValueOrDie()),
+  EXPECT_THAT(NodesSequenceOf(decomposed.value()),
               ElementsAreArray(expected_results));
 }
 
@@ -136,7 +133,7 @@ TEST_F(TFRDecomposeContextTest, FLOAT_3_ins) {
 
   std::vector<NodeAndType> expected_results{{"RiscAddDummy", DT_FLOAT},
                                             {"RiscAddDummy", DT_FLOAT}};
-  EXPECT_THAT(NodesSequenceOf(decomposed.ValueOrDie()),
+  EXPECT_THAT(NodesSequenceOf(decomposed.value()),
               ElementsAreArray(expected_results));
 }
 
@@ -154,7 +151,7 @@ TEST_F(TFRDecomposeContextTest, INT32_3_ins) {
 
   std::vector<NodeAndType> expected_results{{"RiscAddDummy", DT_INT32},
                                             {"RiscAddDummy", DT_INT32}};
-  EXPECT_THAT(NodesSequenceOf(decomposed.ValueOrDie()),
+  EXPECT_THAT(NodesSequenceOf(decomposed.value()),
               ElementsAreArray(expected_results));
 }
 

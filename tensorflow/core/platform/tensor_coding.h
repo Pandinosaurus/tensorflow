@@ -14,8 +14,8 @@ limitations under the License.
 ==============================================================================*/
 
 // Helper routines for encoding/decoding tensor contents.
-#ifndef TENSORFLOW_PLATFORM_TENSOR_CODING_H_
-#define TENSORFLOW_PLATFORM_TENSOR_CODING_H_
+#ifndef TENSORFLOW_CORE_PLATFORM_TENSOR_CODING_H_
+#define TENSORFLOW_CORE_PLATFORM_TENSOR_CODING_H_
 
 #include <string>
 
@@ -31,7 +31,8 @@ namespace port {
 // Store src contents in *out.  If backing memory for src is shared with *out,
 // will ref obj during the call and will arrange to unref obj when no
 // longer needed.
-void AssignRefCounted(StringPiece src, core::RefCounted* obj, std::string* out);
+void AssignRefCounted(absl::string_view src, core::RefCounted* obj,
+                      std::string* out);
 
 // Copy contents of src to dst[0,src.size()-1].
 inline void CopyToArray(const std::string& src, char* dst) {
@@ -86,21 +87,22 @@ class StringListDecoder {
   // Populates the given vector with the lengths of each string in the sequence
   // being decoded. Upon returning the vector is guaranteed to contain as many
   // elements as there are strings in the sequence.
-  virtual bool ReadSizes(std::vector<uint32>* sizes) = 0;
+  virtual bool ReadSizes(std::vector<uint32_t>* sizes) = 0;
 
   // Returns a pointer to the next string in the sequence, then prepares for the
   // next call by advancing 'size' characters in the sequence.
-  virtual const char* Data(uint32 size) = 0;
+  virtual const char* Data(uint32_t size) = 0;
 };
 
-std::unique_ptr<StringListEncoder> NewStringListEncoder(string* out);
-std::unique_ptr<StringListDecoder> NewStringListDecoder(const string& in);
+std::unique_ptr<StringListEncoder> NewStringListEncoder(std::string* out);
+std::unique_ptr<StringListDecoder> NewStringListDecoder(const std::string& in);
 
 #if defined(TENSORFLOW_PROTOBUF_USES_CORD)
 // Store src contents in *out.  If backing memory for src is shared with *out,
 // will ref obj during the call and will arrange to unref obj when no
 // longer needed.
-void AssignRefCounted(StringPiece src, core::RefCounted* obj, absl::Cord* out);
+void AssignRefCounted(absl::string_view src, core::RefCounted* obj,
+                      absl::Cord* out);
 
 // TODO(kmensah): Macro guard this with a check for Cord support.
 inline void CopyToArray(const absl::Cord& src, char* dst) {
@@ -132,4 +134,4 @@ std::unique_ptr<StringListDecoder> NewStringListDecoder(const absl::Cord& in);
 }  // namespace port
 }  // namespace tensorflow
 
-#endif  // TENSORFLOW_PLATFORM_TENSOR_CODING_H_
+#endif  // TENSORFLOW_CORE_PLATFORM_TENSOR_CODING_H_

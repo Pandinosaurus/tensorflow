@@ -16,20 +16,20 @@ limitations under the License.
 
 #if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 
+#include "absl/synchronization/notification.h"
 #include "tensorflow/core/common_runtime/collective_util.h"
 #include "tensorflow/core/nccl/nccl_manager.h"
-#include "tensorflow/core/platform/tracing.h"
 #include "tensorflow/core/profiler/lib/traceme.h"
 
 namespace tensorflow {
 
 void NcclReducer::Run(StatusCallback done) {
   Tensor group_size;
-  std::unique_ptr<Notification> group_size_ready;
-  Status group_size_status;
-  std::unique_ptr<Notification> nccl_done;
+  std::unique_ptr<absl::Notification> group_size_ready;
+  absl::Status group_size_status;
+  std::unique_ptr<absl::Notification> nccl_done;
   if (col_params_->final_op) {
-    group_size_ready = absl::make_unique<Notification>();
+    group_size_ready = std::make_unique<absl::Notification>();
     // Create an on-device scalar value from group_size_.
     // TODO(ayushd, tucker): avoid this copy by either reusing across
     // invocations or providing the scalar to the kernel in host memory.
@@ -49,15 +49,15 @@ void NcclReducer::Run(StatusCallback done) {
         break;
       case DT_INT32:
         group_size_val =
-            Tensor(static_cast<int32>(col_params_->group.group_size));
+            Tensor(static_cast<int32_t>(col_params_->group.group_size));
         break;
       case DT_INT64:
         group_size_val =
             Tensor(static_cast<int64_t>(col_params_->group.group_size));
         break;
       default:
-        done(errors::Internal("Unsupported type ",
-                              DataTypeString(col_ctx_->output->dtype())));
+        done(absl::InternalError(absl::StrCat(
+            "Unsupported type ", DataTypeString(col_ctx_->output->dtype()))));
         return;
     }
     group_size = Tensor(
@@ -65,23 +65,23 @@ void NcclReducer::Run(StatusCallback done) {
         col_ctx_->output->dtype(), TensorShape({}));
     DeviceContext* op_dev_ctx = col_ctx_->op_ctx->op_device_context();
     // Enqueue copy on gpu stream.
-    Notification* copy_note = group_size_ready.get();
+    absl::Notification* copy_note = group_size_ready.get();
     op_dev_ctx->CopyCPUTensorToDevice(
         &group_size_val, col_ctx_->device, &group_size,
-        [copy_note, &group_size_status](const Status& s) {
+        [copy_note, &group_size_status](const absl::Status& s) {
           group_size_status = s;
           copy_note->Notify();
         });
-    nccl_done = absl::make_unique<Notification>();
+    nccl_done = std::make_unique<absl::Notification>();
   }
 
-  Status nccl_status;
+  absl::Status nccl_status;
   // If no final_op, then the NCCL callback is just `done`.  Otherwise we notify
   // `nccl_done` so that we can then perform `final_op`.
   StatusCallback done_callback;
   if (col_params_->final_op) {
-    Notification* nccl_note = nccl_done.get();
-    done_callback = [nccl_note, &nccl_status](const Status& s) {
+    absl::Notification* nccl_note = nccl_done.get();
+    done_callback = [nccl_note, &nccl_status](const absl::Status& s) {
       nccl_status = s;
       nccl_note->Notify();
     };
@@ -104,14 +104,15 @@ void NcclReducer::Run(StatusCallback done) {
   // TODO(b/80529858): make this entirely non-blocking by getting rid of the
   // waits below and calling final op from the nccl kernel's DoneCallback.
   {
-    profiler::TraceMe activity("Nccl", profiler::TraceMeLevel::kInfo);
+    tsl::profiler::TraceMe activity("Nccl", tsl::profiler::TraceMeLevel::kInfo);
     nccl_done->WaitForNotification();
   }
   {
-    profiler::TraceMe activity("GroupSizeCopy", profiler::TraceMeLevel::kInfo);
+    tsl::profiler::TraceMe activity("GroupSizeCopy",
+                                    tsl::profiler::TraceMeLevel::kInfo);
     group_size_ready->WaitForNotification();
   }
-  Status final_status =
+  absl::Status final_status =
       group_size_status.ok() ? nccl_status : group_size_status;
   if (final_status.ok()) {
     final_status = collective_util::ComputeBinOp(
@@ -122,6 +123,7 @@ void NcclReducer::Run(StatusCallback done) {
 }
 
 REGISTER_COLLECTIVE(NcclReduce, NcclReducer);
+REGISTER_COLLECTIVE(NcclReduceScatter, NcclReduceScatterer);
 
 }  // namespace tensorflow
 

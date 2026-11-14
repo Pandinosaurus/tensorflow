@@ -15,35 +15,49 @@ limitations under the License.
 
 #include "tensorflow/compiler/tf2xla/tf2xla_util.h"
 
+#include <initializer_list>
+#include <memory>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+#include "absl/log/check.h"
+#include "absl/status/status.h"
 #include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
 #include "tensorflow/cc/framework/ops.h"
-#include "tensorflow/cc/ops/data_flow_ops.h"
+#include "tensorflow/cc/framework/scope.h"
+#include "tensorflow/cc/ops/array_ops.h"
+#include "tensorflow/cc/ops/const_op.h"
 #include "tensorflow/cc/ops/function_ops.h"
 #include "tensorflow/cc/ops/functional_ops.h"
 #include "tensorflow/cc/ops/list_ops.h"
-#include "tensorflow/cc/ops/standard_ops.h"
+#include "tensorflow/cc/ops/math_ops.h"
+#include "tensorflow/cc/ops/no_op.h"
 #include "tensorflow/compiler/tf2xla/sharding_util.h"
+#include "xla/tsl/lib/core/status_test_util.h"
 #include "tensorflow/core/common_runtime/function.h"
-#include "tensorflow/core/common_runtime/graph_optimizer.h"
+#include "tensorflow/core/common_runtime/function_def_utils.h"
 #include "tensorflow/core/common_runtime/process_function_library_runtime.h"
 #include "tensorflow/core/framework/function.h"
 #include "tensorflow/core/framework/graph_to_functiondef.h"
 #include "tensorflow/core/framework/node_def.pb.h"
+#include "tensorflow/core/framework/node_def_util.h"
+#include "tensorflow/core/framework/op.h"
+#include "tensorflow/core/framework/tensor_shape.h"
 #include "tensorflow/core/graph/graph.h"
-#include "tensorflow/core/lib/core/status.h"
-#include "tensorflow/core/lib/core/status_test_util.h"
+#include "tensorflow/core/platform/env.h"
 #include "tensorflow/core/platform/test.h"
 #include "tensorflow/core/public/version.h"
 
 namespace tensorflow {
 namespace {
 
-void ExpectErrorContains(const Status& status, absl::string_view str) {
-  EXPECT_NE(Status::OK(), status);
-  EXPECT_TRUE(absl::StrContains(status.error_message(), str))
-      << "expected error: " << status.error_message() << " to contain: " << str;
+void ExpectErrorContains(const absl::Status& status, absl::string_view str) {
+  EXPECT_NE(absl::OkStatus(), status);
+  EXPECT_TRUE(absl::StrContains(status.message(), str))
+      << "expected error: " << status.message() << " to contain: " << str;
 }
 
 TEST(ValidateConfig, Good) {
@@ -157,7 +171,7 @@ TEST(ValidateConfig, ConflictingFetchName) {
   ExpectErrorContains(ValidateConfig(config), "conflicting fetch name");
 }
 
-static tf2xla::Config FetchesConfig(std::vector<string> fetches) {
+static tf2xla::Config FetchesConfig(std::vector<std::string> fetches) {
   tf2xla::Config config;
   for (const auto& fetch_node_name : fetches) {
     auto* fetch = config.add_fetch();
@@ -245,8 +259,8 @@ TEST(SetNodeShardingFromNeighbors, Basic) {
   auto parse_status = ParseShardingFromDevice(*c_node, num_cores_per_replica,
                                               /*add_metadata=*/false);
   TF_ASSERT_OK(parse_status.status());
-  ASSERT_TRUE(parse_status.ValueOrDie().has_value());
-  EXPECT_EQ(2, parse_status.ValueOrDie().value().tile_assignment_devices(0));
+  ASSERT_TRUE(parse_status.value().has_value());
+  EXPECT_EQ(2, parse_status.value().value().tile_assignment_devices(0));
 
   // Test where two inputs to c_node have a device.
   b_node->set_assigned_device_name("/device:TPU_REPLICATED_CORE:1");
@@ -254,16 +268,16 @@ TEST(SetNodeShardingFromNeighbors, Basic) {
   parse_status = ParseShardingFromDevice(*c_node, num_cores_per_replica,
                                          /*add_metadata=*/false);
   TF_ASSERT_OK(parse_status.status());
-  ASSERT_TRUE(parse_status.ValueOrDie().has_value());
-  EXPECT_EQ(1, parse_status.ValueOrDie().value().tile_assignment_devices(0));
+  ASSERT_TRUE(parse_status.value().has_value());
+  EXPECT_EQ(1, parse_status.value().value().tile_assignment_devices(0));
 
   // Test setting based on out edges.
   TF_ASSERT_OK(SetNodeShardingFromNeighbors(a_node, /*out_edges=*/true));
   parse_status = ParseShardingFromDevice(*a_node, num_cores_per_replica,
                                          /*add_metadata=*/false);
   TF_ASSERT_OK(parse_status.status());
-  ASSERT_TRUE(parse_status.ValueOrDie().has_value());
-  EXPECT_EQ(1, parse_status.ValueOrDie().value().tile_assignment_devices(0));
+  ASSERT_TRUE(parse_status.value().has_value());
+  EXPECT_EQ(1, parse_status.value().value().tile_assignment_devices(0));
 }
 
 REGISTER_OP("One")
@@ -337,7 +351,7 @@ TEST(CachedFunctionHandles, Basic) {
 }
 
 TEST(PropagateConstIntoFunctionalNodes, WhileLoopWithResourceInput) {
-  FunctionLibraryDefinition fld(OpRegistry::Global(), {});
+  FunctionLibraryDefinition fld(OpRegistry::Global(), FunctionDefLibrary());
   {
     // Cond graph & body graph.
     Scope scope = Scope::NewRootScope().ExitOnError();
@@ -369,7 +383,7 @@ TEST(PropagateConstIntoFunctionalNodes, WhileLoopWithResourceInput) {
 }
 
 TEST(PropagateConstIntoFunctionalNodes, CopiedConstNodeHasUniqueName) {
-  FunctionLibraryDefinition fld(OpRegistry::Global(), {});
+  FunctionLibraryDefinition fld(OpRegistry::Global(), FunctionDefLibrary());
   {
     // Cond graph & body graph.
     Scope scope = Scope::NewRootScope().ExitOnError();
@@ -409,7 +423,7 @@ TEST(PropagateConstIntoFunctionalNodes, CopiedConstNodeHasUniqueName) {
   TF_ASSERT_OK(GetNodeAttr(while_node->def(), "body", &body_fn));
   const FunctionDef* rewritten_body_fn = fld.Find(body_fn.name());
   ASSERT_NE(rewritten_body_fn, nullptr);
-  std::unordered_map<string, NodeDef> nodes;
+  std::unordered_map<std::string, NodeDef> nodes;
   for (const NodeDef& node_def : rewritten_body_fn->node_def()) {
     nodes[node_def.name()] = node_def;
   }
@@ -422,7 +436,7 @@ TEST(PropagateConstIntoFunctionalNodes, CopiedConstNodeHasUniqueName) {
 }
 
 TEST(PropagateConstIntoFunctionalNodes, RewriteTensorListWithConstMember) {
-  FunctionLibraryDefinition fld(OpRegistry::Global(), {});
+  FunctionLibraryDefinition fld(OpRegistry::Global(), FunctionDefLibrary());
   {
     // Cond graph
     Scope scope = Scope::NewRootScope().ExitOnError();
@@ -492,14 +506,61 @@ TEST(PropagateConstIntoFunctionalNodes, RewriteTensorListWithConstMember) {
   const FunctionDef* bwd_body = fld.Find("bwd_body_tl_rewrite_0");
   ASSERT_NE(bwd_body, nullptr);
   std::unique_ptr<FunctionBody> bwd_fbody;
-  TF_CHECK_OK(
-      FunctionDefToBodyHelper(*bwd_body, AttrSlice(), &fld, &bwd_fbody));
+  CHECK_OK(FunctionDefToBodyHelper(*bwd_body, AttrSlice(), &fld, &bwd_fbody));
   auto node_name_index = bwd_fbody->graph->BuildNodeNameIndex();
   const Node* identity = node_name_index.at("identity");
   ASSERT_NE(identity, nullptr);
   const Node* input;
   TF_ASSERT_OK(identity->input_node(0, &input));
   EXPECT_EQ(input->type_string(), "Const");
+}
+
+TEST(PropagateConstIntoFunctionalNodes, RepeatedWhileLoops) {
+  FunctionLibraryDefinition fld(OpRegistry::Global(), FunctionDefLibrary());
+  {
+    Scope scope = Scope::NewRootScope().ExitOnError();
+    auto arg0 = ops::_Arg(scope.WithOpName("arg0"), DT_INT32, 0);
+    auto arg1 = ops::_Arg(scope.WithOpName("arg1"), DT_INT32, 1);
+    auto ret0 = ops::_Retval(scope.WithOpName("ret0"), arg0, 0);
+    auto ret1 = ops::_Retval(scope.WithOpName("ret1"), arg1, 1);
+    Graph graph(OpRegistry::Global());
+    TF_ASSERT_OK(scope.ToGraph(&graph));
+
+    FunctionDef cond_fdef;
+    TF_ASSERT_OK(GraphToFunctionDef(graph, "cond", &cond_fdef));
+    TF_ASSERT_OK(fld.AddFunctionDef(cond_fdef));
+
+    FunctionDef body_fdef;
+    TF_ASSERT_OK(GraphToFunctionDef(graph, "body", &body_fdef));
+    TF_ASSERT_OK(fld.AddFunctionDef(body_fdef));
+  }
+
+  Scope scope = Scope::NewRootScope().ExitOnError();
+  auto val0 = ops::Const(scope.WithOpName("val0"), 0, TensorShape({}));
+  auto val1 = ops::Const(scope.WithOpName("val1"), 6, TensorShape({}));
+
+  NameAttrList cond_fn, body_fn;
+  cond_fn.set_name("cond");
+  body_fn.set_name("body");
+
+  auto while_op0 =
+      ops::While(scope.WithOpName("while0"),
+                 std::initializer_list<Input>{val0, val1}, cond_fn, body_fn);
+  auto while_op1 = ops::While(
+      scope.WithOpName("while1"),
+      std::initializer_list<Input>{while_op0.output[0], while_op0.output[1]},
+      cond_fn, body_fn);
+  auto while_op2 = ops::While(
+      scope.WithOpName("while2"),
+      std::initializer_list<Input>{while_op1.output[0], while_op1.output[1]},
+      cond_fn, body_fn);
+
+  Graph graph(OpRegistry::Global());
+  TF_ASSERT_OK(scope.ToGraph(&graph));
+
+  FunctionLibraryDefinition lookup_fld(fld);
+  TF_EXPECT_OK(PropagateConstIntoFunctionalNodes(&graph, &lookup_fld, &fld));
+  TF_EXPECT_OK(PropagateConstIntoFunctionalNodes(&graph, &lookup_fld, &fld));
 }
 
 }  // namespace

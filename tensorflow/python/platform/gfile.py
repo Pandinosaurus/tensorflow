@@ -14,10 +14,6 @@
 # ==============================================================================
 
 """Import router for file_io."""
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 # pylint: disable=unused-import
 from tensorflow.python.lib.io.file_io import copy as Copy
 from tensorflow.python.lib.io.file_io import create_dir as MkDir
@@ -112,6 +108,13 @@ class GFile(_FileIO):
   >>> f.tell()
   7
   >>> f.close()
+
+  **Security Note:** The `tf.io.gfile` APIs do not perform path validation
+  or sandboxing. They do not prevent path traversal (e.g., using `..`), do
+  not restrict access to any directory, and will follow symbolic links. If your
+  application accepts file paths from untrusted sources (such as user input,
+  model configurations, or checkpoint metadata), you must validate and
+  canonicalize paths before passing them to these functions.
   """
 
   def __init__(self, name, mode='r'):

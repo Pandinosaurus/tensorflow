@@ -14,13 +14,14 @@
 # ==============================================================================
 """Tests for wrapping an eager op in a call op at runtime."""
 from tensorflow.compiler.tests import xla_test
-from tensorflow.python.eager import context
-from tensorflow.python.eager import function
+from tensorflow.python.eager import def_function
 from tensorflow.python.eager import test
+from tensorflow.python.framework import test_util
 from tensorflow.python.ops import resource_variable_ops
 from tensorflow.python.ops import variables
 
 
+@test_util.with_eager_op_as_function(only_as_function=True)
 class RunEagerOpAsFunctionXlaTest(xla_test.XLATestCase):
 
   def testVarCreateReadDestroy(self):
@@ -33,7 +34,7 @@ class RunEagerOpAsFunctionXlaTest(xla_test.XLATestCase):
     with self.test_scope():
       v = resource_variable_ops.ResourceVariable(1.0)
 
-      @function.defun
+      @def_function.function
       def f():
         return v.read_value()
 
@@ -42,5 +43,4 @@ class RunEagerOpAsFunctionXlaTest(xla_test.XLATestCase):
 
 
 if __name__ == "__main__":
-  context.enable_run_eager_op_as_function()
   test.main()

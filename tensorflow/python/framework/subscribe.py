@@ -14,14 +14,11 @@
 # ==============================================================================
 """Subscribe function."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import contextlib
 import re
 
 from tensorflow.python.framework import ops
+from tensorflow.python.framework import tensor as tensor_lib
 from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import variables
 from tensorflow.python.platform import tf_logging as logging
@@ -46,7 +43,7 @@ def _recursive_apply(tensors, apply_fn):
     `TypeError` if undefined type in the tensors structure.
   """
   tensors_type = type(tensors)
-  if tensors_type is ops.Tensor:
+  if isinstance(tensors, tensor_lib.Tensor):
     return apply_fn(tensors)
   elif isinstance(tensors, variables.Variable):
     return apply_fn(tensors.value())
@@ -175,7 +172,9 @@ def _subscribe_extend(tensor, side_effects):
     for s in side_effects:
       outs += s(source_tensor)
 
-  out_ops = [out.op if isinstance(out, ops.Tensor) else out for out in outs]
+  out_ops = [
+      out.op if isinstance(out, tensor_lib.Tensor) else out for out in outs
+  ]
   tensor.op._add_control_inputs(out_ops)  # pylint: disable=protected-access
 
   return tensor

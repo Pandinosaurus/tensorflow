@@ -13,11 +13,7 @@
 # limitations under the License.
 # ==============================================================================
 """Test configs for pool operators."""
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
-import tensorflow.compat.v1 as tf
+import tensorflow as tf
 from tensorflow.lite.testing.zip_test_utils import create_tensor_data
 from tensorflow.lite.testing.zip_test_utils import make_zip_of_tests
 from tensorflow.lite.testing.zip_test_utils import register_make_test_function
@@ -95,6 +91,8 @@ def make_pool_tests(pool_op_in, allow_fully_quantize=False):
           strides=parameters["strides"],
           data_format=parameters["data_format"],
           padding=parameters["padding"])
+      if 0 in out.shape.as_list():
+        raise ValueError("TFLite pooling tests require nonempty outputs")
       return [input_tensor], [out]
 
     def build_inputs(parameters, sess, inputs, outputs):
@@ -119,8 +117,8 @@ def make_pool_tests(pool_op_in, allow_fully_quantize=False):
 def make_l2_pool(input_tensor, ksize, strides, padding, data_format):
   """Given an input perform a sequence of TensorFlow ops to produce l2pool."""
   return tf.sqrt(
-      tf.nn.avg_pool(
-          tf.square(input_tensor),
+      tf.nn.avg_pool2d(
+          input=tf.square(input_tensor),
           ksize=ksize,
           strides=strides,
           padding=padding,
@@ -135,12 +133,12 @@ def make_l2_pool_tests(options):
 @register_make_test_function()
 def make_avg_pool_tests(options):
   make_pool_tests(
-      tf.nn.avg_pool, allow_fully_quantize=True)(
+      tf.nn.avg_pool2d, allow_fully_quantize=True)(
           options, expected_tf_failures=160)
 
 
 @register_make_test_function()
 def make_max_pool_tests(options):
   make_pool_tests(
-      tf.nn.max_pool, allow_fully_quantize=True)(
+      tf.nn.max_pool2d, allow_fully_quantize=True)(
           options, expected_tf_failures=160)

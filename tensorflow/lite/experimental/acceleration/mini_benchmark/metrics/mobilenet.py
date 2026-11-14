@@ -22,17 +22,14 @@ https://tfhub.dev/tensorflow/coral-model/mobilenet_v1_1.0_224_quantized/1/defaul
 
 The metrics used are symmetric KL-divergence and MSE.
 """
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import argparse
 import sys
 # TODO(b/152872335): (re-)port to tf v2 after output names are kept during
 # conversion in v2.
 import tensorflow.compat.v1 as tf
 from tensorflow.lite.experimental.acceleration.mini_benchmark.metrics import kl_divergence
-
+from tensorflow.lite.python import lite
+from tensorflow.lite.tools import flatbuffer_utils
 parser = argparse.ArgumentParser(
     description='Script to generate a metrics model for mobilenet v1.')
 parser.add_argument('output', help='Output filepath')
@@ -54,12 +51,16 @@ def main(output_path):
     ok = tf.reshape(
         tf.logical_and(kld_metric < 5.5, mse < 0.003), [1], name='ok')
     sess = tf.compat.v1.Session()
-    converter = tf.lite.TFLiteConverter.from_session(sess, [
+    converter = lite.TFLiteConverter.from_session(sess, [
         expected_scores,
         actual_scores,
     ], [kld_metric, mse, ok])
     converter.experimental_new_converter = True
     tflite_model = converter.convert()
+    if sys.byteorder == 'big':
+      tflite_model = flatbuffer_utils.byte_swap_tflite_buffer(
+          tflite_model, 'big', 'little'
+      )
     open(output_path, 'wb').write(tflite_model)
 
 

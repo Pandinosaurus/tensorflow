@@ -16,6 +16,7 @@ limitations under the License.
 #include "tensorflow/core/debug/debug_graph_utils.h"
 
 #include "tensorflow/core/framework/tensor_testutil.h"
+#include "tensorflow/core/lib/core/errors.h"
 #include "tensorflow/core/lib/core/status_test_util.h"
 #include "tensorflow/core/lib/strings/str_util.h"
 
@@ -23,17 +24,17 @@ namespace tensorflow {
 
 class DebugGraphUtilsTest : public ::testing::Test {
  protected:
-  Status ParseDebugOpName(const string& debug_op_name,
-                          string* debug_op_name_proper,
-                          std::unordered_map<string, string>* attributes) {
+  absl::Status ParseDebugOpName(
+      const std::string& debug_op_name, std::string* debug_op_name_proper,
+      std::unordered_map<std::string, std::string>* attributes) {
     return DebugNodeInserter::ParseDebugOpName(
         debug_op_name, debug_op_name_proper, attributes);
   }
 };
 
 TEST_F(DebugGraphUtilsTest, TestParseNoAttributeDebugOpName) {
-  string debug_op_name_proper;
-  std::unordered_map<string, string> attributes;
+  std::string debug_op_name_proper;
+  std::unordered_map<std::string, std::string> attributes;
   TF_ASSERT_OK(
       ParseDebugOpName("DebugIdentity", &debug_op_name_proper, &attributes));
   ASSERT_EQ("DebugIdentity", debug_op_name_proper);
@@ -41,55 +42,55 @@ TEST_F(DebugGraphUtilsTest, TestParseNoAttributeDebugOpName) {
 }
 
 TEST_F(DebugGraphUtilsTest, TestMalformedDebugOpName) {
-  string debug_op_name_proper;
-  std::unordered_map<string, string> attributes;
+  std::string debug_op_name_proper;
+  std::unordered_map<std::string, std::string> attributes;
 
-  Status s = ParseDebugOpName("(mute_if_healthy=true)", &debug_op_name_proper,
-                              &attributes);
-  ASSERT_EQ(errors::Code::INVALID_ARGUMENT, s.code());
+  absl::Status s = ParseDebugOpName("(mute_if_healthy=true)",
+                                    &debug_op_name_proper, &attributes);
+  ASSERT_TRUE(absl::IsInvalidArgument(s));
 
   s = ParseDebugOpName("DebugNumericSummary(", &debug_op_name_proper,
                        &attributes);
-  ASSERT_EQ(errors::Code::INVALID_ARGUMENT, s.code());
+  ASSERT_TRUE(absl::IsInvalidArgument(s));
 
   s = ParseDebugOpName("DebugNumericSummary)", &debug_op_name_proper,
                        &attributes);
-  ASSERT_EQ(errors::Code::INVALID_ARGUMENT, s.code());
+  ASSERT_TRUE(absl::IsInvalidArgument(s));
 }
 
 TEST_F(DebugGraphUtilsTest, TestDebugOpNameWithMalformedAttributes) {
-  string debug_op_name_proper;
-  std::unordered_map<string, string> attributes;
+  std::string debug_op_name_proper;
+  std::unordered_map<std::string, std::string> attributes;
 
-  Status s = ParseDebugOpName("DebugNumericSummary(=)", &debug_op_name_proper,
-                              &attributes);
-  ASSERT_EQ(errors::Code::INVALID_ARGUMENT, s.code());
+  absl::Status s = ParseDebugOpName("DebugNumericSummary(=)",
+                                    &debug_op_name_proper, &attributes);
+  ASSERT_TRUE(absl::IsInvalidArgument(s));
 
   s = ParseDebugOpName("DebugNumericSummary(mute_if_healthy=)",
                        &debug_op_name_proper, &attributes);
-  ASSERT_EQ(errors::Code::INVALID_ARGUMENT, s.code());
+  ASSERT_TRUE(absl::IsInvalidArgument(s));
 
   s = ParseDebugOpName("DebugNumericSummary(=true)", &debug_op_name_proper,
                        &attributes);
-  ASSERT_EQ(errors::Code::INVALID_ARGUMENT, s.code());
+  ASSERT_TRUE(absl::IsInvalidArgument(s));
 
   s = ParseDebugOpName("DebugNumericSummary(mute_if_healthy:true)",
                        &debug_op_name_proper, &attributes);
-  ASSERT_EQ(errors::Code::INVALID_ARGUMENT, s.code());
+  ASSERT_TRUE(absl::IsInvalidArgument(s));
 
   s = ParseDebugOpName("DebugNumericSummary(mute_if_healthy=true;threshold=)",
                        &debug_op_name_proper, &attributes);
-  ASSERT_EQ(errors::Code::INVALID_ARGUMENT, s.code());
+  ASSERT_TRUE(absl::IsInvalidArgument(s));
 
   s = ParseDebugOpName(
       "DebugNumericSummary(mute_if_healthy=true;threshold:300.0)",
       &debug_op_name_proper, &attributes);
-  ASSERT_EQ(errors::Code::INVALID_ARGUMENT, s.code());
+  ASSERT_TRUE(absl::IsInvalidArgument(s));
 }
 
 TEST_F(DebugGraphUtilsTest, TestValidDebugOpNameWithSingleAttribute) {
-  string debug_op_name_proper;
-  std::unordered_map<string, string> attributes;
+  std::string debug_op_name_proper;
+  std::unordered_map<std::string, std::string> attributes;
 
   TF_ASSERT_OK(ParseDebugOpName("DebugNumericSummary()", &debug_op_name_proper,
                                 &attributes));
@@ -105,8 +106,8 @@ TEST_F(DebugGraphUtilsTest, TestValidDebugOpNameWithSingleAttribute) {
 }
 
 TEST_F(DebugGraphUtilsTest, TestValidDebugOpNameWithMoreThanOneAttributes) {
-  string debug_op_name_proper;
-  std::unordered_map<string, string> attributes;
+  std::string debug_op_name_proper;
+  std::unordered_map<std::string, std::string> attributes;
   TF_ASSERT_OK(ParseDebugOpName(
       "DebugNumericSummary(mute_if_healthy=true; threshold=300.0)",
       &debug_op_name_proper, &attributes));
@@ -127,18 +128,18 @@ TEST_F(DebugGraphUtilsTest, TestValidDebugOpNameWithMoreThanOneAttributes) {
 }
 
 TEST_F(DebugGraphUtilsTest, TestValidDebugOpNameWithMoreDuplicateAttributes) {
-  string debug_op_name_proper;
-  std::unordered_map<string, string> attributes;
-  Status s = ParseDebugOpName(
+  std::string debug_op_name_proper;
+  std::unordered_map<std::string, std::string> attributes;
+  absl::Status s = ParseDebugOpName(
       "DebugNumericSummary(mute_if_healthy=true; lower_bound=3; "
       "mute_if_healthy=false;)",
       &debug_op_name_proper, &attributes);
-  ASSERT_EQ(errors::Code::INVALID_ARGUMENT, s.code());
+  ASSERT_TRUE(absl::IsInvalidArgument(s));
 }
 
 TEST_F(DebugGraphUtilsTest, TestValidDebugOpNameWithWhitespaceInAttributes) {
-  string debug_op_name_proper;
-  std::unordered_map<string, string> attributes;
+  std::string debug_op_name_proper;
+  std::unordered_map<std::string, std::string> attributes;
 
   TF_ASSERT_OK(ParseDebugOpName(
       "DebugNumericSummary(  mute_if_healthy=true; threshold=300.0  )",

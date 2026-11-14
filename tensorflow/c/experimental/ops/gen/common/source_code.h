@@ -15,6 +15,8 @@ limitations under the License.
 #ifndef TENSORFLOW_C_EXPERIMENTAL_OPS_GEN_COMMON_SOURCE_CODE_H_
 #define TENSORFLOW_C_EXPERIMENTAL_OPS_GEN_COMMON_SOURCE_CODE_H_
 
+#include <vector>
+
 #include "tensorflow/core/platform/types.h"
 
 namespace tensorflow {
@@ -22,13 +24,13 @@ namespace generator {
 
 class SourceCode {
  public:
-  string Render() const;
+  std::string Render() const;
   void SetSpacesPerIndent(int spaces_per_indent) {
     spaces_per_indent_ = spaces_per_indent;
   }
 
-  void AddLineWithIndent(const string &line);
-  void AddLineWithoutIndent(const string &line);
+  void AddLineWithIndent(const std::string& line);
+  void AddLineWithoutIndent(const std::string& line);
   void AddBlankLine();
   void IncreaseIndent();
   void DecreaseIndent();
@@ -36,10 +38,10 @@ class SourceCode {
  private:
   struct Line {
     int indent;
-    string text;
+    std::string text;
   };
 
-  void ValidateAndAddLine(int indent_level, const string &raw_line);
+  void ValidateAndAddLine(int indent_level, const std::string& raw_line);
 
   int spaces_per_indent_ = 2;
   int current_indent_ = 0;

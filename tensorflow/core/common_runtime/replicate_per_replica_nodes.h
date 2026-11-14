@@ -17,6 +17,7 @@ limitations under the License.
 #define TENSORFLOW_CORE_COMMON_RUNTIME_REPLICATE_PER_REPLICA_NODES_H_
 
 #include "absl/container/flat_hash_map.h"
+#include "absl/status/status.h"
 #include "tensorflow/core/graph/graph.h"
 #include "tensorflow/core/lib/core/status.h"
 
@@ -34,8 +35,8 @@ namespace tensorflow {
 // 3) Clusters assigned to different composite devices should have no data
 // dependency.
 // TODO(b/145922293): Register it as a POST_REWRITE_FOR_EXEC pass.
-Status ReplicatePerReplicaNodesInFunctionGraph(
-    const absl::flat_hash_map<string, const std::vector<string>*>&
+absl::Status ReplicatePerReplicaNodesInFunctionGraph(
+    const absl::flat_hash_map<std::string, const std::vector<std::string>*>&
         composite_devices,
     Graph* graph);
 

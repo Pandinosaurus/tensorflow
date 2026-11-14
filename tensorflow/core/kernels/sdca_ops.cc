@@ -27,7 +27,7 @@ limitations under the License.
 #include <vector>
 
 #include "absl/strings/str_format.h"
-#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
+#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
 #include "tensorflow/core/framework/device_base.h"
 #include "tensorflow/core/framework/kernel_def_builder.h"
 #include "tensorflow/core/framework/op.h"
@@ -49,6 +49,7 @@ limitations under the License.
 #include "tensorflow/core/lib/core/status.h"
 #include "tensorflow/core/lib/core/stringpiece.h"
 #include "tensorflow/core/lib/gtl/inlined_vector.h"
+#include "tensorflow/core/platform/errors.h"
 #include "tensorflow/core/platform/fingerprint.h"
 #include "tensorflow/core/platform/macros.h"
 #include "tensorflow/core/platform/mutex.h"
@@ -67,7 +68,7 @@ using sdca::Regularizations;
 
 struct ComputeOptions {
   explicit ComputeOptions(OpKernelConstruction* const context) {
-    string loss_type;
+    std::string loss_type;
     OP_REQUIRES_OK(context, context->GetAttr("loss_type", &loss_type));
     if (loss_type == "logistic_loss") {
       loss_updater.reset(new LogisticLossUpdater);
@@ -80,9 +81,9 @@ struct ComputeOptions {
     } else if (loss_type == "poisson_loss") {
       loss_updater.reset(new PoissonLossUpdater);
     } else {
-      OP_REQUIRES(
-          context, false,
-          errors::InvalidArgument("Unsupported loss type: ", loss_type));
+      OP_REQUIRES(context, false,
+                  absl::InvalidArgumentError(
+                      absl::StrCat("Unsupported loss type: ", loss_type)));
     }
     auto s = context->GetAttr("adaptative", &adaptive);
     if (!s.ok()) {
@@ -97,13 +98,13 @@ struct ComputeOptions {
                    context->GetAttr("num_dense_features", &num_dense_features));
     OP_REQUIRES(
         context, num_sparse_features + num_dense_features > 0,
-        errors::InvalidArgument("Requires at least one feature to train."));
+        absl::InvalidArgumentError("Requires at least one feature to train."));
 
     OP_REQUIRES(context,
                 static_cast<int64_t>(num_sparse_features) +
                         static_cast<int64_t>(num_dense_features) <=
                     std::numeric_limits<int>::max(),
-                errors::InvalidArgument(absl::StrFormat(
+                absl::InvalidArgumentError(absl::StrFormat(
                     "Too many feature groups: %d > %d",
                     static_cast<int64_t>(num_sparse_features) +
                         static_cast<int64_t>(num_dense_features),
@@ -142,13 +143,18 @@ void DoCompute(const ComputeOptions& options, OpKernelContext* const context) {
   const Tensor* example_state_data_t;
   OP_REQUIRES_OK(context,
                  context->input("example_state_data", &example_state_data_t));
+  OP_REQUIRES(context,
+              TensorShapeUtils::IsMatrix(example_state_data_t->shape()),
+              absl::InvalidArgumentError(
+                  absl::StrCat("example_state_data must be rank 2 but is rank ",
+                               example_state_data_t->dims())));
   TensorShape expected_example_state_shape({examples.num_examples(), 4});
   OP_REQUIRES(context,
               example_state_data_t->shape() == expected_example_state_shape,
-              errors::InvalidArgument(
+              absl::InvalidArgumentError(absl::StrCat(
                   "Expected shape ", expected_example_state_shape.DebugString(),
                   " for example_state_data, got ",
-                  example_state_data_t->shape().DebugString()));
+                  example_state_data_t->shape().DebugString())));
 
   Tensor mutable_example_state_data_t(*example_state_data_t);
   auto example_state_data = mutable_example_state_data_t.matrix<float>();
@@ -166,7 +172,7 @@ void DoCompute(const ComputeOptions& options, OpKernelContext* const context) {
   }
   struct {
     mutex mu;
-    Status value TF_GUARDED_BY(mu);
+    absl::Status value TF_GUARDED_BY(mu);
   } train_step_status;
   std::atomic<std::int64_t> atomic_index(-1);
   auto train_step = [&](const int64_t begin, const int64_t end) {
@@ -178,7 +184,7 @@ void DoCompute(const ComputeOptions& options, OpKernelContext* const context) {
       const float dual = example_state_data(example_index, 0);
       const float example_weight = example.example_weight();
       float example_label = example.example_label();
-      const Status conversion_status =
+      const absl::Status conversion_status =
           options.loss_updater->ConvertLabel(&example_label);
       if (!conversion_status.ok()) {
         mutex_lock l(train_step_status.mu);
@@ -306,8 +312,9 @@ class SdcaFprint : public OpKernel {
   void Compute(OpKernelContext* context) override {
     const Tensor& input = context->input(0);
     OP_REQUIRES(context, TensorShapeUtils::IsVector(input.shape()),
-                errors::InvalidArgument("Input must be a vector, got shape ",
-                                        input.shape().DebugString()));
+                absl::InvalidArgumentError(
+                    absl::StrCat("Input must be a vector, got shape ",
+                                 input.shape().DebugString())));
     Tensor* out;
     const int64_t num_elements = input.NumElements();
     OP_REQUIRES_OK(context, context->allocate_output(
@@ -322,7 +329,7 @@ class SdcaFprint : public OpKernel {
       // safely be used as sentinel values (e.g. dense hash table empty key).
       out_values(i, 0) = TF_PREDICT_TRUE(fprint.low64 >= 2)
                              ? fprint.low64
-                             : fprint.low64 + ~static_cast<uint64>(1);
+                             : fprint.low64 + ~static_cast<uint64_t>(1);
       out_values(i, 1) = fprint.high64;
     }
   }

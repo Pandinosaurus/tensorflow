@@ -37,16 +37,17 @@ class MarkForCompilationPass : public GraphOptimizationPass {
  public:
   MarkForCompilationPass() = default;
 
-  Status Run(const GraphOptimizationPassOptions& options) override;
+  absl::Status Run(const GraphOptimizationPassOptions& options) override;
 
  private:
-  Status RunForTest(const GraphOptimizationPassOptions& options,
-                    bool disable_deadness_analysis);
+  absl::Status RunForTest(const GraphOptimizationPassOptions& options,
+                          bool disable_deadness_analysis,
+                          bool deterministic_cluster_names);
 
   friend class MarkForCompilationPassTestHelper;
 };
 
-absl::flat_hash_map<string, std::vector<string>>* GetAllowlistTable();
+absl::flat_hash_map<std::string, std::vector<std::string>>* GetAllowlistTable();
 
 namespace testing {
 // DO NOT USE IN PRODUCTION.
@@ -55,7 +56,7 @@ namespace testing {
 void ResetClusterSequenceNumber();
 
 // Return a list of operation that we choose not to put into the allowlist.
-absl::flat_hash_set<string> GetKnownXLAAllowlistOp();
+absl::flat_hash_set<std::string> GetKnownXLAAllowlistOp();
 }  // namespace testing
 }  // namespace tensorflow
 

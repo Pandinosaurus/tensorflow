@@ -1,7 +1,23 @@
-load("//tensorflow/core/platform:rules_cc.bzl", "cc_library")
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
 load("//tensorflow:tensorflow.bzl", "tf_cc_test")
+load("//tensorflow/core/platform:rules_cc.bzl", "cc_library")
 
 package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
     default_visibility = ["//visibility:public"],
     licenses = ["notice"],
 )
@@ -12,6 +28,20 @@ cc_library(
     deps = [
         "//tensorflow/core:framework",
         "//tensorflow/core:lib",
+    ],
+)
+
+tf_cc_test(
+    name = "decode_test",
+    srcs = ["decode_test.cc"],
+    deps = [
+        ":decode",
+        "//tensorflow/core:framework",
+        "//tensorflow/core:lib",
+        "//tensorflow/core:test",
+        "//tensorflow/core:test_main",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:status_matchers",
     ],
 )
 
@@ -71,9 +101,24 @@ cc_library(
         "//tensorflow/core:lib",
         "//tensorflow/core:platform_base",
         "@com_google_absl//absl/strings",
-        "@com_google_absl//absl/time",
-        "@com_google_protobuf//:protobuf_headers",
+        "@com_google_protobuf//:protobuf",
+        "@xla//xla/tsl/util/proto:proto_utils",
     ],
+)
+
+# For a more maintainable build this target should not exist and the headers
+# should  be split into the existing cc_library targets, but this change was
+# automatically  done so that we can remove long standing issues and complexity
+# in the build system. It's up to the OWNERS of this package to get rid of it or
+# not. The use of the textual_hdrs attribute is discouraged, use hdrs instead.
+# Here it is used to avoid header parsing errors in packages where the feature
+# parse_headers was enabled since loose headers were not being parsed. See
+# go/loose-lsc-one-target-approach for more details.
+cc_library(
+    name = "loose_headers",
+    tags = ["avoid_dep"],
+    textual_hdrs = ["proto_utils.h"],
+    visibility = ["//tensorflow/contrib/fused_conv:__pkg__"],
 )
 
 tf_cc_test(

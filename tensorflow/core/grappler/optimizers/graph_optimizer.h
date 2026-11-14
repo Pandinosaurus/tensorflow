@@ -18,6 +18,7 @@ limitations under the License.
 
 #include <string>
 
+#include "absl/status/status.h"
 #include "tensorflow/core/framework/graph.pb.h"
 #include "tensorflow/core/platform/env.h"
 #include "tensorflow/core/platform/errors.h"
@@ -35,9 +36,9 @@ struct GrapplerItem;
 class GraphOptimizer {
  public:
   GraphOptimizer() : deadline_usec_(0) {}
-  virtual ~GraphOptimizer() {}
+  virtual ~GraphOptimizer() = default;
 
-  virtual string name() const = 0;
+  virtual std::string name() const = 0;
 
   // Returns true if the optimizer requires a valid function library to perform
   // graph optimization. If false, optimized GrapplerItem will have a stub
@@ -48,41 +49,42 @@ class GraphOptimizer {
 
   // Routine called to allow an algorithm to propose a rewritten graph
   // for the graph, feeds and fetches in "item" to run more efficiently
-  // on "cluster". If the returned status is Status::OK() then
+  // on "cluster". If the returned status is OkStatus() then
   // *optimized_graph contains the rewritten graph.
   // Returns an error status if it failed to generate a solution.
   //
   // A return value of error::Aborted() can be used signal early termination of
   // the optimizer, e.g. if the optimization turned out to be a no-op. In this
   // case the content of *optimized_graph is undefined.
-  virtual Status Optimize(Cluster* cluster, const GrapplerItem& item,
-                          GraphDef* optimized_graph) = 0;
+  virtual absl::Status Optimize(Cluster* cluster, const GrapplerItem& item,
+                                GraphDef* optimized_graph) = 0;
 
   // Subclasses may define a version of Optimize that consumes item.
-  virtual Status Optimize(Cluster* cluster, GrapplerItem&& item,
-                          GraphDef* optimized_graph) {
+  virtual absl::Status Optimize(Cluster* cluster, GrapplerItem&& item,
+                                GraphDef* optimized_graph) {
     return Optimize(cluster, item, optimized_graph);
   }
 
   // Set deadline in microseconds since epoch. A value of zero means no
   // deadline.
-  void set_deadline_usec(uint64 deadline_usec) {
+  void set_deadline_usec(uint64_t deadline_usec) {
     deadline_usec_ = deadline_usec;
   }
-  uint64 deadline_usec() const { return deadline_usec_; }
+  uint64_t deadline_usec() const { return deadline_usec_; }
   bool DeadlineExceeded() const {
     return deadline_usec_ > 0 && Env::Default()->NowMicros() > deadline_usec_;
   }
 
  private:
-  uint64 deadline_usec_;
+  uint64_t deadline_usec_;
 };
 
-#define GRAPPLER_RETURN_IF_DEADLINE_EXCEEDED()                              \
-  do {                                                                      \
-    if (this->DeadlineExceeded()) {                                         \
-      return errors::DeadlineExceeded(this->name(), " exceeded deadline."); \
-    }                                                                       \
+#define GRAPPLER_RETURN_IF_DEADLINE_EXCEEDED()                \
+  do {                                                        \
+    if (this->DeadlineExceeded()) {                           \
+      return absl::DeadlineExceededError(                     \
+          absl::StrCat(this->name(), " exceeded deadline.")); \
+    }                                                         \
   } while (0)
 
 }  // end namespace grappler

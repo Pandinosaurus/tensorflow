@@ -13,16 +13,12 @@
 # limitations under the License.
 # ==============================================================================
 """Ftrl-proximal for TensorFlow."""
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import ops
 from tensorflow.python.ops import array_ops
+from tensorflow.python.ops import gen_training_ops
 from tensorflow.python.ops import math_ops
 from tensorflow.python.training import optimizer
-from tensorflow.python.training import training_ops
 from tensorflow.python.util.tf_export import tf_export
 
 
@@ -168,7 +164,7 @@ class FtrlOptimizer(optimizer.Optimizer):
     accum = self.get_slot(var, "accum")
     linear = self.get_slot(var, "linear")
     if self._l2_shrinkage_regularization_strength <= 0.0:
-      return training_ops.apply_ftrl(
+      return gen_training_ops.apply_ftrl(
           var,
           accum,
           linear,
@@ -181,7 +177,7 @@ class FtrlOptimizer(optimizer.Optimizer):
           math_ops.cast(self._learning_rate_power_tensor, var.dtype.base_dtype),
           use_locking=self._use_locking)
     else:
-      return training_ops.apply_ftrl_v2(
+      return gen_training_ops.apply_ftrl_v2(
           var,
           accum,
           linear,
@@ -200,7 +196,7 @@ class FtrlOptimizer(optimizer.Optimizer):
     accum = self.get_slot(var, "accum")
     linear = self.get_slot(var, "linear")
     if self._l2_shrinkage_regularization_strength <= 0.0:
-      return training_ops.resource_apply_ftrl(
+      return gen_training_ops.resource_apply_ftrl(
           var.handle,
           accum.handle,
           linear.handle,
@@ -213,7 +209,7 @@ class FtrlOptimizer(optimizer.Optimizer):
           math_ops.cast(self._learning_rate_power_tensor, var.dtype.base_dtype),
           use_locking=self._use_locking)
     else:
-      return training_ops.resource_apply_ftrl_v2(
+      return gen_training_ops.resource_apply_ftrl_v2(
           var.handle,
           accum.handle,
           linear.handle,
@@ -232,7 +228,7 @@ class FtrlOptimizer(optimizer.Optimizer):
     accum = self.get_slot(var, "accum")
     linear = self.get_slot(var, "linear")
     if self._l2_shrinkage_regularization_strength <= 0.0:
-      return training_ops.sparse_apply_ftrl(
+      return gen_training_ops.sparse_apply_ftrl(
           var,
           accum,
           linear,
@@ -246,7 +242,7 @@ class FtrlOptimizer(optimizer.Optimizer):
           math_ops.cast(self._learning_rate_power_tensor, var.dtype.base_dtype),
           use_locking=self._use_locking)
     else:
-      return training_ops.sparse_apply_ftrl_v2(
+      return gen_training_ops.sparse_apply_ftrl_v2(
           var,
           accum,
           linear,
@@ -266,7 +262,7 @@ class FtrlOptimizer(optimizer.Optimizer):
     accum = self.get_slot(var, "accum")
     linear = self.get_slot(var, "linear")
     if self._l2_shrinkage_regularization_strength <= 0.0:
-      return training_ops.resource_sparse_apply_ftrl(
+      return gen_training_ops.resource_sparse_apply_ftrl(
           var.handle,
           accum.handle,
           linear.handle,
@@ -279,7 +275,7 @@ class FtrlOptimizer(optimizer.Optimizer):
           math_ops.cast(self._learning_rate_power_tensor, grad.dtype),
           use_locking=self._use_locking)
     else:
-      return training_ops.resource_sparse_apply_ftrl_v2(
+      return gen_training_ops.resource_sparse_apply_ftrl_v2(
           var.handle,
           accum.handle,
           linear.handle,

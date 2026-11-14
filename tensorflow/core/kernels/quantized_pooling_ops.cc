@@ -17,14 +17,16 @@ limitations under the License.
 
 #define EIGEN_USE_THREADS
 
-#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
+#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
 #include "tensorflow/core/framework/numeric_op.h"
 #include "tensorflow/core/framework/op_kernel.h"
+#include "tensorflow/core/framework/op_requires.h"
 #include "tensorflow/core/framework/tensor.h"
 #include "tensorflow/core/framework/tensor_shape.h"
 #include "tensorflow/core/kernels/ops_util.h"
 #include "tensorflow/core/kernels/pooling_ops_common.h"
 #include "tensorflow/core/lib/core/errors.h"
+#include "tensorflow/core/platform/errors.h"
 #include "tensorflow/core/platform/logging.h"
 #include "tensorflow/core/util/padding.h"
 #include "tensorflow/core/util/tensor_format.h"
@@ -40,15 +42,15 @@ class QuantizedAvgPoolingOp : public OpKernel {
       : OpKernel(context) {
     OP_REQUIRES_OK(context, context->GetAttr("ksize", &ksize_));
     OP_REQUIRES(context, ksize_.size() == 4,
-                errors::InvalidArgument("Sliding window ksize field must "
-                                        "specify 4 dimensions"));
+                absl::InvalidArgumentError("Sliding window ksize field must "
+                                           "specify 4 dimensions"));
     OP_REQUIRES_OK(context, context->GetAttr("strides", &stride_));
     OP_REQUIRES(context, stride_.size() == 4,
-                errors::InvalidArgument("Sliding window strides field must "
-                                        "specify 4 dimensions"));
+                absl::InvalidArgumentError("Sliding window strides field must "
+                                           "specify 4 dimensions"));
     OP_REQUIRES_OK(context, context->GetAttr("padding", &padding_));
     OP_REQUIRES(context, ksize_[0] == 1 && stride_[0] == 1,
-                errors::Unimplemented(
+                absl::UnimplementedError(
                     "Pooling is not yet supported on the batch dimension."));
   }
 
@@ -65,33 +67,51 @@ class QuantizedAvgPoolingOp : public OpKernel {
       return;
     }
 
-    const float min_input = context->input(1).flat<float>()(0);
-    const float max_input = context->input(2).flat<float>()(0);
+    const Tensor& min_input_tensor = context->input(1);
+    const Tensor& max_input_tensor = context->input(2);
+    OP_REQUIRES(context, TensorShapeUtils::IsScalar(min_input_tensor.shape()),
+                errors::InvalidArgument(
+                    "min_input shape must be rank 0 but is rank ",
+                    min_input_tensor.dims(),
+                    ", received shape: ", min_input_tensor.shape()));
+    OP_REQUIRES(context, TensorShapeUtils::IsScalar(max_input_tensor.shape()),
+                errors::InvalidArgument(
+                    "max_input shape must be rank 0 but is rank ",
+                    max_input_tensor.dims(),
+                    ", received shape: ", max_input_tensor.shape()));
+    const float min_input = context->input(1).scalar<float>()();
+    const float max_input = context->input(2).scalar<float>()();
 
     OP_REQUIRES(context, params.depth_window == 1,
-                errors::Unimplemented("Non-spatial pooling is not "
-                                      "yet supported. Volunteers? :)"));
+                absl::UnimplementedError("Non-spatial pooling is not "
+                                         "yet supported. Volunteers? :)"));
 
     OP_REQUIRES(context, tensor_in.dims() == 4,
-                errors::InvalidArgument("tensor_in must be 4-dimensional"));
+                absl::InvalidArgumentError("tensor_in must be 4-dimensional"));
 
     Tensor* output = nullptr;
+    TensorShape params_forward_output_shape;
+    OP_REQUIRES_OK(context,
+                   params.forward_output_shape(&params_forward_output_shape));
     OP_REQUIRES_OK(context, context->allocate_output(
-                                0, params.forward_output_shape(), &output));
-    const int32_t highest = static_cast<int32>(Eigen::NumTraits<T>::highest());
-    const int32_t lowest = static_cast<int32>(Eigen::NumTraits<T>::lowest());
+                                0, params_forward_output_shape, &output));
+    const int32_t highest =
+        static_cast<int32_t>(Eigen::NumTraits<T>::highest());
+    const int32_t lowest = static_cast<int32_t>(Eigen::NumTraits<T>::lowest());
 
     // TODO(vrv): Switch this to the Eigen::Tensor version of
     // SpatialAvgPooling once that version is running quickly.
-    Tensor int32_output(DT_INT32, params.forward_output_shape());
+    OP_REQUIRES_OK(context,
+                   params.forward_output_shape(&params_forward_output_shape));
+    Tensor int32_output(DT_INT32, params_forward_output_shape);
     // Cast input to int32 tensor and call SpatialAvgPool.
     Tensor int32_input(DT_INT32, tensor_in.shape());
-    int32_input.flat<int32>() = tensor_in.flat<T>().template cast<int32>();
-    SpatialAvgPool<Device, int32>(context, &int32_output, int32_input, params,
-                                  padding_);
+    int32_input.flat<int32_t>() = tensor_in.flat<T>().template cast<int32_t>();
+    SpatialAvgPool<Device, int32_t>(context, &int32_output, int32_input, params,
+                                    padding_);
 
     // Clamp the int32 output back into quantized space.
-    output->flat<T>() = int32_output.flat<int32>()
+    output->flat<T>() = int32_output.flat<int32_t>()
                             .cwiseMax(lowest)
                             .cwiseMin(highest)
                             .template cast<T>();
@@ -105,8 +125,8 @@ class QuantizedAvgPoolingOp : public OpKernel {
   }
 
  private:
-  std::vector<int32> ksize_;
-  std::vector<int32> stride_;
+  std::vector<int32_t> ksize_;
+  std::vector<int32_t> stride_;
   Padding padding_;
 };
 
@@ -117,8 +137,20 @@ class QuantizedMaxPoolingOp : public MaxPoolingOp<Device, T> {
       : MaxPoolingOp<Device, T>(context) {}
 
   void Compute(OpKernelContext* context) override {
-    const float min_input = context->input(1).flat<float>()(0);
-    const float max_input = context->input(2).flat<float>()(0);
+    const Tensor& min_input_tensor = context->input(1);
+    const Tensor& max_input_tensor = context->input(2);
+    OP_REQUIRES(context, TensorShapeUtils::IsScalar(min_input_tensor.shape()),
+                errors::InvalidArgument(
+                    "min_input shape must be rank 0 but is rank ",
+                    min_input_tensor.dims(),
+                    ", received shape: ", min_input_tensor.shape()));
+    OP_REQUIRES(context, TensorShapeUtils::IsScalar(max_input_tensor.shape()),
+                errors::InvalidArgument(
+                    "max_input shape must be rank 0 but is rank ",
+                    max_input_tensor.dims(),
+                    ", received shape: ", max_input_tensor.shape()));
+    const float min_input = context->input(1).scalar<float>()();
+    const float max_input = context->input(2).scalar<float>()();
     MaxPoolingOp<Device, T>::Compute(context);
     Tensor* output_min = nullptr;
     OP_REQUIRES_OK(context, context->allocate_output(1, {}, &output_min));

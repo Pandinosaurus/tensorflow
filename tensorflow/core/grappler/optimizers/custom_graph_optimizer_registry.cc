@@ -17,13 +17,14 @@ limitations under the License.
 #include <string>
 #include <unordered_map>
 
+#include "absl/base/call_once.h"
 #include "tensorflow/core/platform/logging.h"
 
 namespace tensorflow {
 namespace grappler {
 namespace {
 
-typedef std::unordered_map<string, CustomGraphOptimizerRegistry::Creator>
+typedef std::unordered_map<std::string, CustomGraphOptimizerRegistry::Creator>
     RegistrationMap;
 RegistrationMap* registered_optimizers = nullptr;
 RegistrationMap* GetRegistrationMap() {
@@ -34,7 +35,7 @@ RegistrationMap* GetRegistrationMap() {
 
 // This map is a global map for registered plugin optimizers. It contains the
 // device_type as its key, and an optimizer creator as the value.
-typedef std::unordered_map<string, PluginGraphOptimizerRegistry::Creator>
+typedef std::unordered_map<std::string, PluginGraphOptimizerRegistry::Creator>
     PluginRegistrationMap;
 PluginRegistrationMap* GetPluginRegistrationMap() {
   static PluginRegistrationMap* registered_plugin_optimizers =
@@ -44,7 +45,7 @@ PluginRegistrationMap* GetPluginRegistrationMap() {
 
 // This map is a global map for registered plugin configs. It contains the
 // device_type as its key, and ConfigList as the value.
-typedef std::unordered_map<string, ConfigList> PluginConfigMap;
+typedef std::unordered_map<std::string, ConfigList> PluginConfigMap;
 PluginConfigMap* GetPluginConfigMap() {
   static PluginConfigMap* plugin_config_map = new PluginConfigMap;
   return plugin_config_map;
@@ -54,39 +55,42 @@ PluginConfigMap* GetPluginConfigMap() {
 // See tensorflow/core/protobuf/rewriter_config.proto for more details about
 // each optimizer.
 const ConfigList& DefaultPluginConfigs() {
-  static ConfigList* default_plugin_configs =
-      new ConfigList(/*disable_model_pruning=*/false,
-                     {{"implementation_selector", RewriterConfig::ON},
-                      {"function_optimization", RewriterConfig::ON},
-                      {"common_subgraph_elimination", RewriterConfig::ON},
-                      {"arithmetic_optimization", RewriterConfig::ON},
-                      {"debug_stripper", RewriterConfig::ON},
-                      {"constant_folding", RewriterConfig::ON},
-                      {"shape_optimization", RewriterConfig::ON},
-                      {"auto_mixed_precision", RewriterConfig::ON},
-                      {"auto_mixed_precision_mkl", RewriterConfig::ON},
-                      {"pin_to_host_optimization", RewriterConfig::ON},
-                      {"layout_optimizer", RewriterConfig::ON},
-                      {"remapping", RewriterConfig::ON},
-                      {"loop_optimization", RewriterConfig::ON},
-                      {"dependency_optimization", RewriterConfig::ON},
-                      {"auto_parallel", RewriterConfig::ON},
-                      {"memory_optimization", RewriterConfig::ON},
-                      {"scoped_allocator_optimization", RewriterConfig::ON}});
+  static ConfigList* default_plugin_configs = new ConfigList(
+      /*disable_model_pruning=*/false,
+      {{"implementation_selector", RewriterConfig::ON},
+       {"function_optimization", RewriterConfig::ON},
+       {"common_subgraph_elimination", RewriterConfig::ON},
+       {"arithmetic_optimization", RewriterConfig::ON},
+       {"debug_stripper", RewriterConfig::ON},
+       {"constant_folding", RewriterConfig::ON},
+       {"shape_optimization", RewriterConfig::ON},
+       {"auto_mixed_precision", RewriterConfig::ON},
+       {"auto_mixed_precision_onednn_bfloat16", RewriterConfig::ON},
+       {"auto_mixed_precision_mkl", RewriterConfig::ON},
+       {"auto_mixed_precision_cpu", RewriterConfig::ON},
+       {"pin_to_host_optimization", RewriterConfig::ON},
+       {"layout_optimizer", RewriterConfig::ON},
+       {"remapping", RewriterConfig::ON},
+       {"loop_optimization", RewriterConfig::ON},
+       {"dependency_optimization", RewriterConfig::ON},
+       {"auto_parallel", RewriterConfig::ON},
+       {"memory_optimization", RewriterConfig::ON},
+       {"scoped_allocator_optimization", RewriterConfig::ON}});
   return *default_plugin_configs;
 }
 
 }  // namespace
 
 std::unique_ptr<CustomGraphOptimizer>
-CustomGraphOptimizerRegistry::CreateByNameOrNull(const string& name) {
+CustomGraphOptimizerRegistry::CreateByNameOrNull(const std::string& name) {
   const auto it = GetRegistrationMap()->find(name);
   if (it == GetRegistrationMap()->end()) return nullptr;
   return std::unique_ptr<CustomGraphOptimizer>(it->second());
 }
 
-std::vector<string> CustomGraphOptimizerRegistry::GetRegisteredOptimizers() {
-  std::vector<string> optimizer_names;
+std::vector<std::string>
+CustomGraphOptimizerRegistry::GetRegisteredOptimizers() {
+  std::vector<std::string> optimizer_names;
   optimizer_names.reserve(GetRegistrationMap()->size());
   for (const auto& opt : *GetRegistrationMap())
     optimizer_names.emplace_back(opt.first);
@@ -94,7 +98,7 @@ std::vector<string> CustomGraphOptimizerRegistry::GetRegisteredOptimizers() {
 }
 
 void CustomGraphOptimizerRegistry::RegisterOptimizerOrDie(
-    const Creator& optimizer_creator, const string& name) {
+    const Creator& optimizer_creator, const std::string& name) {
   const auto it = GetRegistrationMap()->find(name);
   if (it != GetRegistrationMap()->end()) {
     LOG(FATAL) << "CustomGraphOptimizer is registered twice: " << name;
@@ -104,13 +108,16 @@ void CustomGraphOptimizerRegistry::RegisterOptimizerOrDie(
 
 std::vector<std::unique_ptr<CustomGraphOptimizer>>
 PluginGraphOptimizerRegistry::CreateOptimizers(
-    const std::set<string>& device_types) {
+    const std::set<std::string>& device_types) {
   std::vector<std::unique_ptr<CustomGraphOptimizer>> optimizer_list;
   for (auto it = GetPluginRegistrationMap()->begin();
        it != GetPluginRegistrationMap()->end(); ++it) {
     if (device_types.find(it->first) == device_types.end()) continue;
-    LOG(INFO) << "Plugin optimizer for device_type " << it->first
-              << " is enabled.";
+    static absl::once_flag plugin_optimizer_flag;
+    absl::call_once(plugin_optimizer_flag, [&]() {
+      LOG(INFO) << "Plugin optimizer for device_type " << it->first
+                << " is enabled.";
+    });
     optimizer_list.emplace_back(
         std::unique_ptr<CustomGraphOptimizer>(it->second()));
   }
@@ -129,7 +136,7 @@ void PluginGraphOptimizerRegistry::RegisterPluginOptimizerOrDie(
 }
 
 void PluginGraphOptimizerRegistry::PrintPluginConfigsIfConflict(
-    const std::set<string>& device_types) {
+    const std::set<std::string>& device_types) {
   bool init = false, conflict = false;
   ConfigList plugin_configs;
   // Check if plugin's configs have conflict.
@@ -160,12 +167,13 @@ void PluginGraphOptimizerRegistry::PrintPluginConfigsIfConflict(
     // disable_model_pruning    0
     // remapping                1
     // ...
-    string logs = "";
-    strings::StrAppend(&logs, "disable_model_pruning\t\t",
-                       cur_plugin_configs.disable_model_pruning, "\n");
+    std::string logs = "";
+    absl::StrAppend(&logs, "disable_model_pruning\t\t",
+                    cur_plugin_configs.disable_model_pruning, "\n");
     for (auto const& pair : cur_plugin_configs.toggle_config) {
-      strings::StrAppend(&logs, pair.first, string(32 - pair.first.size(), ' '),
-                         (pair.second != RewriterConfig::OFF), "\n");
+      absl::StrAppend(&logs, pair.first,
+                      std::string(32 - pair.first.size(), ' '),
+                      pair.second != RewriterConfig::OFF, "\n");
     }
     LOG(WARNING) << "Plugin's configs for device_type " << device_type << ":\n"
                  << logs;
@@ -173,7 +181,7 @@ void PluginGraphOptimizerRegistry::PrintPluginConfigsIfConflict(
 }
 
 ConfigList PluginGraphOptimizerRegistry::GetPluginConfigs(
-    bool use_plugin_optimizers, const std::set<string>& device_types) {
+    bool use_plugin_optimizers, const std::set<std::string>& device_types) {
   if (!use_plugin_optimizers) return DefaultPluginConfigs();
 
   ConfigList ret_plugin_configs = DefaultPluginConfigs();

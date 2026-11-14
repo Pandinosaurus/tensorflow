@@ -14,17 +14,11 @@
 # ==============================================================================
 """Tests for inspect_utils module."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import abc
 import collections
 import functools
-import imp
 import textwrap
-
-import six
+import types
 
 from tensorflow.python import lib
 from tensorflow.python.autograph.pyct import inspect_utils
@@ -56,7 +50,7 @@ def wrapping_decorator():
   return dec
 
 
-class TestClass(object):
+class TestClass:
 
   def member_function(self):
     pass
@@ -283,7 +277,7 @@ class InspectUtilsTest(test.TestCase):
       return free_function
 
     ns = inspect_utils.getnamespace(test_fn)
-    globs = six.get_function_globals(test_fn)
+    globs = test_fn.__globals__
     self.assertTrue(ns['free_function'] is free_function)
     self.assertFalse(globs['free_function'] is free_function)
 
@@ -308,8 +302,8 @@ class InspectUtilsTest(test.TestCase):
 
   def test_getqualifiedname(self):
     foo = object()
-    qux = imp.new_module('quxmodule')
-    bar = imp.new_module('barmodule')
+    qux = types.ModuleType('quxmodule')
+    bar = types.ModuleType('barmodule')
     baz = object()
     bar.baz = baz
 
@@ -337,7 +331,7 @@ class InspectUtilsTest(test.TestCase):
       current_level = []
       for j in range(10):
         mod_name = 'mod_{}_{}'.format(i, j)
-        mod = imp.new_module(mod_name)
+        mod = types.ModuleType(mod_name)
         current_level.append(mod)
         if i == 9 and j == 9:
           mod.foo = foo
@@ -364,7 +358,7 @@ class InspectUtilsTest(test.TestCase):
     ns = {}
     mods = []
     for i in range(10):
-      mod = imp.new_module('mod_{}'.format(i))
+      mod = types.ModuleType('mod_{}'.format(i))
       if i == 9:
         mod.foo = foo
       # Module i refers to module i+1
@@ -440,7 +434,7 @@ class InspectUtilsTest(test.TestCase):
     def local_function():
       pass
 
-    class LocalClass(object):
+    class LocalClass:
 
       def member_function(self):
         pass
@@ -488,7 +482,8 @@ class InspectUtilsTest(test.TestCase):
         LocalClass)
 
   def test_getmethodclass_callables(self):
-    class TestCallable(object):
+
+    class TestCallable:
 
       def __call__(self):
         pass
@@ -503,7 +498,8 @@ class InspectUtilsTest(test.TestCase):
         inspect_utils.getmethodclass(tensor.get_shape), type(tensor))
 
   def test_getdefiningclass(self):
-    class Superclass(object):
+
+    class Superclass:
 
       def foo(self):
         pass
@@ -545,10 +541,10 @@ class InspectUtilsTest(test.TestCase):
 
   def test_isconstructor(self):
 
-    class OrdinaryClass(object):
+    class OrdinaryClass:
       pass
 
-    class OrdinaryCallableClass(object):
+    class OrdinaryCallableClass:
 
       def __call__(self):
         pass
@@ -572,8 +568,7 @@ class InspectUtilsTest(test.TestCase):
 
   def test_isconstructor_abc_callable(self):
 
-    @six.add_metaclass(abc.ABCMeta)
-    class AbcBase(object):
+    class AbcBase(metaclass=abc.ABCMeta):
 
       @abc.abstractmethod
       def __call__(self):
@@ -592,24 +587,24 @@ class InspectUtilsTest(test.TestCase):
 
   def test_getfutureimports_functions(self):
     imps = inspect_utils.getfutureimports(basic_definitions.function_with_print)
-    self.assertIn('absolute_import', imps)
-    self.assertIn('division', imps)
-    self.assertIn('print_function', imps)
+    self.assertNotIn('absolute_import', imps)
+    self.assertNotIn('division', imps)
+    self.assertNotIn('print_function', imps)
     self.assertNotIn('generators', imps)
 
   def test_getfutureimports_lambdas(self):
     imps = inspect_utils.getfutureimports(basic_definitions.simple_lambda)
-    self.assertIn('absolute_import', imps)
-    self.assertIn('division', imps)
-    self.assertIn('print_function', imps)
+    self.assertNotIn('absolute_import', imps)
+    self.assertNotIn('division', imps)
+    self.assertNotIn('print_function', imps)
     self.assertNotIn('generators', imps)
 
   def test_getfutureimports_methods(self):
     imps = inspect_utils.getfutureimports(
         basic_definitions.SimpleClass.method_with_print)
-    self.assertIn('absolute_import', imps)
-    self.assertIn('division', imps)
-    self.assertIn('print_function', imps)
+    self.assertNotIn('absolute_import', imps)
+    self.assertNotIn('division', imps)
+    self.assertNotIn('print_function', imps)
     self.assertNotIn('generators', imps)
 
 

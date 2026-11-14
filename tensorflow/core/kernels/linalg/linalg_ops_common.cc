@@ -15,14 +15,22 @@ limitations under the License.
 
 #include "tensorflow/core/kernels/linalg/linalg_ops_common.h"
 
+#include <cstddef>
+#include <cstdint>
+#include <initializer_list>
+#include <set>
 #include <utility>
 
-#include "third_party/eigen3/Eigen/Core"
+#include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
+#include "Eigen/Core"  // from @eigen_archive
 #include "tensorflow/core/framework/device_base.h"
 #include "tensorflow/core/framework/kernel_def_builder.h"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/tensor_shape.h"
+#include "tensorflow/core/framework/types.h"
 #include "tensorflow/core/lib/core/errors.h"
+#include "tensorflow/core/platform/errors.h"
 #include "tensorflow/core/platform/logging.h"
 #include "tensorflow/core/platform/types.h"
 
@@ -33,10 +41,11 @@ template <class InputScalar, class OutputScalar>
 void LinearAlgebraOp<InputScalar, OutputScalar>::ValidateSingleMatrix(
     OpKernelContext* context, const TensorShapes& input_matrix_shapes) {
   OP_REQUIRES(context, input_matrix_shapes.size() == 1,
-              errors::InvalidArgument("Expected a single input matrix, got %d.",
-                                      input_matrix_shapes.size()));
+              absl::InvalidArgumentError(
+                  absl::StrCat("Expected a single input matrix, got %d.",
+                               input_matrix_shapes.size())));
   OP_REQUIRES(context, TensorShapeUtils::IsMatrix(input_matrix_shapes[0]),
-              errors::InvalidArgument("Input must be a matrix."));
+              absl::InvalidArgumentError("Input must be a matrix."));
 }
 
 // static
@@ -44,45 +53,51 @@ template <class InputScalar, class OutputScalar>
 void LinearAlgebraOp<InputScalar, OutputScalar>::ValidateSingleSquareMatrix(
     OpKernelContext* context, const TensorShapes& input_matrix_shapes) {
   OP_REQUIRES(context, input_matrix_shapes.size() == 1,
-              errors::InvalidArgument("Expected a single input matrix, got %d.",
-                                      input_matrix_shapes.size()));
+              absl::InvalidArgumentError(
+                  absl::StrCat("Expected a single input matrix, got %d.",
+                               input_matrix_shapes.size())));
   OP_REQUIRES(context, TensorShapeUtils::IsSquareMatrix(input_matrix_shapes[0]),
-              errors::InvalidArgument("Input matrix must be square."));
+              absl::InvalidArgumentError("Input matrix must be square."));
 }
 
 // static
 template <class InputScalar, class OutputScalar>
 void LinearAlgebraOp<InputScalar, OutputScalar>::ValidateSolver(
     OpKernelContext* context, const TensorShapes& input_matrix_shapes) {
-  OP_REQUIRES(context, input_matrix_shapes.size() == 2,
-              errors::InvalidArgument("Expected two input matrices, got %d.",
-                                      input_matrix_shapes.size()));
-  OP_REQUIRES(context, TensorShapeUtils::IsMatrix(input_matrix_shapes[0]),
-              errors::InvalidArgument("First input (lhs) must be a matrix."));
-  OP_REQUIRES(context, TensorShapeUtils::IsMatrix(input_matrix_shapes[1]),
-              errors::InvalidArgument("Second input (rhs) must be a matrix."));
+  OP_REQUIRES(
+      context, input_matrix_shapes.size() == 2,
+      absl::InvalidArgumentError(absl::StrCat(
+          "Expected two input matrices, got %d.", input_matrix_shapes.size())));
+  OP_REQUIRES(
+      context, TensorShapeUtils::IsMatrix(input_matrix_shapes[0]),
+      absl::InvalidArgumentError("First input (lhs) must be a matrix."));
+  OP_REQUIRES(
+      context, TensorShapeUtils::IsMatrix(input_matrix_shapes[1]),
+      absl::InvalidArgumentError("Second input (rhs) must be a matrix."));
   OP_REQUIRES(
       context,
       input_matrix_shapes[0].dim_size(0) == input_matrix_shapes[1].dim_size(0),
-      errors::InvalidArgument("Input matrix and rhs are incompatible."));
+      absl::InvalidArgumentError("Input matrix and rhs are incompatible."));
 }
 
 // static
 template <class InputScalar, class OutputScalar>
 void LinearAlgebraOp<InputScalar, OutputScalar>::ValidateSquareSolver(
     OpKernelContext* context, const TensorShapes& input_matrix_shapes) {
-  OP_REQUIRES(context, input_matrix_shapes.size() == 2,
-              errors::InvalidArgument("Expected two input matrices, got %d.",
-                                      input_matrix_shapes.size()));
+  OP_REQUIRES(
+      context, input_matrix_shapes.size() == 2,
+      absl::InvalidArgumentError(absl::StrCat(
+          "Expected two input matrices, got %d.", input_matrix_shapes.size())));
   OP_REQUIRES(
       context, TensorShapeUtils::IsSquareMatrix(input_matrix_shapes[0]),
-      errors::InvalidArgument("First input (lhs) must be a square matrix."));
-  OP_REQUIRES(context, TensorShapeUtils::IsMatrix(input_matrix_shapes[1]),
-              errors::InvalidArgument("Second input (rhs) must be a matrix."));
+      absl::InvalidArgumentError("First input (lhs) must be a square matrix."));
+  OP_REQUIRES(
+      context, TensorShapeUtils::IsMatrix(input_matrix_shapes[1]),
+      absl::InvalidArgumentError("Second input (rhs) must be a matrix."));
   OP_REQUIRES(
       context,
       input_matrix_shapes[0].dim_size(0) == input_matrix_shapes[1].dim_size(0),
-      errors::InvalidArgument("Input matrix and rhs are incompatible."));
+      absl::InvalidArgumentError("Input matrix and rhs are incompatible."));
 }
 
 template <class InputScalar, class OutputScalar>
@@ -124,23 +139,24 @@ void LinearAlgebraOp<InputScalar, OutputScalar>::AnalyzeInputs(
       input_rank = in.dims();
       OP_REQUIRES(
           context, input_rank >= 2,
-          errors::InvalidArgument("Input tensor ", i,
-                                  " must have rank >= 2, got ", input_rank));
+          absl::InvalidArgumentError(absl::StrCat(
+              "Input tensor ", i, " must have rank >= 2, got ", input_rank)));
       // If the tensor rank is greater than 2, we consider the inner-most
       // dimensions as matrices, and loop over all the other outer ("batch")
       // dimensions to compute the results.
       for (int dim = 0; dim < input_rank - 2; ++dim) {
-        batch_shape->AddDim(in.dim_size(dim));
+        OP_REQUIRES_OK(context,
+                       batch_shape->AddDimWithStatus(in.dim_size(dim)));
       }
     } else {
       // Make sure that all inputs have the same rank and outer dimensions.
       OP_REQUIRES(context, input_rank == in.dims(),
-                  errors::InvalidArgument(
+                  absl::InvalidArgumentError(
                       "All input tensors must have the same rank."));
       for (int dim = 0; dim < input_rank - 2; ++dim) {
         OP_REQUIRES(
             context, in.dim_size(dim) == batch_shape->dim_size(dim),
-            errors::InvalidArgument(
+            absl::InvalidArgumentError(
                 "All input tensors must have the same outer dimensions."));
       }
     }
@@ -149,9 +165,15 @@ void LinearAlgebraOp<InputScalar, OutputScalar>::AnalyzeInputs(
     const int col_dimension = input_rank - 1;
     const int64_t num_rows = in.dim_size(row_dimension);
     const int64_t num_cols = in.dim_size(col_dimension);
-    input_matrix_shapes->emplace_back(
-        std::initializer_list<int64_t>({num_rows, num_cols}));
+    TensorShape input_shape;
+    OP_REQUIRES_OK(context, TensorShape::BuildTensorShape({num_rows, num_cols},
+                                                          &input_shape));
+    input_matrix_shapes->push_back(std::move(input_shape));
     inputs->emplace_back(&in);
+    OP_REQUIRES(
+        context, in.dtype() == DataTypeToEnum<InputScalar>::v(),
+        errors::InvalidArgument("Invalid input dtype ", in.dtype(), " vs ",
+                                DataTypeToEnum<InputScalar>::v()));
   }
   // Have the derived class validate that the inputs are as expected.
   ValidateInputMatrixShapes(context, *input_matrix_shapes);
@@ -169,9 +191,9 @@ void LinearAlgebraOp<InputScalar, OutputScalar>::PrepareOutputs(
   // Make sure the number of op outputs is what the derived class expects.
   OP_REQUIRES(
       context, num_outputs <= context->num_outputs(),
-      errors::Internal(
+      absl::InternalError(absl::StrCat(
           "Derived class expected more outputs (%d) that the op has (%d).",
-          num_outputs, context->num_outputs()));
+          num_outputs, context->num_outputs())));
 
   // Allocate outputs.
   std::set<int> unused_inputs;
@@ -185,9 +207,9 @@ void LinearAlgebraOp<InputScalar, OutputScalar>::PrepareOutputs(
       const TensorShape& output_matrix_shape =
           output_matrix_shapes->at(output_idx);
       OP_REQUIRES(context, output_matrix_shape.dims() <= 2,
-                  errors::InvalidArgument(
+                  absl::InvalidArgumentError(absl::StrCat(
                       "Rank of matrix output no. %d must be 0, 1 or 2, got %d.",
-                      output_idx, output_matrix_shape.dims()));
+                      output_idx, output_matrix_shape.dims())));
 
       // The final output has the shape of the outer batch dimensions
       // concatenated with the output_matrix_shape (if the output is not
@@ -212,6 +234,11 @@ void LinearAlgebraOp<InputScalar, OutputScalar>::PrepareOutputs(
       OP_REQUIRES_OK(context, context->allocate_output(
                                   output_idx, output_tensor_shape, &out));
     }
+    OP_REQUIRES(
+        context, out->dtype() == DataTypeToEnum<OutputScalar>::v(),
+        errors::InvalidArgument("Invalid output dtype ", out->dtype(), " vs ",
+                                DataTypeToEnum<OutputScalar>::v()));
+
     outputs->emplace_back(out);
   }
 }
@@ -249,6 +276,7 @@ void LinearAlgebraOp<InputScalar, OutputScalar>::ComputeTensorSlice(
 }
 
 // Explicitly instantiate LinearAlgebraOp for the scalar types we expect to use.
+template class LinearAlgebraOp<Eigen::half>;
 template class LinearAlgebraOp<float>;
 template class LinearAlgebraOp<double>;
 template class LinearAlgebraOp<complex64>;

@@ -15,7 +15,9 @@ limitations under the License.
 #ifndef TENSORFLOW_LITE_EXPERIMENTAL_RESOURCE_RESOURCE_VARIABLE_H_
 #define TENSORFLOW_LITE_EXPERIMENTAL_RESOURCE_RESOURCE_VARIABLE_H_
 
-#include "tensorflow/lite/c/common.h"
+#include <cstddef>
+
+#include "tensorflow/lite/core/c/common.h"
 #include "tensorflow/lite/experimental/resource/resource_base.h"
 
 namespace tflite {
@@ -35,6 +37,10 @@ class ResourceVariable : public ResourceBase {
 
   ~ResourceVariable() override;
 
+  ResourceType GetResourceType() const override {
+    return ResourceType::kResourceVariable;
+  }
+
   // Assigns data from a tensor. Copies its type, shape and data over.
   TfLiteStatus AssignFrom(const TfLiteTensor* tensor);
 
@@ -46,7 +52,11 @@ class ResourceVariable : public ResourceBase {
   // Returns true if this resource variable is initialized.
   bool IsInitialized() override { return is_initialized_; }
 
- private:
+  size_t GetMemoryUsage() override {
+    return is_initialized_ ? tensor_.bytes : 0;
+  }
+
+ protected:
   // The tensor (and its buffer stored in `tensor_.data` is fully owned by
   // the `ResourceVariable` object.
   TfLiteTensor tensor_;
@@ -56,14 +66,19 @@ class ResourceVariable : public ResourceBase {
 };
 
 // Creates a resource variable, shared among all the subgraphs with the given
-// resource id if there is an existing one.
+// resource id if there is an existing one. Returns kTfLiteError if the given
+// resource id is already used by a resource of a different type.
 // WARNING: Experimental interface, subject to change.
-void CreateResourceVariableIfNotAvailable(ResourceMap* resources,
-                                          int resource_id);
+TfLiteStatus CreateResourceVariableIfNotAvailable(ResourceMap* resources,
+                                                  int resource_id);
 
 // Returns the corresponding resource variable, or nullptr if none.
 // WARNING: Experimental interface, subject to change.
 ResourceVariable* GetResourceVariable(ResourceMap* resources, int resource_id);
+
+// Returns true if 'tensor' points to a builtin resource.
+// WARNING: Experimental interface, subject to change.
+bool IsBuiltinResource(const TfLiteTensor* tensor);
 
 }  // namespace resource
 }  // namespace tflite

@@ -20,15 +20,11 @@ with low latency and a small binary size on Android, iOS, and other operating
 systems.
 """
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import os
 
 from setuptools import find_packages
 from setuptools import setup
-PACKAGE_NAME = 'tflite_runtime'
+PACKAGE_NAME = os.environ['PROJECT_NAME']
 PACKAGE_VERSION = os.environ['PACKAGE_VERSION']
 DOCLINES = __doc__.split('\n')
 
@@ -37,7 +33,7 @@ setup(
     version=PACKAGE_VERSION,
     description=DOCLINES[0],
     long_description='\n'.join(DOCLINES[2:]),
-    url='https://www.tensorflow.org/lite/',
+    url='https://developers.google.com/edge/litert',
     author='Google, LLC',
     author_email='packages@tensorflow.org',
     license='Apache 2.0',
@@ -51,11 +47,10 @@ setup(
         'Intended Audience :: Science/Research',
         'License :: OSI Approved :: Apache Software License',
         'Programming Language :: Python :: 3',
-        'Programming Language :: Python :: 3.4',
-        'Programming Language :: Python :: 3.5',
-        'Programming Language :: Python :: 3.6',
-        'Programming Language :: Python :: 3.7',
         'Programming Language :: Python :: 3.8',
+        'Programming Language :: Python :: 3.9',
+        'Programming Language :: Python :: 3.10',
+        'Programming Language :: Python :: 3.11',
         'Topic :: Scientific/Engineering',
         'Topic :: Scientific/Engineering :: Mathematics',
         'Topic :: Scientific/Engineering :: Artificial Intelligence',
@@ -67,5 +62,7 @@ setup(
     package_dir={'': '.'},
     package_data={'': ['*.so', '*.pyd']},
     install_requires=[
-        'numpy ~= 1.19.2',  # Higher versions have a compatibility issue.
-    ])
+        'numpy >= 1.23.2',  # Better to keep sync with both TF ci_build
+        # and OpenCV-Python requirement.
+    ],
+)

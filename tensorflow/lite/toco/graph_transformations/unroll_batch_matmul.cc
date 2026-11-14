@@ -12,19 +12,25 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <iterator>
 #include <memory>
-#include <numeric>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
 #include "absl/container/inlined_vector.h"
+#include "absl/log/check.h"
+#include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_join.h"
 #include "tensorflow/core/platform/logging.h"
+#include "tensorflow/core/platform/status.h"
 #include "tensorflow/core/util/matmul_bcast.h"
 #include "tensorflow/lite/toco/graph_transformations/graph_transformations.h"
 #include "tensorflow/lite/toco/model.h"
+#include "tensorflow/lite/toco/toco_types.h"
 #include "tensorflow/lite/toco/tooling_util.h"
 
 namespace toco {
@@ -56,6 +62,7 @@ std::vector<std::string> SliceInput(
 
   // Slice along each batch index and remember the slice output for future use.
   std::vector<std::string> slice_outputs;
+  slice_outputs.reserve(batch_size);
   for (int batch_idx = 0; batch_idx < batch_size; ++batch_idx) {
     std::string batch_name =
         absl::StrCat(base_name, "_b", batch_idx, "/slice_", input_name);
@@ -93,7 +100,7 @@ std::vector<std::string> SliceInput(
 std::vector<int32> GetTransposePerm(const Array& input_array) {
   const int32_t dims = input_array.shape().dimensions_count();
   std::vector<int32> perm_array_val(dims);
-  for (int i = 0; i < dims; ++i) {
+  for (int32_t i = 0; i < dims; ++i) {
     perm_array_val[i] = i;
   }
   perm_array_val[dims - 2] = dims - 1;
@@ -105,7 +112,7 @@ std::vector<int32> GetTransposeShape(const Shape& input_shape,
                                      const std::vector<int32>& perm_array_val) {
   const int32_t dims = input_shape.dimensions_count();
   std::vector<int32> output_shape(dims);
-  for (int i = 0; i < dims; ++i) {
+  for (int32_t i = 0; i < dims; ++i) {
     output_shape[i] = input_shape.dims(perm_array_val[i]);
   }
   return output_shape;
@@ -131,12 +138,12 @@ TransposeOperator* TransposeInput(const std::string& input, Model* model) {
 // Unrolls a BatchMatMul on the batch dimension.
 // We need to slice each batch out of the inputs, matmul them individually, then
 // stack them all back together at the end.
-::tensorflow::Status UnrollBatchMatMul::Run(Model* model, std::size_t op_index,
-                                            bool* modified) {
+absl::Status UnrollBatchMatMul::Run(Model* model, std::size_t op_index,
+                                    bool* modified) {
   *modified = false;
   auto batch_op_it = model->operators.begin() + op_index;
   if (batch_op_it->get()->type != OperatorType::kBatchMatMul) {
-    return ::tensorflow::Status::OK();
+    return absl::OkStatus();
   }
   const auto* batch_op =
       static_cast<const BatchMatMulOperator*>(batch_op_it->get());
@@ -147,7 +154,7 @@ TransposeOperator* TransposeInput(const std::string& input, Model* model) {
   const auto& input_lhs_array = model->GetArray(input_lhs);
   const auto& input_rhs_array = model->GetArray(input_rhs);
   if (!input_lhs_array.has_shape() || !input_rhs_array.has_shape())
-    return ::tensorflow::Status::OK();
+    return absl::OkStatus();
 
   // Transpose LHS input if necessary.
   if (batch_op->adj_x) {
@@ -192,7 +199,7 @@ TransposeOperator* TransposeInput(const std::string& input, Model* model) {
     model->operators.emplace(tail_it, matmul_op);
     DeleteOpAndArrays(model, batch_op);
     *modified = true;
-    return ::tensorflow::Status::OK();
+    return absl::OkStatus();
   }
   AddMessageF("Unrolling BatchMatMul %s %d times", LogName(*batch_op),
               bcast.output_batch_size());
@@ -209,7 +216,8 @@ TransposeOperator* TransposeInput(const std::string& input, Model* model) {
   // Compute (single batch) MatMul for each output batch. The MatMul outputs are
   // then packed together into one output Tensor.
   std::vector<std::string> pack_inputs;
-  for (int batch_idx = 0; batch_idx < bcast.output_batch_size(); ++batch_idx) {
+  for (int64_t batch_idx = 0; batch_idx < bcast.output_batch_size();
+       ++batch_idx) {
     std::string batch_name =
         absl::StrCat(batch_op->outputs[0], "_b", batch_idx);
     const int a_batch_idx = bcast.IsBroadcastingRequired()
@@ -259,7 +267,7 @@ TransposeOperator* TransposeInput(const std::string& input, Model* model) {
 
   DeleteOpAndArrays(model, batch_op);
   *modified = true;
-  return ::tensorflow::Status::OK();
+  return absl::OkStatus();
 }
 
 }  // namespace toco

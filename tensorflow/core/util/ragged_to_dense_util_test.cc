@@ -15,6 +15,8 @@ limitations under the License.
 
 #include "tensorflow/core/util/ragged_to_dense_util.h"
 
+#include <vector>
+
 #include <gmock/gmock.h>
 #include "tensorflow/core/framework/op.h"
 #include "tensorflow/core/framework/shape_inference.h"
@@ -75,7 +77,7 @@ TEST(CombineRaggedTensorToTensorShapes, UnknownShapeDenseValue) {
 }
 
 TEST(GetRowPartitionTypesHelper, BasicTest) {
-  const std::vector<string> row_partition_type_strings = {
+  const std::vector<std::string> row_partition_type_strings = {
       "FIRST_DIM_SIZE", "VALUE_ROWIDS", "ROW_SPLITS"};
   std::vector<RowPartitionType> row_partition_types;
   TF_ASSERT_OK(GetRowPartitionTypesHelper(row_partition_type_strings,

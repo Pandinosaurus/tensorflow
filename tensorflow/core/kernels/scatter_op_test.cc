@@ -62,7 +62,7 @@ class ScatterSubOpTest : public OpsTestBase {
 TEST_F(ScatterUpdateOpTest, Simple_StringType) {
   MakeOp(DT_STRING_REF, DT_INT32);
   AddInputFromArray<tstring>(TensorShape({1}), {"Brain"});
-  AddInputFromArray<int32>(TensorShape({1}), {0});
+  AddInputFromArray<int32_t>(TensorShape({1}), {0});
   AddInputFromArray<tstring>(TensorShape({1}), {"TensorFlow"});
   TF_ASSERT_OK(RunOpKernel());
   // Check the new state of the input
@@ -75,7 +75,7 @@ TEST_F(ScatterUpdateOpTest, Simple_StringType) {
 TEST_F(ScatterUpdateOpTest, Simple_BoolType) {
   MakeOp(DT_BOOL_REF, DT_INT32);
   AddInputFromArray<bool>(TensorShape({1}), {false});
-  AddInputFromArray<int32>(TensorShape({1}), {0});
+  AddInputFromArray<int32_t>(TensorShape({1}), {0});
   AddInputFromArray<bool>(TensorShape({1}), {true});
   TF_ASSERT_OK(RunOpKernel());
   // Check the new state of the input
@@ -91,7 +91,7 @@ TEST_F(ScatterUpdateOpTest, Simple_TwoD32) {
   // Feed and run
   AddInputFromArray<float>(TensorShape({5, 3}),
                            {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0});
-  AddInputFromArray<int32>(TensorShape({3}), {0, 4, 2});
+  AddInputFromArray<int32_t>(TensorShape({3}), {0, 4, 2});
   AddInputFromArray<float>(TensorShape({3, 3}),
                            {100, 101, 102, 777, 778, 779, 10000, 10001, 10002});
   TF_ASSERT_OK(RunOpKernel());
@@ -128,7 +128,7 @@ TEST_F(ScatterUpdateOpTest, Simple_ZeroD) {
 
   // Feed and run
   AddInputFromArray<float>(TensorShape({5}), {0, 0, 0, 0, 0});
-  AddInputFromArray<int32>(TensorShape({}), {3});
+  AddInputFromArray<int32_t>(TensorShape({}), {3});
   AddInputFromArray<float>(TensorShape({}), {101});
   TF_ASSERT_OK(RunOpKernel());
 
@@ -144,7 +144,7 @@ TEST_F(ScatterUpdateOpTest, Simple_OneD) {
 
   // Feed and run
   AddInputFromArray<float>(TensorShape({5}), {0, 0, 0, 0, 0});
-  AddInputFromArray<int32>(TensorShape({3}), {0, 4, 2});
+  AddInputFromArray<int32_t>(TensorShape({3}), {0, 4, 2});
   AddInputFromArray<float>(TensorShape({3}), {100, 101, 102});
   TF_ASSERT_OK(RunOpKernel());
 
@@ -160,7 +160,7 @@ TEST_F(ScatterUpdateOpTest, HigherRank) {
 
   // Feed and run
   AddInputFromArray<float>(TensorShape({8}), {0, 0, 0, 0, 0, 0, 0, 0});
-  AddInputFromArray<int32>(TensorShape({2, 3}), {0, 4, 2, 1, 3, 6});
+  AddInputFromArray<int32_t>(TensorShape({2, 3}), {0, 4, 2, 1, 3, 6});
   AddInputFromArray<float>(TensorShape({2, 3}), {10, 20, 30, 40, 50, 60});
   TF_ASSERT_OK(RunOpKernel());
 
@@ -177,10 +177,10 @@ TEST_F(ScatterUpdateOpTest, Error_IndexOutOfRange) {
   // Feed and run
   AddInputFromArray<float>(TensorShape({5, 3}),
                            {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0});
-  AddInputFromArray<int32>(TensorShape({3}), {0, 4, 99});
+  AddInputFromArray<int32_t>(TensorShape({3}), {0, 4, 99});
   AddInputFromArray<float>(TensorShape({3, 3}),
                            {100, 101, 102, 777, 778, 779, 10000, 10001, 10002});
-  Status s = RunOpKernel();
+  absl::Status s = RunOpKernel();
   EXPECT_TRUE(
       absl::StrContains(s.ToString(), "indices[2] = 99 is not in [0, 5)"))
       << s;
@@ -191,9 +191,9 @@ TEST_F(ScatterSubOpTest, Error_IndexOutOfRange) {
   // Feed and run
   AddInputFromArray<float>(TensorShape({14}),
                            {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0});
-  AddInputFromArray<int32>(TensorShape({3}), {0, 1, 99});
+  AddInputFromArray<int32_t>(TensorShape({3}), {0, 1, 99});
   AddInputFromArray<float>(TensorShape({3}), {100, 101, 102});
-  Status s = RunOpKernel();
+  absl::Status s = RunOpKernel();
   EXPECT_TRUE(
       absl::StrContains(s.ToString(), "indices[2] = 99 is not in [0, 14)"))
       << s;
@@ -203,18 +203,18 @@ TEST_F(ScatterSubOpTest, StressIndexTest) {
   MakeOp(DT_INT32_REF, DT_INT32);
   // Feed and run
   const int kRows = 1;
-  std::vector<int32> values(kRows, 0);
+  std::vector<int32_t> values(kRows, 0);
   const int kNumUpdates = 1000000;
-  std::vector<int32> indices(kNumUpdates, 0);
-  std::vector<int32> updates(kNumUpdates, 1);
-  AddInputFromArray<int32>(TensorShape({kRows}), values);
-  AddInputFromArray<int32>(TensorShape({kNumUpdates}), indices);
-  AddInputFromArray<int32>(TensorShape({kNumUpdates}), updates);
-  Status s = RunOpKernel();
+  std::vector<int32_t> indices(kNumUpdates, 0);
+  std::vector<int32_t> updates(kNumUpdates, 1);
+  AddInputFromArray<int32_t>(TensorShape({kRows}), values);
+  AddInputFromArray<int32_t>(TensorShape({kNumUpdates}), indices);
+  AddInputFromArray<int32_t>(TensorShape({kNumUpdates}), updates);
+  absl::Status s = RunOpKernel();
   Tensor params_tensor = *mutable_input(0).tensor;
   Tensor expected(allocator(), DT_INT32, TensorShape({1}));
-  test::FillValues<int32>(&expected, {-1000000});
-  test::ExpectTensorEqual<int32>(expected, params_tensor);
+  test::FillValues<int32_t>(&expected, {-1000000});
+  test::ExpectTensorEqual<int32_t>(expected, params_tensor);
 }
 
 TEST_F(ScatterUpdateOpTest, Error_WrongDimsIndices) {
@@ -222,10 +222,10 @@ TEST_F(ScatterUpdateOpTest, Error_WrongDimsIndices) {
 
   // Feed and run
   AddInputFromArray<float>(TensorShape({2, 3}), {0, 0, 0, 0, 0, 0});
-  AddInputFromArray<int32>(TensorShape({1, 3}), {0, 4, 99});
+  AddInputFromArray<int32_t>(TensorShape({1, 3}), {0, 4, 99});
   AddInputFromArray<float>(TensorShape({3, 3}),
                            {100, 101, 102, 777, 778, 779, 10000, 10001, 10002});
-  Status s = RunOpKernel();
+  absl::Status s = RunOpKernel();
   EXPECT_TRUE(absl::StrContains(s.ToString(),
                                 "Must have updates.shape = indices.shape + "
                                 "params.shape[1:] or updates.shape = [], got "))
@@ -238,11 +238,11 @@ TEST_F(ScatterUpdateOpTest, Error_MismatchedParamsAndUpdateDimensions) {
   // Feed and run
   AddInputFromArray<float>(TensorShape({5, 3}),
                            {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0});
-  AddInputFromArray<int32>(TensorShape({3}), {0, 4, 2});
+  AddInputFromArray<int32_t>(TensorShape({3}), {0, 4, 2});
   AddInputFromArray<float>(
       TensorShape({3, 4}),
       {100, 101, 102, 103, 777, 778, 779, 780, 10000, 10001, 10002, 10004});
-  Status s = RunOpKernel();
+  absl::Status s = RunOpKernel();
   EXPECT_TRUE(absl::StrContains(s.ToString(),
                                 "Must have updates.shape = indices.shape + "
                                 "params.shape[1:] or updates.shape = [], got "))
@@ -256,10 +256,10 @@ TEST_F(ScatterUpdateOpTest, Error_MismatchedIndicesAndUpdateDimensions) {
   // Feed and run
   AddInputFromArray<float>(TensorShape({5, 3}),
                            {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0});
-  AddInputFromArray<int32>(TensorShape({3}), {0, 4, 2});
+  AddInputFromArray<int32_t>(TensorShape({3}), {0, 4, 2});
   AddInputFromArray<float>(TensorShape({2, 3}),
                            {100, 101, 102, 10000, 10001, 10002});
-  Status s = RunOpKernel();
+  absl::Status s = RunOpKernel();
   EXPECT_TRUE(absl::StrContains(s.ToString(),
                                 "Must have updates.shape = indices.shape + "
                                 "params.shape[1:] or updates.shape = [], got "))
@@ -307,7 +307,7 @@ void BM_ScatterHelper(::testing::benchmark::State& state, int embedding_size,
   bm.AddInputFromArray<float>(TensorShape({kNumUpdates, embedding_size}),
                               updates);
   for (auto i : state) {
-    Status s = bm.RunOpKernel();
+    absl::Status s = bm.RunOpKernel();
   }
   state.SetItemsProcessed((static_cast<int64_t>(kNumUpdates) * embedding_size) *
                           state.iterations());
@@ -316,7 +316,7 @@ void BM_ScatterHelper(::testing::benchmark::State& state, int embedding_size,
 void BM_ScatterUpdateInt32(::testing::benchmark::State& state) {
   const int embedding_size = state.range(0);
 
-  BM_ScatterHelper<int32>(state, embedding_size, "ScatterUpdate");
+  BM_ScatterHelper<int32_t>(state, embedding_size, "ScatterUpdate");
 }
 void BM_ScatterUpdateInt64(::testing::benchmark::State& state) {
   const int embedding_size = state.range(0);
@@ -327,13 +327,13 @@ void BM_ScatterUpdateInt64(::testing::benchmark::State& state) {
 void BM_ScatterAddInt32(::testing::benchmark::State& state) {
   const int embedding_size = state.range(0);
 
-  BM_ScatterHelper<int32>(state, embedding_size, "ScatterAdd");
+  BM_ScatterHelper<int32_t>(state, embedding_size, "ScatterAdd");
 }
 
 void BM_ScatterAddInt32Large(::testing::benchmark::State& state) {
   const int embedding_size = state.range(0);
 
-  BM_ScatterHelper<int32>(state, embedding_size, "ScatterAdd", true);
+  BM_ScatterHelper<int32_t>(state, embedding_size, "ScatterAdd", true);
 }
 void BM_ScatterAddInt64(::testing::benchmark::State& state) {
   const int embedding_size = state.range(0);
@@ -344,7 +344,7 @@ void BM_ScatterAddInt64(::testing::benchmark::State& state) {
 void BM_ScatterMulInt32(::testing::benchmark::State& state) {
   const int embedding_size = state.range(0);
 
-  BM_ScatterHelper<int32>(state, embedding_size, "ScatterMul");
+  BM_ScatterHelper<int32_t>(state, embedding_size, "ScatterMul");
 }
 void BM_ScatterMulInt64(::testing::benchmark::State& state) {
   const int embedding_size = state.range(0);
@@ -355,7 +355,7 @@ void BM_ScatterMulInt64(::testing::benchmark::State& state) {
 void BM_ScatterDivInt32(::testing::benchmark::State& state) {
   const int embedding_size = state.range(0);
 
-  BM_ScatterHelper<int32>(state, embedding_size, "ScatterDiv");
+  BM_ScatterHelper<int32_t>(state, embedding_size, "ScatterDiv");
 }
 void BM_ScatterDivInt64(::testing::benchmark::State& state) {
   const int embedding_size = state.range(0);
@@ -366,7 +366,7 @@ void BM_ScatterDivInt64(::testing::benchmark::State& state) {
 void BM_ScatterMinInt32(::testing::benchmark::State& state) {
   const int embedding_size = state.range(0);
 
-  BM_ScatterHelper<int32>(state, embedding_size, "ScatterMin");
+  BM_ScatterHelper<int32_t>(state, embedding_size, "ScatterMin");
 }
 void BM_ScatterMinInt64(::testing::benchmark::State& state) {
   const int embedding_size = state.range(0);
@@ -377,7 +377,7 @@ void BM_ScatterMinInt64(::testing::benchmark::State& state) {
 void BM_ScatterMaxInt32(::testing::benchmark::State& state) {
   const int embedding_size = state.range(0);
 
-  BM_ScatterHelper<int32>(state, embedding_size, "ScatterMax");
+  BM_ScatterHelper<int32_t>(state, embedding_size, "ScatterMax");
 }
 void BM_ScatterMaxInt64(::testing::benchmark::State& state) {
   const int embedding_size = state.range(0);

@@ -16,7 +16,7 @@ limitations under the License.
 #include "tensorflow/compiler/jit/xla_tensor.h"
 
 #include "tensorflow/compiler/tf2xla/shape_util.h"
-#include "tensorflow/compiler/xla/shape_util.h"
+#include "xla/shape_util.h"
 
 namespace tensorflow {
 
@@ -29,22 +29,23 @@ namespace tensorflow {
   return xla_tensor;
 }
 
-/*static*/ se::DeviceMemoryBase XlaTensor::DeviceMemoryFromTensor(
+/*static*/ stream_executor::DeviceAddressBase XlaTensor::DeviceMemoryFromTensor(
     const Tensor& tensor) {
   const XlaTensor* xla_tensor = FromTensor(&tensor);
   if (xla_tensor) {
     CHECK(xla_tensor->has_shaped_buffer());
     return xla_tensor->shaped_buffer().root_buffer();
   } else {
-    return se::DeviceMemoryBase(const_cast<char*>(tensor.tensor_data().data()),
-                                tensor.tensor_data().size());
+    return stream_executor::DeviceAddressBase(
+        const_cast<char*>(tensor.tensor_data().data()),
+        tensor.tensor_data().size());
   }
 }
 
-Status XlaTensor::AllocateShapedBuffer(DataType dtype,
-                                       const xla::Shape& on_device_shape,
-                                       xla::LocalClient* client,
-                                       int device_ordinal) {
+absl::Status XlaTensor::AllocateShapedBuffer(DataType dtype,
+                                             const xla::Shape& on_device_shape,
+                                             xla::LocalClient* client,
+                                             int device_ordinal) {
   xla::Shape on_host_shape =
       xla::ShapeUtil::DeviceShapeToHostShape(on_device_shape);
   xla::ScopedShapedBuffer shaped_buffer(on_host_shape, on_device_shape,
@@ -53,9 +54,9 @@ Status XlaTensor::AllocateShapedBuffer(DataType dtype,
   for (auto& index_to_buffer : shaped_buffer.buffers()) {
     xla::Shape subshape =
         xla::ShapeUtil::GetSubshape(on_device_shape, index_to_buffer.first);
-    uint64 size =
+    uint64_t size =
         client->backend().transfer_manager()->GetByteSizeRequirement(subshape);
-    TF_ASSIGN_OR_RETURN(se::OwningDeviceMemory buffer,
+    TF_ASSIGN_OR_RETURN(se::ScopedDeviceAddress<uint8_t> buffer,
                         client->backend().memory_allocator()->Allocate(
                             device_ordinal, size, /*retry_on_failure=*/false,
                             subshape.layout().memory_space()));
@@ -66,7 +67,7 @@ Status XlaTensor::AllocateShapedBuffer(DataType dtype,
   VLOG(4) << shaped_buffer.ToString();
 
   set_shaped_buffer(std::move(shaped_buffer));
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 void XlaTensor::WaitForDefinitionEventOnStream(se::Stream* stream) {
@@ -83,7 +84,7 @@ void XlaTensor::WaitForDefinitionEventOnStream(se::Stream* stream) {
     return;
   }
 
-  stream->ThenWaitFor(definition_event_.get());
+  stream->WaitFor(definition_event_.get()).IgnoreError();
   streams_defined_on_.push_back(stream);
 }
 
@@ -94,9 +95,9 @@ void XlaTensor::ResetDefinitionEvent(std::shared_ptr<se::Event> event,
   streams_defined_on_ = {stream};
 }
 
-Status XlaTensor::RefreshStatusOfStreams() {
+absl::Status XlaTensor::RefreshStatusOfStreams() {
   mutex_lock lock(mu_);
-  Status status;
+  absl::Status status;
   for (se::Stream* stream : streams_defined_on_) {
     status.Update(stream->RefreshStatus());
   }

@@ -11,6 +11,9 @@ limitations under the License.
 ==============================================================================*/
 #include "tensorflow/core/kernels/data/optimize_dataset_op.h"
 
+#include <utility>
+#include <vector>
+
 #include "tensorflow/core/data/dataset_test_base.h"
 #include "tensorflow/core/kernels/data/range_dataset_op.h"
 #include "tensorflow/core/kernels/data/take_dataset_op.h"
@@ -25,16 +28,16 @@ constexpr char kNoopElimination[] = "noop_elimination";
 class OptimizeDatasetParams : public DatasetParams {
  public:
   template <typename T>
-  OptimizeDatasetParams(T input_dataset_params, string optimizations,
+  OptimizeDatasetParams(T input_dataset_params, std::string optimizations,
                         DataTypeVector output_dtypes,
                         std::vector<PartialTensorShape> output_shapes,
                         std::vector<tstring> optimization_configs,
-                        string node_name)
+                        std::string node_name)
       : DatasetParams(std::move(output_dtypes), std::move(output_shapes),
                       std::move(node_name)),
         optimizations_(std::move(optimizations)),
         optimization_configs_(std::move(optimization_configs)) {
-    input_dataset_params_.push_back(absl::make_unique<T>(input_dataset_params));
+    input_dataset_params_.push_back(std::make_unique<T>(input_dataset_params));
     iterator_prefix_ =
         name_utils::IteratorPrefix(input_dataset_params.dataset_type(),
                                    input_dataset_params.iterator_prefix());
@@ -44,26 +47,27 @@ class OptimizeDatasetParams : public DatasetParams {
     return {CreateTensor<tstring>(TensorShape({1}), {optimizations_})};
   }
 
-  Status GetInputNames(std::vector<string>* input_names) const override {
+  absl::Status GetInputNames(
+      std::vector<std::string>* input_names) const override {
     *input_names = {OptimizeDatasetOp::kInputDataset,
                     OptimizeDatasetOp::kOptimizations};
-    return Status::OK();
+    return absl::OkStatus();
   }
 
-  Status GetAttributes(AttributeVector* attr_vector) const override {
+  absl::Status GetAttributes(AttributeVector* attr_vector) const override {
     *attr_vector = {
         {OptimizeDatasetOp::kOutputShapes, output_shapes_},
         {OptimizeDatasetOp::kOutputTypes, output_dtypes_},
         {OptimizeDatasetOp::kOptimizationConfigs, optimization_configs_}};
-    return Status::OK();
+    return absl::OkStatus();
   }
 
-  string dataset_type() const override {
+  std::string dataset_type() const override {
     return OptimizeDatasetOp::kDatasetType;
   }
 
  private:
-  string optimizations_;
+  std::string optimizations_;
   std::vector<tstring> optimization_configs_;
 };
 

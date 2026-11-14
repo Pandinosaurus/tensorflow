@@ -13,6 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include <cstdint>
 #if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 #define EIGEN_USE_GPU
 
@@ -23,8 +24,8 @@ namespace tensorflow {
 namespace functor {
 using Eigen::GpuDevice;
 
-template struct Tile<GpuDevice, float, int32>;
-template struct Tile<GpuDevice, float, int64>;
+template struct Tile<GpuDevice, float, int32_t>;
+template struct Tile<GpuDevice, float, int64_t>;
 }  // namespace functor
 }  // namespace tensorflow
 

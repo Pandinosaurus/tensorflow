@@ -14,9 +14,12 @@ limitations under the License.
 ==============================================================================*/
 #include "tensorflow/lite/delegates/coreml/builders/util.h"
 
+#include <cstdint>
 #include <vector>
 
-#include "tensorflow/lite/delegates/coreml/builders/op_validator.h"
+#include "fp16.h"  // from @FP16
+#include "tensorflow/lite/core/c/common.h"
+#include "tensorflow/lite/kernels/internal/tensor_ctypes.h"
 #include "tensorflow/lite/kernels/kernel_util.h"
 
 namespace tflite {
@@ -26,11 +29,12 @@ namespace {
 void Get4DShape(const TfLiteTensor* tensor, std::vector<int>* shape) {
   const int rank = tensor->dims->size;
   shape->resize(4);
-  for (int i = 0; i < 4 - rank; i++) {
-    (*shape)[i] = 1;
-  }
-  for (int i = 4 - rank; i < 4; ++i) {
-    (*shape)[i] = tensor->dims->data[i - (4 - rank)];
+  for (int i = 0; i < 4; ++i) {
+    if (i < 4 - rank) {
+      (*shape)[i] = 1;
+    } else {
+      (*shape)[i] = tensor->dims->data[i - (4 - rank)];
+    }
   }
 }
 }  // namespace
@@ -38,6 +42,9 @@ void Get4DShape(const TfLiteTensor* tensor, std::vector<int>* shape) {
 // Determines if two tensor shapes are broadcastable. See comment of
 // IsBinaryOpSupported for more info.
 bool IsBroadcastable(const TfLiteTensor* input_0, const TfLiteTensor* input_1) {
+  if (input_0->dims->size > 4 || input_1->dims->size > 4) {
+    return false;
+  }
   std::vector<int> shape_0;
   std::vector<int> shape_1;
   Get4DShape(input_0, &shape_0);
@@ -76,10 +83,26 @@ bool IsBroadcastable(const TfLiteTensor* input_0, const TfLiteTensor* input_1) {
   return true;
 }
 
+bool IsBinaryOpSupportedType(const TfLiteTensor* tensor) {
+  return tensor->type == kTfLiteFloat32 ||
+         (tensor->type == kTfLiteFloat16 && IsConstantTensor(tensor));
+}
+
 bool IsBinaryOpSupported(const TfLiteRegistration* registration,
                          const TfLiteNode* node, TfLiteContext* context) {
-  return IsBroadcastable(GetInput(context, node, 0),
-                         GetInput(context, node, 1));
+  const auto* input_0 = GetInput(context, node, 0);
+  const auto* input_1 = GetInput(context, node, 1);
+  if (IsBinaryOpSupportedType(input_0) && IsBinaryOpSupportedType(input_1)) {
+    return IsBroadcastable(input_0, input_1);
+  }
+  return false;
+}
+
+float GetScalarFloatFromTensor(const TfLiteTensor* tensor) {
+  if (tensor->type == kTfLiteFloat16) {
+    return fp16_ieee_to_fp32_value(GetTensorData<uint16_t>(tensor)[0]);
+  }
+  return GetTensorData<float>(tensor)[0];
 }
 
 }  // namespace coreml

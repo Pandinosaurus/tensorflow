@@ -66,7 +66,7 @@ struct DataTypeFormatter {
 
 // Populates `param_names` and `defaults_tuple` based on the given OpDef.
 void GetOpDefNamesAndDefaults(const tensorflow::OpDef& op_def,
-                              std::vector<string>& param_names,
+                              std::vector<std::string>& param_names,
                               Safe_PyObjectPtr& defaults_tuple) {
   param_names.reserve(op_def.input_arg_size() + op_def.attr_size());
   std::set<std::string> inferred_attrs;
@@ -118,9 +118,9 @@ void GetOpDefNamesAndDefaults(const tensorflow::OpDef& op_def,
 PythonAPIInfo::PythonAPIInfo(const std::string& api_name)
     : api_name_(InternPyString(api_name)) {}
 
-Status PythonAPIInfo::Initialize(const OpDef& op_def,
-                                 const std::vector<string> param_names,
-                                 PyObject* defaults_tuple) {
+absl::Status PythonAPIInfo::Initialize(
+    const OpDef& op_def, const std::vector<std::string> param_names,
+    PyObject* defaults_tuple) {
   // Intern the parameter names.
   param_names_.reserve(param_names.size());
   for (const auto& param_name : param_names) {
@@ -167,10 +167,10 @@ Status PythonAPIInfo::Initialize(const OpDef& op_def,
       },
       &inputs_with_number_attrs_);
 
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-Status PythonAPIInfo::CheckParamNames() const {
+absl::Status PythonAPIInfo::CheckParamNames() const {
   std::vector<bool> param_found(param_names_.size());
   for (const auto& attr : attributes_) {
     if (attr.index != -1) {
@@ -186,14 +186,16 @@ Status PythonAPIInfo::CheckParamNames() const {
       continue;
     }
     if (!param_found[i]) {
-      return errors::InvalidArgument(
-          api_name_, ": missing specification for parameter ", param_names_[i]);
+      return absl::InvalidArgumentError(
+          absl::StrCat(api_name_, ": missing specification for parameter ",
+                       param_names_[i]));
     }
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-Status PythonAPIInfo::InitializeFromRegisteredOp(const std::string& op_name) {
+absl::Status PythonAPIInfo::InitializeFromRegisteredOp(
+    const std::string& op_name) {
   const tensorflow::OpDef* op_def = nullptr;
   TF_RETURN_IF_ERROR(
       tensorflow::OpRegistry::Global()->LookUpOpDef(op_name, &op_def));
@@ -201,13 +203,13 @@ Status PythonAPIInfo::InitializeFromRegisteredOp(const std::string& op_name) {
   Safe_PyObjectPtr defaults_tuple;
   GetOpDefNamesAndDefaults(*op_def, param_names, defaults_tuple);
   TF_RETURN_IF_ERROR(Initialize(*op_def, param_names, defaults_tuple.get()));
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-Status PythonAPIInfo::InitializeFromParamSpecs(
+absl::Status PythonAPIInfo::InitializeFromParamSpecs(
     const std::map<std::string, std::string>& input_specs,
     const std::map<std::string, std::string>& attr_specs,
-    const std::vector<string> param_names, PyObject* defaults_tuple) {
+    const std::vector<std::string> param_names, PyObject* defaults_tuple) {
   OpDefBuilder op_def_builder(api_name_);
   op_def_builder.AllowAttrTypeAny();
   for (const auto& attr_spec : attr_specs) {
@@ -223,15 +225,15 @@ Status PythonAPIInfo::InitializeFromParamSpecs(
   TF_RETURN_IF_ERROR(
       Initialize(op_reg_data.op_def, param_names, defaults_tuple));
 
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-Status PythonAPIInfo::InitializeAttribute(
+absl::Status PythonAPIInfo::InitializeAttribute(
     const OpDef::AttrDef& attr_def,
     const std::map<std::string, int>& param_name_to_index) {
   if (attr_def.name() == "name") {
-    return errors::InvalidArgument(
-        api_name_, ": Reserved parameter `name` was used as an attribute.");
+    return absl::InvalidArgumentError(absl::StrCat(
+        api_name_, ": Reserved parameter `name` was used as an attribute."));
   }
   const char* name = InternPyString(attr_def.name());
 
@@ -242,9 +244,9 @@ Status PythonAPIInfo::InitializeAttribute(
   attributes_.push_back({param_index, dtype, name, inferred_index});
   Attribute& attr = attributes_.back();
   if (attr.type == AttributeType::UNKNOWN) {
-    return errors::InvalidArgument(api_name_, ": Bad attribute type for ",
-                                   attr_def.name(), ": '", attr_def.type(),
-                                   "'");
+    return absl::InvalidArgumentError(
+        absl::StrCat(api_name_, ": Bad attribute type for ", attr_def.name(),
+                     ": '", attr_def.type(), "'"));
   }
   std::vector<DataType>* ok_dtypes = nullptr;
 
@@ -285,37 +287,39 @@ Status PythonAPIInfo::InitializeAttribute(
         : attr.type == AttributeType::INT        ? &inferred_length_attrs_
                                                  : nullptr;
     if (inferred_attr_names == nullptr) {
-      return errors::InvalidArgument(
-          api_name_, ": Missing specification for parameter ", attr_def.name());
+      return absl::InvalidArgumentError(
+          absl::StrCat(api_name_, ": Missing specification for parameter ",
+                       attr_def.name()));
     } else {
       attr.inferred_index = inferred_attr_names->size();
       inferred_attr_names->push_back(attr.name);
     }
   }
 
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-Status PythonAPIInfo::InitializeInput(
+absl::Status PythonAPIInfo::InitializeInput(
     const OpDef::ArgDef& arg_def,
     const std::map<std::string, ParamIndex>& param_name_to_index) {
   if (arg_def.name() == "name") {
-    return errors::InvalidArgument(
-        api_name_, ": Reserved parameter `name` was used as a tensor input.");
+    return absl::InvalidArgumentError(absl::StrCat(
+        api_name_, ": Reserved parameter `name` was used as a tensor input."));
   }
   const ParamIndex param_index =
       gtl::FindWithDefault(param_name_to_index, arg_def.name(), -1);
   if (param_index == -1) {
-    return errors::InvalidArgument(
-        api_name_, ": Missing specification for parameter ", arg_def.name());
+    return absl::InvalidArgumentError(absl::StrCat(
+        api_name_, ": Missing specification for parameter ", arg_def.name()));
   }
   if (arg_def.is_ref()) {
     // TODO(b/164980194): Support reference parameters.
     //   - Pass as_ref to convert_to_tensor
     //   - Check that values for ref inputs have ref types.
-    return errors::InvalidArgument(api_name_,
-                                   ": PythonAPIInfo doesn't support reference "
-                                   "parameters yet.");
+    return absl::InvalidArgumentError(
+        absl::StrCat(api_name_,
+                     ": PythonAPIInfo doesn't support reference "
+                     "parameters yet."));
   }
   bool is_list =
       !arg_def.number_attr().empty() || !arg_def.type_list_attr().empty();
@@ -326,18 +330,18 @@ Status PythonAPIInfo::InitializeInput(
     InputsWithTypeListAttr* input =
         FindInputsWithTypeListAttr(arg_def.type_list_attr());
     if (!input) {
-      return errors::InvalidArgument(
-          api_name_, ": Type attribute ", arg_def.type_list_attr(),
-          " for parameter ", arg_def.name(), " not found.");
+      return absl::InvalidArgumentError(
+          absl::StrCat(api_name_, ": Type attribute ", arg_def.type_list_attr(),
+                       " for parameter ", arg_def.name(), " not found."));
     }
     input->tensor_list_params.push_back(param_index);
   } else if (!arg_def.type_attr().empty()) {
     InputsWithTypeAttr* input = FindInputsWithTypeAttr(arg_def.type_attr());
     // input or list(input) with dtype specified by a `type` attribute.
     if (!input) {
-      return errors::InvalidArgument(api_name_, ": Type attribute ",
-                                     arg_def.type_attr(), " for parameter ",
-                                     arg_def.name(), " not found.");
+      return absl::InvalidArgumentError(
+          absl::StrCat(api_name_, ": Type attribute ", arg_def.type_attr(),
+                       " for parameter ", arg_def.name(), " not found."));
     }
     if (arg_def.number_attr().empty()) {
       input->tensor_params.push_back(param_index);
@@ -353,18 +357,18 @@ Status PythonAPIInfo::InitializeInput(
     InputsWithNumberAttr* input =
         FindInputsWithNumberAttr(arg_def.number_attr());
     if (!input) {
-      return errors::InvalidArgument(api_name_, ": Length attribute ",
-                                     arg_def.number_attr(), " for parameter ",
-                                     arg_def.name(), " not found.");
+      return absl::InvalidArgumentError(
+          absl::StrCat(api_name_, ": Length attribute ", arg_def.number_attr(),
+                       " for parameter ", arg_def.name(), " not found."));
     }
     input->tensor_list_params.push_back(param_index);
   }
 
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 PythonAPIInfo::InputsWithTypeAttr* PythonAPIInfo::FindInputsWithTypeAttr(
-    const string& name) {
+    const std::string& name) {
   for (auto& input : inputs_with_type_attrs_) {
     if (name == input.type_attr->name) {
       return &input;
@@ -374,7 +378,7 @@ PythonAPIInfo::InputsWithTypeAttr* PythonAPIInfo::FindInputsWithTypeAttr(
 }
 
 PythonAPIInfo::InputsWithTypeListAttr*
-PythonAPIInfo::FindInputsWithTypeListAttr(const string& name) {
+PythonAPIInfo::FindInputsWithTypeListAttr(const std::string& name) {
   for (auto& input : inputs_with_type_list_attrs_) {
     if (name == input.type_list_attr->name) {
       return &input;
@@ -384,7 +388,7 @@ PythonAPIInfo::FindInputsWithTypeListAttr(const string& name) {
 }
 
 PythonAPIInfo::InputsWithNumberAttr* PythonAPIInfo::FindInputsWithNumberAttr(
-    const string& name) {
+    const std::string& name) {
   for (auto& input : inputs_with_number_attrs_) {
     if (name == input.number_attr->name) {
       return &input;
@@ -393,8 +397,8 @@ PythonAPIInfo::InputsWithNumberAttr* PythonAPIInfo::FindInputsWithNumberAttr(
   return nullptr;
 }
 
-string PythonAPIInfo::DebugInfo() const {
-  string s = absl::StrCat("DebugInfo for ", api_name_, ":\n");
+std::string PythonAPIInfo::DebugInfo() const {
+  std::string s = absl::StrCat("DebugInfo for ", api_name_, ":\n");
   absl::StrAppend(&s, "  param_names=[", absl::StrJoin(param_names_, ", "),
                   "]\n");
   Safe_PyObjectPtr defaults_repr(PyObject_Repr(defaults_tuple_.get()));

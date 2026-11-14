@@ -17,13 +17,29 @@ limitations under the License.
 #include <stdlib.h>
 #include <string.h>
 
+#include <algorithm>
+#include <cstdint>
+#include <cstdlib>
+#include <functional>
+#include <ios>
+#include <memory>
+#include <string>
+#include <utility>
+#include <variant>
+#include <vector>
+
+#include "absl/base/thread_annotations.h"
+#include "absl/log/log.h"
 #include "absl/strings/numbers.h"
 #include "absl/strings/str_cat.h"
-#include "absl/types/variant.h"
+#include "absl/strings/str_format.h"
+#include "absl/synchronization/mutex.h"
+#include "third_party/cloud_cpp/google/cloud/common_options.h"
+#include "third_party/cloud_cpp/google/cloud/options.h"
+#include "third_party/cloud_cpp/google/cloud/status_or.h"
 #include "google/cloud/storage/client.h"
 #include "tensorflow/c/env.h"
 #include "tensorflow/c/experimental/filesystem/plugins/gcs/gcs_helper.h"
-#include "tensorflow/c/logging.h"
 #include "tensorflow/c/tf_status.h"
 
 // Implementation of a filesystem for GCS environments.
@@ -59,6 +75,9 @@ constexpr char kAppendMode[] = "GCS_APPEND_MODE";
 // default as the multiple API calls required add a risk of stranding temporary
 // objects.
 constexpr char kComposeAppend[] = "compose";
+
+// User-agent to be passed to GCS requests.
+constexpr char kUserAgent[] = "TensorFlow-C-API";
 
 // We can cast `google::cloud::StatusCode` to `TF_Code` because they have the
 // same integer values. See
@@ -131,10 +150,20 @@ static int64_t LoadBufferFromGCS(const std::string& path, size_t offset,
     TF_SetStatus(status, TF_UNKNOWN, "Could not get content-length header");
     return -1;
   }
+  if (read < 0 || read > static_cast<int64_t>(buffer_size)) {
+    TF_SetStatus(status, TF_INTERNAL,
+                 "Read length from GCS exceeds buffer size.");
+    return -1;
+  }
   // `TF_OUT_OF_RANGE` isn't considered as an error. So we clear it here.
   TF_SetStatus(status, TF_OK, "");
-  TF_VLog(1, "Successful read of %s @ %u of size: %u", path.c_str(), offset,
-          read);
+  VLOG(1) << absl::StrFormat("Successful read of %s @ %u of size: %u", path,
+                             offset, read);
+  if (read < 0) {
+    TF_SetStatus(status, TF_INTERNAL, "Invalid negative content-length");
+    return -1;
+  }
+  read = std::min<int64_t>(read, buffer_size);
   stream.read(buffer, read);
   read = stream.gcount();
   if (read < buffer_size) {
@@ -147,8 +176,8 @@ static int64_t LoadBufferFromGCS(const std::string& path, size_t offset,
                                   path, " @ ", offset)
                          .c_str());
       }
-      TF_VLog(2, "Successful integrity check for: %s @ %u", path.c_str(),
-              offset);
+      VLOG(2) << absl::StrFormat("Successful integrity check for: %s @ %u",
+                                 path, offset);
     }
   }
   return read;
@@ -195,10 +224,10 @@ int64_t Read(const TF_RandomAccessFile* file, uint64_t offset, size_t n,
   if (gcs_file->is_cache_enable || n > gcs_file->buffer_size) {
     return gcs_file->read_fn(gcs_file->path, offset, n, buffer, status);
   } else {
-    absl::MutexLock l(&gcs_file->buffer_mutex);
+    absl::MutexLock l(gcs_file->buffer_mutex);
     size_t buffer_end = gcs_file->buffer_start + gcs_file->buffer.size();
     size_t copy_size = 0;
-    if (offset < buffer_end && gcs_file->buffer_start) {
+    if (offset >= gcs_file->buffer_start && offset < buffer_end) {
       copy_size = (std::min)(n, static_cast<size_t>(buffer_end - offset));
       memcpy(buffer,
              gcs_file->buffer.data() + (offset - gcs_file->buffer_start),
@@ -288,8 +317,8 @@ static void SyncImpl(const std::string& bucket, const std::string& object,
       TF_SetStatusFromGCSStatus(metadata.status(), status);
       return;
     }
-    TF_VLog(3, "AppendObject: gs://%s/%s to gs://%s/%s", bucket.c_str(),
-            temporary_object.c_str(), bucket.c_str(), object.c_str());
+    VLOG(3) << absl::StrFormat("AppendObject: gs://%s/%s to gs://%s/%s", bucket,
+                               temporary_object, bucket, object);
     const std::vector<gcs::ComposeSourceObject> source_objects = {
         {object, {}, {}}, {temporary_object, {}, {}}};
     metadata = gcs_client->ComposeObject(bucket, source_objects, object,
@@ -328,8 +357,8 @@ void Append(const TF_WritableFile* file, const char* buffer, size_t n,
                  "The internal temporary file is not writable.");
     return;
   }
-  TF_VLog(3, "Append: gs://%s/%s size %u", gcs_file->bucket.c_str(),
-          gcs_file->object.c_str(), n);
+  VLOG(3) << absl::StrFormat("Append: gs://%s/%s size %u", gcs_file->bucket,
+                             gcs_file->object, n);
   gcs_file->sync_need = true;
   gcs_file->outfile.write(buffer, n);
   if (!gcs_file->outfile)
@@ -355,8 +384,8 @@ int64_t Tell(const TF_WritableFile* file, TF_Status* status) {
 void Flush(const TF_WritableFile* file, TF_Status* status) {
   auto gcs_file = static_cast<GCSFile*>(file->plugin_file);
   if (gcs_file->sync_need) {
-    TF_VLog(3, "Flush started: gs://%s/%s", gcs_file->bucket.c_str(),
-            gcs_file->object.c_str());
+    VLOG(3) << absl::StrFormat("Flush started: gs://%s/%s", gcs_file->bucket,
+                               gcs_file->object);
     if (!gcs_file->outfile) {
       TF_SetStatus(status, TF_INTERNAL,
                    "Could not append to the internal temporary file.");
@@ -364,8 +393,8 @@ void Flush(const TF_WritableFile* file, TF_Status* status) {
     }
     SyncImpl(gcs_file->bucket, gcs_file->object, &gcs_file->offset,
              &gcs_file->outfile, gcs_file->gcs_client, status);
-    TF_VLog(3, "Flush finished: gs://%s/%s", gcs_file->bucket.c_str(),
-            gcs_file->object.c_str());
+    VLOG(3) << absl::StrFormat("Flush finished: gs://%s/%s", gcs_file->bucket,
+                               gcs_file->object);
     if (TF_GetCode(status) != TF_OK) return;
     gcs_file->sync_need = false;
   } else {
@@ -375,15 +404,15 @@ void Flush(const TF_WritableFile* file, TF_Status* status) {
 
 void Sync(const TF_WritableFile* file, TF_Status* status) {
   auto gcs_file = static_cast<GCSFile*>(file->plugin_file);
-  TF_VLog(3, "Sync: gs://%s/%s", gcs_file->bucket.c_str(),
-          gcs_file->object.c_str());
+  VLOG(3) << absl::StrFormat("Sync: gs://%s/%s", gcs_file->bucket,
+                             gcs_file->object);
   Flush(file, status);
 }
 
 void Close(const TF_WritableFile* file, TF_Status* status) {
   auto gcs_file = static_cast<GCSFile*>(file->plugin_file);
-  TF_VLog(3, "Close: gs://%s/%s", gcs_file->bucket.c_str(),
-          gcs_file->object.c_str());
+  VLOG(3) << absl::StrFormat("Close: gs://%s/%s", gcs_file->bucket,
+                             gcs_file->object);
   if (gcs_file->sync_need) {
     Flush(file, status);
   }
@@ -425,7 +454,7 @@ namespace tf_gcs_filesystem {
 // TODO(vnvo2409): We could do some cleanups like `return TF_SetStatus`.
 // TODO(vnvo2409): Refactor the filesystem implementation when
 // https://github.com/googleapis/google-cloud-cpp/issues/4482 is done.
-GCSFile::GCSFile(google::cloud::storage::Client&& gcs_client)
+GCSFile::GCSFile(gcs::Client&& gcs_client)
     : gcs_client(gcs_client), block_cache_lock() {
   const char* append_mode = std::getenv(kAppendMode);
   compose = (append_mode != nullptr) && (!strcmp(kAppendMode, append_mode));
@@ -437,17 +466,21 @@ GCSFile::GCSFile(google::cloud::storage::Client&& gcs_client)
 
   // Apply the overrides for the block size (MB), max bytes (MB), and max
   // staleness (seconds) if provided.
-  if (absl::SimpleAtoi(std::getenv(kBlockSize), &value)) {
+  const char* block_size_env = std::getenv(kBlockSize);
+  if (block_size_env && absl::SimpleAtoi(block_size_env, &value)) {
     block_size = value * 1024 * 1024;
   }
-  if (absl::SimpleAtoi(std::getenv(kMaxCacheSize), &value)) {
+  const char* max_bytes_env = std::getenv(kMaxCacheSize);
+  if (max_bytes_env && absl::SimpleAtoi(max_bytes_env, &value)) {
     max_bytes = static_cast<size_t>(value * 1024 * 1024);
   }
-  if (absl::SimpleAtoi(std::getenv(kMaxStaleness), &value)) {
+  const char* max_staleness_env = std::getenv(kMaxStaleness);
+  if (max_staleness_env && absl::SimpleAtoi(max_staleness_env, &value)) {
     max_staleness = value;
   }
-  TF_VLog(1, "GCS cache max size = %u ; block size = %u ; max staleness = %u",
-          max_bytes, block_size, max_staleness);
+  VLOG(1) << absl::StrFormat(
+      "GCS cache max size = %u ; block size = %u ; max staleness = %u",
+      max_bytes, block_size, max_staleness);
 
   file_block_cache = std::make_unique<RamFileBlockCache>(
       block_size, max_bytes, max_staleness,
@@ -459,10 +492,14 @@ GCSFile::GCSFile(google::cloud::storage::Client&& gcs_client)
 
   uint64_t stat_cache_max_age = kStatCacheDefaultMaxAge;
   size_t stat_cache_max_entries = kStatCacheDefaultMaxEntries;
-  if (absl::SimpleAtoi(std::getenv(kStatCacheMaxAge), &value)) {
+  const char* stat_cache_max_age_env = std::getenv(kStatCacheMaxAge);
+  if (stat_cache_max_age_env &&
+      absl::SimpleAtoi(stat_cache_max_age_env, &value)) {
     stat_cache_max_age = value;
   }
-  if (absl::SimpleAtoi(std::getenv(kStatCacheMaxEntries), &value)) {
+  const char* stat_cache_max_entries_env = std::getenv(kStatCacheMaxEntries);
+  if (stat_cache_max_entries_env &&
+      absl::SimpleAtoi(stat_cache_max_entries_env, &value)) {
     stat_cache_max_entries = static_cast<size_t>(value);
   }
   stat_cache = std::make_unique<ExpiringLRUCache<GcsFileStat>>(
@@ -487,12 +524,19 @@ GCSFile::GCSFile(google::cloud::storage::Client&& gcs_client, bool compose,
       stat_cache_max_age, stat_cache_max_entries);
 }
 
+// Set the UserAgent to identify the client for storage.
+static google::cloud::StatusOr<gcs::Client> GetStorageClient() {
+  google::cloud::Options options =
+      google::cloud::Options{}.set<google::cloud::UserAgentProductsOption>(
+          {kUserAgent});
+  return gcs::Client(options);
+}
+
 void InitTest(TF_Filesystem* filesystem, bool compose, uint64_t block_size,
               size_t max_bytes, uint64_t max_staleness,
               uint64_t stat_cache_max_age, size_t stat_cache_max_entries,
               TF_Status* status) {
-  google::cloud::StatusOr<gcs::Client> client =
-      gcs::Client::CreateDefaultClient();
+  google::cloud::StatusOr<gcs::Client> client = GetStorageClient();
   if (!client) {
     TF_SetStatusFromGCSStatus(client.status(), status);
     return;
@@ -505,8 +549,7 @@ void InitTest(TF_Filesystem* filesystem, bool compose, uint64_t block_size,
 }
 
 void Init(TF_Filesystem* filesystem, TF_Status* status) {
-  google::cloud::StatusOr<gcs::Client> client =
-      gcs::Client::CreateDefaultClient();
+  google::cloud::StatusOr<gcs::Client> client = GetStorageClient();
   if (!client) {
     TF_SetStatusFromGCSStatus(client.status(), status);
     return;
@@ -532,10 +575,10 @@ static void UncachedStatForObject(const std::string& bucket,
   stat->base.mtime_nsec =
       metadata->time_storage_class_updated().time_since_epoch().count();
   stat->base.is_directory = object.back() == '/';
-  TF_VLog(1,
-          "Stat of: gs://%s/%s --  length: %u generation: %u; mtime_nsec: %u;",
-          bucket.c_str(), object.c_str(), stat->base.length,
-          stat->generation_number, stat->base.mtime_nsec);
+  VLOG(1) << absl::StrFormat(
+      "Stat of: gs://%s/%s --  length: %u generation: %u; mtime_nsec: %u;",
+      bucket, object, stat->base.length, stat->generation_number,
+      stat->base.mtime_nsec);
   return TF_SetStatus(status, TF_OK, "");
 }
 
@@ -549,7 +592,7 @@ void NewRandomAccessFile(const TF_Filesystem* filesystem, const char* path,
   auto gcs_file = static_cast<GCSFile*>(filesystem->plugin_filesystem);
   bool is_cache_enabled;
   {
-    absl::MutexLock l(&gcs_file->block_cache_lock);
+    absl::MutexLock l(gcs_file->block_cache_lock);
     is_cache_enabled = gcs_file->file_block_cache->IsCacheEnabled();
   }
   auto read_fn = [gcs_file, is_cache_enabled, bucket, object](
@@ -557,7 +600,7 @@ void NewRandomAccessFile(const TF_Filesystem* filesystem, const char* path,
                      char* buffer, TF_Status* status) -> int64_t {
     int64_t read = 0;
     if (is_cache_enabled) {
-      absl::ReaderMutexLock l(&gcs_file->block_cache_lock);
+      absl::ReaderMutexLock l(gcs_file->block_cache_lock);
       GcsFileStat stat;
       gcs_file->stat_cache->LookupOrCompute(
           path, &stat,
@@ -570,10 +613,9 @@ void NewRandomAccessFile(const TF_Filesystem* filesystem, const char* path,
       if (TF_GetCode(status) != TF_OK) return -1;
       if (!gcs_file->file_block_cache->ValidateAndUpdateFileSignature(
               path, stat.generation_number)) {
-        TF_VLog(
-            1,
-            "File signature has been changed. Refreshing the cache. Path: %s",
-            path.c_str());
+        VLOG(1)
+            << "File signature has been changed. Refreshing the cache. Path: "
+            << path;
       }
       read = gcs_file->file_block_cache->Read(path, offset, n, buffer, status);
     } else {
@@ -605,7 +647,7 @@ void NewWritableFile(const TF_Filesystem* filesystem, const char* path,
        (gcs_file->compose ? 0 : -1)});
   // We are responsible for freeing the pointer returned by TF_GetTempFileName
   free(temp_file_name);
-  TF_VLog(3, "GcsWritableFile: %s", path);
+  VLOG(3) << "GcsWritableFile: " << path;
   TF_SetStatus(status, TF_OK, "");
 }
 
@@ -652,8 +694,8 @@ void NewAppendableFile(const TF_Filesystem* filesystem, const char* path,
       return;
     }
   }
-  TF_VLog(3, "GcsWritableFile: %s with existing file %s", path,
-          temp_file_name.c_str());
+  VLOG(3) << absl::StrFormat("GcsWritableFile: %s with existing file %s", path,
+                             temp_file_name);
   TF_SetStatus(status, TF_OK, "");
 }
 
@@ -682,15 +724,21 @@ void NewReadOnlyMemoryRegionFromFile(const TF_Filesystem* filesystem,
   int64_t read =
       tf_random_access_file::Read(&reader, 0, metadata->size(), buffer, status);
   tf_random_access_file::Cleanup(&reader);
-  if (TF_GetCode(status) != TF_OK) return;
+  if (TF_GetCode(status) != TF_OK) {
+    plugin_memory_free(buffer);
+    return;
+  }
 
   if (read > 0 && buffer) {
     region->plugin_memory_region =
         new tf_read_only_memory_region::GCSMemoryRegion(
             {buffer, static_cast<uint64_t>(read)});
     TF_SetStatus(status, TF_OK, "");
-  } else if (read == 0) {
-    TF_SetStatus(status, TF_INVALID_ARGUMENT, "File is empty");
+  } else {
+    if (read == 0) {
+      TF_SetStatus(status, TF_INVALID_ARGUMENT, "File is empty");
+    }
+    plugin_memory_free(buffer);
   }
 }
 
@@ -764,9 +812,9 @@ static std::vector<std::string> GetChildrenBounded(
       return result;
     }
     auto value = *std::move(item);
-    std::string children = absl::holds_alternative<std::string>(value)
-                               ? absl::get<std::string>(value)
-                               : absl::get<gcs::ObjectMetadata>(value).name();
+    std::string children = std::holds_alternative<std::string>(value)
+                               ? std::get<std::string>(value)
+                               : std::get<gcs::ObjectMetadata>(value).name();
     auto pos = children.find(prefix);
     if (pos != 0) {
       TF_SetStatus(status, TF_INTERNAL,
@@ -812,7 +860,7 @@ static bool FolderExists(GCSFile* gcs_file, std::string dir,
 }
 
 static void ClearFileCaches(GCSFile* gcs_file, const std::string& path) {
-  absl::ReaderMutexLock l(&gcs_file->block_cache_lock);
+  absl::ReaderMutexLock l(gcs_file->block_cache_lock);
   gcs_file->file_block_cache->RemoveFile(path);
   gcs_file->stat_cache->Delete(path);
 }
@@ -845,10 +893,10 @@ void CreateDir(const TF_Filesystem* filesystem, const char* path,
                TF_Status* status) {
   std::string dir = path;
   MaybeAppendSlash(&dir);
-  TF_VLog(3,
-          "CreateDir: creating directory with path: %s and "
-          "path_with_slash: %s",
-          path, dir.c_str());
+  VLOG(3) << absl::StrFormat(
+      "CreateDir: creating directory with path: %s and "
+      "path_with_slash: %s",
+      path, dir);
   std::string bucket, object;
   ParseGCSPath(dir, true, &bucket, &object, status);
   if (TF_GetCode(status) != TF_OK) return;
@@ -866,7 +914,7 @@ void CreateDir(const TF_Filesystem* filesystem, const char* path,
   PathExists(filesystem, dir.c_str(), status);
   if (TF_GetCode(status) == TF_OK) {
     // Use the original name for a correct error here.
-    TF_VLog(3, "CreateDir: directory already exists, not uploading %s", path);
+    VLOG(3) << "CreateDir: directory already exists, not uploading " << path;
     return TF_SetStatus(status, TF_ALREADY_EXISTS, path);
   }
 
@@ -976,7 +1024,7 @@ bool IsDirectory(const TF_Filesystem* filesystem, const char* path,
 static void RenameObject(const TF_Filesystem* filesystem,
                          const std::string& src, const std::string& dst,
                          TF_Status* status) {
-  TF_VLog(3, "RenameObject: started %s to %s", src.c_str(), dst.c_str());
+  VLOG(3) << absl::StrFormat("RenameObject: started %s to %s", src, dst);
   std::string bucket_src, object_src;
   ParseGCSPath(src, false, &bucket_src, &object_src, status);
   if (TF_GetCode(status) != TF_OK) return;
@@ -991,7 +1039,7 @@ static void RenameObject(const TF_Filesystem* filesystem,
       gcs::Fields("done,rewriteToken"));
   TF_SetStatusFromGCSStatus(metadata.status(), status);
   if (TF_GetCode(status) != TF_OK) return;
-  TF_VLog(3, "RenameObject: finished %s to %s", src.c_str(), dst.c_str());
+  VLOG(3) << absl::StrFormat("RenameObject: finished %s to %s", src, dst);
 
   ClearFileCaches(gcs_file, dst);
   DeleteFile(filesystem, src.c_str(), status);
@@ -1129,7 +1177,7 @@ static char* TranslateName(const TF_Filesystem* filesystem, const char* uri) {
 
 static void FlushCaches(const TF_Filesystem* filesystem) {
   auto gcs_file = static_cast<GCSFile*>(filesystem->plugin_filesystem);
-  absl::ReaderMutexLock l(&gcs_file->block_cache_lock);
+  absl::ReaderMutexLock l(gcs_file->block_cache_lock);
   gcs_file->file_block_cache->Flush();
   gcs_file->stat_cache->Clear();
 }

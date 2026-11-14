@@ -113,7 +113,7 @@ class Scope {
   /// `name/child_scope_name` as the prefix. The actual name will be unique
   /// in the current scope. All other properties are inherited from the current
   /// scope. If `child_scope_name` is empty, the `/` is elided.
-  Scope NewSubScope(const string& child_scope_name) const;
+  Scope NewSubScope(const std::string& child_scope_name) const;
 
   /// Return a new scope. All ops created within the returned scope will have
   /// names of the form `name/StrCat(fragments...)[_suffix]`
@@ -125,8 +125,7 @@ class Scope {
   /// Return a new scope. All ops created within the returned scope will have as
   /// control dependencies the union of operations in the control_deps vector
   /// and the control dependencies of the current scope.
-  Scope WithControlDependencies(
-      const gtl::ArraySlice<Operation>& control_deps) const;
+  Scope WithControlDependencies(absl::Span<const Operation> control_deps) const;
   /// Same as above, but convenient to add control dependency on the operation
   /// producing the control_dep output.
   Scope WithControlDependencies(const Output& control_dep) const;
@@ -137,15 +136,15 @@ class Scope {
 
   /// Return a new scope. All ops created within the returned scope will have
   /// the device field set to 'device'.
-  Scope WithDevice(const string& device) const;
+  Scope WithDevice(const std::string& device) const;
 
   /// Returns a new scope.  All ops created within the returned scope will have
   /// their assigned device set to `assigned_device`.
-  Scope WithAssignedDevice(const string& assigned_device) const;
+  Scope WithAssignedDevice(const std::string& assigned_device) const;
 
   /// Returns a new scope.  All ops created within the returned scope will have
   /// their _XlaCluster attribute set to `xla_cluster`.
-  Scope WithXlaCluster(const string& xla_cluster) const;
+  Scope WithXlaCluster(const std::string& xla_cluster) const;
 
   /// Return a new scope. All ops created within the returned scope will be
   /// co-located on the device where op is placed.
@@ -165,19 +164,19 @@ class Scope {
 
   /// Return a new scope. All ops created with the new scope will have
   /// kernel_label as the value for their '_kernel' attribute;
-  Scope WithKernelLabel(const string& kernel_label) const;
+  Scope WithKernelLabel(const std::string& kernel_label) const;
 
   // The following functions are for scope object consumers.
 
   /// Return a unique name, using default_name if an op name has not been
   /// specified.
-  string GetUniqueNameForOp(const string& default_name) const;
+  std::string GetUniqueNameForOp(const std::string& default_name) const;
 
   /// Update the status on this scope.
   /// Note: The status object is shared between all children of this scope.
-  /// If the resulting status is not Status::OK() and exit_on_error_ is set on
+  /// If the resulting status is not OkStatus() and exit_on_error_ is set on
   /// this scope, this function exits by calling LOG(FATAL).
-  void UpdateStatus(const Status& s) const;
+  void UpdateStatus(const absl::Status& s) const;
 
   // START_SKIP_DOXYGEN
 
@@ -187,7 +186,8 @@ class Scope {
   void UpdateBuilder(NodeBuilder* builder) const;
   // END_SKIP_DOXYGEN
 
-  CompositeOpScopes GetCompositeOpScopes(const string& composite_op_name) const;
+  CompositeOpScopes GetCompositeOpScopes(
+      const std::string& composite_op_name) const;
 
   bool ok() const;
 
@@ -197,33 +197,36 @@ class Scope {
   // TODO(skyewm): Graph is not part of public API
   std::shared_ptr<Graph> graph_as_shared_ptr() const;
 
-  Status status() const;
+  absl::Status status() const;
 
-  /// If status() is Status::OK(), convert the Graph object stored in this scope
-  /// to a GraphDef proto and return Status::OK(). Otherwise, return the error
-  /// status as is without performing GraphDef conversion.
-  Status ToGraphDef(GraphDef* gdef) const;
+  /// If status() is ok, convert the Graph object stored in this scope
+  /// to a GraphDef proto and return an ok Status. Otherwise, return the error
+  /// status as is without performing GraphDef conversion. If
+  /// `include_debug_info` is true, populate the `debug_info` field of the
+  /// GraphDef from stack traces in this Graph.
+  absl::Status ToGraphDef(GraphDef* gdef,
+                          bool include_debug_info = false) const;
 
   // START_SKIP_DOXYGEN
 
-  /// If status() is Status::OK(), construct a Graph object using `opts` as the
+  /// If status() is OkStatus(), construct a Graph object using `opts` as the
   /// GraphConstructorOptions, and return Status::OK if graph construction was
   /// successful. Otherwise, return the error status.
   // TODO(josh11b, keveman): Make this faster; right now it converts
   // Graph->GraphDef->Graph.  This cleans up the graph (e.g. adds
   // edges from the source and to the sink node, resolves back edges
   // by name), and makes sure the resulting graph is valid.
-  Status ToGraph(
+  absl::Status ToGraph(
       Graph* g, GraphConstructorOptions opts = GraphConstructorOptions{}) const;
 
   // Calls AddNode() using this scope's ShapeRefiner. This exists in the public
   // API to prevent custom op wrappers from needing access to shape_refiner.h or
   // scope_internal.h.
   // TODO(skyewm): remove this from public API
-  Status DoShapeInference(Node* node) const;
+  absl::Status DoShapeInference(Node* node) const;
 
   // Creates a new root scope that causes all DoShapeInference() calls to return
-  // Status::OK() (on the returned scope and any subscopes). Used for testing.
+  // OkStatus() (on the returned scope and any subscopes). Used for testing.
   // TODO(skyewm): fix tests that still require this and eventually remove, or
   // at least remove from public API
   static Scope DisabledShapeInferenceScope();
@@ -238,7 +241,7 @@ class Scope {
   // END_SKIP_DOXYGEN
 
  private:
-  Scope WithOpNameImpl(const string& op_name) const;
+  Scope WithOpNameImpl(const std::string& op_name) const;
 
   friend class InternalScope;
   std::unique_ptr<Impl> impl_;
@@ -258,9 +261,9 @@ struct CompositeOpScopes {
 // Creates a node of the given operation, with the given inputs, and assigns the
 // result to output. This does not support the ability to add additional
 // attributes.
-Status CreateOutputWithScope(string op_name,
-                             absl::Span<const ::tensorflow::Input> inputs,
-                             const Scope& scope, Output* output);
+absl::Status CreateOutputWithScope(std::string op_name,
+                                   absl::Span<const ::tensorflow::Input> inputs,
+                                   const Scope& scope, Output* output);
 /// @}
 
 }  // namespace tensorflow

@@ -1,1 +1,13 @@
+_jpeg_*
+_jinit_*
+_jdiv_round_up
+_jround_up
+_jzero_far
+_jcopy_*
+_jsimd_*
+_hwloc_*
+_LLVM*
 *mlir*
+_curl_*
+_Curl_*
+_curlx_*

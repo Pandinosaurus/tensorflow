@@ -13,25 +13,27 @@
 # limitations under the License.
 # ==============================================================================
 """Tests for tensorflow.ops.math_ops."""
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 from absl.testing import parameterized
 import numpy as np
 
+from tensorflow.core.framework import full_type_pb2
+from tensorflow.python import tf2
 from tensorflow.python.eager import backprop
 from tensorflow.python.eager import context
+from tensorflow.python.eager import def_function
 from tensorflow.python.framework import constant_op
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import errors
 from tensorflow.python.framework import errors_impl
+from tensorflow.python.framework import indexed_slices
 from tensorflow.python.framework import ops
+from tensorflow.python.framework import tensor as tensor_lib
 from tensorflow.python.framework import test_util
 from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import gradients
 from tensorflow.python.ops import math_ops
 from tensorflow.python.ops import resource_variable_ops
+from tensorflow.python.ops import tensor_array_ops
 from tensorflow.python.ops import variables
 from tensorflow.python.ops.ragged import ragged_factory_ops
 from tensorflow.python.platform import googletest
@@ -55,6 +57,19 @@ class ReduceTest(test_util.TensorFlowTestCase):
     expected = math_ops.cast(out_f32, dtypes.bfloat16)
 
     self.assertAllClose(out_bf16, expected, 1e-3)
+
+  def testCountNonzero(self):
+    # simple case
+    x = np.array([[0, -2, 0], [4, 0, 0]], dtype=np.int32)
+    self.assertEqual(self.evaluate(math_ops.count_nonzero(x)), 2)
+
+    # boolean input
+    x = math_ops.not_equal(x, 0)
+    self.assertEqual(self.evaluate(math_ops.count_nonzero(x)), 2)
+
+    # would overflow if int8 would be used for internal calculations
+    x = 2 * np.ones(512, dtype=np.int8)
+    self.assertEqual(self.evaluate(math_ops.count_nonzero(x)), 512)
 
   def testReduceExplicitAxes(self):
     x = np.array([[1, 2, 3], [4, 5, 6]], dtype=np.int32)
@@ -130,6 +145,51 @@ class ReduceTest(test_util.TensorFlowTestCase):
                                      []])
     self.assertAllClose(math_ops.reduce_std(x, axis=0), [0., 4., 1., 0.])
 
+  def testReduceStdFloat16LargeMagnitude(self):
+    # Regression test: squared deviations of large-magnitude float16 values
+    # can overflow float16's range even when the standard deviation itself
+    # does not, so reduce_std/reduce_variance need to compute internally in
+    # a wider dtype. Previously this produced NaN on CPU and Inf on GPU for
+    # reduce_std, instead of a finite, correct result on both.
+    rs = np.random.RandomState(0)
+    x_np = rs.randn(1000).astype(np.float32) * 1e4
+    x_f16 = constant_op.constant(x_np.astype(np.float16))
+    expected_std = np.std(x_np.astype(np.float64))
+
+    std = self.evaluate(math_ops.reduce_std(x_f16))
+    self.assertEqual(std.dtype, np.float16)
+    self.assertTrue(np.isfinite(std), f"Expected a finite result, got {std}")
+    self.assertAllClose(std, expected_std, rtol=0.02)
+
+    # The true variance here does exceed float16's range (~65504), so,
+    # unlike the standard deviation, it should consistently overflow to Inf
+    # rather than landing on NaN on some platforms.
+    variance = self.evaluate(math_ops.reduce_variance(x_f16))
+    self.assertEqual(variance.dtype, np.float16)
+    self.assertTrue(np.isposinf(variance), f"Expected Inf, got {variance}")
+
+  def testReduceStdFloat16ModerateMagnitude(self):
+    # Companion to testReduceStdFloat16LargeMagnitude: covers the path where
+    # neither the squared deviations nor the variance overflow float16, so
+    # the float32-promoted computation should still closely match a float64
+    # reference, same as before the promotion was added.
+    rs = np.random.RandomState(0)
+    x_np = rs.randn(1000).astype(np.float32)
+    x_f16 = constant_op.constant(x_np.astype(np.float16))
+    expected_std = np.std(x_np.astype(np.float64))
+    expected_variance = np.var(x_np.astype(np.float64))
+
+    std = self.evaluate(math_ops.reduce_std(x_f16))
+    variance = self.evaluate(math_ops.reduce_variance(x_f16))
+    self.assertEqual(std.dtype, np.float16)
+    self.assertEqual(variance.dtype, np.float16)
+    self.assertTrue(np.isfinite(std), f"Expected a finite result, got {std}")
+    self.assertTrue(
+        np.isfinite(variance), f"Expected a finite result, got {variance}"
+    )
+    self.assertAllClose(std, expected_std, rtol=0.05)
+    self.assertAllClose(variance, expected_variance, rtol=0.05)
+
   def testReduceStdComplex(self):
     # Ensure that complex values are handled to be consistent with numpy
     complex_ys = [([0 - 1j, 0 + 1j], dtypes.float64),
@@ -140,6 +200,49 @@ class ReduceTest(test_util.TensorFlowTestCase):
       self.assertEqual(np.std(y), 1.0)
       self.assertEqual(self.evaluate(y_result), 1.0)
       self.assertEqual(y_result.dtype, dtype)
+
+  def testReduceVarAndStdIdenticalLargeValues(self):
+
+    def var_and_std(x, keepdims):
+      return (
+          math_ops.reduce_variance(x, axis=1, keepdims=keepdims),
+          math_ops.reduce_std(x, axis=1, keepdims=keepdims),
+      )
+
+    graph_fn = def_function.function(var_and_std)
+    jit_fn = def_function.function(var_and_std, jit_compile=True)
+    for dtype in [
+        dtypes.float16,
+        dtypes.bfloat16,
+        dtypes.float32,
+        dtypes.float64,
+        dtypes.complex64,
+        dtypes.complex128,
+    ]:
+      for sign in [1.0, -1.0]:
+        val = sign * (
+            100.0 if dtype in (dtypes.float16, dtypes.bfloat16) else 7.5e10
+        )
+        if dtype.is_complex:
+          val = complex(val, val)
+        x = constant_op.constant([[val, val, val]], dtype=dtype)
+        # The expected variance is 0. The mean of the squared deviations can
+        # come out a few units high here (2 for float32 and 4 for complex64 on
+        # some CPUs), far below the 8192**2 that a one-ulp error in the
+        # float32 mean of 7.5e10 adds.
+        atol = {dtypes.float32: 2.5, dtypes.complex64: 5.0}.get(dtype, 1e-5)
+        for keepdims in [False, True]:
+          expected = [[0.0]] if keepdims else [0.0]
+          for fn in (var_and_std, graph_fn):
+            variance, std = self.evaluate(fn(x, keepdims))
+            self.assertAllClose(variance, expected, atol=atol)
+            self.assertAllClose(std, expected, atol=atol)
+          try:
+            variance, std = self.evaluate(jit_fn(x, keepdims))
+          except (errors.UnimplementedError, errors.InvalidArgumentError):
+            continue  # XLA is not linked into this build.
+          self.assertAllClose(variance, expected, atol=atol)
+          self.assertAllClose(std, expected, atol=atol)
 
 
 @test_util.run_all_in_graph_and_eager_modes
@@ -221,6 +324,15 @@ class LogSumExpTest(test_util.TensorFlowTestCase):
       res = math_ops.reduce_logsumexp(-np.inf)
       self.assertEqual(-np.inf, self.evaluate(res))
 
+  def testRaggedTensor(self):
+    for dtype in [dtypes.float16, dtypes.float32, dtypes.double]:
+      x_rt = ragged_factory_ops.constant([[1, 2], [], [3, 4, 5]], dtype=dtype)
+      x_np = np.array(self.evaluate(x_rt.flat_values))
+      with test_util.use_gpu():
+        y_rt = math_ops.reduce_logsumexp(x_rt)
+        y_np = np.log(np.sum(np.exp(x_np - np.max(x_np)))) + np.max(x_np)
+        self.assertAllClose(y_rt, y_np)
+
 
 @test_util.run_all_in_graph_and_eager_modes
 class RoundTest(test_util.TensorFlowTestCase):
@@ -236,7 +348,41 @@ class RoundTest(test_util.TensorFlowTestCase):
         y_np = np.round(x_np)
         self.assertAllClose(y_tf_np, y_np, atol=1e-2)
 
+  def testComplexDtypeValidation(self):
+    """Test that complex dtypes raise TypeError with helpful message."""
+    # Test complex64
+    x_complex64 = constant_op.constant(
+        [1.4 + 2.6j, 3.2 + 4.8j], dtype=dtypes.complex64
+    )
+    with self.assertRaisesRegex(
+        TypeError,
+        r"tf\.math\.round does not support complex dtypes.*complex64.*"
+        r"apply tf\.math\.round separately",
+    ):
+      math_ops.round(x_complex64)
 
+    # Test complex128
+    x_complex128 = constant_op.constant(
+        [1.4 + 2.6j, 3.2 + 4.8j], dtype=dtypes.complex128
+    )
+    with self.assertRaisesRegex(
+        TypeError,
+        r"tf\.math\.round does not support complex dtypes.*complex128.*"
+        r"apply tf\.math\.round separately",
+    ):
+      math_ops.round(x_complex128)
+
+  def testBFloat16Support(self):
+    """Test that bfloat16 dtype works correctly with tf.math.round."""
+    x = constant_op.constant([0.9, 2.5, 2.3, 1.5, -4.5], dtype=dtypes.bfloat16)
+    result = math_ops.round(x)
+    expected = constant_op.constant(
+        [1.0, 2.0, 2.0, 2.0, -4.0], dtype=dtypes.bfloat16
+    )
+    self.assertAllClose(self.evaluate(result), self.evaluate(expected))
+
+
+@test_util.with_eager_op_as_function
 @test_util.run_all_in_graph_and_eager_modes
 class MatMulTest(test_util.TensorFlowTestCase, parameterized.TestCase):
   """Test for matmul."""
@@ -348,6 +494,120 @@ class MatMulTest(test_util.TensorFlowTestCase, parameterized.TestCase):
 
 
 @test_util.run_all_in_graph_and_eager_modes
+class SampledADDMMTest(test_util.TensorFlowTestCase):
+  """Test for sampled_addmm."""
+
+  SUPPORTED_DTYPES = [
+      dtypes.bfloat16,
+      dtypes.float16,
+      dtypes.float32,
+      dtypes.float64,
+  ]
+
+  def sampledADDMMRef(
+      self,
+      indices,
+      values,
+      dense_shape,
+      mat1,
+      mat2,
+      beta=1.0,
+      alpha=1.0,
+      output_type=dtypes.float32,
+  ):
+    dense = math_ops.matmul(mat1, mat2, output_type=output_type)
+    dense_vals = array_ops.gather_nd(dense, indices, batch_dims=dense.ndim - 2)
+    return alpha * dense_vals + beta * values
+
+  def testSampledADDMM2D(self):
+    for dtype in self.SUPPORTED_DTYPES:
+      indices = constant_op.constant([[0, 0], [1, 1]])
+      values = constant_op.constant([0.5, 0.3], dtype=dtype)
+      dense_shape = constant_op.constant([2, 2])
+      mat1 = constant_op.constant([1, 2, 3, 4, 5, 6], shape=[2, 3], dtype=dtype)
+      mat2 = constant_op.constant(
+          [7, 8, 9, 10, 11, 12], shape=[3, 2], dtype=dtype
+      )
+      alpha = 0.75
+      beta = 0.25
+
+      _, res, _ = math_ops.sampled_addmm(
+          indices,
+          values,
+          dense_shape,
+          mat1,
+          mat2,
+          beta=beta,
+          alpha=alpha,
+          output_type=dtype,
+      )
+      ref = self.sampledADDMMRef(
+          indices,
+          values,
+          dense_shape,
+          mat1,
+          mat2,
+          beta=beta,
+          alpha=alpha,
+          output_type=dtype,
+      )
+      self.assertAllClose(res, ref, atol=1e-2)
+
+  def testBatchSampledADDMM(self):
+    for dtype in self.SUPPORTED_DTYPES:
+      indices = constant_op.constant([[[0, 1], [1, 0]], [[0, 0], [1, 0]]])
+      values = constant_op.constant([[3, 5], [2, 7]], dtype=dtype)
+      dense_shape = constant_op.constant([2, 2])
+      mat1 = constant_op.constant(
+          np.arange(1, 13), shape=[2, 2, 3], dtype=dtype
+      )
+      mat2 = constant_op.constant(
+          np.arange(13, 25), shape=[2, 3, 2], dtype=dtype
+      )
+      alpha = 0.4
+      beta = 0.6
+
+      _, res, _ = math_ops.sampled_addmm(
+          indices,
+          values,
+          dense_shape,
+          mat1,
+          mat2,
+          beta=beta,
+          alpha=alpha,
+          output_type=dtype,
+      )
+      ref = self.sampledADDMMRef(
+          indices,
+          values,
+          dense_shape,
+          mat1,
+          mat2,
+          beta=beta,
+          alpha=alpha,
+          output_type=dtype,
+      )
+      self.assertAllClose(res, ref, atol=1e-2)
+
+  def testInvalidDenseShape(self):
+    for dtype in self.SUPPORTED_DTYPES:
+      indices = constant_op.constant([[[0, 1], [1, 0]], [[0, 0], [1, 0]]])
+      values = constant_op.constant([[3, 5], [2, 7]], dtype=dtype)
+      dense_shape = constant_op.constant([1, 2])
+      mat1 = constant_op.constant(
+          np.arange(1, 13), shape=[2, 2, 3], dtype=dtype
+      )
+      mat2 = constant_op.constant(
+          np.arange(13, 25), shape=[2, 3, 2], dtype=dtype
+      )
+
+      with self.assertRaisesRegex(ValueError, "does not match output shape"):
+        math_ops.sampled_addmm(
+            indices, values, dense_shape, mat1, mat2, output_type=dtype
+        )
+
+
+@test_util.run_all_in_graph_and_eager_modes
 class ModTest(test_util.TensorFlowTestCase):
 
   def testFloat(self):
@@ -403,6 +663,7 @@ class SquaredDifferenceTest(test_util.TensorFlowTestCase):
         self.assertAllClose(z, z_tf)
 
 
+@test_util.with_eager_op_as_function
 @test_util.run_all_in_graph_and_eager_modes
 class ApproximateEqualTest(test_util.TensorFlowTestCase):
 
@@ -443,6 +704,20 @@ class ApproximateEqualTest(test_util.TensorFlowTestCase):
           "Shapes must be equal rank|must be of the same shape"):
         math_ops.approximate_equal(x, y)
 
+  def testApproximateEqualShapeXla(self):
+
+    @def_function.function(jit_compile=True)
+    def approximate_equal(x, y):
+      return math_ops.approximate_equal(x, y)
+
+    for dtype in [np.float32, np.double]:
+      x = np.array([1, 2], dtype=dtype)
+      y = np.array([[1, 2]], dtype=dtype)
+      with self.assertRaisesRegex(
+          (ValueError, errors.InvalidArgumentError),
+          "Shapes must be equal rank|must be of the same shape"):
+        approximate_equal(x, y)
+
 
 @test_util.run_all_in_graph_and_eager_modes
 class ScalarMulTest(test_util.TensorFlowTestCase):
@@ -472,10 +747,42 @@ class ScalarMulTest(test_util.TensorFlowTestCase):
     with test_util.device(use_gpu=True):
       self.assertAllEqual(self.evaluate(expected), self.evaluate(result))
 
+  def testAcceptsPythonSequences(self):
+    # Inputs without a `dtype` attribute are converted to tensors first.
+    with test_util.device(use_gpu=True):
+      for scalar_mul_fn in (math_ops.scalar_mul, math_ops.scalar_mul_v2):
+        result = scalar_mul_fn(3, [1, 2, 3])
+        self.assertEqual(dtypes.int32, result.dtype)
+        self.assertAllEqual([3, 6, 9], self.evaluate(result))
+
+        result = scalar_mul_fn(2.0, ((1.0, 2.0), (3.0, 4.0)))
+        self.assertEqual(dtypes.float32, result.dtype)
+        self.assertAllClose([[2.0, 4.0], [6.0, 8.0]], self.evaluate(result))
+
+        result = scalar_mul_fn(3, 5)
+        self.assertAllEqual(15, self.evaluate(result))
+
+        result = scalar_mul_fn(3.0, [])
+        self.assertEqual(dtypes.float32, result.dtype)
+        self.assertAllEqual([], self.evaluate(result))
+
+        result = scalar_mul_fn(2, np.array([1, 2], dtype=np.int64))
+        self.assertEqual(dtypes.int64, result.dtype)
+        self.assertAllEqual([2, 4], self.evaluate(result))
+
+  def testPythonSequenceInheritsTypedScalarDtype(self):
+    with test_util.device(use_gpu=True):
+      for scalar_mul_fn in (math_ops.scalar_mul, math_ops.scalar_mul_v2):
+        for dtype in (dtypes.float16, dtypes.float64):
+          scalar = constant_op.constant(2.0, dtype=dtype)
+          result = scalar_mul_fn(scalar, [1.0, 2.0])
+          self.assertEqual(dtype, result.dtype)
+          self.assertAllClose([2.0, 4.0], self.evaluate(result))
+
   def testAcceptsIndexedSlices(self):
     values = constant_op.constant([2, 3, 5, 7, 0, -1], shape=[3, 2])
     indices = constant_op.constant([0, 2, 5])
-    x = math_ops.scalar_mul(-3, ops.IndexedSlices(values, indices))
+    x = math_ops.scalar_mul(-3, indexed_slices.IndexedSlices(values, indices))
     with test_util.device(use_gpu=True):
       self.assertAllEqual(
           self.evaluate(x.values), [[-6, -9], [-15, -21], [0, 3]])
@@ -544,7 +851,7 @@ class AddNTest(test_util.TensorFlowTestCase):
             [self.evaluate(g) for g in add_n_grad])
 
   def testIndexedSlices(self):
-    slc = ops.IndexedSlices(
+    slc = indexed_slices.IndexedSlices(
         array_ops.constant([1, 2], shape=[1, 2]), array_ops.constant([1]),
         array_ops.constant([2, 2]))
     slc_as_dense = np.array([[0, 0], [1, 2]])
@@ -659,6 +966,12 @@ class DivAndModTest(test_util.TensorFlowTestCase):
     np_result = self.numpySafeTruncateDivInt(nums, divs)
     self.assertAllEqual(tf_result, np_result)
 
+  def testTruncateDivideFloat(self):
+    nums, divs = self.floatTestData()
+    tf_result = math_ops.truncatediv(nums, divs)
+    np_result = np.trunc(nums / divs)
+    self.assertAllEqual(tf_result, np_result)
+
   @test_util.deprecated_graph_mode_only
   def testDivideName(self):
     op = math_ops.divide(
@@ -739,22 +1052,44 @@ class DivAndModTest(test_util.TensorFlowTestCase):
   def testWithPythonValue(self):
     # Test case for https://github.com/tensorflow/tensorflow/issues/39475
     x = math_ops.divide(5, 2)
-    self.assertIsInstance(x, ops.Tensor)
+    self.assertIsInstance(x, tensor_lib.Tensor)
     x = math_ops.divide(5, array_ops.constant(2.0))
-    self.assertIsInstance(x, ops.Tensor)
+    self.assertIsInstance(x, tensor_lib.Tensor)
 
   def intEdgeTestData(self, dtype):
     """Edge-case test data for integer types."""
-    # INT_MIN/-1 expected to produce signed-integer overflow,
-    # INT_MIN/INT_MAX expected to work.
-    nums = np.array([np.iinfo(dtype).min, -1, 1,
-                     np.iinfo(dtype).max],
-                    dtype=dtype).reshape([4, 1])
-    divs = nums.reshape([1, 4])
+    # INT_MIN/-1 will produce signed-integer overflow, so we instead test
+    # (INT_MIN + 1) / -1.
+    nums = np.array(
+        [
+            [np.iinfo(dtype).min, -1, 1, np.iinfo(dtype).max],
+            [np.iinfo(dtype).min + 1, -1, 1, np.iinfo(dtype).max],
+            [np.iinfo(dtype).min, -1, 1, np.iinfo(dtype).max],
+            [np.iinfo(dtype).min, -1, 1, np.iinfo(dtype).max],
+        ],
+        dtype=dtype,
+    )
+    divs = np.array(
+        [
+            [
+                np.iinfo(dtype).min,
+                np.iinfo(dtype).min,
+                np.iinfo(dtype).min,
+                np.iinfo(dtype).min,
+            ],
+            [-1, -1, -1, -1],
+            [1, 1, 1, 1],
+            [
+                np.iinfo(dtype).max,
+                np.iinfo(dtype).max,
+                np.iinfo(dtype).max,
+                np.iinfo(dtype).max,
+            ],
+        ],
+        dtype=dtype,
+    )
     return nums, divs
 
-  @test_util.disable_asan("Expected signed integer overflow.")
-  @test_util.disable_ubsan("Expected signed integer overflow.")
   def testFloorDivModIntEdges(self):
     for dtype in [np.int32, np.int64]:
       x, y = self.intEdgeTestData(dtype)
@@ -764,12 +1099,7 @@ class DivAndModTest(test_util.TensorFlowTestCase):
       tf_floor_mod = math_ops.floormod(x, y)
       np_floor_mod = self.numpySafeFloorModInt(x, y)
       self.assertAllEqual(tf_floor_mod, np_floor_mod)
-      z = math_ops.add(math_ops.multiply(tf_floor_div, y), tf_floor_mod)
-      # x = floor_div(x, y) * y + floor_mod(x, y)
-      self.assertAllEqual(z, np.broadcast_to(x, z.shape))
 
-  @test_util.disable_asan("Expected signed integer overflow.")
-  @test_util.disable_ubsan("Expected signed integer overflow.")
   def testTruncateDivModIntEdges(self):
     for dtype in [np.int32, np.int64]:
       x, y = self.intEdgeTestData(dtype)
@@ -779,20 +1109,31 @@ class DivAndModTest(test_util.TensorFlowTestCase):
       tf_truncate_mod = math_ops.truncatemod(x, y)
       np_truncate_mod = self.numpySafeTruncateModInt(x, y)
       self.assertAllEqual(tf_truncate_mod, np_truncate_mod)
-      z = math_ops.add(math_ops.multiply(tf_truncate_div, y), tf_truncate_mod)
-      # x = truncatediv(x, y) * y + truncatemod(x, y)
-      self.assertAllEqual(z, np.broadcast_to(x, z.shape))
 
 
 @test_util.run_all_in_graph_and_eager_modes
 class DivNoNanTest(test_util.TensorFlowTestCase, parameterized.TestCase):
 
-  @parameterized.parameters((dtypes.bfloat16), (dtypes.float16),
-                            (dtypes.float32), (dtypes.float64),
-                            (dtypes.complex64), (dtypes.complex128))
+  _SUPPORTED_DTYPES = [dtypes.int8, dtypes.uint8,
+                       dtypes.int16, dtypes.uint16,
+                       dtypes.int32, dtypes.uint32,
+                       dtypes.int64, dtypes.uint64,
+                       dtypes.bfloat16, dtypes.float16,
+                       dtypes.float32, dtypes.float64,
+                       dtypes.complex64, dtypes.complex128]
+
+  @parameterized.parameters(*_SUPPORTED_DTYPES)
   def testBasic(self, dtype):
-    nums = np.arange(-10, 10, .25).reshape(80, 1)
-    divs = np.arange(-3, 3, .25).reshape(1, 24)
+    if dtype.is_unsigned:
+      nums = np.arange(0, 120, 3).reshape(40, 1)
+      divs = np.arange(0, 48, 4).reshape(1, 12)
+    elif dtype.is_integer:
+      nums = np.arange(-120, 120, 3).reshape(80, 1)
+      divs = np.arange(-48, 48, 4).reshape(1, 24)
+    else:
+      nums = np.arange(-10, 10, .25).reshape(80, 1)
+      divs = np.arange(-3, 3, .25).reshape(1, 24)
+    assert 0 in divs, "Bad test set-up"
 
     tf_nums = constant_op.constant(nums, dtype=dtype)
     tf_divs = constant_op.constant(divs, dtype=dtype)
@@ -807,6 +1148,35 @@ class DivNoNanTest(test_util.TensorFlowTestCase, parameterized.TestCase):
     with test_util.use_gpu():
       tf_result = math_ops.div_no_nan(tf_nums, tf_divs)
       self.assertAllCloseAccordingToType(tf_result, np_result)
+
+  @parameterized.product(
+      type_x=_SUPPORTED_DTYPES + [float, int],
+      type_y=_SUPPORTED_DTYPES + [float, int])
+  def testSameSupportedTypesAsDivide(self, type_x, type_y):
+    def one(type_):
+      if type_ is int:
+        return 1
+      elif type_ is float:
+        return 1.0
+      else:
+        return constant_op.constant(1, dtype=type_)
+
+    x = one(type_x)
+    y = one(type_y)
+
+    divide_raises = False
+    try:
+      divide_result = math_ops.divide(x, y)
+    except TypeError:
+      divide_raises = True
+
+    if divide_raises:
+      with self.assertRaises(TypeError):
+        _ = math_ops.div_no_nan(x, y)
+    else:
+      divide_no_nan_result = math_ops.div_no_nan(x, y)
+      self.assertEqual(divide_no_nan_result.dtype, divide_result.dtype)
+      self.assertAllEqual(divide_no_nan_result, divide_result)
 
   @parameterized.parameters((dtypes.bfloat16), (dtypes.float16),
                             (dtypes.float32), (dtypes.float64),
@@ -824,7 +1194,7 @@ class DivNoNanTest(test_util.TensorFlowTestCase, parameterized.TestCase):
                             (dtypes.float32), (dtypes.float64),
                             (dtypes.complex64), (dtypes.complex128))
   def testNonFiniteInNumerator(self, dtype):
-    nums = constant_op.constant([np.nan, np.inf, np.NINF], dtype=dtype)
+    nums = constant_op.constant([np.nan, np.inf, -np.inf], dtype=dtype)
     zeros = constant_op.constant([0, 0, 0], dtype=dtype)
     ones = constant_op.constant([1, 1, 1], dtype=dtype)
     with test_util.use_gpu():
@@ -839,7 +1209,7 @@ class MultiplyNoNanTest(test_util.TensorFlowTestCase):
 
   def testBasic(self):
     for dtype in [np.float32, np.float64]:
-      values = [0, 1, np.nan, np.inf, np.NINF]
+      values = [0, 1, np.nan, np.inf, -np.inf]
       x = constant_op.constant(values, dtype=dtype)
       zeros = constant_op.constant(np.zeros((5,)), dtype=dtype)
       ones = constant_op.constant(np.ones((5,)), dtype=dtype)
@@ -852,6 +1222,51 @@ class MultiplyNoNanTest(test_util.TensorFlowTestCase):
         # second argument.
         tf_result_reverseargs = math_ops.multiply_no_nan(zeros, x)
         self.assertAllEqual(zeros * x, tf_result_reverseargs)
+
+
+@test_util.run_all_in_graph_and_eager_modes
+class XopsGpuKernelTest(test_util.TensorFlowTestCase):
+  """The zero branch of the MLIR-generated GPU kernels for xlogy and friends.
+
+  On CPU these ops run the Eigen functors in cwise_ops.h instead.
+  """
+
+  @test_util.run_gpu_only
+  def testNegativeZeroGivesPositiveZero(self):
+    for op, y in (
+        (math_ops.xlogy, 2.0),
+        (math_ops.xlog1py, 1.0),
+        (math_ops.xdivy, 3.0),
+    ):
+      for dtype in [dtypes.float16, dtypes.float32, dtypes.float64]:
+        x = constant_op.constant(np.full((16,), -0.0), dtype=dtype)
+        y_t = constant_op.constant(np.full((16,), y), dtype=dtype)
+        with test_util.force_gpu():
+          result = self.evaluate(op(x, y_t))
+        self.assertAllEqual(result, np.zeros(16))
+        self.assertFalse(np.signbit(result).any())
+
+  @test_util.run_gpu_only
+  def testSubnormalIsNotReturned(self):
+    # The GPU kernels flush denormals, so a subnormal x compares equal to zero
+    # and the result is 0; without flushing, x / x is 1. It must never be x.
+    for dtype in [dtypes.float16, dtypes.float32, dtypes.float64]:
+      tiny = np.finfo(dtype.as_numpy_dtype).tiny / 4
+      x = constant_op.constant(np.full((16,), tiny), dtype=dtype)
+      with test_util.force_gpu():
+        result = self.evaluate(math_ops.xdivy(x, x))
+      self.assertTrue(np.isin(result, [0.0, 1.0]).all(), result)
+
+  @test_util.run_gpu_only
+  def testComplexXlog1pyComparesXAgainstZero(self):
+    # The complex kernel compared x against 1 rather than 0, so xlog1py(1, y)
+    # returned 1 and xlog1py(0, -1) returned nan.
+    for dtype in [dtypes.complex64, dtypes.complex128]:
+      x = constant_op.constant([1.0, 0.0], dtype=dtype)
+      y = constant_op.constant([1.0, -1.0], dtype=dtype)
+      with test_util.force_gpu():
+        result = self.evaluate(math_ops.xlog1py(x, y))
+      self.assertAllClose(result, [np.log(2.0), 0.0])
 
 
 @test_util.run_all_in_graph_and_eager_modes
@@ -885,6 +1300,19 @@ class XlogyTest(test_util.TensorFlowTestCase):
         xtimes_logy = self.evaluate(math_ops.log(y[1]))
         self.assertAllClose(zeros_np, xlogy_tf_np[0])
         self.assertAllClose(xtimes_logy, xlogy_tf_np[1])
+
+  def testXlogyWithNegativeZero(self):
+    # A zero x gives +0 at every size. Tensors of at least one SIMD packet used
+    # to return x itself, which kept the sign of -0. This covers the Eigen CPU
+    # kernels; the GPU kernels are generated from MLIR separately.
+    for dtype in [dtypes.float16, dtypes.float32, dtypes.float64]:
+      for size in [1, 3, 4, 16, 1024]:
+        x = constant_op.constant(np.full((size,), -0.0), dtype=dtype)
+        y = constant_op.constant(np.full((size,), 2.0), dtype=dtype)
+        with test_util.force_cpu():
+          xlogy = self.evaluate(math_ops.xlogy(x, y))
+          self.assertAllEqual(xlogy, np.zeros(size))
+          self.assertFalse(np.signbit(xlogy).any())
 
 
 @test_util.run_all_in_graph_and_eager_modes
@@ -920,6 +1348,17 @@ class Xlog1pyTest(test_util.TensorFlowTestCase):
         self.assertAllClose(zeros_np, xlog1py_tf_np[0])
         self.assertAllClose(xtimes_log1py, xlog1py_tf_np[1])
 
+  def testXlog1pyWithNegativeZero(self):
+    # See XlogyTest.testXlogyWithNegativeZero.
+    for dtype in [dtypes.float16, dtypes.float32, dtypes.float64]:
+      for size in [1, 3, 4, 16, 1024]:
+        x = constant_op.constant(np.full((size,), -0.0), dtype=dtype)
+        y = constant_op.constant(np.full((size,), 1.0), dtype=dtype)
+        with test_util.force_cpu():
+          xlog1py = self.evaluate(math_ops.xlog1py(x, y))
+          self.assertAllEqual(xlog1py, np.zeros(size))
+          self.assertFalse(np.signbit(xlog1py).any())
+
 
 @test_util.run_all_in_graph_and_eager_modes
 class XdivyTest(test_util.TensorFlowTestCase):
@@ -952,6 +1391,17 @@ class XdivyTest(test_util.TensorFlowTestCase):
         x_over_y = self.evaluate(1 / y[1])
         self.assertAllClose(zeros_np, xdivy_tf_np[0])
         self.assertAllClose(x_over_y, xdivy_tf_np[1])
+
+  def testXdivyWithNegativeZero(self):
+    # See XlogyTest.testXlogyWithNegativeZero.
+    for dtype in [dtypes.float16, dtypes.float32, dtypes.float64]:
+      for size in [1, 3, 4, 16, 1024]:
+        x = constant_op.constant(np.full((size,), -0.0), dtype=dtype)
+        y = constant_op.constant(np.full((size,), 3.0), dtype=dtype)
+        with test_util.force_cpu():
+          xdivy = self.evaluate(math_ops.xdivy(x, y))
+          self.assertAllEqual(xdivy, np.zeros(size))
+          self.assertFalse(np.signbit(xdivy).any())
 
 
 @test_util.run_all_in_graph_and_eager_modes
@@ -1015,7 +1465,7 @@ class BinaryOpsTest(test_util.TensorFlowTestCase):
       error = TypeError
       error_message = (r"Failed to convert elements of .* to Tensor")
 
-    class RHSReturnsTrue(object):
+    class RHSReturnsTrue:
 
       def __radd__(self, other):
         return True
@@ -1023,7 +1473,7 @@ class BinaryOpsTest(test_util.TensorFlowTestCase):
     a = array_ops.ones([1], dtype=dtypes.int32) + RHSReturnsTrue()
     self.assertEqual(a, True)
 
-    class RHSRaisesError(object):
+    class RHSRaisesError:
 
       def __radd__(self, other):
         raise TypeError("RHS not implemented")
@@ -1032,7 +1482,7 @@ class BinaryOpsTest(test_util.TensorFlowTestCase):
       a = array_ops.ones([1], dtype=dtypes.int32) + RHSRaisesError()
       self.evaluate(a)
 
-    class RHSReturnsNotImplemented(object):
+    class RHSReturnsNotImplemented:
 
       def __radd__(self, other):
         return NotImplemented
@@ -1041,7 +1491,7 @@ class BinaryOpsTest(test_util.TensorFlowTestCase):
       a = array_ops.ones([1], dtype=dtypes.int32) + RHSReturnsNotImplemented()
       self.evaluate(a)
 
-    class RHSNotImplemented(object):
+    class RHSNotImplemented:
       pass
 
     with self.assertRaisesRegex(error, error_message):
@@ -1059,6 +1509,32 @@ class SignTest(test_util.TensorFlowTestCase):
         y = math_ops.sign(x)
       self.assertAllClose(
           t.gradient(y, x), math_ops.complex(0.353553, -0.353553))
+
+  def test_complex_sign_tiny_no_underflow(self):
+    # Regression test for tf#116945: tf.math.sign returned 0 for small complex64
+    # inputs because complex_abs computed |z|^2 in float32, which underflows to
+    # 0 for |z| < ~1.08e-19. With the fix, the entire computation is promoted
+    # to complex128 and the result is cast back to the input dtype.
+    with context.eager_mode():
+      # |z| = sqrt(2) * 1e-20 ~= 1.41e-20, well below float32 underflow.
+      tiny = 1e-20
+      for dtype, expected_dtype in [
+          (np.complex64, np.complex64),
+          (np.complex128, np.complex128),
+      ]:
+        x = constant_op.constant(tiny + tiny * 1j, dtype=dtype)
+        y = math_ops.sign(x)
+        # Result should be x/|x| = (1+1j)/sqrt(2), not 0.
+        # Use builtin complex() instead of np.complex (deprecated in NumPy 1.20+).
+        expected = np.array(
+            complex(tiny, tiny) / abs(complex(tiny, tiny)), dtype=expected_dtype
+        )
+        self.assertAllClose(y.numpy(), expected, atol=1e-6)
+        self.assertEqual(y.dtype.base_dtype, expected_dtype)
+
+      # Also verify zero still returns zero (no division by zero crash).
+      z = constant_op.constant(0 + 0j, dtype=np.complex64)
+      self.assertAllEqual(math_ops.sign(z).numpy(), np.complex64(0))
 
 
 @test_util.run_all_in_graph_and_eager_modes
@@ -1091,15 +1567,39 @@ class ReciprocalNoNanTest(test_util.TensorFlowTestCase):
       self.assertEqual(y.dtype.base_dtype, x.dtype.base_dtype)
 
 
-@test_util.run_all_in_graph_and_eager_modes
-class EqualityTest(test_util.TensorFlowTestCase):
+class EqualityTest(test_util.TensorFlowTestCase, parameterized.TestCase):
 
+  @test_util.run_all_in_graph_and_eager_modes
   def testEqualityNone(self):
     x = constant_op.constant([1.0, 2.0, 0.0, 4.0], dtype=dtypes.float32)
     self.assertNotEqual(x, None)
     self.assertNotEqual(None, x)
     self.assertFalse(math_ops.tensor_equals(x, None))
     self.assertTrue(math_ops.tensor_not_equals(x, None))
+
+  @parameterized.named_parameters(
+      (f"-is_equals={is_equals}-float_literal_type={type(float_literal)}"  # pylint: disable=g-complex-comprehension
+       f"-float_literal={float_literal}", is_equals, float_literal)
+      for float_literal in [4.6, np.float32(4.6), 4.4, np.float32(4.4)]
+      for is_equals in [True, False])
+  def testEqualityNoDowncast(self, is_equals, float_literal):
+    if (tf2.enabled() and isinstance(float_literal, np.float32) or
+        not tf2.enabled() and isinstance(float_literal, float)):
+      # TODO(b/199262800): Remove this skip
+      self.skipTest("There is a bug in type promotion.")
+    if is_equals:
+      op = math_ops.tensor_equals
+    else:
+      op = math_ops.tensor_not_equals
+    x = constant_op.constant(4)
+    try:
+      result = op(x, float_literal)
+      if isinstance(result, tensor_lib.Tensor):
+        result = self.evaluate(result)
+    except TypeError:
+      # Throwing a TypeError is OK
+      return
+    self.assertEqual(result, not is_equals)
 
 
 @test_util.run_all_in_graph_and_eager_modes
@@ -1110,6 +1610,22 @@ class RangeTest(test_util.TensorFlowTestCase):
     tensor = ops.convert_to_tensor(values)
     self.assertAllEqual((5,), tensor.get_shape().as_list())
     self.assertAllEqual(values, self.evaluate(tensor))
+
+  def testInputsNearInt64Max(self):
+    int64_t_max = 2**63 - 1
+    x = math_ops.range(0, 201, int64_t_max - 200, dtype=dtypes.int64)
+    self.assertAllEqual((0,), self.evaluate(x))  # just below potential overflow
+    x = math_ops.range(0, 202, int64_t_max - 200, dtype=dtypes.int64)
+    self.assertAllEqual(
+        (0,), self.evaluate(x))  # smallest input with potential overflow
+
+  def testInt32Overflow(self):
+    start = 1136033460
+    end = -2110457150
+    step = -1849827689
+    expected = np.arange(start, end, step)
+    actual = math_ops.range(start, end, step)
+    self.assertAllEqual(expected, self.evaluate(actual))
 
 
 @test_util.run_all_in_graph_and_eager_modes
@@ -1122,7 +1638,7 @@ class ErfcinvTest(test_util.TensorFlowTestCase):
 
 
 @test_util.run_all_in_graph_and_eager_modes
-class ArgMaxMinTest(test_util.TensorFlowTestCase):
+class ArgMaxMinTest(test_util.TensorFlowTestCase, parameterized.TestCase):
 
   def _generateRandomTensor(self, dtype, shape):
     if dtype.is_integer:
@@ -1159,6 +1675,47 @@ class ArgMaxMinTest(test_util.TensorFlowTestCase):
       values = array_ops.zeros(shape=(193681,), dtype=dtype)
       self.assertAllEqual(math_ops.argmax(values), 0)
 
+  def testArgMaxUint16(self):
+    shape = (24, 8)
+    for dtype in self._getValidDtypes():
+      tf_values = self._generateRandomTensor(dtype, shape)
+      np_values = self.evaluate(tf_values)
+      for axis in range(0, len(shape)):
+        np_max = np.argmax(np_values, axis=axis)
+        tf_max = math_ops.argmax(
+            tf_values, axis=axis, output_type=dtypes.uint16)
+        self.assertAllEqual(tf_max, np_max)
+
+  @parameterized.parameters(
+      dtypes.int8,
+      dtypes.uint8,
+      dtypes.int16,
+      dtypes.uint16,
+      dtypes.int32,
+      dtypes.int64,
+  )
+  def testArgMaxWithIntegerDtypes(self, dtype):
+    shape = (24, 8)
+    tf_values = self._generateRandomTensor(dtype, shape)
+    np_values = self.evaluate(tf_values)
+    for axis in range(len(shape)):
+      np_max = np.argmax(np_values, axis=axis)
+      tf_max = math_ops.argmax(
+          tf_values,
+          axis=constant_op.constant(axis, dtype=dtype),
+          output_type=dtypes.int32,
+      )
+      self.assertAllEqual(tf_max, np_max)
+
+  def testArgMaxRaisesInvalidDtype(self):
+    invalid_axis = constant_op.constant(1, dtype=dtypes.float32)
+    with self.assertRaises(TypeError):
+      math_ops.argmax(
+          constant_op.constant([1, 2, 3]),
+          axis=invalid_axis,
+          output_type=dtypes.int32,
+      )
+
   def testArgMin(self):
     shape = (24, 8)
     for dtype in self._getValidDtypes():
@@ -1180,6 +1737,83 @@ class ArgMaxMinTest(test_util.TensorFlowTestCase):
       # Long tensor to ensure works with multithreading/GPU
       values = array_ops.zeros(shape=(193681,), dtype=dtype)
       self.assertAllEqual(math_ops.argmin(values), 0)
+
+
+class CastTest(test_util.TensorFlowTestCase):
+
+  def testCastWithFullType(self):
+
+    @def_function.function
+    def test_fn():
+      ta = tensor_array_ops.TensorArray(dtypes.int32, size=1)
+      h = math_ops.cast(ta.flow, dtypes.variant)
+
+      t = full_type_pb2.FullTypeDef(
+          type_id=full_type_pb2.TFT_PRODUCT,
+          args=[full_type_pb2.FullTypeDef(type_id=full_type_pb2.TFT_ARRAY)])
+      h.op.experimental_set_type(t)
+
+      ta = tensor_array_ops.TensorArray(dtypes.int32, flow=h)
+      ta = ta.write(0, constant_op.constant(1))
+      return ta.stack()
+
+    self.assertAllEqual(self.evaluate(test_fn()), [1])
+
+
+@test_util.run_all_in_graph_and_eager_modes
+class ScalarCoercionTest(test_util.TensorFlowTestCase):
+
+  def testSubtractScalarCoercion(self):
+    x = constant_op.constant([1.0, 2.0, 3.0], dtype=dtypes.float32)
+
+    def subtract_fn(t):
+      return math_ops.subtract(5, t)
+
+    def subtract_reverse_fn(t):
+      return math_ops.subtract(t, 5)
+
+    for fn, expected in (
+        (subtract_fn, [4.0, 3.0, 2.0]),
+        (subtract_reverse_fn, [-4.0, -3.0, -2.0]),
+    ):
+      self.assertAllClose(fn(x), expected)
+      self.assertAllClose(def_function.function(fn)(x), expected)
+      if test_util.is_xla_enabled():
+        self.assertAllClose(
+            def_function.function(fn, jit_compile=True)(x), expected
+        )
+
+  def testMultiplyAndPowScalarCoercion(self):
+    x1 = constant_op.constant([1.0, 2.0, 3.0, 4.0], dtype=dtypes.float32)
+    x2 = constant_op.constant([4.0, 5.0, 6.0, 7.0], dtype=dtypes.bfloat16)
+
+    def mul_fn(x):
+      return math_ops.multiply(5, x)
+
+    def pow_fn(x):
+      return math_ops.pow(1, x)
+
+    def mul_reverse_fn(x):
+      return math_ops.multiply(x, 5)
+
+    def pow_reverse_fn(x):
+      return math_ops.pow(x, 2)
+
+    self.assertAllClose(mul_fn(x1), [5.0, 10.0, 15.0, 20.0])
+    self.assertAllClose(pow_fn(x2), [1.0, 1.0, 1.0, 1.0])
+    self.assertAllClose(mul_reverse_fn(x1), [5.0, 10.0, 15.0, 20.0])
+    self.assertAllClose(pow_reverse_fn(x2), [16.0, 25.0, 36.0, 49.0])
+
+    if test_util.is_xla_enabled():
+      mul_xla = def_function.function(mul_fn, jit_compile=True)
+      pow_xla = def_function.function(pow_fn, jit_compile=True)
+      mul_rev_xla = def_function.function(mul_reverse_fn, jit_compile=True)
+      pow_rev_xla = def_function.function(pow_reverse_fn, jit_compile=True)
+
+      self.assertAllClose(mul_xla(x1), [5.0, 10.0, 15.0, 20.0])
+      self.assertAllClose(pow_xla(x2), [1.0, 1.0, 1.0, 1.0])
+      self.assertAllClose(mul_rev_xla(x1), [5.0, 10.0, 15.0, 20.0])
+      self.assertAllClose(pow_rev_xla(x2), [16.0, 25.0, 36.0, 49.0])
 
 
 if __name__ == "__main__":

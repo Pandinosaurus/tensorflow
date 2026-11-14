@@ -14,16 +14,13 @@
 # ==============================================================================
 """Tests for `tf.Module`."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import abc
 import collections
 import itertools
+import sys
+import unittest
 
 from absl.testing import parameterized
-import six
 
 from tensorflow.python import tf2
 from tensorflow.python.distribute import ps_values
@@ -52,6 +49,16 @@ class TestModuleNaming(test_util.TensorFlowTestCase):
       mod = module.Module(name="bar")
     self.assertEqual(mod.name, "bar")
     self.assertEqual(mod.name_scope.name, "foo/bar/")
+
+  def test_scope_nesting_behavior(self):
+    mod = module.Module(name="bar")
+    with ops.name_scope("foo", skip_on_eager=False):
+      # mod.name_scope is absolute and anchored to instantiation time.
+      with mod.name_scope:
+        self.assertEqual(get_name_scope(), "bar/")
+      # Using mod.name creates a relative scope that nests inside ambient scopes.
+      with ops.name_scope(mod.name, skip_on_eager=False):
+        self.assertEqual(get_name_scope(), "foo/bar/")
 
   def test_enters_name_scope_in_call(self):
     mod = ReturnsNameScopeModule()
@@ -172,7 +179,7 @@ class TestModuleNaming(test_util.TensorFlowTestCase):
 
       def __getattr__(self, name):
         scope_names.append((name, get_name_scope()))
-        return super(GetAttrModule, self).__getattr__(name)
+        return super().__getattr__(name)
 
     mod = GetAttrModule()
     with self.assertRaises(AttributeError):
@@ -186,7 +193,7 @@ class TestModuleNaming(test_util.TensorFlowTestCase):
 
       def __getattribute__(self, name):
         scope_names.append((name, get_name_scope()))
-        return super(GetAttributeModule, self).__getattribute__(name)
+        return super().__getattribute__(name)
 
     mod = GetAttributeModule()
     with self.assertRaises(AttributeError):
@@ -291,7 +298,7 @@ class VariableTrackingTest(test_util.TensorFlowTestCase):
 
     m = module.Module()
     m.a = CompositeVariable([variables.Variable(1.), variables.Variable(2.)])
-    self.assertAllEqual(m.variables, m.a._variables)
+    self.assertEqual(list(m.variables), list(m.a._variables))
 
 
 class ModuleTrackingTest(test_util.TensorFlowTestCase):
@@ -361,7 +368,7 @@ class ErrorModule(module.Module):
 
   def __init__(self, call_super, raise_in_constructor=True):
     if call_super:
-      super(ErrorModule, self).__init__()
+      super().__init__()
     if raise_in_constructor:
       raise ErrorModuleError("Deliberate error!")
 
@@ -372,7 +379,7 @@ class ErrorModule(module.Module):
 class RecursiveModule(module.Module):
 
   def __init__(self, depth, trainable=True):
-    super(RecursiveModule, self).__init__(name="badger")
+    super().__init__(name="badger")
     with self.name_scope:
       self.child = None
       if depth > 1:
@@ -380,8 +387,7 @@ class RecursiveModule(module.Module):
       self.w = variables.Variable(1.0, trainable=trainable, name="mushroom")
 
 
-@six.add_metaclass(abc.ABCMeta)
-class AbstractModule(module.Module):
+class AbstractModule(module.Module, metaclass=abc.ABCMeta):
 
   @abc.abstractmethod
   def __call__(self, x):
@@ -398,7 +404,7 @@ class ConcreteModule(AbstractModule):
 class TreeModule(module.Module):
 
   def __init__(self, name=None):
-    super(TreeModule, self).__init__(name=name)
+    super().__init__(name=name)
     self._leaves = []
 
   @module.Module.with_name_scope
@@ -456,7 +462,7 @@ class ModuleWithFunctionAnnotatedCall(module.Module):
 class PropertyModule(module.Module):
 
   def __init__(self):
-    super(PropertyModule, self).__init__()
+    super().__init__()
     self._setter_scope_name = None
 
   @property
@@ -520,6 +526,8 @@ class FlattenTest(parameterized.TestCase, test_util.TensorFlowTestCase):
     self.assertLen(mod.variables, 1)
     self.assertEqual(mod.variables[0], mod.normal_variable)
 
+  @unittest.skipIf(sys.version_info.major == 3 and sys.version_info.minor == 12,
+                   reason="b/313658911: _TupleWrapper __dict__ attribute error")
   def test_with_path(self):
     mod = module.Module()
     mod.w = variables.Variable(1.)
@@ -560,13 +568,7 @@ class FlattenTest(parameterized.TestCase, test_util.TensorFlowTestCase):
                       ("decoder", "w", 0, 1, "k"): mod.decoder.w[0][1]["k"]},)
 
   def test_raises_error_with_path(self):
-    if six.PY2:
-      class NonOrderable(object):
-        __lt__ = None
-
-      non_orderable = NonOrderable
-    else:
-      non_orderable = object
+    non_orderable = object
 
     m = module.Module()
     m.layers = {non_orderable(): None, non_orderable(): None}
@@ -578,7 +580,7 @@ class FlattenTest(parameterized.TestCase, test_util.TensorFlowTestCase):
 class LayerModule(module.Module):
 
   def __init__(self):
-    super(LayerModule, self).__init__()
+    super().__init__()
     self._trainable_variables = [
         variables.Variable(1., name="a"),
         variables.Variable(2., name="b"),
@@ -601,7 +603,7 @@ class LayerModule(module.Module):
             attribute_traversal_key=key_function))
 
 
-class MemberType(object):
+class MemberType:
   """A simple type to search for."""
   pass
 
@@ -609,7 +611,7 @@ class MemberType(object):
 class SimpleModule(module.Module):
 
   def __init__(self, create_child=True, container_type=list):
-    super(SimpleModule, self).__init__()
+    super().__init__()
     self.z = MemberType()
     self.a = container_type([MemberType(), MemberType()])
     if create_child:

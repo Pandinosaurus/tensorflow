@@ -15,13 +15,13 @@ limitations under the License.
 
 // See docs in ../ops/array_ops.cc.
 
-#ifdef INTEL_MKL
+#if defined(INTEL_MKL)
 #define EIGEN_USE_THREADS
 
 #include <math.h>
 
-#include "mkldnn.hpp"
-#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
+#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
+#include "dnnl.hpp"
 #include "tensorflow/core/framework/op.h"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/type_traits.h"
@@ -72,14 +72,14 @@ class MklRequantizePerChannelOp : public OpKernel {
           ctx, input_requested_min.NumElements() == 1,
           errors::InvalidArgument("requested_output_min must be a scalar"));
       const float input_requested_min_float =
-          input_requested_min.flat<float>()(0);
+          input_requested_min.scalar<float>()();
 
       const Tensor& input_requested_max = ctx->input(this->kRequestMaxIndex);
       OP_REQUIRES(
           ctx, input_requested_min.NumElements() == 1,
           errors::InvalidArgument("requested_output_max must be a scalar"));
       const float input_requested_max_float =
-          input_requested_max.flat<float>()(0);
+          input_requested_max.scalar<float>()();
 
       if (out_type_ == DT_QINT8) {
         OP_REQUIRES(ctx, input_requested_min_float < 0.0f,
@@ -105,9 +105,23 @@ class MklRequantizePerChannelOp : public OpKernel {
                               static_cast<float>(1L << 31));
       }
 
-      mkldnn::primitive_attr reorder_attr;
+      dnnl::primitive_attr reorder_attr;
+#ifndef ENABLE_ONEDNN_V3
       reorder_attr.set_output_scales(2, scales);
+#else
+      reorder_attr.set_scales_mask(DNNL_ARG_SRC, 2);
+      auto scale_mem = memory({{static_cast<int64_t>(scales.size())},
+                               MklDnnType<float>(),
+                               memory::format_tag::x},
+                              cpu_engine_, scales.data());
+#endif  // !ENABLE_ONEDNN_V3
 
+      // Create the oneDNN wrapper over Eigen threadpool and set max threads
+      // in oneDNN.
+      Eigen::ThreadPoolInterface* eigen_interface =
+          EigenThreadPoolFromTfContext(ctx);
+      tsl::OneDnnThreadPool eigen_tp(eigen_interface,
+                                     ThreadPoolUseCallerThread());
       memory::dims dims_mkl_order =
           TFShapeToMklDnnDimsInNCHW(input.shape(), FORMAT_NHWC);
       memory::desc input_md = memory::desc(dims_mkl_order, MklDnnType<qint32>(),
@@ -135,17 +149,19 @@ class MklRequantizePerChannelOp : public OpKernel {
       std::unique_ptr<memory> output_mem_prim(
           new memory(output_md, cpu_engine_, output_buf));
 
-      mkldnn::reorder::primitive_desc reorder_pd =
+      dnnl::reorder::primitive_desc reorder_pd =
           ReorderPd(cpu_engine_, input_mem_prim->get_desc(), cpu_engine_,
                     output_mem_prim->get_desc(), reorder_attr);
       std::shared_ptr<stream> reorder_stream;
-      MklDnnThreadPool eigen_tp(ctx);
+
       reorder_stream.reset(CreateStream(&eigen_tp, cpu_engine_));
-      std::unordered_map<int, mkldnn::memory> reorder_args = {
-          {MKLDNN_ARG_FROM, *input_mem_prim},
-          {MKLDNN_ARG_TO, *output_mem_prim}};
-      std::unique_ptr<mkldnn::primitive> reorder_prim(
-          new mkldnn::reorder(reorder_pd));
+      std::unordered_map<int, dnnl::memory> reorder_args = {
+          {DNNL_ARG_FROM, *input_mem_prim}, {DNNL_ARG_TO, *output_mem_prim}};
+#ifdef ENABLE_ONEDNN_V3
+      reorder_args.insert({DNNL_ARG_ATTR_SCALES | DNNL_ARG_SRC, scale_mem});
+#endif  // ENABLE_ONEDNN_V3
+      std::unique_ptr<dnnl::primitive> reorder_prim(
+          new dnnl::reorder(reorder_pd));
       reorder_prim->execute(*reorder_stream, reorder_args);
 
       Tensor* output_min = nullptr;
@@ -155,9 +171,9 @@ class MklRequantizePerChannelOp : public OpKernel {
       OP_REQUIRES_OK(ctx,
                      ctx->allocate_output(kOutputMaxIndex, {}, &output_max));
 
-      output_min->flat<float>()(0) = input_requested_min_float;
-      output_max->flat<float>()(0) = input_requested_max_float;
-    } catch (mkldnn::error& e) {
+      output_min->scalar<float>()() = input_requested_min_float;
+      output_max->scalar<float>()() = input_requested_max_float;
+    } catch (dnnl::error& e) {
       string error_msg = "Status: " + std::to_string(e.status) +
                          ", message: " + std::string(e.message) + ", in file " +
                          std::string(__FILE__) + ":" + std::to_string(__LINE__);

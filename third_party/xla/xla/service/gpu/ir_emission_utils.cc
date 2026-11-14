@@ -1,0 +1,545 @@
+/* Copyright 2017 The OpenXLA Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+==============================================================================*/
+
+#include "xla/service/gpu/ir_emission_utils.h"
+
+#include <algorithm>
+#include <cstdint>
+#include <optional>
+#include <string>
+#include <utility>
+
+#include "absl/algorithm/container.h"
+#include "absl/container/inlined_vector.h"
+#include "absl/log/check.h"
+#include "absl/log/log.h"
+#include "absl/status/status.h"
+#include "absl/status/status_macros.h"
+#include "absl/strings/escaping.h"
+#include "absl/strings/str_join.h"
+#include "absl/strings/string_view.h"
+#include "absl/strings/substitute.h"
+#include "absl/types/span.h"
+#include "llvm/ADT/SmallVector.h"
+#include "llvm/IR/Attributes.h"
+#include "llvm/IR/Constants.h"
+#include "llvm/IR/DerivedTypes.h"
+#include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/Intrinsics.h"
+#include "llvm/IR/Type.h"
+#include "llvm/IR/Value.h"
+#include "llvm/IR/Verifier.h"
+#include "llvm/Support/raw_ostream.h"
+#include "xla/codegen/ir_emission_utils.h"
+#include "xla/codegen/xtile/xtile_config.pb.h"
+#include "xla/hlo/ir/hlo_casting_utils.h"
+#include "xla/hlo/ir/hlo_computation.h"
+#include "xla/hlo/ir/hlo_instruction.h"
+#include "xla/hlo/ir/hlo_instructions.h"
+#include "xla/hlo/ir/hlo_opcode.h"
+#include "xla/hlo/utils/hlo_traversal.h"
+#include "xla/layout_util.h"
+#include "xla/permutation_util.h"
+#include "xla/primitive_util.h"
+#include "xla/service/buffer_assignment.h"
+#include "xla/service/collective_ops_utils.h"
+#include "xla/service/gpu/backend_configs.pb.h"
+#include "xla/service/matmul_indexing_utils.h"
+#include "xla/shape.h"
+#include "xla/shape_util.h"
+#include "xla/status_macros.h"
+#include "xla/stream_executor/device_description.h"
+#include "xla/tsl/lib/strings/proto_serialization.h"
+#include "xla/util.h"
+#include "xla/xla_data.pb.h"
+#include "tsl/platform/protobuf.h"
+#include "tsl/platform/regexp.h"
+
+namespace xla {
+namespace gpu {
+
+bool IsGpublasLtSupportedGroupedMatMul(const HloInstruction& instr) {
+  if (instr.opcode() == HloOpcode::kRaggedDot) {
+    switch (instr.shape().element_type()) {
+      // Only float 16 and bf 16 are supported by HipBlasLt GroupGemm
+      case F16:
+      case BF16:
+        return (((instr.operand(0)->shape().element_type() == F16) ||
+                 (instr.operand(0)->shape().element_type() == BF16)) &&
+                ((instr.operand(1)->shape().element_type() == F16) ||
+                 (instr.operand(1)->shape().element_type() == BF16)));
+      default:
+        return false;
+    }
+  }
+  return false;
+}
+
+bool IsRaggedDotWgrad(const RaggedDotDimensionNumbers& dnums) {
+  const auto& lhs_contracting_dims =
+      dnums.dot_dimension_numbers().lhs_contracting_dimensions();
+  return absl::c_linear_search(lhs_contracting_dims,
+                               dnums.lhs_ragged_dimensions(0));
+}
+
+bool IsTritonSupportedRaggedDot(
+    const se::GpuComputeCapability& gpu_compute_capability,
+    const HloInstruction& instr) {
+  if (instr.opcode() != HloOpcode::kRaggedDot) {
+    return false;
+  }
+
+  const auto* ragged_dot = Cast<HloRaggedDotInstruction>(&instr);
+  const auto& ragged_dims = ragged_dot->ragged_dot_dimension_numbers();
+
+  // Exactly one LHS ragged dimension is required: the emitter and autotuner
+  // access lhs_ragged_dimensions(0) unconditionally.
+  if (ragged_dims.lhs_ragged_dimensions().size() != 1) {
+    return false;
+  }
+
+  // The xtile emitter's PrimitiveTypeToMlirType conversion supports the
+  // following element types for ragged-dot operands and output.
+  // Complex types (C64, C128) fall to the default branch and return
+  // UnimplementedError.  Nanoo FP8 types (F8E4M3FNUZ, F8E5M2FNUZ) are
+  // ROCm-only (NaNo format not supported on NVIDIA GPUs).
+  // Triton uses power-of-two block sizes (16..256) internally; problem
+  // dimensions need not be powers of two — masking handles boundary tiles.
+  const bool is_rocm = gpu_compute_capability.IsRocm();
+  auto is_supported_element_type = [&](PrimitiveType type) -> bool {
+    switch (type) {
+      case F16:
+      case BF16:
+      case F32:
+      case F64:
+      case F8E5M2:
+      case F8E4M3FN:
+        return true;
+      case F8E4M3FNUZ:
+      case F8E5M2FNUZ:
+        return is_rocm;
+      default:
+        return false;
+    }
+  };
+
+  return is_supported_element_type(instr.operand(0)->shape().element_type()) &&
+         is_supported_element_type(instr.operand(1)->shape().element_type()) &&
+         is_supported_element_type(instr.shape().element_type());
+}
+
+absl::StatusOr<bool> IsCublasSupportedMatMul(
+    const HloInstruction& dot, bool allow_matrix_vector_multiplication,
+    bool is_normalized) {
+  if (dot.opcode() != HloOpcode::kDot) {
+    return false;
+  }
+
+  // Number of operands that have non-trivial non-contracting dimension.
+  int num_matrix_operands = 0;
+  for (int operand : {0, 1}) {
+    ABSL_ASSIGN_OR_RETURN(DotOperandDims dims,
+                     DotOperandDims::FromDotOperand(&dot, operand));
+    if (dims.Rank(DotOperandDims::kContracting) == 0) {
+      return false;
+    }
+    if (is_normalized) {
+      // cuBLAS only supports single contracting dimension.
+      if (dims.Rank(DotOperandDims::kContracting) > 1) {
+        return false;
+      }
+      // cuBLAS doesn't support a physically minor batch dimension.
+      if (absl::c_linear_search(dims.Indices(DotOperandDims::kBatch),
+                                LayoutUtil::Minor(dims.shape().layout(), 0))) {
+        return false;
+      }
+      // cuBLAS supports up to one non-contracting dimension.
+      if (dims.Rank(DotOperandDims::kNonContracting) > 1) {
+        return false;
+      }
+    }
+    num_matrix_operands +=
+        (dims.TotalSize(DotOperandDims::kNonContracting) != 1);
+  }
+
+  if (num_matrix_operands == 0 ||
+      (num_matrix_operands == 1 && !allow_matrix_vector_multiplication)) {
+    return false;
+  }
+
+  switch (dot.shape().element_type()) {
+    // Types allowed for both matmul and matmul-vector.
+    case F8E4M3FN:
+    case F8E5M2:
+    case F16:
+    case BF16:
+    case F32:
+    case F64:
+    case C64:
+      return true;
+    case S32:
+      return (dot.operand(0)->shape().element_type() == S8 &&
+              dot.operand(1)->shape().element_type() == S8);
+    // Only allowed for matmul.
+    case F8E3M4:
+    case F8E4M3:
+    case F8E4M3FNUZ:
+    case F8E5M2FNUZ:
+    case C128:
+      return num_matrix_operands == 2;
+    default:
+      return false;
+  }
+}
+
+bool IsCustomCallToTopK(const HloInstruction& hlo) {
+  return hlo.opcode() == HloOpcode::kCustomCall &&
+         hlo.custom_call_target() == kTopKCustomCallTarget;
+}
+
+bool IsCustomCallToPtxKernel(const HloInstruction& hlo) {
+  return hlo.opcode() == HloOpcode::kCustomCall &&
+         hlo.custom_call_target() == "__gpu$xla.gpu.ptx";
+}
+
+bool IsCustomCallToMosaicGpu(const HloInstruction& hlo) {
+  return hlo.opcode() == HloOpcode::kCustomCall &&
+         (hlo.custom_call_target() == "mosaic_gpu" ||
+          hlo.custom_call_target() == "mosaic_gpu_v2");
+}
+
+bool IsMosaicWithCollectiveMetadata(const HloInstruction& hlo) {
+  return IsCustomCallToMosaicGpu(hlo) &&
+         RE2::PartialMatch(hlo.raw_backend_config_string(),
+                           "uses_xla_collective_metadata\\s*=\\s*[tT]rue");
+}
+
+static bool IsContiguousSlice(
+    const Shape& orig, const Shape& sliced,
+    std::optional<absl::Span<const int64_t>> slice_strides) {
+  std::optional<int64_t> sliced_dim;
+
+  for (auto dim : orig.layout().minor_to_major()) {
+    // All dimensions before the sliced one must be 1.
+    if (sliced_dim.has_value()) {
+      if (sliced.dimensions(dim) != 1) return false;
+    }
+
+    // We found sliced dimension, check that it's not a strided one, because it
+    // means that we can't take a contiguous slice.
+    if (sliced.dimensions(dim) < orig.dimensions(dim)) {
+      if (slice_strides.has_value() && slice_strides.value()[dim] != 1 &&
+          sliced.dimensions(dim) > 1) {
+        return false;
+      }
+      sliced_dim = dim;
+    }
+  }
+  return true;
+}
+
+int GetBitwidth(PrimitiveType type) {
+  if (type == PRED) {
+    return 8;
+  }
+  return primitive_util::BitWidth(type);
+}
+
+bool IsContiguousSlice(const HloInstruction& instr) {
+  if (auto slice = DynCast<HloSliceInstruction>(&instr)) {
+    const Shape& full_shape = slice->operand(0)->shape();
+    const Shape& slice_shape = slice->shape();
+    return IsContiguousSlice(full_shape, slice_shape, slice->slice_strides());
+
+  } else if (auto slice = DynCast<HloDynamicSliceInstruction>(&instr)) {
+    const Shape& full_shape = slice->operand(0)->shape();
+    const Shape& slice_shape = slice->shape();
+    return IsContiguousSlice(full_shape, slice_shape, std::nullopt);
+
+  } else if (auto slice = DynCast<HloDynamicUpdateSliceInstruction>(&instr)) {
+    const Shape& full_shape = slice->shape();
+    const Shape& slice_shape = slice->update()->shape();
+    return IsContiguousSlice(full_shape, slice_shape, std::nullopt);
+  }
+  return false;
+}
+
+bool EmitsNoThunks(const HloInstruction& hlo) {
+  switch (hlo.opcode()) {
+    // The module is already scheduled, so instructions that only order other
+    // instructions are no-ops.
+    case HloOpcode::kAddDependency:
+    case HloOpcode::kAfterAll:
+    // Their semantics are encoded by buffer assignment.
+    case HloOpcode::kBitcast:
+    case HloOpcode::kGetTupleElement:
+    case HloOpcode::kParameter:
+    case HloOpcode::kTuple:
+    // Constants are emitted as globals that are initialized when the
+    // executable is loaded.
+    case HloOpcode::kConstant:
+      return true;
+    case HloOpcode::kCustomCall:
+      return hlo.custom_call_target() == kNopCustomCallTarget ||
+             hlo.custom_call_target() == kPinCustomCallTarget ||
+             hlo.custom_call_target() == kUnpinCustomCallTarget ||
+             hlo.custom_call_target() == kCreateBufferCustomCallTarget;
+    default:
+      return false;
+  }
+}
+
+absl::StatusOr<BufferAllocation::Slice> GetAllocationSlice(
+    const BufferAssignment& buffer_assignment, const HloInstruction* instr,
+    const ShapeIndex& index) {
+  return buffer_assignment.GetUniqueSlice(instr, index);
+}
+
+bool CanEmitPackedTranspose(const TransposeDescription& desc) {
+  // TransposeDescription is normalized by construction.
+  PackedTransposeDescription spec(desc);
+  return GetPackedTransposeTileSizes(spec).ok();
+}
+
+std::optional<TransposeDescription> GetDescriptionForTiledTransposeEmitter(
+    const HloInstruction& hero) {
+  if (hero.opcode() != HloOpcode::kTranspose) {
+    return std::nullopt;
+  }
+
+  absl::InlinedVector<int64_t, 3> normalized_permutation;
+  auto normalized_dims_or = ShapeUtil::GetNormalizedLogicalTransposeShape(
+      hero.operand(0)->shape(), hero.shape(), hero.dimensions(),
+      normalized_permutation);
+  if (!normalized_dims_or.ok()) {
+    return std::nullopt;
+  }
+  auto normalized_dims = normalized_dims_or.value();
+  auto normalized_operand_dims =
+      Permute(normalized_dims, InversePermutation(normalized_permutation));
+  // A real transpose needs at least 2 transpose dimensions.
+  if (normalized_permutation.size() < 2) {
+    return std::nullopt;
+  }
+  auto bit_width = GetBitwidth(hero.shape().element_type());
+  int64_t operand_most_minor_dim = normalized_operand_dims.back();
+
+  TransposeDescription desc{&hero, normalized_dims, normalized_permutation,
+                            /*shmem_usage=*/0};
+  if (CanEmitPackedTranspose(desc)) {
+    int64_t vector_size =
+        kBankBitwidth / GetBitwidth(hero.shape().element_type());
+    desc.shmem_usage =
+        kNumShmemBanks * (kBankBitwidth / 8) * kNumShmemBanks * vector_size;
+    return desc;
+  }
+  // Minor dimension is preserved.
+  if (normalized_permutation.back() == normalized_dims.size() - 1) {
+    operand_most_minor_dim =
+        normalized_operand_dims[normalized_dims.size() - 2];
+    if (bit_width * normalized_dims.back() <= kMaxBitsInMostMinorDimension &&
+        bit_width * normalized_dims.back() *
+                std::min(operand_most_minor_dim,
+                         normalized_dims[normalized_dims.size() - 2]) >=
+            8 * kMinDimensionToTransposeTiled) {
+      // Tile size for transposition.
+      int64_t shmem_usage_bytes =
+          CeilOfRatio(kNumShmemBanks * (kNumShmemBanks + 1LL) * bit_width *
+                          normalized_dims.back(),
+                      8LL);
+      return TransposeDescription{&hero, normalized_dims,
+                                  normalized_permutation, shmem_usage_bytes};
+    }
+  } else if ((operand_most_minor_dim >= kMinDimensionToTransposeTiled &&
+              normalized_dims.back() >= kMinDimensionToTransposeTiled) ||
+             (operand_most_minor_dim >= kMinDimensionToTransposeTiled2 &&
+              normalized_dims.back() >= kMinDimensionToTransposeTiled2 &&
+              operand_most_minor_dim * normalized_dims.back() >=
+                  kMinTotalDimensionsToTransposeTiled)) {
+    // TODO(b/415741994): TransposeEmitter is regressing for S4 when the last
+    // dimension is being transposed. The issue seems to be related to bank
+    // conflicts but a proper investigation is needed.
+    if (bit_width == 4) {
+      return std::nullopt;
+    }
+    int64_t shmem_usage_bytes =
+        CeilOfRatio(kNumShmemBanks * (kNumShmemBanks + 1LL) * bit_width, 8LL);
+    return TransposeDescription{&hero, normalized_dims, normalized_permutation,
+                                shmem_usage_bytes};
+  }
+  return std::nullopt;
+}
+
+PackedTransposeDescription::PackedTransposeDescription(
+    const TransposeDescription& description)
+    : transpose(Cast<HloTransposeInstruction>(description.instr)) {
+  permutation = llvm::to_vector<3>(description.permutation);
+  inv_permutation = llvm::to_vector<3>(InversePermutation(permutation));
+  canonical_output_shape = llvm::to_vector<3>(description.dimensions);
+  canonical_permutation = llvm::to_vector<3>(description.permutation);
+
+  // If the last dimension is transposed, add a size-1 B dimension.
+  if (canonical_permutation.back() != canonical_output_shape.size() - 1) {
+    canonical_permutation.push_back(canonical_output_shape.size());
+    canonical_output_shape.push_back(1);
+  }
+  // Insert size-1 A dimension if necessary.
+  auto rank = canonical_output_shape.size();
+  // We know that the second to last dimension needs to be transposed, as
+  // otherwise the TransposeDescription would not be normalized. Thus, the index
+  // of the last transposed dimension is always rank - 2.
+  if (canonical_permutation[rank - 3] != rank - 3) {
+    canonical_output_shape.insert(canonical_output_shape.begin() + rank - 2, 1);
+    for (auto& p : canonical_permutation) {
+      if (p > rank - 3) p++;
+    }
+    canonical_permutation.insert(canonical_permutation.begin() + rank - 2,
+                                 rank - 2);
+  }
+  canonical_inv_permutation =
+      llvm::to_vector<3>(InversePermutation(canonical_permutation));
+  canonical_input_shape = llvm::to_vector<3>(
+      Permute(canonical_output_shape, canonical_inv_permutation));
+}
+
+std::string PackedTransposeDescription::ToString() const {
+  return absl::Substitute(R"(
+transpose: $0
+canonical_input_shape: $1
+canonical_output_shape: $2
+canonical_permutation: $3
+canonical_inv_permutation: $4
+[T2, A, T1, B] = [$5, $6, $7, $8]
+)",
+                          transpose->ToString(),
+                          absl::StrJoin(canonical_input_shape, ","),
+                          absl::StrJoin(canonical_output_shape, ","),
+                          absl::StrJoin(canonical_permutation, ","),
+                          absl::StrJoin(canonical_inv_permutation, ","),
+                          dim_T2(), dim_A(), dim_T1(), dim_B());
+}
+
+absl::StatusOr<absl::InlinedVector<int64_t, 3>> GetPackedTransposeTileSizes(
+    const PackedTransposeDescription& spec) {
+  // Check the side outputs, etc.
+  int64_t bits_per_element = GetBitwidth(spec.elem_type());
+  if (bits_per_element >= kBankBitwidth) {
+    return absl::InvalidArgumentError("Element type is too large");
+  }
+  absl::InlinedVector<int64_t, 3> tile_sizes(spec.canonical_rank(), 1);
+  int64_t vector_size = kBankBitwidth / bits_per_element;
+
+  // The shmem size is `shmem_dim x shmem_dim`.
+  int64_t shmem_dim = kNumShmemBanks * vector_size;
+  int64_t tile_size_T1 = std::min(spec.dim_T1(), shmem_dim);
+  int64_t tile_size_A = std::min(spec.dim_A(), shmem_dim / tile_size_T1);
+  int64_t tile_size_T2 = std::min(spec.dim_T2(), shmem_dim);
+  int64_t populated_shmem_rows = tile_size_T2;
+  int64_t populated_shmem_cols = tile_size_A * tile_size_T1;
+
+  // Do not use the packed transpose if there are not enough populated rows or
+  // columns in shmem.
+  const int64_t kNumMinPopulatedRowsOrColumns = 10 * vector_size;
+  if (populated_shmem_cols < kNumMinPopulatedRowsOrColumns ||
+      populated_shmem_rows < kNumMinPopulatedRowsOrColumns) {
+    return absl::InvalidArgumentError("Not enough rows or columns in shmem");
+  }
+
+  // These divisibility constrains are too strict, we can do better.
+  if (spec.dim_B() != 1 || populated_shmem_rows % vector_size != 0 ||
+      populated_shmem_cols % vector_size != 0 ||
+      spec.dim_T2() % tile_size_T2 % vector_size != 0) {
+    return absl::InvalidArgumentError("The shape is not supported");
+  }
+  tile_sizes[spec.dim_T1_output_id()] = tile_size_T1;
+  tile_sizes[spec.dim_T2_output_id()] = tile_size_T2;
+  tile_sizes[spec.dim_A_id()] = tile_size_A;
+  return tile_sizes;
+}
+
+HloInstructionAdaptor FindNonTrivialHero(const HloInstructionAdaptor& instr) {
+  HloInstructionAdaptor hero = instr;
+
+  // Go up the chain of trivial element-wise(+bitcast, -copy) operations. Note
+  // that no memoization is needed due to number of operands constraints: we
+  // never have to revisit same nodes.
+  while (IsIntermediate(&hero.instruction(), /*allowed_operand_count=*/1) &&
+         hero.parent().ContainsInstruction(hero.GetOperand(0))) {
+    hero = hero.GetOperand(0);
+  }
+
+  // Try a bit harder to find a transpose or concat hero. The shared memory
+  // transpose and concat emitters also work if there are elementwise ops with
+  // more than 1 operand on the path between root and the root op.
+  auto is_transpose = [](const HloInstruction& node) {
+    return GetDescriptionForTiledTransposeEmitter(node).has_value();
+  };
+  if (auto transpose = FindHero(hero, std::move(is_transpose))) {
+    return *transpose;
+  }
+  auto is_concatenate = [](const HloInstruction& node) {
+    return node.opcode() == HloOpcode::kConcatenate;
+  };
+  if (auto concatenate = FindHero(hero, std::move(is_concatenate))) {
+    return *concatenate;
+  }
+  if (hero.opcode() != HloOpcode::kReduce) {
+    return instr;
+  }
+  return hero;
+}
+
+const HloInstruction& FindNonTrivialHero(const HloInstruction& instr) {
+  CHECK_NE(instr.opcode(), HloOpcode::kFusion);
+  auto fusion_adaptor = HloFusionAdaptor::ForComputation(instr.parent());
+  HloInstructionAdaptor instr_adaptor(instr, fusion_adaptor.get());
+  return FindNonTrivialHero(instr_adaptor).instruction();
+}
+
+void VerifyModule(const llvm::Module& module) {
+  std::string error_str;
+  llvm::raw_string_ostream error_stream(error_str);
+  bool broken = llvm::verifyModule(module, &error_stream);
+  CHECK(!broken) << error_str;
+}
+
+absl::StatusOr<std::string> GetProtoFingerprint(
+    const tsl::protobuf::MessageLite& proto) {
+  std::string result;
+  TF_RET_CHECK(tsl::SerializeToStringDeterministic(proto, &result));
+  return absl::WebSafeBase64Escape(result);
+}
+
+std::optional<std::string> GetCustomFusionConfigName(
+    const HloInstruction* instr) {
+  if (instr->opcode() != HloOpcode::kFusion ||
+      instr->fusion_kind() != HloInstruction::FusionKind::kCustom) {
+    return std::nullopt;
+  }
+  absl::StatusOr<GpuBackendConfig> backend_config =
+      instr->backend_config<GpuBackendConfig>();
+  if (!backend_config.ok() || !backend_config->has_fusion_backend_config()) {
+    return std::nullopt;
+  }
+  const FusionBackendConfig& fusion_backend_config =
+      backend_config->fusion_backend_config();
+  if (!fusion_backend_config.has_custom_fusion_config()) {
+    return std::nullopt;
+  }
+  return fusion_backend_config.custom_fusion_config().name();
+}
+
+}  // namespace gpu
+}  // namespace xla

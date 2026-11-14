@@ -14,10 +14,6 @@
 # ==============================================================================
 """Tests for exposed tensorflow versions."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 from tensorflow.python.framework import versions
 from tensorflow.python.platform import test
 
@@ -28,8 +24,12 @@ class VersionTest(test.TestCase):
     self.assertEqual(type(versions.__version__), str)
     self.assertEqual(type(versions.VERSION), str)
     # This pattern will need to grow as we include alpha, builds, etc.
-    self.assertRegex(versions.__version__, r'^\d+\.\d+\.(\d+(\-\w+)?|head)$')
-    self.assertRegex(versions.VERSION, r'^\d+\.\d+\.(\d+(\-\w+)?|head)$')
+    self.assertRegex(
+        versions.__version__, r'^\d+\.\d+\.(\d+(\-\w+)?(\+\w+)?|head)$'
+    )
+    self.assertRegex(
+        versions.VERSION, r'^\d+\.\d+\.(\d+(\-\w+)?(\+\w+)?|head)$'
+    )
 
   def testGraphDefVersion(self):
     version = versions.GRAPH_DEF_VERSION

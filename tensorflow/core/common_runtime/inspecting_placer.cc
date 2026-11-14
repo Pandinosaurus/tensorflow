@@ -16,6 +16,7 @@ limitations under the License.
 
 #include <memory>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "absl/strings/str_join.h"
@@ -29,24 +30,25 @@ limitations under the License.
 #include "tensorflow/core/framework/types.h"
 #include "tensorflow/core/graph/graph_node_util.h"
 #include "tensorflow/core/lib/core/errors.h"
+#include "tensorflow/core/platform/refcount.h"
 
 namespace tensorflow {
 
-string IOColocationGroups::DebugString() const {
-  std::unordered_map<int, std::vector<string>> group_members;
+std::string IOColocationGroups::DebugString() const {
+  std::unordered_map<int, std::vector<std::string>> group_members;
   for (int arg_index = 0; arg_index < input_groups.size(); ++arg_index) {
     int group_id = input_groups[arg_index];
-    group_members[group_id].push_back(strings::StrCat("i:", arg_index));
+    group_members[group_id].push_back(absl::StrCat("i:", arg_index));
   }
   for (int ret_index = 0; ret_index < output_groups.size(); ++ret_index) {
     int group_id = output_groups[ret_index];
-    group_members[group_id].push_back(strings::StrCat("o:", ret_index));
+    group_members[group_id].push_back(absl::StrCat("o:", ret_index));
   }
 
-  std::vector<string> group_strings;
+  std::vector<std::string> group_strings;
   for (const auto& it : group_members) {
     int group_id = it.first;
-    const std::vector<string>& members = it.second;
+    const std::vector<std::string>& members = it.second;
     const PossibleDevices& devices = group_devices[group_id];
     group_strings.push_back(strings::StrCat(
         "Group(", group_id, " members = [", absl::StrJoin(members, ", "),
@@ -55,11 +57,11 @@ string IOColocationGroups::DebugString() const {
         "\" resource_device_name = \"",
         DeviceNameUtils::ParsedNameToString(devices.resource_device_name),
         "\" device_types = [",
-        absl::StrJoin(
-            devices.device_types, ", ",
-            [](string* out, const std::pair<DeviceType, int32>& type_and_pref) {
-              out->append(DeviceTypeString(type_and_pref.first));
-            }),
+        absl::StrJoin(devices.device_types, ", ",
+                      [](std::string* out,
+                         const std::pair<DeviceType, int32_t>& type_and_pref) {
+                        out->append(DeviceTypeString(type_and_pref.first));
+                      }),
         "])"));
   }
 
@@ -75,7 +77,7 @@ class ColocationGraphToIOColocationGroups {
       ColocationGraph* colocation_graph)
       : colocation_graph_(colocation_graph), next_group_id_(0) {}
 
-  void AssignGroups(const gtl::InlinedVector<Node*, 4>& nodes,
+  void AssignGroups(const absl::InlinedVector<Node*, 4UL>& nodes,
                     std::vector<int>* groups) {
     for (int i = 0; i < nodes.size(); ++i) {
       int root_id = colocation_graph_->FindAndUpdateRoot(nodes[i]->id());
@@ -92,7 +94,7 @@ class ColocationGraphToIOColocationGroups {
     }
   }
 
-  Status FillGroups(std::vector<PossibleDevices>* group_devices) {
+  absl::Status FillGroups(std::vector<PossibleDevices>* group_devices) {
     group_devices->resize(group_ids_.size());
     for (const auto& it : group_ids_) {
       int assigned_group_id = it.second;
@@ -100,7 +102,7 @@ class ColocationGraphToIOColocationGroups {
       const Member& member = colocation_graph_->members()[it.first];
       TF_RETURN_IF_ERROR(member.FillPossibleDevices(&possible_devices));
     }
-    return Status::OK();
+    return absl::OkStatus();
   }
 
  private:
@@ -123,26 +125,26 @@ InspectingPlacer::InspectingPlacer(const FunctionStack& stack,
       allow_soft_placement_(allow_soft_placement),
       log_device_placement_(log_device_placement) {}
 
-Status InspectingPlacer::ComputeIOColocationGroups(const Node& node,
-                                                   IOColocationGroups* groups) {
-  const FunctionDef* fdef;
+absl::Status InspectingPlacer::ComputeIOColocationGroups(
+    const Node& node, IOColocationGroups* groups) {
+  core::RefCountPtr<FunctionRecord> fdef;
   NameAttrList func;
   TF_RETURN_IF_ERROR(GetFunctionDefAndAttrs(flib_def_, node, &fdef, &func));
   std::unique_ptr<FunctionBody> fbody;
 
-  TF_RETURN_IF_ERROR(FunctionDefToBodyHelper(*fdef, AttrSlice(&func.attr()),
-                                             &flib_def_, &fbody));
+  TF_RETURN_IF_ERROR(FunctionDefToBodyHelper(
+      std::move(fdef), AttrSlice(&func.attr()), &flib_def_, &fbody));
 
   TF_RETURN_IF_ERROR(
       IsolatePlacerInspectionRequiredOps(flib_def_, fbody->graph));
   if (stack_.HasFunction(func.name())) {
-    return errors::Unimplemented(
+    return absl::UnimplementedError(absl::StrCat(
         "Recursive function calls are not supported. Node ",
         FormatNodeForError(node), " inside the body of ",
         errors::FormatFunctionForError(stack_.current_function_name()),
         " calls function ", errors::FormatFunctionForError(func.name()),
         " which is already present in the call stack:\n  ",
-        stack_.FormatForError());
+        stack_.FormatForError()));
   }
 
   ColocationGraph colocation_graph(
@@ -154,7 +156,7 @@ Status InspectingPlacer::ComputeIOColocationGroups(const Node& node,
   converter.AssignGroups(fbody->arg_nodes, &groups->input_groups);
   converter.AssignGroups(fbody->ret_nodes, &groups->output_groups);
   TF_RETURN_IF_ERROR(converter.FillGroups(&groups->group_devices));
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 }  // namespace tensorflow

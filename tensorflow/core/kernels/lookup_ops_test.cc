@@ -51,8 +51,8 @@ class MockHashTable : public lookup::HashTable<K, V> {
   ~MockHashTable() override { alive = false; }
 };
 
-typedef int32 key_dtype;
-typedef int32 value_dtype;
+typedef int32_t key_dtype;
+typedef int32_t value_dtype;
 
 REGISTER_KERNEL_BUILDER(
     Name("MockAnonymousHashTable")
@@ -87,7 +87,7 @@ TEST_F(LookupOpsTest, AnonymousHashTable_RefCounting) {
   auto resource_or = output_handle.GetResource<lookup::LookupInterface>();
   TF_EXPECT_OK(resource_or.status());
   if (resource_or.ok()) {
-    auto mock = resource_or.ValueOrDie();
+    auto mock = resource_or.value();
     EXPECT_TRUE(mock);
     EXPECT_EQ(base->RefCount(), 1);  // GetResource won't increase ref-count
   }

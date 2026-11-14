@@ -1,7 +1,25 @@
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
 # Description:
 #   Contains the Keras save model API (internal TensorFlow version).
 
+load("@xla//third_party/rules_python/python:defs.bzl", "py_library")
+
 package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
     # TODO(scottzhu): Remove non-keras deps from TF.
     default_visibility = [
         "//tensorflow/python/distribute:__pkg__",
@@ -30,13 +48,11 @@ py_library(
         "saving_utils.py",
     ],
     srcs_version = "PY3",
+    strict_deps = False,
     deps = [
-        "//tensorflow/python:lib",
-        "//tensorflow/python:math_ops",
-        "//tensorflow/python:platform",
-        "//tensorflow/python:saver",
-        "//tensorflow/python:tensor_spec",
+        "//tensorflow/python/checkpoint:graph_view",
         "//tensorflow/python/eager:def_function",
+        "//tensorflow/python/framework:tensor_spec",
         "//tensorflow/python/keras:backend",
         "//tensorflow/python/keras:losses",
         "//tensorflow/python/keras:optimizers",
@@ -49,7 +65,12 @@ py_library(
         "//tensorflow/python/keras/utils:engine_utils",
         "//tensorflow/python/keras/utils:metrics_utils",
         "//tensorflow/python/keras/utils:mode_keys",
+        "//tensorflow/python/lib/io:file_io",
+        "//tensorflow/python/ops:math_ops",
+        "//tensorflow/python/platform:gfile",
+        "//tensorflow/python/platform:tf_logging",
         "//tensorflow/python/saved_model",
-        "//tensorflow/python/training/tracking",
+        "//tensorflow/python/training:saver",
+        "@pypi//h5py",
     ],
 )

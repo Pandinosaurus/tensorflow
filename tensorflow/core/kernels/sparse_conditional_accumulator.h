@@ -50,14 +50,15 @@ class SparseConditionalAccumulator
  public:
   SparseConditionalAccumulator(const DataType& dtype,
                                const PartialTensorShape& shape,
-                               const string& name, const string& reduction_type)
+                               const std::string& name,
+                               const std::string& reduction_type)
       : TypedConditionalAccumulatorBase<
             std::tuple<const Tensor*, const Tensor*, const Tensor*>>(
             dtype, shape, name, reduction_type),
         accum_val_(std::make_unique<Tensor>()) {}
 
  protected:
-  std::unique_ptr<std::vector<int64>> accum_idx_vec_;
+  std::unique_ptr<std::vector<int64_t>> accum_idx_vec_;
   std::unique_ptr<std::vector<int>> count_element_;
 
   std::unique_ptr<Tensor> accum_val_;
@@ -69,7 +70,7 @@ class SparseConditionalAccumulator
                            Eigen::Unaligned>
       SliceConstT;
 
-  Status ValidateShape(
+  absl::Status ValidateShape(
       std::tuple<const Tensor*, const Tensor*, const Tensor*>* tensor,
       bool has_known_shape) TF_EXCLUSIVE_LOCKS_REQUIRED(this->mu_) {
     const Tensor* tensor_idx = std::get<0>(*tensor);
@@ -112,14 +113,15 @@ class SparseConditionalAccumulator
     if (counter_ > 0) {
       int64_t accum_val_dims = accum_val_->dims();
       if (accum_val_dims != grad_val_dims) {
-        return errors::InvalidArgument("Shape mismatch: expected values rank ",
-                                       accum_val_dims, ", got ", grad_val_dims);
+        return absl::InvalidArgumentError(
+            absl::StrCat("Shape mismatch: expected values rank ",
+                         accum_val_dims, ", got ", grad_val_dims));
       }
       for (int64_t i = 1; i < accum_val_dims; i++) {
         if (accum_val_->dim_size(i) != tensor_val->dim_size(i)) {
-          return errors::InvalidArgument("Shape mismatch: expected values dim ",
-                                         i, " to be ", accum_val_->dim_size(i),
-                                         ", got ", tensor_val->dim_size(i));
+          return absl::InvalidArgumentError(absl::StrCat(
+              "Shape mismatch: expected values dim ", i, " to be ",
+              accum_val_->dim_size(i), ", got ", tensor_val->dim_size(i)));
         }
       }
     } else {
@@ -140,7 +142,7 @@ class SparseConditionalAccumulator
       }
     }
 
-    return Status::OK();
+    return absl::OkStatus();
   }
 
   void AllocateAndAssignToAccumGradFunction(
@@ -187,7 +189,7 @@ class SparseConditionalAccumulator
     enum Source { from_accum, from_grad, from_accum_and_grad };
 
     // (1) do a pass over inputs, and append values and indices to vectors
-    std::vector<std::tuple<Source, int64, int64>> entries_to_copy;
+    std::vector<std::tuple<Source, int64_t, int64_t>> entries_to_copy;
     entries_to_copy.reserve(accum_nnz + grad_nnz);
 
     // Pass over all non-zero elements of both the gradient and the accumulated
@@ -228,7 +230,7 @@ class SparseConditionalAccumulator
     }
 
     // (2) Copy or sum the non-zero elements into sum_indices and sum_tensor
-    std::vector<int64>* sum_indices_vec = new std::vector<int64_t>();
+    std::vector<int64_t>* sum_indices_vec = new std::vector<int64_t>();
     sum_indices_vec->reserve(sum_nnz);
 
     std::vector<int>* sum_counts = new std::vector<int>();
@@ -356,17 +358,17 @@ class SparseConditionalAccumulator
     // Checks
     OP_REQUIRES_BOOLEAN(
         ctx, TensorShapeUtils::IsVector(grad_idx_tensor->shape()),
-        errors::InvalidArgument(
-            "Input indices should be vector but received shape: ",
-            grad_idx_tensor->shape().DebugString()));
+        absl::InvalidArgumentError(
+            absl::StrCat("Input indices should be vector but received shape: ",
+                         grad_idx_tensor->shape().DebugString())));
     const int64_t nnz = grad_idx_tensor->dim_size(0);
     OP_REQUIRES_BOOLEAN(
         ctx, grad_val_tensor->dims() > 0,
-        errors::InvalidArgument("Values cannot be 0-dimensional."));
+        absl::InvalidArgumentError("Values cannot be 0-dimensional."));
     OP_REQUIRES_BOOLEAN(ctx, grad_val_tensor->dim_size(0) == nnz,
-                        errors::InvalidArgument("Expected ", nnz,
-                                                " non-empty input values, got ",
-                                                grad_val_tensor->dim_size(0)));
+                        absl::InvalidArgumentError(absl::StrCat(
+                            "Expected ", nnz, " non-empty input values, got ",
+                            grad_val_tensor->dim_size(0))));
 
     *tensor = new std::tuple<const Tensor*, const Tensor*, const Tensor*>(
         grad_idx_tensor, grad_val_tensor, grad_shape_tensor);
@@ -382,7 +384,7 @@ class SparseConditionalAccumulator
   }
 
  private:
-  inline int cmp(std::vector<int64>* a_idx, const Tensor* b_idx,
+  inline int cmp(std::vector<int64_t>* a_idx, const Tensor* b_idx,
                  const int64_t a_row, const int64_t b_row) {
     const int64_t a = a_idx->at(a_row);
     const int64_t b = b_idx->vec<int64_t>()(b_row);
@@ -429,7 +431,8 @@ class SparseConditionalAccumulator
     return true;
   }
 
-  TF_DISALLOW_COPY_AND_ASSIGN(SparseConditionalAccumulator);
+  SparseConditionalAccumulator(const SparseConditionalAccumulator&) = delete;
+  void operator=(const SparseConditionalAccumulator&) = delete;
 };
 
 }  // namespace tensorflow

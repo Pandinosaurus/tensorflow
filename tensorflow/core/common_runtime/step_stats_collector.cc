@@ -12,8 +12,10 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
-
 #include "tensorflow/core/common_runtime/step_stats_collector.h"
+
+#include <memory>
+
 #include "tensorflow/core/common_runtime/costmodel_manager.h"
 #include "tensorflow/core/framework/allocation_description.pb.h"
 #include "tensorflow/core/framework/op_kernel.h"
@@ -27,7 +29,6 @@ limitations under the License.
 #include "tensorflow/core/lib/strings/scanner.h"
 #include "tensorflow/core/lib/strings/stringprintf.h"
 #include "tensorflow/core/platform/logging.h"
-#include "tensorflow/core/util/ptr_util.h"
 
 namespace tensorflow {
 namespace {
@@ -35,7 +36,7 @@ const int kMaxAllocReportNodes = 100;
 const float kMaxAllocReportFraction = 0.99;
 
 struct AllocStats {
-  std::map<int64_t, std::vector<string>> nodes_by_size;
+  std::map<int64_t, std::vector<std::string>> nodes_by_size;
   int64_t total_bytes = 0;
   int64_t total_nodes = 0;
 };
@@ -52,7 +53,7 @@ bool IsSend(const NodeDef* node) {
 
 NodeExecStatsWrapper::NodeExecStatsWrapper(
     const NodeDef* node, StepStatsCollector* step_stats_collector)
-    : NodeExecStatsWrapper(MakeUnique<NodeExecStats>(), node,
+    : NodeExecStatsWrapper(std::make_unique<NodeExecStats>(), node,
                            step_stats_collector) {
   stats_->set_node_name(node->name());
 }
@@ -64,39 +65,39 @@ NodeExecStatsWrapper::NodeExecStatsWrapper(
       node_(node),
       step_stats_collector_(step_stats_collector) {}
 
-void NodeExecStatsWrapper::Done(const string& device) {
+void NodeExecStatsWrapper::Done(const std::string& device) {
   // TODO(tucker): merge with the DetailText function in session.cc in a common
   // location.
   DCHECK(node_);
-  string memory;
+  std::string memory;
   for (auto& all : stats_->memory()) {
     int64_t tot = all.total_bytes();
     if (tot >= 0.1 * 1048576.0) {
       int64_t peak = all.peak_bytes();
       if (peak > 0) {
         memory =
-            strings::StrCat(memory, "[", all.allocator_name(),
-                            strings::Printf(" %.1fMB %.1fMB] ", tot / 1048576.0,
-                                            peak / 1048576.0));
+            absl::StrCat(memory, "[", all.allocator_name(),
+                         absl::StrFormat(" %.1fMB %.1fMB] ", tot / 1048576.0,
+                                         peak / 1048576.0));
       } else {
-        memory = strings::StrCat(memory, "[", all.allocator_name(),
-                                 strings::Printf(" %.1fMB] ", tot / 1048576.0));
+        memory = absl::StrCat(memory, "[", all.allocator_name(),
+                              absl::StrFormat(" %.1fMB] ", tot / 1048576.0));
       }
     }
   }
   const AttrSlice attrs(*node_);
-  string text;
+  std::string text;
   if (IsSend(node_)) {
-    string tensor_name;
+    std::string tensor_name;
     TF_CHECK_OK(GetNodeAttr(attrs, "tensor_name", &tensor_name));
-    string recv_device;
+    std::string recv_device;
     TF_CHECK_OK(GetNodeAttr(attrs, "recv_device", &recv_device));
     text = strings::StrCat(memory, node_->name(), " = ", node_->op(), "(",
                            tensor_name, " @", recv_device, ")");
   } else if (IsRecv(node_)) {
-    string tensor_name;
+    std::string tensor_name;
     TF_CHECK_OK(GetNodeAttr(attrs, "tensor_name", &tensor_name));
-    string send_device;
+    std::string send_device;
     TF_CHECK_OK(GetNodeAttr(attrs, "send_device", &send_device));
     text = strings::StrCat(memory, node_->name(), " = ", node_->op(), "(",
                            tensor_name, " @", send_device, ")");
@@ -196,7 +197,7 @@ void NodeExecStatsWrapper::Finalize() {
 StepStatsCollector::StepStatsCollector(StepStats* step_stats)
     : finalized_(false), step_stats_(step_stats) {}
 
-static int ExtractGpuWithStreamAll(string device_name) {
+static int ExtractGpuWithStreamAll(std::string device_name) {
   // Check if the device name matches the ".*gpu:(\\d+)/stream:all$" regexp,
   // and if it does return the stream index (always positive). If it doesn't
   // return -1.
@@ -211,7 +212,7 @@ static int ExtractGpuWithStreamAll(string device_name) {
   scanner.RestartCapture().Many(strings::Scanner::DIGIT).StopCapture();
   // Check that the digits are preceded by the 'device:GPU:' string
   scanner.OneLiteral(":UPG:ecived");
-  StringPiece capture;
+  absl::string_view capture;
   bool matched = scanner.GetResult(nullptr, &capture);
 
   if (!matched) {
@@ -219,15 +220,15 @@ static int ExtractGpuWithStreamAll(string device_name) {
   } else {
     // Convert the captured string into an integer. But first we need to put
     // the digits back in order
-    string ordered_capture(capture);
+    std::string ordered_capture(capture);
     std::reverse(ordered_capture.begin(), ordered_capture.end());
     int gpu_id;
-    CHECK(strings::safe_strto32(ordered_capture, &gpu_id));
+    CHECK(absl::SimpleAtoi(ordered_capture, &gpu_id));
     return gpu_id;
   }
 }
 
-static int ExtractGpuWithoutStream(string device_name) {
+static int ExtractGpuWithoutStream(std::string device_name) {
   // Check if the device name matches the ".*gpu:(\\d+)$" regexp,
   // and if it does return the stream index (always positive). If it doesn't
   // return -1.
@@ -240,7 +241,7 @@ static int ExtractGpuWithoutStream(string device_name) {
   scanner.RestartCapture().Many(strings::Scanner::DIGIT).StopCapture();
   // Check that the digits are preceded by the 'device:GPU:' string
   scanner.OneLiteral(":UPG:ecived");
-  StringPiece capture;
+  absl::string_view capture;
   bool matched = scanner.GetResult(nullptr, &capture);
 
   if (!matched) {
@@ -248,17 +249,17 @@ static int ExtractGpuWithoutStream(string device_name) {
   } else {
     // Convert the captured string into an integer. But first we need to put
     // the digits back in order
-    string ordered_capture(capture);
+    std::string ordered_capture(capture);
     std::reverse(ordered_capture.begin(), ordered_capture.end());
     int gpu_id;
-    CHECK(strings::safe_strto32(ordered_capture, &gpu_id));
+    CHECK(absl::SimpleAtoi(ordered_capture, &gpu_id));
     return gpu_id;
   }
 }
 
 void StepStatsCollector::BuildCostModel(
     CostModelManager* cost_model_manager,
-    const std::unordered_map<string, const Graph*>& device_map) {
+    const std::unordered_map<std::string, const Graph*>& device_map) {
   mutex_lock lock(mu_);
 
   if (!finalized_) {
@@ -275,13 +276,13 @@ void StepStatsCollector::BuildCostModel(
     const DeviceStepStats* hardware_stats;
   };
 
-  std::unordered_map<StringPiece, DeviceStats, StringPieceHasher>
+  std::unordered_map<absl::string_view, DeviceStats, StringPieceHasher>
       per_device_stats;
   std::unordered_map<int, const DeviceStepStats*> gpu_hardware_stats;
 
   for (int i = 0; i < step_stats_->dev_stats_size(); ++i) {
     const DeviceStepStats& device_stats = step_stats_->dev_stats(i);
-    const string& device_name = device_stats.device();
+    const std::string& device_name = device_stats.device();
     const int gpu_id = ExtractGpuWithStreamAll(device_name);
     if (gpu_id >= 0) {
       // These are gpu hardware stats
@@ -294,8 +295,8 @@ void StepStatsCollector::BuildCostModel(
   }
 
   for (auto& itr : per_device_stats) {
-    const StringPiece device_name = itr.first;
-    const int gpu_id = ExtractGpuWithoutStream(string(device_name));
+    const absl::string_view device_name = itr.first;
+    const int gpu_id = ExtractGpuWithoutStream(std::string(device_name));
     if (gpu_id >= 0) {
       // Reference the gpu hardware stats in addition to the regular stats
       // for this gpu device if they're available.
@@ -306,7 +307,7 @@ void StepStatsCollector::BuildCostModel(
   }
 
   for (const auto& itr : device_map) {
-    const StringPiece device = itr.first;
+    const absl::string_view device = itr.first;
     if (per_device_stats.find(device) == per_device_stats.end()) {
       continue;
     }
@@ -315,17 +316,18 @@ void StepStatsCollector::BuildCostModel(
     CostModel* cm = cost_model_manager->FindOrCreateCostModel(graph);
     cm->IncrementUpdateTimes();
 
-    std::unordered_map<StringPiece, Node*, StringPieceHasher> name_to_node;
+    std::unordered_map<absl::string_view, Node*, StringPieceHasher>
+        name_to_node;
     for (Node* n : graph->nodes()) {
       name_to_node.emplace(n->name(), n);
     }
 
     const DeviceStats& dev_stats = per_device_stats.find(device)->second;
 
-    std::unordered_map<string, NodeExecStats> name_to_hw_node_stats;
+    std::unordered_map<std::string, NodeExecStats> name_to_hw_node_stats;
     if (dev_stats.hardware_stats) {
       for (const auto& node_stats : dev_stats.hardware_stats->node_stats()) {
-        string node_name = node_stats.node_name();
+        std::string node_name = node_stats.node_name();
         // Remove the part of op name (e.g. :Conv2D) in the end of a node name.
         size_t pos = node_name.find_first_of(':');
         if (pos != std::string::npos) {
@@ -366,7 +368,8 @@ void StepStatsCollector::BuildCostModel(
         cm->RecordMemoryStats(node, stats.memory_stats());
         // Use hardware stats to record the execution time if they're available,
         // otherwise use the regular (less accurate) stats
-        string node_name = dev_stats.regular_stats->node_stats(i).node_name();
+        std::string node_name =
+            dev_stats.regular_stats->node_stats(i).node_name();
         if (dev_stats.hardware_stats && name_to_hw_node_stats.find(node_name) !=
                                             name_to_hw_node_stats.end()) {
           const NodeExecStats& hw_stats = name_to_hw_node_stats[node_name];
@@ -381,14 +384,14 @@ void StepStatsCollector::BuildCostModel(
   }
 }
 
-void StepStatsCollector::Save(const string& device,
+void StepStatsCollector::Save(const std::string& device,
                               NodeExecStats* node_stats_pb) {
   Save(device,
        new NodeExecStatsWrapper(std::unique_ptr<NodeExecStats>(node_stats_pb),
                                 nullptr, this));
 }
 
-void StepStatsCollector::Save(const string& device,
+void StepStatsCollector::Save(const std::string& device,
                               NodeExecStatsWrapper* node_stats) {
   if (!node_stats) return;
   VLOG(1) << "Save dev " << device << " node stats " << node_stats->stats();
@@ -408,9 +411,9 @@ void StepStatsCollector::Save(const string& device,
   }
 }
 
-void StepStatsCollector::SaveThreadName(const string& device,
-                                        const uint32 thread_id,
-                                        const string& thread_name) {
+void StepStatsCollector::SaveThreadName(const std::string& device,
+                                        const uint32_t thread_id,
+                                        const std::string& thread_name) {
   VLOG(1) << "Save dev " << device << " thread id " << thread_id << " name "
           << thread_name;
   {
@@ -432,16 +435,17 @@ NodeExecStatsInterface* StepStatsCollector::CreateNodeExecStats(
   return new NodeExecStatsWrapper(node, this);
 }
 
-string StepStatsCollector::ReportAllocsOnResourceExhausted(const string& err) {
+std::string StepStatsCollector::ReportAllocsOnResourceExhausted(
+    const absl::string_view err) {
   mutex_lock l(mu_);
   if (err.find("OOM") == err.npos) {
     return "";
   }
   // <device, allocator> -> AllocStats
-  std::map<std::pair<string, string>, AllocStats> allocs_map;
-  string report = "\n";
+  std::map<std::pair<std::string, std::string>, AllocStats> allocs_map;
+  std::string report = "\n";
   for (const auto& dev_stat : dev_stats_) {
-    const string& device = dev_stat.first;
+    const std::string& device = dev_stat.first;
     // Only print the device that has OOM.
     // TODO(xpan): Extract device from err first to speed it up.
     if (err.find(device) == err.npos) {
@@ -460,7 +464,7 @@ string StepStatsCollector::ReportAllocsOnResourceExhausted(const string& err) {
             std::make_pair(dev_stat.first, alloc.first->allocator_name());
         AllocStats& dev_allocs_stats = allocs_map[dev_allocator];
         TrackingAllocator* tracking_alloc = alloc.second;
-        gtl::InlinedVector<AllocRecord, 4> cur_records =
+        absl::InlinedVector<AllocRecord, 4UL> cur_records =
             tracking_alloc->GetCurrentRecords();
         int64_t cur_bytes = 0;
         for (const auto& r : cur_records) {
@@ -487,7 +491,7 @@ string StepStatsCollector::ReportAllocsOnResourceExhausted(const string& err) {
     // Print allocations stats of the <device, allocator> pair.
     for (auto it = dev_allocs_stats.nodes_by_size.rbegin();
          it != dev_allocs_stats.nodes_by_size.rend(); ++it) {
-      for (const string& node_name : it->second) {
+      for (const std::string& node_name : it->second) {
         reported_bytes += it->first;
         strings::StrAppend(&report, "  ",
                            strings::HumanReadableNumBytes(it->first), " from ",
@@ -529,7 +533,7 @@ void StepStatsCollector::FinalizeInternal() {
     return;
   }
   finalized_ = true;
-  std::map<string, DeviceStepStats*> dev_stats_pb;
+  std::map<std::string, DeviceStepStats*> dev_stats_pb;
   for (auto& ds : *step_stats_->mutable_dev_stats()) {
     dev_stats_pb[ds.device()] = &ds;
   }

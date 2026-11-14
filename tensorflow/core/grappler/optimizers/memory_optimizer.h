@@ -35,21 +35,21 @@ class MemoryOptimizer : public GraphOptimizer {
   //   RewriterConfig::memory_optimizer_target_node_name_scope.
   explicit MemoryOptimizer(
       RewriterConfig::MemOptType optimization_level,
-      const string& recomputation_targets_name_scope = "gradients/")
+      const std::string& recomputation_targets_name_scope = "gradients/")
       : optimization_level_(optimization_level),
         recomputation_targets_name_scope_(recomputation_targets_name_scope) {}
   ~MemoryOptimizer() override {}
 
-  string name() const override { return "memory_optimizer"; };
+  std::string name() const override { return "memory_optimizer"; };
 
   bool UsesFunctionLibrary() const override { return false; }
 
-  Status Optimize(Cluster* cluster, const GrapplerItem& item,
-                  GraphDef* pruned_graph) override;
+  absl::Status Optimize(Cluster* cluster, const GrapplerItem& item,
+                        GraphDef* pruned_graph) override;
 
  private:
   RewriterConfig::MemOptType optimization_level_;
-  string recomputation_targets_name_scope_;
+  std::string recomputation_targets_name_scope_;
 };
 
 }  // end namespace grappler

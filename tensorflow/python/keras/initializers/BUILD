@@ -1,9 +1,25 @@
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
 # Description:
 #   Contains the Keras initializer API (internal TensorFlow version).
 
-load("//tensorflow:tensorflow.bzl", "tf_py_test")
+load("@xla//third_party/rules_python/python:defs.bzl", "py_library")
 
 package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
     default_visibility = ["//tensorflow/python/keras:__subpackages__"],
     licenses = ["notice"],
 )
@@ -24,39 +40,20 @@ py_library(
         "initializers_v2.py",
     ],
     srcs_version = "PY3",
+    strict_deps = False,
     deps = [
-        "//tensorflow/python:array_ops",
-        "//tensorflow/python:constant_op",
-        "//tensorflow/python:dtypes",
-        "//tensorflow/python:init_ops",
-        "//tensorflow/python:linalg_ops",
-        "//tensorflow/python:math_ops",
-        "//tensorflow/python:random_ops",
-        "//tensorflow/python:stateless_random_ops",
         "//tensorflow/python:tf2",
+        "//tensorflow/python/framework:constant_op",
+        "//tensorflow/python/framework:dtypes",
         "//tensorflow/python/keras:backend",
         "//tensorflow/python/keras/utils:generic_utils",
         "//tensorflow/python/keras/utils:tf_inspect",
+        "//tensorflow/python/ops:array_ops",
+        "//tensorflow/python/ops:init_ops",
+        "//tensorflow/python/ops:linalg_ops",
+        "//tensorflow/python/ops:math_ops",
+        "//tensorflow/python/ops:random_ops",
+        "//tensorflow/python/ops:stateless_random_ops",
         "//tensorflow/python/util:tf_export",
-    ],
-)
-
-tf_py_test(
-    name = "initializers_test",
-    size = "small",
-    srcs = ["initializers_test.py"],
-    python_version = "PY3",
-    deps = [
-        ":initializers",
-        "//tensorflow/python:array_ops",
-        "//tensorflow/python:client_testlib",
-        "//tensorflow/python:framework_test_lib",
-        "//tensorflow/python:init_ops",
-        "//tensorflow/python:tf2",
-        "//tensorflow/python/keras:backend",
-        "//tensorflow/python/keras:combinations",
-        "//tensorflow/python/keras:models",
-        "//tensorflow/python/keras/engine",
-        "//third_party/py/numpy",
     ],
 )

@@ -1,63 +1,150 @@
-load("//tensorflow:tensorflow.bzl", "py_tests")
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
+load("@xla//third_party/rules_python/python:py_library.bzl", "py_library")
+load("//tensorflow:tensorflow.default.bzl", "tf_py_strict_test")
 
 package(
-    default_visibility = ["//tensorflow:internal"],
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
     licenses = ["notice"],
 )
 
 py_library(
-    name = "summary",
-    srcs = glob(
-        ["*.py"],
-        exclude = [
-            "fake*",
-            "*_test.py",
-        ],
-    ),
-    srcs_version = "PY3",
+    name = "plugin_asset",
+    srcs = ["plugin_asset.py"],
+    strict_deps = True,
     visibility = ["//visibility:public"],
     deps = [
-        "//tensorflow/core:protos_all_py",
-        "//tensorflow/python:client",
-        "//tensorflow/python:lib",
-        "//tensorflow/python:logging_ops_gen",
-        "//tensorflow/python:platform",
-        "//tensorflow/python:pywrap_tensorflow",
-        "//tensorflow/python:summary_op_util",
-        "//tensorflow/python:summary_ops_gen",
-        "//tensorflow/python:summary_ops_v2",
-        "//tensorflow/python/distribute:summary_op_util",
-        "//tensorflow/python/eager:context",
-        "//tensorflow/python/framework",
-        "//tensorflow/python/framework:constant_op",
-        "//tensorflow/python/framework:for_generated_wrappers",
-        "//tensorflow/python/summary/writer",
-        "//tensorflow/python/util",
-        "@six_archive//:six",
+        "//tensorflow/python/framework:ops",
     ],
 )
 
-py_tests(
-    name = "summary_tests",
-    size = "small",
-    srcs = [
-        "plugin_asset_test.py",
-        "summary_iterator_test.py",
-        "summary_test.py",
-    ],
-    python_version = "PY3",
+py_library(
+    name = "__init__",
+    srcs = ["__init__.py"],
+    strict_deps = True,
+    visibility = ["//visibility:public"],
+)
+
+py_library(
+    name = "summary_iterator",
+    srcs = ["summary_iterator.py"],
+    strict_deps = True,
+    visibility = ["//visibility:public"],
     deps = [
-        ":summary",
         "//tensorflow/core:protos_all_py",
-        "//tensorflow/python:array_ops",
-        "//tensorflow/python:client_testlib",
-        "//tensorflow/python:platform",
-        "//tensorflow/python:platform_test",
-        "//tensorflow/python:summary_ops_v2",
-        "//tensorflow/python:variables",
-        "//tensorflow/python/framework",
-        "//tensorflow/python/framework:for_generated_wrappers",
+        "//tensorflow/python/lib/io:tf_record",
+        "//tensorflow/python/util:tf_export",
+    ],
+)
+
+py_library(
+    name = "summary_py",
+    srcs = ["summary.py"],
+    strict_deps = True,
+    visibility = ["//visibility:public"],
+    deps = [
+        ":tb_summary",
+        "//tensorflow/core:protos_all_py",
+        "//tensorflow/python/distribute:summary_op_util",
+        "//tensorflow/python/eager:context",
+        "//tensorflow/python/framework:constant_op",
+        "//tensorflow/python/framework:dtypes",
+        "//tensorflow/python/framework:ops",
+        "//tensorflow/python/ops:array_ops",
+        "//tensorflow/python/ops:logging_ops_gen",
+        "//tensorflow/python/ops:summary_op_util",
+        "//tensorflow/python/ops:summary_ops_gen",
+        "//tensorflow/python/ops:summary_ops_v2",
+        "//tensorflow/python/summary/writer",
+        "//tensorflow/python/summary/writer:writer_cache",
+        "//tensorflow/python/training:training_util",
+        "//tensorflow/python/util:compat",
+        "//tensorflow/python/util:tf_export",
+    ],
+)
+
+tf_py_strict_test(
+    name = "plugin_asset_test",
+    size = "small",
+    srcs = ["plugin_asset_test.py"],
+    deps = [
+        ":plugin_asset",
+        "//tensorflow/python/framework:ops",
         "//tensorflow/python/framework:test_lib",
+        "//tensorflow/python/platform:test",
+    ],
+)
+
+tf_py_strict_test(
+    name = "summary_iterator_test",
+    size = "small",
+    srcs = ["summary_iterator_test.py"],
+    deps = [
+        ":summary_iterator",
+        ":summary_py",
+        "//tensorflow/core:protos_all_py",
+        "//tensorflow/python/framework:test_lib",
+        "//tensorflow/python/platform:client_testlib",
         "//tensorflow/python/summary/writer",
     ],
+)
+
+tf_py_strict_test(
+    name = "summary_test",
+    size = "small",
+    srcs = ["summary_test.py"],
+    deps = [
+        ":summary_py",
+        "//tensorflow/core:protos_all_py",
+        "//tensorflow/python/framework:constant_op",
+        "//tensorflow/python/framework:dtypes",
+        "//tensorflow/python/framework:errors",
+        "//tensorflow/python/framework:meta_graph",
+        "//tensorflow/python/framework:ops",
+        "//tensorflow/python/framework:test_lib",
+        "//tensorflow/python/ops:array_ops",
+        "//tensorflow/python/ops:summary_ops_v2",
+        "//tensorflow/python/ops:variables",
+        "//tensorflow/python/platform:client_testlib",
+        "//tensorflow/python/platform:test",
+    ],
+)
+
+tf_py_strict_test(
+    name = "summary_v2_test",
+    size = "small",
+    srcs = ["summary_v2_test.py"],
+    deps = [
+        ":summary_py",
+        ":tb_summary",
+        "//tensorflow/python/framework:constant_op",
+        "//tensorflow/python/framework:dtypes",
+        "//tensorflow/python/framework:ops",
+        "//tensorflow/python/framework:test_lib",
+        "//tensorflow/python/ops:array_ops",
+        "//tensorflow/python/ops:summary_ops_v2",
+        "//tensorflow/python/platform:client_testlib",
+        "//tensorflow/python/training:training_util",
+    ],
+)
+
+py_library(
+    name = "tb_summary",
+    srcs = ["tb_summary.py"],
+    strict_deps = True,
+    visibility = ["//tensorflow:internal"],
+    deps = ["//tensorflow/python/util:tf_export"],
 )

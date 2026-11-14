@@ -1,0 +1,721 @@
+/* Copyright 2026 The OpenXLA Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+==============================================================================*/
+
+#include "xla/backends/gpu/runtime/command_executor.h"
+
+#include <cstddef>
+#include <memory>
+#include <optional>
+#include <string>
+#include <utility>
+#include <variant>
+#include <vector>
+
+#include <gmock/gmock.h>
+#include "absl/cleanup/cleanup.h"
+#include "absl/status/status.h"
+#include "absl/status/status_macros.h"
+#include "absl/status/statusor.h"
+#include "absl/strings/string_view.h"
+#include "absl/types/span.h"
+#include "xla/backends/gpu/runtime/command.h"
+#include "xla/backends/gpu/runtime/command_buffer_requests.h"
+#include "xla/backends/gpu/runtime/command_state.h"
+#include "xla/backends/gpu/runtime/thunk.h"
+#include "xla/runtime/buffer_use.h"
+#include "xla/runtime/execution_graph.h"
+#include "xla/runtime/resource_use.h"
+#include "xla/service/buffer_assignment.h"
+#include "xla/service/gpu/buffer_allocations.h"
+#include "xla/service/service_executable_run_options.h"
+#include "xla/shape.h"
+#include "xla/shape_util.h"
+#include "xla/stream_executor/command_buffer.h"
+#include "xla/stream_executor/device_address.h"
+#include "xla/stream_executor/gpu/scoped_command_buffer_annotation.h"
+#include "xla/stream_executor/mock_command_buffer.h"
+#include "xla/tsl/platform/test.h"
+#include "xla/tsl/profiler/backends/cpu/annotation_stack.h"
+#include "xla/xla_data.pb.h"
+
+namespace xla::gpu {
+namespace {
+
+// A minimal Command for testing: configurable buffer uses, no-op Record.
+class FakeCmd : public Command {
+ public:
+  explicit FakeCmd(Command::BufferUses uses = {}, int* update_count = nullptr,
+                   bool requires_update_on_initialize = false,
+                   bool requires_update_on_execute = false,
+                   bool requires_warmup = false)
+      : Command(Thunk::Kind::kCommand),
+        uses_(std::move(uses)),
+        update_count_(update_count),
+        requires_update_on_initialize_(requires_update_on_initialize),
+        requires_update_on_execute_(requires_update_on_execute),
+        requires_warmup_(requires_warmup) {}
+
+  absl::StatusOr<const se::CommandBuffer::Command*> Record(
+      const Thunk::ExecuteParams&, const RecordParams&, RecordAction action,
+      se::CommandBuffer*) override {
+    if (update_count_ != nullptr &&
+        std::holds_alternative<RecordUpdate>(action)) {
+      ++*update_count_;
+    }
+    return nullptr;
+  }
+
+  BufferUses buffer_uses() const override { return uses_; }
+
+  bool requires_update_on_initialize() const override {
+    return requires_update_on_initialize_;
+  }
+
+  bool requires_update_on_execute() const override {
+    return requires_update_on_execute_;
+  }
+
+  bool requires_warmup() const override { return requires_warmup_; }
+
+ private:
+  BufferUses uses_;
+  int* update_count_;
+  bool requires_update_on_initialize_;
+  bool requires_update_on_execute_;
+  bool requires_warmup_;
+};
+
+// Convenience aliases for synchronization modes.
+constexpr auto kSerialize = CommandExecutor::SynchronizationMode::kSerialize;
+constexpr auto kConcurrent = CommandExecutor::SynchronizationMode::kConcurrent;
+constexpr auto kLHS = CommandExecutor::SynchronizationMode::kLHS;
+
+TEST(CommandExecutorTest, DuplicateAllocsCollapsedToOne) {
+  BufferAllocation alloc0(/*index=*/0, /*size=*/1024, /*color=*/0);
+  Shape shape = ShapeUtil::MakeShape(U8, {100});
+  auto slice = BufferAllocation::Slice(&alloc0, 0, 100);
+
+  CommandSequence cmds;
+  cmds.Emplace<FakeCmd>(Command::BufferUses{BufferUse::Read(slice, shape)});
+  cmds.Emplace<FakeCmd>(Command::BufferUses{BufferUse::Write(slice, shape)});
+  ASSERT_OK_AND_ASSIGN(auto executor,
+                       CommandExecutor::Create(std::move(cmds), kSerialize));
+
+  // Both commands reference the same allocation index — should appear once.
+  EXPECT_EQ(executor.allocs_indices().size(), 1);
+  EXPECT_EQ(executor.allocs_indices()[0], 0);
+}
+
+// A FakeCmd that reports `nested` as its only nested command.
+class NestingCmd : public FakeCmd {
+ public:
+  explicit NestingCmd(Command* nested) : nested_(nested) {}
+
+ protected:
+  absl::Status WalkNestedCommands(CommandWalker callback) override {
+    return callback(nested_);
+  }
+
+ private:
+  Command* nested_;
+};
+
+TEST(CommandExecutorTest, EmptySequenceDoesNotRequireWarmup) {
+  ASSERT_OK_AND_ASSIGN(auto executor, CommandExecutor::Create({}, kSerialize));
+  EXPECT_FALSE(executor.requires_warmup({}));
+}
+
+TEST(CommandExecutorTest, RequiresWarmup) {
+  for (bool requires_warmup : {false, true}) {
+    CommandSequence commands;
+    commands.Emplace<FakeCmd>();
+    commands.Emplace<FakeCmd>(Command::BufferUses{}, nullptr, false, false,
+                              requires_warmup);
+    ASSERT_OK_AND_ASSIGN(auto executor, CommandExecutor::Create(
+                                            std::move(commands), kSerialize));
+    EXPECT_EQ(executor.requires_warmup({}), requires_warmup);
+  }
+}
+
+TEST(CommandExecutorTest, RequiresWarmupInNestedCommands) {
+  for (bool requires_warmup : {false, true}) {
+    FakeCmd nested({}, nullptr, false, false, requires_warmup);
+    CommandSequence commands;
+    commands.Emplace<NestingCmd>(&nested);
+    ASSERT_OK_AND_ASSIGN(auto executor, CommandExecutor::Create(
+                                            std::move(commands), kSerialize));
+    EXPECT_EQ(executor.requires_warmup({}), requires_warmup);
+  }
+}
+
+TEST(CommandExecutorTest, RequiresWarmupWithCommandBufferRequests) {
+  FakeCmd nested({}, nullptr, false, false, /*requires_warmup=*/true);
+  CommandSequence commands;
+  commands.Emplace<FakeCmd>();
+  const Command* top_cmd = commands[0];
+  commands.Emplace<NestingCmd>(&nested);
+  ASSERT_OK_AND_ASSIGN(
+      auto executor, CommandExecutor::Create(std::move(commands), kSerialize));
+  EXPECT_TRUE(executor.requires_warmup({}));
+
+  CommandBufferRequests requests;
+
+  // Overriding nested command true -> false clears warmup requirement.
+  requests.SetRequiresWarmup(&nested, false);
+  EXPECT_FALSE(executor.requires_warmup(requests));
+
+  // Overriding top-level command false -> true requests warmup again.
+  requests.SetRequiresWarmup(top_cmd, true);
+  EXPECT_TRUE(executor.requires_warmup(requests));
+}
+
+class CommandExecutorUpdateTest : public ::testing::Test {
+ protected:
+  void ExpectUpdateCount(
+      std::optional<std::vector<BufferAllocation::Index>> updated_allocs,
+      std::vector<BufferAllocation::Index> persistent_alloc_indices,
+      bool is_initialization, bool requires_update_on_initialize,
+      bool requires_update_on_execute, int expected_update_count) {
+    BufferAllocation allocation(/*index=*/0, /*size=*/1024, /*color=*/0);
+    Shape shape = ShapeUtil::MakeShape(U8, {100});
+    BufferAllocation::Slice slice(&allocation, /*offset=*/0, /*size=*/100);
+
+    int update_count = 0;
+    CommandSequence commands;
+    commands.Emplace<FakeCmd>(
+        Command::BufferUses{BufferUse::Read(slice, shape)}, &update_count,
+        requires_update_on_initialize, requires_update_on_execute);
+    ASSERT_OK_AND_ASSIGN(
+        CommandExecutor executor,
+        CommandExecutor::Create(std::move(commands), kSerialize));
+
+    std::vector<se::DeviceAddressBase> buffers(2);
+    BufferAllocations allocations(buffers, /*device_ordinal=*/0,
+                                  /*memory_allocator=*/nullptr);
+    ServiceExecutableRunOptions run_options;
+    Thunk::ExecuteParams execute_params = Thunk::ExecuteParams::Create(
+        run_options, allocations, /*stream=*/nullptr,
+        /*command_buffer_trace_stream=*/nullptr,
+        /*collective_params=*/nullptr, /*collective_cliques=*/nullptr,
+        /*collective_memory=*/nullptr, /*additional_compute_streams=*/{},
+        /*execution_scoped_state=*/nullptr,
+        absl::MakeConstSpan(persistent_alloc_indices));
+
+    CommandStateManager state_manager;
+    Command::RecordParams create_params{state_manager};
+    ::testing::NiceMock<se::MockCommandBuffer> command_buffer;
+    se::CommandBuffer::State command_buffer_state =
+        se::CommandBuffer::State::kCreate;
+    ON_CALL(command_buffer, state()).WillByDefault([&] {
+      return command_buffer_state;
+    });
+    ON_CALL(command_buffer, mode())
+        .WillByDefault(::testing::Return(se::CommandBuffer::Mode::kPrimary));
+
+    ASSERT_OK(executor
+                  .RecordCreate(execute_params, create_params, &command_buffer,
+                                /*dependencies=*/{})
+                  .status());
+
+    command_buffer_state = se::CommandBuffer::State::kUpdate;
+    Command::RecordParams update_params{
+        state_manager, std::move(updated_allocs), is_initialization};
+    ASSERT_OK(
+        executor.RecordUpdate(execute_params, update_params, &command_buffer));
+    EXPECT_EQ(update_count, expected_update_count);
+  }
+};
+
+TEST_F(CommandExecutorUpdateTest, EmptyUpdatedAllocationsSkipRegularCommand) {
+  ExpectUpdateCount(/*updated_allocs=*/std::vector<BufferAllocation::Index>{},
+                    /*persistent_alloc_indices=*/{1},
+                    /*is_initialization=*/false,
+                    /*requires_update_on_initialize=*/false,
+                    /*requires_update_on_execute=*/false,
+                    /*expected_update_count=*/0);
+}
+
+TEST_F(CommandExecutorUpdateTest,
+       EmptyUpdatedAllocationsDoNotSkipRequiredCommand) {
+  ExpectUpdateCount(/*updated_allocs=*/std::vector<BufferAllocation::Index>{},
+                    /*persistent_alloc_indices=*/{0},
+                    /*is_initialization=*/false,
+                    /*requires_update_on_initialize=*/false,
+                    /*requires_update_on_execute=*/true,
+                    /*expected_update_count=*/1);
+}
+
+TEST_F(CommandExecutorUpdateTest, UnknownUpdatedAllocationsUpdateCommand) {
+  ExpectUpdateCount(/*updated_allocs=*/std::nullopt,
+                    /*persistent_alloc_indices=*/{0},
+                    /*is_initialization=*/false,
+                    /*requires_update_on_initialize=*/false,
+                    /*requires_update_on_execute=*/false,
+                    /*expected_update_count=*/1);
+}
+
+TEST_F(CommandExecutorUpdateTest, UpdatedAllocationIntersectionControlsUpdate) {
+  ExpectUpdateCount(/*updated_allocs=*/std::vector<BufferAllocation::Index>{0},
+                    /*persistent_alloc_indices=*/{1},
+                    /*is_initialization=*/false,
+                    /*requires_update_on_initialize=*/false,
+                    /*requires_update_on_execute=*/false,
+                    /*expected_update_count=*/1);
+  ExpectUpdateCount(/*updated_allocs=*/std::vector<BufferAllocation::Index>{1},
+                    /*persistent_alloc_indices=*/{1},
+                    /*is_initialization=*/false,
+                    /*requires_update_on_initialize=*/false,
+                    /*requires_update_on_execute=*/false,
+                    /*expected_update_count=*/0);
+  ExpectUpdateCount(/*updated_allocs=*/std::vector<BufferAllocation::Index>{0},
+                    /*persistent_alloc_indices=*/{0},
+                    /*is_initialization=*/false,
+                    /*requires_update_on_initialize=*/false,
+                    /*requires_update_on_execute=*/false,
+                    /*expected_update_count=*/0);
+}
+
+TEST_F(CommandExecutorUpdateTest,
+       InitializationUpdatePreservesPersistentException) {
+  ExpectUpdateCount(/*updated_allocs=*/std::vector<BufferAllocation::Index>{},
+                    /*persistent_alloc_indices=*/{1},
+                    /*is_initialization=*/true,
+                    /*requires_update_on_initialize=*/true,
+                    /*requires_update_on_execute=*/false,
+                    /*expected_update_count=*/1);
+  ExpectUpdateCount(/*updated_allocs=*/std::vector<BufferAllocation::Index>{},
+                    /*persistent_alloc_indices=*/{0},
+                    /*is_initialization=*/true,
+                    /*requires_update_on_initialize=*/true,
+                    /*requires_update_on_execute=*/false,
+                    /*expected_update_count=*/0);
+}
+
+class AnnotationCapturingCmd : public Command {
+ public:
+  AnnotationCapturingCmd(Thunk::ThunkInfo thunk_info, Command::BufferUses uses,
+                         std::string* create_annotation,
+                         std::string* update_annotation)
+      : Command(Thunk::Kind::kCommand, std::move(thunk_info)),
+        uses_(std::move(uses)),
+        create_annotation_(create_annotation),
+        update_annotation_(update_annotation) {}
+
+  absl::StatusOr<const se::CommandBuffer::Command*> Record(
+      const Thunk::ExecuteParams&, const RecordParams&, RecordAction action,
+      se::CommandBuffer*) override {
+    if (std::holds_alternative<RecordCreate>(action)) {
+      *create_annotation_ = tsl::profiler::AnnotationStack::Get();
+    } else {
+      *update_annotation_ = tsl::profiler::AnnotationStack::Get();
+    }
+    return nullptr;
+  }
+
+  BufferUses buffer_uses() const override { return uses_; }
+
+ private:
+  BufferUses uses_;
+  std::string* create_annotation_;
+  std::string* update_annotation_;
+};
+
+TEST_F(CommandExecutorUpdateTest,
+       RecordCreatePushesAnnotationAndRecordUpdateSkipsIt) {
+  tsl::profiler::AnnotationStack::Enable(true);
+  absl::Cleanup disable_annotation_stack = [] {
+    tsl::profiler::AnnotationStack::Enable(false);
+  };
+
+  BufferAllocation allocation(/*index=*/0, /*size=*/1024, /*color=*/0);
+  Shape shape = ShapeUtil::MakeShape(U8, {100});
+  BufferAllocation::Slice slice(&allocation, /*offset=*/0, /*size=*/100);
+
+  Thunk::ThunkInfo thunk_info;
+  thunk_info.profile_annotation = "fusion.42";
+  std::string create_annotation = "unset";
+  std::string update_annotation = "unset";
+
+  CommandSequence commands;
+  commands.Emplace<AnnotationCapturingCmd>(
+      std::move(thunk_info), Command::BufferUses{BufferUse::Read(slice, shape)},
+      &create_annotation, &update_annotation);
+  ASSERT_OK_AND_ASSIGN(
+      CommandExecutor executor,
+      CommandExecutor::Create(std::move(commands), kSerialize));
+
+  std::vector<se::DeviceAddressBase> buffers(1);
+  BufferAllocations allocations(buffers, /*device_ordinal=*/0,
+                                /*memory_allocator=*/nullptr);
+  ServiceExecutableRunOptions run_options;
+  Thunk::ExecuteParams execute_params = Thunk::ExecuteParams::Create(
+      run_options, allocations, /*stream=*/nullptr,
+      /*command_buffer_trace_stream=*/nullptr,
+      /*collective_params=*/nullptr, /*collective_cliques=*/nullptr,
+      /*collective_memory=*/nullptr);
+
+  CommandStateManager state_manager;
+  Command::RecordParams create_params{state_manager};
+  ::testing::NiceMock<se::MockCommandBuffer> command_buffer;
+  se::CommandBuffer::State command_buffer_state =
+      se::CommandBuffer::State::kCreate;
+  ON_CALL(command_buffer, state()).WillByDefault([&] {
+    return command_buffer_state;
+  });
+  ON_CALL(command_buffer, mode())
+      .WillByDefault(::testing::Return(se::CommandBuffer::Mode::kPrimary));
+
+  ASSERT_OK(executor
+                .RecordCreate(execute_params, create_params, &command_buffer,
+                              /*dependencies=*/{})
+                .status());
+  EXPECT_EQ(create_annotation, "Thunk:#hlo_op=fusion.42#");
+
+  command_buffer_state = se::CommandBuffer::State::kUpdate;
+  Command::RecordParams update_params{state_manager,
+                                      /*updated_allocs=*/std::nullopt};
+  ASSERT_OK(
+      executor.RecordUpdate(execute_params, update_params, &command_buffer));
+  EXPECT_EQ(update_annotation, "");
+}
+
+//===----------------------------------------------------------------------===//
+// Command buffer annotation tests
+//===----------------------------------------------------------------------===//
+
+// A command for op `op` that appends the command buffer annotation active
+// while it is recorded to `seen`. Records `nested`, if any, while its own
+// annotation is active, as while and conditional commands record their bodies.
+class AnnotationProbeCmd : public Command {
+ public:
+  AnnotationProbeCmd(absl::string_view op, std::vector<std::string>* seen,
+                     const CommandExecutor* nested = nullptr)
+      : Command(Thunk::Kind::kCommand, MakeThunkInfo(op)),
+        seen_(seen),
+        nested_(nested) {}
+
+  absl::StatusOr<const se::CommandBuffer::Command*> Record(
+      const Thunk::ExecuteParams& execute_params,
+      const RecordParams& record_params, RecordAction action,
+      se::CommandBuffer* command_buffer) override {
+    seen_->emplace_back(
+        se::ScopedCommandBufferAnnotation::GetCurrentAnnotation());
+    if (nested_ != nullptr) {
+      if (std::holds_alternative<RecordCreate>(action)) {
+        ABSL_RETURN_IF_ERROR(nested_
+                            ->RecordCreate(execute_params, record_params,
+                                           command_buffer, /*dependencies=*/{})
+                            .status());
+      } else {
+        ABSL_RETURN_IF_ERROR(nested_->RecordUpdate(execute_params, record_params,
+                                              command_buffer));
+      }
+    }
+    return nullptr;
+  }
+
+  BufferUses buffer_uses() const override { return {}; }
+
+  // Updated on every record, so that `RecordUpdate` visits it.
+  bool requires_update_on_execute() const override { return true; }
+
+ private:
+  static ThunkInfo MakeThunkInfo(absl::string_view op) {
+    ThunkInfo info;
+    info.profile_annotation = std::string(op);
+    return info;
+  }
+
+  std::vector<std::string>* seen_;
+  const CommandExecutor* nested_;
+};
+
+// Records `executor` with `RecordCreate` and then `RecordUpdate` into a mock
+// command buffer, inside an annotation root that is `enabled` with annotation
+// "root".
+absl::Status RecordCreateAndUpdate(const CommandExecutor& executor,
+                                   bool enabled) {
+  std::vector<se::DeviceAddressBase> buffers(1);
+  BufferAllocations allocations(buffers, /*device_ordinal=*/0,
+                                /*memory_allocator=*/nullptr);
+  ServiceExecutableRunOptions run_options;
+  Thunk::ExecuteParams execute_params = Thunk::ExecuteParams::Create(
+      run_options, allocations, /*stream=*/nullptr,
+      /*command_buffer_trace_stream=*/nullptr,
+      /*collective_params=*/nullptr, /*collective_cliques=*/nullptr,
+      /*collective_memory=*/nullptr, /*additional_compute_streams=*/{},
+      /*execution_scoped_state=*/nullptr, /*persistent_alloc_indices=*/{});
+
+  CommandStateManager state_manager;
+  ::testing::NiceMock<se::MockCommandBuffer> command_buffer;
+  se::CommandBuffer::State command_buffer_state =
+      se::CommandBuffer::State::kCreate;
+  ON_CALL(command_buffer, state()).WillByDefault([&] {
+    return command_buffer_state;
+  });
+  ON_CALL(command_buffer, mode())
+      .WillByDefault(::testing::Return(se::CommandBuffer::Mode::kPrimary));
+
+  auto root = se::ScopedCommandBufferAnnotation::Root(enabled, "root");
+  Command::RecordParams create_params{state_manager};
+  ABSL_RETURN_IF_ERROR(executor
+                      .RecordCreate(execute_params, create_params,
+                                    &command_buffer, /*dependencies=*/{})
+                      .status());
+  command_buffer_state = se::CommandBuffer::State::kUpdate;
+  Command::RecordParams update_params{state_manager};
+  return executor.RecordUpdate(execute_params, update_params, &command_buffer);
+}
+
+TEST(CommandExecutorAnnotationTest,
+     RecordsCommandsAndNestedExecutorsUnderTheirAnnotations) {
+  std::vector<std::string> seen;
+  CommandSequence inner_commands;
+  inner_commands.Emplace<AnnotationProbeCmd>("inner", &seen);
+  ASSERT_OK_AND_ASSIGN(
+      CommandExecutor inner,
+      CommandExecutor::Create(std::move(inner_commands), kSerialize));
+  CommandSequence commands;
+  commands.Emplace<AnnotationProbeCmd>("outer", &seen, &inner);
+  commands.Emplace<AnnotationProbeCmd>("next", &seen);
+  ASSERT_OK_AND_ASSIGN(
+      CommandExecutor executor,
+      CommandExecutor::Create(std::move(commands), kSerialize));
+
+  // With a disabled root, nothing is pushed on either create or update.
+  ASSERT_OK(RecordCreateAndUpdate(executor, /*enabled=*/false));
+  EXPECT_THAT(seen, ::testing::ElementsAre("", "", "", "", "", ""));
+  EXPECT_FALSE(se::ScopedCommandBufferAnnotation::IsActive());
+
+  // With an enabled root, each command and nested executor sees its stacked
+  // frame on create and update, without leaking into sibling commands.
+  seen.clear();
+  ASSERT_OK(RecordCreateAndUpdate(executor, /*enabled=*/true));
+  const std::string outer = "root::Thunk:#hlo_op=outer#";
+  const std::string inner_annotation = outer + "::Thunk:#hlo_op=inner#";
+  const std::string next = "root::Thunk:#hlo_op=next#";
+  EXPECT_THAT(seen, ::testing::ElementsAre(outer, inner_annotation, next, outer,
+                                           inner_annotation, next));
+  EXPECT_EQ(se::ScopedCommandBufferAnnotation::GetCurrentAnnotation(), "");
+}
+
+//===----------------------------------------------------------------------===//
+// extra_resources design tests
+//===----------------------------------------------------------------------===//
+
+TEST(CommandExecutorTest, CreateWithExtraResourcesConcurrent) {
+  auto shared_resource = Resource::Create(Resource::kToken);
+
+  CommandSequence cmds;
+  cmds.Emplace<FakeCmd>();
+  cmds.Emplace<FakeCmd>();
+
+  // cmd0 writes shared_resource, cmd1 reads it — adds a resource dependency.
+  std::vector<Command::ResourceUses> extra = {
+      {ResourceUse::Write(shared_resource)},
+      {ResourceUse::Read(shared_resource)},
+  };
+  ASSERT_OK_AND_ASSIGN(
+      auto executor,
+      CommandExecutor::Create(std::move(cmds), kConcurrent, std::move(extra)));
+  EXPECT_EQ(executor.size(), 2);
+}
+
+TEST(CommandExecutorTest, CreateWithExtraResourcesLHS) {
+  auto shared_resource = Resource::Create(Resource::kToken);
+
+  CommandSequence cmds;
+  cmds.Emplace<FakeCmd>();
+  cmds.Emplace<FakeCmd>();
+
+  std::vector<Command::ResourceUses> extra = {
+      {ResourceUse::Write(shared_resource)},
+      {ResourceUse::Read(shared_resource)},
+  };
+  ASSERT_OK_AND_ASSIGN(
+      auto executor,
+      CommandExecutor::Create(std::move(cmds), kLHS, std::move(extra)));
+  EXPECT_EQ(executor.size(), 2);
+}
+
+//===----------------------------------------------------------------------===//
+// RenderExecutionGraph failure cases (do not require a registered renderer)
+//===----------------------------------------------------------------------===//
+
+//===----------------------------------------------------------------------===//
+// RenderExecutionGraph tests with a fake registered renderer.
+//
+// The FakeRenderer is registered once (SetUpTestSuite) and captures the
+// operations passed to GenerateGraphAsString so tests can inspect them.
+//===----------------------------------------------------------------------===//
+
+// Fake renderer that records per-operation metadata for assertions.
+class FakeRenderer : public ExecutionGraph::Renderer {
+ public:
+  struct CapturedOp {
+    std::string name;
+    size_t resource_use_count;
+    size_t buffer_use_count;
+  };
+
+  std::string GenerateGraphAsString(
+      absl::Span<const ExecutionGraph::Operation* const> operations) override {
+    captured_.clear();
+    for (const auto* op : operations) {
+      captured_.push_back({std::string(op->name()), op->ResourceUses().size(),
+                           op->BufferUses().size()});
+    }
+    return "fake_graph";
+  }
+
+  absl::StatusOr<std::string> PublishGraph(
+      absl::string_view graph_as_string) override {
+    return std::string(graph_as_string);
+  }
+
+  const std::vector<CapturedOp>& captured() const { return captured_; }
+
+ private:
+  std::vector<CapturedOp> captured_;
+};
+
+class CommandExecutorRendererTest : public ::testing::Test {
+ protected:
+  static void SetUpTestSuite() {
+    // Register a shared FakeRenderer once for this test suite.
+    // We keep a raw pointer so tests can inspect captured state.
+    fake_renderer_ = new FakeRenderer();
+    ExecutionGraph::RegisterRenderer(
+        std::unique_ptr<ExecutionGraph::Renderer>(fake_renderer_));
+  }
+
+  static FakeRenderer* fake_renderer_;
+};
+
+FakeRenderer* CommandExecutorRendererTest::fake_renderer_ = nullptr;
+
+// Basic smoke test: render succeeds and returns the fake URL.
+TEST_F(CommandExecutorRendererTest, RenderSucceeds) {
+  CommandSequence cmds;
+  cmds.Emplace<FakeCmd>();
+  cmds.Emplace<FakeCmd>();
+  ASSERT_OK_AND_ASSIGN(auto executor,
+                       CommandExecutor::Create(std::move(cmds), kConcurrent));
+
+  ASSERT_OK_AND_ASSIGN(auto url, executor.RenderExecutionGraph());
+  EXPECT_EQ(url, "fake_graph");
+  EXPECT_EQ(fake_renderer_->captured().size(), 2);
+}
+
+// Without extra_resources, each CommandOperation has exactly one resource use:
+// the Write(cmd->token()) that is always added by the CommandOperation ctor.
+TEST_F(CommandExecutorRendererTest, RenderWithoutExtraResourcesHasOneResource) {
+  CommandSequence cmds;
+  cmds.Emplace<FakeCmd>();
+  cmds.Emplace<FakeCmd>();
+  ASSERT_OK_AND_ASSIGN(auto executor,
+                       CommandExecutor::Create(std::move(cmds), kConcurrent));
+
+  ASSERT_OK(executor.RenderExecutionGraph().status());
+  ASSERT_EQ(fake_renderer_->captured().size(), 2);
+  EXPECT_EQ(fake_renderer_->captured()[0].resource_use_count, 1);
+  EXPECT_EQ(fake_renderer_->captured()[1].resource_use_count, 1);
+}
+
+// With extra_resources, RenderExecutionGraph() must use extra_resources_
+// (not empty {}) when calling CreateCommandOperations. Each CommandOperation
+// should show Write(token) + the extra resource = 2 total.
+TEST_F(CommandExecutorRendererTest, RenderUsesStoredExtraResources) {
+  auto shared_resource = Resource::Create(Resource::kToken);
+
+  CommandSequence cmds;
+  cmds.Emplace<FakeCmd>();
+  cmds.Emplace<FakeCmd>();
+
+  // cmd0 writes shared_resource; cmd1 reads it.
+  std::vector<Command::ResourceUses> extra = {
+      {ResourceUse::Write(shared_resource)},
+      {ResourceUse::Read(shared_resource)},
+  };
+  ASSERT_OK_AND_ASSIGN(
+      auto executor,
+      CommandExecutor::Create(std::move(cmds), kConcurrent, std::move(extra)));
+
+  ASSERT_OK_AND_ASSIGN(auto url, executor.RenderExecutionGraph());
+  EXPECT_EQ(url, "fake_graph");
+
+  ASSERT_EQ(fake_renderer_->captured().size(), 2);
+  // cmd0: Write(cmd0->token()) + Write(shared_resource) = 2
+  EXPECT_EQ(fake_renderer_->captured()[0].resource_use_count, 2);
+  // cmd1: Write(cmd1->token()) + Read(shared_resource) = 2
+  EXPECT_EQ(fake_renderer_->captured()[1].resource_use_count, 2);
+}
+
+// Same verification for kLHS mode — extra_resources must be passed through.
+TEST_F(CommandExecutorRendererTest, RenderUsesStoredExtraResourcesLHSMode) {
+  auto shared_resource = Resource::Create(Resource::kToken);
+
+  CommandSequence cmds;
+  cmds.Emplace<FakeCmd>();
+  cmds.Emplace<FakeCmd>();
+
+  std::vector<Command::ResourceUses> extra = {
+      {ResourceUse::Write(shared_resource)},
+      {ResourceUse::Read(shared_resource)},
+  };
+  ASSERT_OK_AND_ASSIGN(
+      auto executor,
+      CommandExecutor::Create(std::move(cmds), kLHS, std::move(extra)));
+
+  ASSERT_OK(executor.RenderExecutionGraph().status());
+  ASSERT_EQ(fake_renderer_->captured().size(), 2);
+  // cmd0: Write(cmd0->token()) + Write(shared_resource) = 2.
+  EXPECT_EQ(fake_renderer_->captured()[0].resource_use_count, 2);
+  // cmd1: Write(cmd1->token()) + Read(shared_resource) = 2. The executor adds
+  // no LHS-specific dependencies; schedule order comes from `extra_resources`.
+  EXPECT_EQ(fake_renderer_->captured()[1].resource_use_count, 2);
+}
+
+// Calling RenderExecutionGraph twice produces consistent results.
+TEST_F(CommandExecutorRendererTest, RenderIsIdempotent) {
+  auto shared_resource = Resource::Create(Resource::kToken);
+
+  CommandSequence cmds;
+  cmds.Emplace<FakeCmd>();
+  cmds.Emplace<FakeCmd>();
+
+  std::vector<Command::ResourceUses> extra = {
+      {ResourceUse::Write(shared_resource)},
+      {ResourceUse::Read(shared_resource)},
+  };
+  ASSERT_OK_AND_ASSIGN(
+      auto executor,
+      CommandExecutor::Create(std::move(cmds), kConcurrent, std::move(extra)));
+
+  ASSERT_OK_AND_ASSIGN(auto url1, executor.RenderExecutionGraph());
+  auto captured1 = fake_renderer_->captured();
+
+  ASSERT_OK_AND_ASSIGN(auto url2, executor.RenderExecutionGraph());
+  auto captured2 = fake_renderer_->captured();
+
+  EXPECT_EQ(url1, url2);
+  ASSERT_EQ(captured1.size(), captured2.size());
+  for (size_t i = 0; i < captured1.size(); ++i) {
+    EXPECT_EQ(captured1[i].resource_use_count, captured2[i].resource_use_count);
+  }
+}
+
+}  // namespace
+}  // namespace xla::gpu

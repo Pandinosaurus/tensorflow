@@ -30,16 +30,16 @@ REGISTER_SYSTEM_OP("_Arg")
     .SetShapeFn([](shape_inference::InferenceContext* context) {
       const AttrValue* dtype_attr = context->GetAttr("T");
       if (!dtype_attr) {
-        return errors::InvalidArgument(
+        return absl::InvalidArgumentError(
             "_Arg node does not have attribute \"T\"");
       }
 
       const AttrValue* shape_attr = context->GetAttr("_output_shapes");
       if (shape_attr && shape_attr->has_list()) {
         if (shape_attr->list().shape().empty()) {
-          return errors::InvalidArgument(
+          return absl::InvalidArgumentError(absl::StrCat(
               "Invalid \"_output_shapes\" attribute value for _Arg node: ",
-              shape_attr->DebugString());
+              shape_attr->DebugString()));
         }
         const TensorShapeProto& shape_proto = shape_attr->list().shape(0);
         shape_inference::ShapeHandle shape_handle;
@@ -51,7 +51,7 @@ REGISTER_SYSTEM_OP("_Arg")
       }
 
       if (dtype_attr->type() != DT_RESOURCE) {
-        return Status::OK();
+        return absl::OkStatus();
       }
 
       // If the argument is for a resource type, then also try to infer the
@@ -61,18 +61,18 @@ REGISTER_SYSTEM_OP("_Arg")
       // If either the shape or type attribute is not set then simply return
       // with unknown output set above.
       if (!dtype_attr || !shape_attr) {
-        return Status::OK();
+        return absl::OkStatus();
       }
 
       if (dtype_attr->list().type().empty()) {
-        return errors::InvalidArgument(
+        return absl::InvalidArgumentError(absl::StrCat(
             "Invalid \"_handle_dtypes\" attribute value for _Arg node: ",
-            dtype_attr->DebugString());
+            dtype_attr->DebugString()));
       }
       if (shape_attr->list().shape().empty()) {
-        return errors::InvalidArgument(
+        return absl::InvalidArgumentError(absl::StrCat(
             "Invalid \"_handle_shapes\" attribute value for _Arg node: ",
-            shape_attr->DebugString());
+            shape_attr->DebugString()));
       }
       DataType dtype = dtype_attr->list().type(0);
       const TensorShapeProto& shape_proto = shape_attr->list().shape(0);
@@ -81,7 +81,7 @@ REGISTER_SYSTEM_OP("_Arg")
           context->MakeShapeFromShapeProto(shape_proto, &shape_handle));
       context->set_output_handle_shapes_and_types(
           0, std::vector<shape_inference::ShapeAndType>{{shape_handle, dtype}});
-      return Status::OK();
+      return absl::OkStatus();
     })
     .Doc(R"doc(
 A graph node which represents an argument to a function.
@@ -108,7 +108,7 @@ REGISTER_SYSTEM_OP("_DeviceArg")
     .SetIsStateful()
     .SetShapeFn([](shape_inference::InferenceContext* context) {
       context->set_output(0, context->UnknownShape());
-      return Status::OK();
+      return absl::OkStatus();
     })
     .Doc(R"doc(
 A graph node which represents an argument to a function.
@@ -123,7 +123,7 @@ REGISTER_SYSTEM_OP("_Retval")
     .Attr("index: int >= 0")
     .SetIsStateful()
     .SetShapeFn([](shape_inference::InferenceContext* context) {
-      return Status::OK();
+      return absl::OkStatus();
     })
     .Doc(R"doc(
 A graph node which represents a return value of a function.
@@ -138,7 +138,7 @@ REGISTER_SYSTEM_OP("_DeviceRetval")
     .Attr("index: int >= 0")
     .SetIsStateful()
     .SetShapeFn([](shape_inference::InferenceContext* context) {
-      return Status::OK();
+      return absl::OkStatus();
     })
     .Doc(R"doc(
 A graph node which represents a return value of a function.

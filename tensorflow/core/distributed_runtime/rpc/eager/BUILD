@@ -1,8 +1,24 @@
-load("//tensorflow/core/platform:rules_cc.bzl", "cc_library")
-load("//tensorflow:tensorflow.bzl", "tf_grpc_cc_dependencies")
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
 load("//tensorflow:tensorflow.bzl", "tf_cc_test")
+load("//tensorflow:tensorflow.default.bzl", "tf_grpc_cc_dependencies")
+load("//tensorflow/core/platform:rules_cc.bzl", "cc_library")
 
 package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
     default_visibility = [
         "//tensorflow:internal",
     ],
@@ -13,9 +29,9 @@ cc_library(
     name = "grpc_eager_service",
     srcs = ["grpc_eager_service.h"],
     hdrs = ["grpc_eager_service.h"],
+    # copybara:uncomment copts = ["-Wthread-safety-analysis"],
     deps = [
-        "//tensorflow/core/protobuf:eager_service_proto_cc",
-        "//tensorflow/stream_executor/platform",
+        "//tensorflow/core/protobuf:eager_service_cc_grpc_proto",
     ] + tf_grpc_cc_dependencies(),
 )
 
@@ -23,8 +39,10 @@ cc_library(
     name = "grpc_eager_client",
     srcs = ["grpc_eager_client.cc"],
     hdrs = ["grpc_eager_client.h"],
+    # copybara:uncomment copts = ["-Wthread-safety-analysis"],
     deps = [
         ":grpc_eager_service",
+        "//tensorflow/core:framework",
         "//tensorflow/core:lib",
         "//tensorflow/core:lib_internal",
         "//tensorflow/core/distributed_runtime:call_options",
@@ -33,7 +51,14 @@ cc_library(
         "//tensorflow/core/distributed_runtime/rpc:grpc_client_cq_tag",
         "//tensorflow/core/distributed_runtime/rpc:grpc_state",
         "//tensorflow/core/distributed_runtime/rpc:grpc_util",
+        "//tensorflow/core/platform:error_payloads",
         "//tensorflow/core/protobuf:eager_service_proto_cc",
+        "//tensorflow/core/protobuf:for_core_protos_cc",
+        "@com_google_absl//absl/log",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/synchronization",
+        "@xla//xla/tsl/distributed_runtime:call_options",
     ] + tf_grpc_cc_dependencies(),
 )
 
@@ -41,17 +66,19 @@ cc_library(
     name = "grpc_eager_service_impl",
     srcs = ["grpc_eager_service_impl.cc"],
     hdrs = ["grpc_eager_service_impl.h"],
+    # copybara:uncomment copts = ["-Wthread-safety-analysis"],
     deps = [
         ":grpc_eager_service",
         "//tensorflow/core:framework",
-        "//tensorflow/core:ptr_util",
         "//tensorflow/core/distributed_runtime/eager:eager_service_impl",
-        "//tensorflow/core/distributed_runtime/rpc:async_service_interface",
-        "//tensorflow/core/distributed_runtime/rpc:grpc_call",
         "//tensorflow/core/distributed_runtime/rpc:grpc_channel",
         "//tensorflow/core/distributed_runtime/rpc:grpc_util",
         "//tensorflow/core/distributed_runtime/rpc:grpc_worker_cache",
         "//tensorflow/core/protobuf:eager_service_proto_cc",
+        "@com_google_absl//absl/log",
+        "@com_google_absl//absl/status",
+        "@xla//xla/tsl/distributed_runtime/rpc:async_service_interface",
+        "@xla//xla/tsl/distributed_runtime/rpc:grpc_call",
     ] + tf_grpc_cc_dependencies(),
 )
 
@@ -61,14 +88,18 @@ tf_cc_test(
     srcs = [
         "grpc_eager_client_test.cc",
     ],
+    # copybara:uncomment extra_copts = ["-Wthread-safety-analysis"],
     deps = [
         ":grpc_eager_client",
         "//tensorflow/c:tf_status_headers",
+        "//tensorflow/core:lib",
         "//tensorflow/core:test",
         "//tensorflow/core:test_main",
         "//tensorflow/core/distributed_runtime/rpc:grpc_channel",
         "//tensorflow/core/platform:blocking_counter",
         "//tensorflow/core/platform:status",
-        "//tensorflow/core/platform:strcat",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings",
+        "@xla//xla/tsl/protobuf:error_codes_proto_impl_cc",
     ],
 )

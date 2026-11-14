@@ -16,32 +16,37 @@ limitations under the License.
 #define TENSORFLOW_CORE_KERNELS_MAP_KERNELS_H_
 
 #include "tensorflow/core/framework/op_kernel.h"
+#include "tensorflow/core/framework/op_requires.h"
+#include "tensorflow/core/framework/types.h"
 #include "tensorflow/core/kernels/tensor_map.h"
 #include "tensorflow/core/util/batch_util.h"
 #include "tensorflow/core/util/tensor_ops_util.h"
 
 namespace tensorflow {
 
-Status GetInputMap(OpKernelContext* ctx, int index, const TensorMap** ret_map) {
+inline absl::Status GetInputMap(OpKernelContext* ctx, int index,
+                                const TensorMap** ret_map) {
   if (!TensorShapeUtils::IsScalar(ctx->input(index).shape())) {
-    return errors::InvalidArgument("Input map must be a scalar. Saw: ",
-                                   ctx->input(index).shape().DebugString());
+    return absl::InvalidArgumentError(
+        absl::StrCat("Input map must be a scalar. Saw: ",
+                     ctx->input(index).shape().DebugString()));
   }
   const TensorMap* map = ctx->input(index).scalar<Variant>()().get<TensorMap>();
   if (map == nullptr) {
-    return errors::InvalidArgument(
-        "Input handle is not a map. Saw: '",
-        ctx->input(index).scalar<Variant>()().DebugString(), "'");
+    return absl::InvalidArgumentError(
+        absl::StrCat("Input handle is not a map. Saw: '",
+                     ctx->input(index).scalar<Variant>()().DebugString(), "'"));
   }
   *ret_map = map;
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 // TODO(kattian): change into templated function
-Status ForwardInputOrCreateNewMap(OpKernelContext* ctx, int32_t input_index,
-                                  int32_t output_index,
-                                  const TensorMap& input_map,
-                                  TensorMap** output_map) {
+inline absl::Status ForwardInputOrCreateNewMap(OpKernelContext* ctx,
+                                               int32_t input_index,
+                                               int32_t output_index,
+                                               const TensorMap& input_map,
+                                               TensorMap** output_map) {
   // Attempt to forward the input tensor to the output if possible.
   std::unique_ptr<Tensor> maybe_output = ctx->forward_input(
       input_index, output_index, DT_VARIANT, TensorShape{},
@@ -52,15 +57,15 @@ Status ForwardInputOrCreateNewMap(OpKernelContext* ctx, int32_t input_index,
     output_tensor = maybe_output.get();
     TensorMap* tmp_out = output_tensor->scalar<Variant>()().get<TensorMap>();
     if (tmp_out == nullptr) {
-      return errors::InvalidArgument(
+      return absl::InvalidArgumentError(absl::StrCat(
           "Expected input ", input_index, " to be a TensorMap but saw ",
-          output_tensor->scalar<Variant>()().TypeName());
+          output_tensor->scalar<Variant>()().TypeName()));
     }
     if (tmp_out->RefCountIsOne()) {
       // Woohoo, forwarding succeeded!
       ctx->set_output(output_index, *output_tensor);
       *output_map = tmp_out;
-      return Status::OK();
+      return absl::OkStatus();
     }
   }
 
@@ -73,7 +78,7 @@ Status ForwardInputOrCreateNewMap(OpKernelContext* ctx, int32_t input_index,
   output_tensor->scalar<Variant>()() = input_map.Copy();
 
   *output_map = output_tensor->scalar<Variant>()().get<TensorMap>();
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 class EmptyTensorMap : public OpKernel {
@@ -93,41 +98,49 @@ class EmptyTensorMap : public OpKernel {
 class TensorMapSize : public OpKernel {
  public:
   explicit TensorMapSize(OpKernelConstruction* ctx) : OpKernel(ctx) {}
-  ~TensorMapSize() override {}
+  ~TensorMapSize() override = default;
 
   void Compute(OpKernelContext* ctx) override {
     const TensorMap* map = nullptr;
     OP_REQUIRES_OK(ctx, GetInputMap(ctx, 0, &map));
     Tensor* result;
     OP_REQUIRES_OK(ctx, ctx->allocate_output(0, TensorShape{}, &result));
-    result->scalar<int32>()() = map->tensors().size();
+    result->scalar<int32_t>()() = map->tensors().size();
   }
 };
 
 class TensorMapLookup : public OpKernel {
  public:
   explicit TensorMapLookup(OpKernelConstruction* ctx) : OpKernel(ctx) {}
-  ~TensorMapLookup() override {}
+  ~TensorMapLookup() override = default;
 
   void Compute(OpKernelContext* ctx) override {
     const TensorKey& key = ctx->input(1);
     const TensorMap* map = nullptr;
     OP_REQUIRES_OK(ctx, GetInputMap(ctx, 0, &map));
 
-    OP_REQUIRES(
-        ctx, map->tensors().find(key) != map->tensors().end(),
-        errors::InvalidArgument("Trying to lookup non-existent key. Could not "
-                                "find key \"" +
-                                key.SummarizeValue(100) + "\"."));
+    const auto it = map->tensors().find(key);
+    OP_REQUIRES(ctx, it != map->tensors().end(),
+                absl::InvalidArgumentError(
+                    absl::StrCat("Trying to lookup non-existent key. Could not "
+                                 "find key \"",
+                                 key.SummarizeValue(100), "\".")));
 
-    ctx->set_output(0, map->tensors().find(key)->second);
+    const Tensor& value = it->second;
+    OP_REQUIRES(ctx, value.dtype() == ctx->expected_output_dtype(0),
+                absl::InvalidArgumentError(absl::StrCat(
+                    "Key does not match requested dtype. Stored: ",
+                    DataTypeString(value.dtype()), ", expected: ",
+                    DataTypeString(ctx->expected_output_dtype(0)))));
+
+    ctx->set_output(0, value);
   }
 };
 
 class TensorMapInsert : public OpKernel {
  public:
   explicit TensorMapInsert(OpKernelConstruction* ctx) : OpKernel(ctx) {}
-  ~TensorMapInsert() override {}
+  ~TensorMapInsert() override = default;
 
   void Compute(OpKernelContext* ctx) override {
     const TensorKey& key = ctx->input(1);
@@ -151,11 +164,11 @@ class TensorMapErase : public OpKernel {
     const TensorMap* map = nullptr;
     OP_REQUIRES_OK(ctx, GetInputMap(ctx, 0, &map));
 
-    OP_REQUIRES(
-        ctx, map->tensors().find(key) != map->tensors().end(),
-        errors::InvalidArgument("Trying to erase non-existent item. Could not "
-                                "find key \"" +
-                                key.SummarizeValue(100) + "\"."));
+    OP_REQUIRES(ctx, map->tensors().find(key) != map->tensors().end(),
+                absl::InvalidArgumentError(
+                    absl::StrCat("Trying to erase non-existent item. Could not "
+                                 "find key \"",
+                                 key.SummarizeValue(100), "\".")));
 
     TensorMap* output_map = nullptr;
     OP_REQUIRES_OK(ctx,
@@ -167,7 +180,7 @@ class TensorMapErase : public OpKernel {
 class TensorMapHasKey : public OpKernel {
  public:
   explicit TensorMapHasKey(OpKernelConstruction* ctx) : OpKernel(ctx) {}
-  ~TensorMapHasKey() override {}
+  ~TensorMapHasKey() override = default;
 
   void Compute(OpKernelContext* ctx) override {
     const TensorKey& key = ctx->input(1);
@@ -184,14 +197,14 @@ class TensorMapStackKeys : public OpKernel {
   explicit TensorMapStackKeys(OpKernelConstruction* ctx) : OpKernel(ctx) {
     OP_REQUIRES_OK(ctx, ctx->GetAttr("key_dtype", &key_dtype_));
   }
-  ~TensorMapStackKeys() override {}
+  ~TensorMapStackKeys() override = default;
 
   void Compute(OpKernelContext* ctx) override {
     const TensorMap* map = nullptr;
     OP_REQUIRES_OK(ctx, GetInputMap(ctx, 0, &map));
 
     OP_REQUIRES(ctx, map->size() != 0,
-                errors::InvalidArgument(
+                absl::InvalidArgumentError(
                     "TensorMapStackKeys cannot be called on empty map."));
 
     auto it = map->tensors().begin();
@@ -206,10 +219,10 @@ class TensorMapStackKeys : public OpKernel {
     while (it != map->tensors().end() && i < sz) {
       OP_REQUIRES(
           ctx, it->first.dtype() == key_dtype_,
-          errors::InvalidArgument("Key does not match requested dtype."));
+          absl::InvalidArgumentError("Key does not match requested dtype."));
       OP_REQUIRES(
           ctx, it->first.shape() == key_shape,
-          errors::InvalidArgument("Keys must all have the same shape."));
+          absl::InvalidArgumentError("Keys must all have the same shape."));
       OP_REQUIRES_OK(ctx, batch_util::CopyElementToSlice(it->first, result, i));
       i++;
       it++;
@@ -221,8 +234,8 @@ class TensorMapStackKeys : public OpKernel {
 };
 
 template <typename Device>
-Status TensorMapBinaryAdd(OpKernelContext* ctx, const TensorMap& a,
-                          const TensorMap& b, TensorMap* out) {
+absl::Status TensorMapBinaryAdd(OpKernelContext* ctx, const TensorMap& a,
+                                const TensorMap& b, TensorMap* out) {
   // Binary add returns a map containing the union of keys.
   // Values with keys in the intersection are added.
   out->tensors() = a.tensors();
@@ -238,14 +251,14 @@ Status TensorMapBinaryAdd(OpKernelContext* ctx, const TensorMap& a,
       out->tensors().emplace(p.first, p.second);
     }
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 template <typename Device>
-Status TensorMapZerosLike(OpKernelContext* ctx, const TensorMap& x,
-                          TensorMap* y) {
+absl::Status TensorMapZerosLike(OpKernelContext* ctx, const TensorMap& x,
+                                TensorMap* y) {
   // Zeros like returns an empty map.
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 }  // namespace tensorflow

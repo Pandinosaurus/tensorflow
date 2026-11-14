@@ -90,11 +90,13 @@ def TfSavedModel_Dialect : Dialect {
 // Op definitions
 //===----------------------------------------------------------------------===//
 
-class TfSavedModel_Op<string mnemonic, list<OpTrait> traits = []> :
+class TfSavedModel_Op<string mnemonic, list<Trait> traits = []> :
     Op<TfSavedModel_Dialect, mnemonic, traits> {
 }
 
-def TfSavedModel_GlobalTensorOp : TfSavedModel_Op<"global_tensor"> {
+def TfSavedModel_GlobalTensorOp : TfSavedModel_Op<"global_tensor", [
+    SymbolName, SymbolVisibility, Symbol
+]> {
   let summary = "Represents a global tensor value.";
   let description = [{
     Represents a tensor that is not bound to the lifetime of any particular
@@ -121,12 +123,13 @@ def TfSavedModel_GlobalTensorOp : TfSavedModel_Op<"global_tensor"> {
 
   let arguments = (ins
     StrAttr:$sym_name,
-    ElementsAttr:$value,
+    OptionalAttr<ElementsAttr>:$value,
     TypeAttr:$type,
-    UnitAttr:$is_mutable
+    UnitAttr:$is_mutable,
+    OptionalAttr<StrAttr>:$sym_visibility
   );
 
-  let verifier = [{ return Verify(*this); }];
+  let hasVerifier = 1;
 }
 
 def TfSavedModel_SessionInitializerOp: TfSavedModel_Op<"session_initializer"> {
@@ -150,12 +153,14 @@ def TfSavedModel_SessionInitializerOp: TfSavedModel_Op<"session_initializer"> {
   );
 
 
-  let verifier = [{ return Verify(*this); }];
+  let hasVerifier = 1;
 
   let hasCanonicalizer = 1;
 }
 
-def TfSavedModel_AssetOp: TfSavedModel_Op<"asset", [Symbol]> {
+def TfSavedModel_AssetOp: TfSavedModel_Op<"asset", [
+    SymbolName, SymbolVisibility, Symbol
+]> {
   let summary = "Represents an asset in saved model.";
   let description = [{
     Represents an asset in the saved model that points to an external file. It
@@ -171,7 +176,8 @@ def TfSavedModel_AssetOp: TfSavedModel_Op<"asset", [Symbol]> {
 
   let arguments = (ins
     StrAttr:$sym_name,
-    StrAttr:$filename
+    StrAttr:$filename,
+    OptionalAttr<StrAttr>:$sym_visibility
   );
 }
 

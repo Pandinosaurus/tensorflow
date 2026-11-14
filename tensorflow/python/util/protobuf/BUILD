@@ -1,18 +1,27 @@
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
 # Tensorflow protobuf utility package
 
-# buildifier: disable=same-origin-load
-load("//tensorflow:tensorflow.bzl", "get_compatible_with_portable")
-
-# buildifier: disable=same-origin-load
-load("//tensorflow:tensorflow.bzl", "tf_py_test")
-
-# buildifier: disable=same-origin-load
+load("@rules_python//python:proto.bzl", "py_proto_library")
+load("@xla//third_party/rules_python/python:py_library.bzl", "py_library")
+load("//tensorflow:tensorflow.default.bzl", "get_compatible_with_portable", "tf_py_strict_test")
 load("//tensorflow/core/platform:build_config.bzl", "tf_proto_library")  # @unused
 
 visibility = [
-    "//engedu/ml/tf_from_scratch:__pkg__",
     "//third_party/cloud_tpu/convergence_tools:__subpackages__",
-    "//third_party/mlperf:__subpackages__",
     "//tensorflow:internal",
     "//tensorflow/lite/toco/python:__pkg__",
     "//tensorflow_models:__subpackages__",
@@ -25,10 +34,10 @@ visibility = [
     "//third_party/py/tf_agents:__subpackages__",  # For benchmarks.
     "//third_party/py/tf_slim:__subpackages__",
     "//third_party/py/tensorflow_docs:__subpackages__",
-    "//third_party/py/keras:__subpackages__",
 ]
 
 package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
     default_visibility = visibility,
     licenses = ["notice"],
 )
@@ -37,21 +46,18 @@ tf_proto_library(
     name = "compare_test_proto",
     testonly = 1,
     srcs = ["compare_test.proto"],
-    cc_api_version = 2,
 )
 
-tf_py_test(
+tf_py_strict_test(
     name = "protobuf_compare_test",
     size = "small",
     srcs = ["compare_test.py"],
     main = "compare_test.py",
-    python_version = "PY3",
     tags = ["no_pip"],  # compare_test_pb2 proto is not available in pip.
     deps = [
         ":compare_test_proto_py",
-        "@six_archive//:six",
-        "//tensorflow/python:platform_test",
-        #"//tensorflow/python/util",
+        ":protobuf",
+        "//tensorflow/python/platform:test",
     ],
 )
 
@@ -65,7 +71,6 @@ filegroup(
 #     name = "compare_test_py_pb2",
 #     testonly = 1,
 #     has_services = 0,
-#     api_version = 2,
 #     deps = [":compare_test_proto"],
 # )
 # copybara:uncomment_end
@@ -77,10 +82,11 @@ py_library(
         exclude = ["*_test.py"],
     ),
     compatible_with = get_compatible_with_portable(),
-    srcs_version = "PY3",
+    strict_deps = True,
     visibility = visibility + [
         "//tensorflow:__pkg__",
         "//third_party/py/tensorflow_core:__subpackages__",
+        "//third_party/py/tensorflow_data_validation:__subpackages__",
         "//third_party/py/tf_agents:__subpackages__",
         "//third_party/py/tfx:__subpackages__",
     ],
@@ -90,6 +96,6 @@ py_library(
         # py_test because not all tensorflow tests use tensorflow.bzl's py_test.
         "//tensorflow/python:global_test_configuration",
         "@com_google_protobuf//:protobuf_python",
-        "@six_archive//:six",
+        "//tensorflow/python/util:compat",
     ],
 )

@@ -25,7 +25,7 @@ limitations under the License.
 
 #include <memory>
 #include <numeric>
-#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
+#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
 #include "tensorflow/core/framework/bounds_check.h"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/register_types.h"
@@ -40,12 +40,8 @@ limitations under the License.
 #if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 #include "tensorflow/core/common_runtime/gpu/gpu_event_mgr.h"
 #include "tensorflow/core/util/gpu_solvers.h"
-#if GOOGLE_CUDA
-#include "tensorflow/stream_executor/cuda/cuda_activation.h"
-using stream_executor::cuda::ScopedActivateExecutorContext;
-#elif TENSORFLOW_USE_ROCM
+#if TENSORFLOW_USE_ROCM
 #include "tensorflow/core/platform/rocm.h"
-using stream_executor::rocm::ScopedActivateExecutorContext;
 #endif  // TENSORFLOW_USE_ROCM
 #endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 
@@ -73,18 +69,18 @@ int64_t CountAccumulator<bool>(const bool* begin, const bool* end) {
 
 template <typename T>
 struct NumTrue<CPUDevice, T, int64_t> {
-  static Status Compute(OpKernelContext* ctx, const CPUDevice& d,
-                        typename TTypes<T>::ConstFlat input,
-                        TTypes<int64>::UnalignedScalar num_true) {
+  static absl::Status Compute(OpKernelContext* ctx, const CPUDevice& d,
+                              typename TTypes<T>::ConstFlat input,
+                              TTypes<int64_t>::UnalignedScalar num_true) {
     num_true() = CountAccumulator<T>(input.data(), input.data() + input.size());
-    return Status::OK();
+    return absl::OkStatus();
   }
 };
 
 template <int DIMS, typename T, typename TIndex>
 struct Where<CPUDevice, DIMS, T, TIndex> {
   EIGEN_ALWAYS_INLINE static void WriteIndexRowMajor(
-      typename TTypes<int64>::Matrix output,
+      typename TTypes<int64_t>::Matrix output,
       const typename Eigen::DSizes<TIndex, DIMS>& strides, TIndex true_n,
       TIndex index) {
     for (int i = 0; i < DIMS; ++i) {
@@ -93,10 +89,10 @@ struct Where<CPUDevice, DIMS, T, TIndex> {
     }
   }
 
-  EIGEN_ALWAYS_INLINE static Status Compute(
+  EIGEN_ALWAYS_INLINE static absl::Status Compute(
       OpKernelContext* ctx, const CPUDevice& d,
       typename TTypes<T, DIMS>::ConstTensor input,
-      typename TTypes<int64>::Matrix output, TIndex* found_true) {
+      typename TTypes<int64_t>::Matrix output, TIndex* found_true) {
     Eigen::DSizes<Eigen::DenseIndex, DIMS> dims = input.dimensions();
     Eigen::DSizes<TIndex, DIMS> strides;
 
@@ -111,14 +107,14 @@ struct Where<CPUDevice, DIMS, T, TIndex> {
 
     Eigen::DenseIndex output_size = output.dimension(0);
     for (Eigen::DenseIndex n = 0; n < input.size(); ++n) {
-      if (input.data()[n] != T(0)) {
+      if (input(n) != T(0)) {
         if (FastBoundsCheck(*found_true, output_size)) {
           WriteIndexRowMajor(output, strides, *found_true, n);
         }
         ++*found_true;
       }
     }
-    return Status::OK();
+    return absl::OkStatus();
   }
 };
 
@@ -132,18 +128,18 @@ class WhereCPUOp : public OpKernel {
   void Compute(OpKernelContext* context) override {
     const Tensor& input = context->input(0);
 
-    OP_REQUIRES(
-        context, input.dtype() != DT_HALF,
-        errors::Unimplemented("No WhereOp available for float16/half type on "
-                              "CPU; dying in CPU WhereOp to avoid silently "
-                              "creating costly copies from device."));
+    OP_REQUIRES(context, input.dtype() != DT_HALF,
+                absl::UnimplementedError(
+                    "No WhereOp available for float16/half type on "
+                    "CPU; dying in CPU WhereOp to avoid silently "
+                    "creating costly copies from device."));
 
     const int input_dims = input.dims();
 
     int64_t num_true;
-    TTypes<int64>::UnalignedScalar num_true_t(&num_true);
+    TTypes<int64_t>::UnalignedScalar num_true_t(&num_true);
 
-    Status s = functor::NumTrue<CPUDevice, T, int64_t>::Compute(
+    absl::Status s = functor::NumTrue<CPUDevice, T, int64_t>::Compute(
         context, context->eigen_device<CPUDevice>(), input.flat<T>(),
         num_true_t);
     OP_REQUIRES_OK(context, s);
@@ -176,22 +172,23 @@ class WhereCPUOp : public OpKernel {
 
       default:
         OP_REQUIRES(context, false,
-                    errors::InvalidArgument(
-                        "WhereOp : Unhandled input dimensions: ", input_dims));
+                    absl::InvalidArgumentError(absl::StrCat(
+                        "WhereOp : Unhandled input dimensions: ", input_dims)));
     }
 #undef HANDLE_DIM
 
     OP_REQUIRES(
         context, found_true == num_true_t(),
-        errors::InvalidArgument(
+        absl::InvalidArgumentError(absl::StrCat(
             "WhereOp: Race condition between counting the number of true "
             "elements and writing them.  When counting, saw ",
             num_true_t(), " elements; but when writing their indices, saw ",
-            found_true, " elements."));
+            found_true, " elements.")));
   }
 
  private:
-  TF_DISALLOW_COPY_AND_ASSIGN(WhereCPUOp);
+  WhereCPUOp(const WhereCPUOp&) = delete;
+  void operator=(const WhereCPUOp&) = delete;
 };
 
 #define REGISTER_WHERE_OP(T) \
@@ -262,8 +259,8 @@ class WhereGPUOp : public AsyncOpKernel {
     const Tensor& input = context->input(0);
     const int input_dims = input.dims();
 
-    if (input.NumElements() < std::numeric_limits<int32>::max()) {
-      ComputeAsyncType<int32>(input, input_dims, context, done);
+    if (input.NumElements() < std::numeric_limits<int32_t>::max()) {
+      ComputeAsyncType<int32_t>(input, input_dims, context, done);
     } else {
       ComputeAsyncType<int64_t>(input, input_dims, context, done);
     }
@@ -285,7 +282,7 @@ class WhereGPUOp : public AsyncOpKernel {
 
     // Push kernel to stream to get number of true elements.
     const GPUDevice& d = context->eigen_device<GPUDevice>();
-    Status s = functor::NumTrue<GPUDevice, T, Tindex>::Compute(
+    absl::Status s = functor::NumTrue<GPUDevice, T, Tindex>::Compute(
         context, d, input.flat<T>(), num_true_t);
     OP_REQUIRES_OK_ASYNC(context, s, done);
 
@@ -294,69 +291,76 @@ class WhereGPUOp : public AsyncOpKernel {
       // Ensure that within the callback, the proper GPU settings are
       // configured.
       auto stream = context->op_device_context()->stream();
-      ScopedActivateExecutorContext scoped_activation{stream->parent()};
+      {
+        std::unique_ptr<stream_executor::ActivateContext> scoped_activation =
+            stream->parent()->Activate();
 
-      // TODO(ebrevdo): Properly copy back found_true value to CPU for
-      // validation checking.  Currently Where<GPUDevice>::Compute()
-      // does not perform this copy back to CPU.
-      Tindex found_true = -1;
+        // TODO(ebrevdo): Properly copy back found_true value to CPU for
+        // validation checking.  Currently Where<GPUDevice>::Compute()
+        // does not perform this copy back to CPU.
+        Tindex found_true = -1;
 
-      // Step 1: Allocate the output and perform the selection/copy.
-      Tensor* output;
-      OP_REQUIRES_OK_ASYNC(
-          context,
-          context->allocate_output(
-              0, TensorShape({*num_true.data(), input_dims}), &output),
-          done);
+        // Step 1: Allocate the output and perform the selection/copy.
+        Tensor* output;
+        OP_REQUIRES_OK_ASYNC(
+            context,
+            context->allocate_output(
+                0, TensorShape({*num_true.data(), input_dims}), &output),
+            done);
 
-#define HANDLE_DIM(NDIM)                                              \
-  case NDIM: {                                                        \
-    Status s = functor::Where<GPUDevice, NDIM, T, Tindex>::Compute(   \
-        context, d, input.tensor<T, NDIM>(), output->matrix<int64>(), \
-        &found_true);                                                 \
-    OP_REQUIRES_OK_ASYNC(context, s, done);                           \
+#define HANDLE_DIM(NDIM)                                                \
+  case NDIM: {                                                          \
+    Status s = functor::Where<GPUDevice, NDIM, T, Tindex>::Compute(     \
+        context, d, input.tensor<T, NDIM>(), output->matrix<int64_t>(), \
+        &found_true);                                                   \
+    OP_REQUIRES_OK_ASYNC(context, s, done);                             \
   } break;
 
-      switch (input_dims) {
-        HANDLE_DIM(1);
-        HANDLE_DIM(2);
-        HANDLE_DIM(3);
-        HANDLE_DIM(4);
-        HANDLE_DIM(5);
-        HANDLE_DIM(6);
-        HANDLE_DIM(7);
-        HANDLE_DIM(8);
+        switch (input_dims) {
+          HANDLE_DIM(1);
+          HANDLE_DIM(2);
+          HANDLE_DIM(3);
+          HANDLE_DIM(4);
+          HANDLE_DIM(5);
+          HANDLE_DIM(6);
+          HANDLE_DIM(7);
+          HANDLE_DIM(8);
 
-        default:
-          OP_REQUIRES_ASYNC(
-              context, false,
-              errors::InvalidArgument("WhereOp: Unhandled input dimensions: ",
-                                      input_dims),
-              done);
-      }
+          default:
+            OP_REQUIRES_ASYNC(
+                context, false,
+                absl::InvalidArgumentError(absl::StrCat(
+                    "WhereOp: Unhandled input dimensions: ", input_dims)),
+                done);
+        }
 #undef HANDLE_DIM
 
-      // TODO(ebrevdo): Fix the copy back to host.
+        // TODO(ebrevdo): Fix the copy back to host.
 
-      // OP_REQUIRES_ASYNC(
-      //     context, found_true == num_true,
-      //     errors::InvalidArgument(
-      //         "WhereOp: Race condition between counting the number of true "
-      //         "elements and writing them.  When counting, saw ",
-      //         num_true, " elements; but when writing their indices, saw ",
-      //         found_true, " elements."),
-      //     done);
+        // OP_REQUIRES_ASYNC(
+        //     context, found_true == num_true,
+        //     errors::InvalidArgument(
+        //         "WhereOp: Race condition between counting the number of true
+        //         " "elements and writing them.  When counting, saw ",
+        //         num_true, " elements; but when writing their indices, saw ",
+        //         found_true, " elements."),
+        //     done);
+      }  // Release ActivateContext to prevent deadlock when done
+         // inlines another Op kernel, which may assume the original cuda
+         // Context.
 
       done();
     };
 
     auto stream = context->op_device_context()->stream();
-    context->device()->tensorflow_gpu_device_info()->event_mgr->ThenExecute(
-        stream, create_and_check_output);
+    context->device()
+        ->tensorflow_accelerator_device_info()
+        ->event_mgr->ThenExecute(stream, create_and_check_output);
   }
 
  private:
-  TF_DISALLOW_COPY_AND_ASSIGN(WhereGPUOp);
+  WhereGPUOp(const WhereGPUOp&) = delete;
+  void operator=(const WhereGPUOp&) = delete;
 };
 
 #define REGISTER_GPU_WHERE_OP(T) \
@@ -364,15 +368,15 @@ class WhereGPUOp : public AsyncOpKernel {
       Name("Where").Device(DEVICE_GPU).TypeConstraint<T>("T"), WhereGPUOp<T>);
 
 TF_CALL_WHERE_GPU_TYPES(REGISTER_GPU_WHERE_OP);
-REGISTER_KERNEL_BUILDER(Name("Where")
-                            .Device(DEVICE_GPU)
-                            .TypeConstraint<int32>("T")
-                            .HostMemory("input")
-                            .HostMemory("index"),
-                        WhereCPUOp<int32>);
-
 #undef REGISTER_GPU_WHERE_OP
 
 #endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM
+
+REGISTER_KERNEL_BUILDER(Name("Where")
+                            .Device(DEVICE_DEFAULT)
+                            .TypeConstraint<int32_t>("T")
+                            .HostMemory("input")
+                            .HostMemory("index"),
+                        WhereCPUOp<int32_t>);
 
 }  // namespace tensorflow

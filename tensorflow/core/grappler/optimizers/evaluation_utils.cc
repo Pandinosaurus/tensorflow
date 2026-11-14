@@ -15,7 +15,11 @@ limitations under the License.
 
 #include "tensorflow/core/grappler/optimizers/evaluation_utils.h"
 
+#include <memory>
+
+#include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/tensor.pb.h"
+#include "tensorflow/core/framework/types.h"
 #include "tensorflow/core/lib/core/threadpool.h"
 #include "tensorflow/core/platform/cpu_info.h"
 #include "tensorflow/core/platform/denormal.h"
@@ -24,7 +28,7 @@ limitations under the License.
 
 namespace tensorflow {
 namespace grappler {
-using TensorVector = gtl::InlinedVector<TensorValue, 4>;
+using TensorVector = absl::InlinedVector<TensorValue, 4UL>;
 
 // In order to avoid the overhead of creating a large thread pool, we set a
 // small default thread count. This value should be revised should DeviceSimple
@@ -35,9 +39,9 @@ DeviceSimple::DeviceSimple() : DeviceBase(Env::Default()) {
   eigen_worker_threads_.num_threads = kDeviceSimpleThreads;
   eigen_worker_threads_.workers = new thread::ThreadPool(
       Env::Default(), "evaluation_utils", eigen_worker_threads_.num_threads);
-  eigen_device_.reset(new Eigen::ThreadPoolDevice(
+  eigen_device_ = std::make_unique<Eigen::ThreadPoolDevice>(
       eigen_worker_threads_.workers->AsEigenThreadPool(),
-      eigen_worker_threads_.num_threads));
+      eigen_worker_threads_.num_threads);
   set_tensorflow_cpu_worker_threads(&eigen_worker_threads_);
   set_eigen_cpu_device(eigen_device_.get());
 }
@@ -47,39 +51,39 @@ DeviceSimple::~DeviceSimple() {
   delete eigen_worker_threads_.workers;
 }
 
-Status DeviceSimple::MakeTensorFromProto(const TensorProto& tensor_proto,
-                                         const AllocatorAttributes alloc_attrs,
-                                         Tensor* tensor) {
+absl::Status DeviceSimple::MakeTensorFromProto(
+    const TensorProto& tensor_proto, const AllocatorAttributes alloc_attrs,
+    Tensor* tensor) {
   Tensor parsed(tensor_proto.dtype());
   if (!parsed.FromProto(cpu_allocator(), tensor_proto)) {
-    return errors::InvalidArgument("Cannot parse tensor from tensor_proto.");
+    return absl::InvalidArgumentError("Cannot parse tensor from tensor_proto.");
   }
   *tensor = parsed;
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-Status EvaluateNode(const NodeDef& node, const TensorVector& inputs,
-                    DeviceBase* cpu_device, ResourceMgr* resource_mgr,
-                    TensorVector* output) {
-  Status status;
+absl::Status EvaluateNode(const NodeDef& node, const TensorVector& inputs,
+                          DeviceBase* cpu_device, ResourceMgr* resource_mgr,
+                          TensorVector* output) {
+  absl::Status status;
   std::unique_ptr<DeviceBase> device;
   if (cpu_device == nullptr) {
-    device.reset(new DeviceSimple());
+    device = std::make_unique<DeviceSimple>();
     cpu_device = device.get();
   }
 
   std::unique_ptr<OpKernel> op_kernel(
-      CreateOpKernel("CPU", cpu_device, cpu_device->GetAllocator({}), node,
+      CreateOpKernel(DEVICE_CPU, cpu_device, cpu_device->GetAllocator({}), node,
                      TF_GRAPH_DEF_VERSION, &status));
   TF_RETURN_IF_ERROR(status);
   OpKernelContext::Params params;
   params.device = cpu_device;
   params.frame_iter = FrameAndIter(0, 0);
-  params.inputs = &inputs;
+  params.inputs = inputs;
   params.op_kernel = op_kernel.get();
   params.resource_manager = resource_mgr;
 
-  gtl::InlinedVector<AllocatorAttributes, 4> output_attrs;
+  absl::InlinedVector<AllocatorAttributes, 4UL> output_attrs;
   const int num_outputs = op_kernel->num_outputs();
   for (int i = 0; i < num_outputs; i++) {
     AllocatorAttributes attr;

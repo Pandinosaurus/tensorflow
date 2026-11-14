@@ -14,16 +14,20 @@ limitations under the License.
 ==============================================================================*/
 #include "tensorflow/lite/simple_planner.h"
 
+#include <algorithm>
 #include <cstdarg>
+#include <cstddef>
+#include <cstdio>
 #include <initializer_list>
+#include <memory>
 #include <utility>
 #include <vector>
 
 #include <gtest/gtest.h>
-#include "tensorflow/core/platform/logging.h"
-#include "tensorflow/lite/c/common.h"
+#include "absl/log/check.h"
+#include "absl/log/log.h"
+#include "tensorflow/lite/core/c/common.h"
 #include "tensorflow/lite/graph_info.h"
-#include "tensorflow/lite/testing/util.h"
 
 namespace tflite {
 namespace {
@@ -38,11 +42,13 @@ class TestOp {
   const std::vector<int>& inputs() const { return inputs_; }
   const std::vector<int>& outputs() const { return outputs_; }
   const std::vector<int>& temporaries() const { return temporaries_; }
+  const TfLiteRegistration& registration() const { return registration_; }
 
  private:
   std::vector<int> inputs_;
   std::vector<int> outputs_;
   std::vector<int> temporaries_;
+  TfLiteRegistration registration_{};
 };
 
 // A test graph where inputs are processed by the given nodes to produce
@@ -68,6 +74,7 @@ class TestGraph {
         return lite;
       };
 
+      registrations_.push_back(node.registration());
       nodes_.push_back(TfLiteNode());
       nodes_.back().inputs = int_array(node.inputs());
       for (int t : node.inputs()) {
@@ -105,6 +112,9 @@ class TestGraph {
   const std::vector<int>& inputs() { return inputs_; }
   const std::vector<int>& outputs() { return outputs_; }
   const std::vector<int>& variables() { return variables_; }
+  const std::vector<TfLiteRegistration>& registrations() {
+    return registrations_;
+  }
 
   void SetVariables(const std::vector<int>& variables) {
     variables_ = variables;
@@ -121,6 +131,7 @@ class TestGraph {
  private:
   std::vector<TfLiteNode> nodes_;
   std::vector<TfLiteTensor> tensors_;
+  std::vector<TfLiteRegistration> registrations_;
   std::vector<int> inputs_;
   std::vector<int> outputs_;
   std::vector<int> variables_;
@@ -132,9 +143,13 @@ class TestGraphInfo : public GraphInfo {
   explicit TestGraphInfo(TestGraph* graph) : graph_(graph) {}
 
   size_t num_tensors() const override { return graph_->tensors()->size(); }
+  const TfLiteRegistration& registration(size_t index) const override {
+    return graph_->registrations()[index];
+  }
   TfLiteTensor* tensor(size_t index) override {
     return &graph_->tensors()->at(index);
   }
+  TfLiteTensor* tensors() override { return graph_->tensors()->data(); }
   size_t num_execution_nodes() const override { return graph_->nodes().size(); }
   size_t num_total_nodes() const override { return graph_->nodes().size(); }
   const TfLiteNode& node(size_t index) const override {
@@ -165,17 +180,12 @@ void ReportError(TfLiteContext* context, const char* format, ...) {
 
 class SimplePlannerTest : public ::testing::Test {
  protected:
-  void SetGraph(TestGraph* graph, bool preserve_all_tensors = false) {
+  void SetGraph(TestGraph* graph) {
     graph_ = graph;
     context_.ReportError = ReportError;
-    planner_.reset(new SimplePlanner(
-        &context_, std::unique_ptr<GraphInfo>(new TestGraphInfo(graph))));
+    planner_ = std::make_unique<SimplePlanner>(
+        &context_, std::unique_ptr<GraphInfo>(new TestGraphInfo(graph)));
     CHECK(planner_->ResetAllocations() == kTfLiteOk);
-    CHECK(planner_->PlanAllocations() == kTfLiteOk);
-  }
-
-  void SwapGraph(TestGraph* graph) {
-    graph_->Swap(graph);
     CHECK(planner_->PlanAllocations() == kTfLiteOk);
   }
 
@@ -193,10 +203,6 @@ class SimplePlannerTest : public ::testing::Test {
 
   void ResetAllocationsAfter(int node) {
     CHECK(planner_->ResetAllocationsAfter(node) == kTfLiteOk);
-  }
-
-  bool HasNonPersistentMemory() {
-    return planner_ && planner_->HasNonPersistentMemory();
   }
 
   // Returns if the given tensor is allocated or not.
@@ -350,6 +356,61 @@ TEST_F(SimplePlannerTest, SimpleGraphWithPersistentResetAllocationsAfter) {
 
   // Check if the persistent pointer isn't changed.
   EXPECT_TRUE(tensor5_ptr == (*graph.tensors())[5].data.raw);
+}
+
+TEST_F(SimplePlannerTest, SimpleGraphOptionalOutput) {
+  TestGraph graph({0, 1},
+                  {
+                      /* in, out, tmp */
+                      {{0, 1}, {2}, {}},     // First op
+                      {{2, 0}, {4, 5}, {}},  // Second op
+                      {{4, 5}, {3}, {}}      // Third op
+                  },
+                  {-1, 3});
+  SetGraph(&graph);
+  Execute(0, 10);
+
+  EXPECT_TRUE(IsAllocated(1));
+  EXPECT_TRUE(IsAllocated(2));
+  EXPECT_TRUE(IsAllocated(3));
+  EXPECT_TRUE(IsAllocated(4));
+  EXPECT_TRUE(IsAllocated(5));
+}
+
+TEST_F(SimplePlannerTest, UAFWhenResizedToZero) {
+  TestGraph graph({0}, {{{0}, {1}, {}}}, {1});
+  SetGraph(&graph);
+  Execute(0, 10);
+  EXPECT_TRUE(IsAllocated(1));
+
+  // Resize tensor 1 to 0 bytes and re-execute.
+  (*graph.tensors())[1].bytes = 0;
+  Execute(0, 10);
+  EXPECT_FALSE(IsAllocated(1));
+}
+
+TEST_F(SimplePlannerTest, OptionalTensorsInOutputsAndTemporaries) {
+  TestGraph graph({0}, {{{0}, {1, -1}, {-1, 2}}}, {1});
+  SetGraph(&graph);
+  Execute(0, 10);
+  EXPECT_TRUE(IsAllocated(1));
+  EXPECT_TRUE(IsAllocated(2));
+}
+
+TEST_F(SimplePlannerTest, NonPersistentMemoryLifecycle) {
+  TestGraph graph({0, 1}, {{{0, 1}, {2}, {}}}, {2});
+  SetGraph(&graph);
+  Execute(0, 10);
+  EXPECT_TRUE(IsAllocated(1));
+  EXPECT_TRUE(IsAllocated(2));
+
+  ReleaseNonPersistentMemory();
+  EXPECT_FALSE(IsAllocated(1));
+  EXPECT_FALSE(IsAllocated(2));
+
+  AcquireNonPersistentMemory();
+  EXPECT_TRUE(IsAllocated(1));
+  EXPECT_TRUE(IsAllocated(2));
 }
 
 }  // namespace

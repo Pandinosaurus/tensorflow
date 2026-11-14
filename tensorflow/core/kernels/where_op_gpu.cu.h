@@ -20,7 +20,7 @@ limitations under the License.
 
 #define EIGEN_USE_GPU
 
-#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
+#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
 #include "tensorflow/core/framework/bounds_check.h"
 #include "tensorflow/core/framework/register_types.h"
 #include "tensorflow/core/framework/tensor_types.h"
@@ -39,11 +39,11 @@ namespace functor {
 template <int NDIM, typename TIndex>
 __global__ void PropagateWhereIndicesKernel(
     const TIndex output_rows, const typename Eigen::array<TIndex, NDIM> strides,
-    int64* __restrict__ output) {
+    int64_t* __restrict__ output) {
   // TODO(ebrevdo): Use a multi-dimensional loop, increasing the
   // dimensions of individual indices manually, instead of relying on
   // a scalar loop variable and using integer division.
-  GPU_1D_KERNEL_LOOP(i, output_rows) {
+  for (int64_t i : GpuGridRangeX<int64_t>(output_rows)) {
     TIndex index_value = ldg(output + NDIM * i);
 #pragma unroll
     for (int c = 0; c < NDIM; ++c) {
@@ -67,27 +67,24 @@ struct IsNonzero {
 template <typename T, typename TIndex>
 struct CubDeviceReduceCount {
   gpuError_t operator()(void* d_temp_storage, size_t& temp_storage_bytes,
-                        const T* d_in, TIndex* d_out, int num_items,
-                        gpuStream_t stream = 0,
-                        bool debug_synchronous = false) {
+                        const T* d_in, TIndex* d_out, TIndex num_items,
+                        gpuStream_t stream = 0) {
     IsNonzero<T> is_nonzero;
     gpuprim::TransformInputIterator<bool, IsNonzero<T>, const T*>
         is_nonzero_iter(d_in, is_nonzero);
     return gpuprim::DeviceReduce::Sum(d_temp_storage, temp_storage_bytes,
-                                      is_nonzero_iter, d_out, num_items, stream,
-                                      debug_synchronous);
+                                      is_nonzero_iter, d_out, num_items,
+                                      stream);
   }
 };
 
 template <typename TIndex>
 struct CubDeviceReduceCount<bool, TIndex> {
   gpuError_t operator()(void* d_temp_storage, size_t& temp_storage_bytes,
-                        const bool* d_in, TIndex* d_out, int num_items,
-                        gpuStream_t stream = 0,
-                        bool debug_synchronous = false) {
+                        const bool* d_in, TIndex* d_out, TIndex num_items,
+                        gpuStream_t stream = 0) {
     return gpuprim::DeviceReduce::Sum(d_temp_storage, temp_storage_bytes, d_in,
-                                      d_out, num_items, stream,
-                                      debug_synchronous);
+                                      d_out, num_items, stream);
   }
 };
 
@@ -100,9 +97,8 @@ struct CubDeviceSelectFlaggedCounter<T, TIndex, OutputIterator,
                                      false /*IsConvertibleToBool*/> {
   gpuError_t operator()(void* d_temp_storage, size_t& temp_storage_bytes,
                         const T* d_flags, OutputIterator d_out,
-                        TIndex* d_num_selected_out, int num_items,
-                        gpuStream_t stream = 0,
-                        bool debug_synchronous = false) {
+                        TIndex* d_num_selected_out, TIndex num_items,
+                        gpuStream_t stream = 0) {
     gpuprim::CountingInputIterator<TIndex> select_counter(0);
     IsNonzero<T> is_nonzero;
     gpuprim::TransformInputIterator<bool, IsNonzero<T>, const T*>
@@ -110,7 +106,7 @@ struct CubDeviceSelectFlaggedCounter<T, TIndex, OutputIterator,
     return gpuprim::DeviceSelect::Flagged(
         d_temp_storage, temp_storage_bytes, select_counter /*d_in*/,
         is_nonzero_iter /*d_flags*/, d_out, d_num_selected_out, num_items,
-        stream, debug_synchronous);
+        stream);
   }
 };
 
@@ -119,13 +115,12 @@ struct CubDeviceSelectFlaggedCounter<T, TIndex, OutputIterator,
                                      true /*IsConvertibleToBool*/> {
   gpuError_t operator()(void* d_temp_storage, size_t& temp_storage_bytes,
                         const T* d_flags, OutputIterator d_out,
-                        TIndex* d_num_selected_out, int num_items,
-                        gpuStream_t stream = 0,
-                        bool debug_synchronous = false) {
+                        TIndex* d_num_selected_out, TIndex num_items,
+                        gpuStream_t stream = 0) {
     gpuprim::CountingInputIterator<TIndex> select_counter(0);
     return gpuprim::DeviceSelect::Flagged(
         d_temp_storage, temp_storage_bytes, select_counter /*d_in*/, d_flags,
-        d_out, d_num_selected_out, num_items, stream, debug_synchronous);
+        d_out, d_num_selected_out, num_items, stream);
   }
 };
 
@@ -133,7 +128,7 @@ struct CubDeviceSelectFlaggedCounter<T, TIndex, OutputIterator,
 
 template <typename T, typename TIndex>
 struct NumTrue<GPUDevice, T, TIndex> {
-  EIGEN_ALWAYS_INLINE static Status Compute(
+  EIGEN_ALWAYS_INLINE static absl::Status Compute(
       OpKernelContext* ctx, const GPUDevice& d,
       typename TTypes<T>::ConstFlat input,
       typename TTypes<TIndex>::UnalignedScalar num_true) {
@@ -161,11 +156,11 @@ struct NumTrue<GPUDevice, T, TIndex> {
 
     Tensor temp_storage;
     TF_RETURN_IF_ERROR(ctx->allocate_temp(
-        DT_INT8, TensorShape({static_cast<int64>(temp_storage_bytes)}),
+        DT_INT8, TensorShape({static_cast<int64_t>(temp_storage_bytes)}),
         &temp_storage));
 
     auto second_success = reducer(
-        /*temp_storage*/ temp_storage.flat<int8>().data(), temp_storage_bytes,
+        /*temp_storage*/ temp_storage.flat<int8_t>().data(), temp_storage_bytes,
         /*d_in*/ input_data,
         /*d_out*/ num_true_data,
         /*num_items*/ input.size(),
@@ -178,7 +173,7 @@ struct NumTrue<GPUDevice, T, TIndex> {
           temp_storage_bytes, ", status: ", GpuGetErrorString(second_success));
     }
 
-    return Status::OK();
+    return absl::OkStatus();
   }
 };
 
@@ -205,9 +200,13 @@ class WhereOutputIterator {
   typedef std::ptrdiff_t difference_type;
   typedef void value_type;
   typedef void pointer;
-  typedef int64& reference;
+  typedef int64_t& reference;
 
-#if (THRUST_VERSION >= 100700)
+#if (THRUST_VERSION >= 300200)
+  typedef thrust::detail::iterator_facade_category_t<
+      thrust::device_system_tag, thrust::random_access_traversal_tag>
+      iterator_category;  ///< The iterator category
+#elif (THRUST_VERSION >= 100700)
   // Use Thrust's iterator categories so we can use these iterators in Thrust
   // 1.7 (or newer) methods
   typedef typename thrust::detail::iterator_facade_category<
@@ -219,10 +218,12 @@ class WhereOutputIterator {
       iterator_category;  ///< The iterator category
 #endif  // THRUST_VERSION
 
-  WhereOutputIterator(int64* ptr, const Eigen::DenseIndex max_row)
+  EIGEN_DEVICE_FUNC EIGEN_STRONG_INLINE
+  WhereOutputIterator(int64_t* ptr, const Eigen::DenseIndex max_row)
       : ptr_(ptr), max_row_(max_row) {}
 
-  EIGEN_DEVICE_FUNC EIGEN_STRONG_INLINE int64& operator[](int n) const {
+  EIGEN_DEVICE_FUNC EIGEN_STRONG_INLINE int64_t& operator[](
+      std::ptrdiff_t n) const {
     // If the selection mechanism finds too many true values (because
     // the input tensor changed between allocation of output and now),
     // we may accidentally try to write past the allowable memory.  If
@@ -233,8 +234,18 @@ class WhereOutputIterator {
     return *(ptr_ + (valid ? (NDIM * n) : 0));
   }
 
+  EIGEN_DEVICE_FUNC EIGEN_STRONG_INLINE reference operator*() const {
+    // Dereference the current pointer
+    return *ptr_;
+  }
+
+  EIGEN_DEVICE_FUNC EIGEN_STRONG_INLINE self_type
+  operator+(std::ptrdiff_t n) const {
+    return self_type(ptr_ + NDIM * n, max_row_);
+  }
+
  private:
-  int64* ptr_;
+  int64_t* ptr_;
   const Eigen::DenseIndex max_row_;
 };
 
@@ -255,13 +266,13 @@ Eigen::array<TIndex, NDIM> CalculateStrides(
 
 template <int NDIM, typename T, typename TIndex>
 struct Where<GPUDevice, NDIM, T, TIndex> {
-  EIGEN_ALWAYS_INLINE static Status Compute(
+  EIGEN_ALWAYS_INLINE static absl::Status Compute(
       OpKernelContext* ctx, const GPUDevice& d,
       typename TTypes<T, NDIM>::ConstTensor input,
-      typename TTypes<int64>::Matrix output, TIndex* found_true_host) {
+      typename TTypes<int64_t>::Matrix output, TIndex* found_true_host) {
     if (output.dimension(0) == 0) {
       // Nothing to do.
-      return Status::OK();
+      return absl::OkStatus();
     }
 
     const auto& cu_stream = GetGpuStream(ctx);
@@ -280,7 +291,7 @@ struct Where<GPUDevice, NDIM, T, TIndex> {
     typedef std::decay<T> DT;
     CubDeviceSelectFlaggedCounter<
         T, TIndex, decltype(output_iterator) /*OutputIterator*/,
-        std::is_convertible<DT, bool>::value /*IsConvertibleToBool*/>
+        std::is_convertible_v<DT, bool> /*IsConvertibleToBool*/>
         counter;
     auto first_success = counter(/*temp_storage*/ nullptr, temp_storage_bytes,
                                  /*d_flags*/ input.data(),
@@ -298,11 +309,11 @@ struct Where<GPUDevice, NDIM, T, TIndex> {
 
     Tensor temp_storage;
     TF_RETURN_IF_ERROR(ctx->allocate_temp(
-        DT_INT8, TensorShape({static_cast<int64>(temp_storage_bytes)}),
+        DT_INT8, TensorShape({static_cast<int64_t>(temp_storage_bytes)}),
         &temp_storage));
 
     auto second_success = counter(
-        /*temp_storage*/ temp_storage.flat<int8>().data(), temp_storage_bytes,
+        /*temp_storage*/ temp_storage.flat<int8_t>().data(), temp_storage_bytes,
         /*d_flags*/ input.data(),
         /*d_out*/ output_iterator,
         /*d_num_selected_out*/ found_true_device,
@@ -322,13 +333,15 @@ struct Where<GPUDevice, NDIM, T, TIndex> {
     const Eigen::array<TIndex, NDIM> strides =
         CalculateStrides<TIndex, T, NDIM>(input);
     const TIndex output_rows = output.dimension(0);
-    GpuLaunchConfig config = GetGpuLaunchConfig(output_rows, d);
+    absl::StatusOr<GpuLaunchConfig64> config =
+        GetGpuLaunchConfig64(output_rows, d);
+    if (!config.ok()) return config.status();
     TF_CHECK_OK(GpuLaunchKernel(PropagateWhereIndicesKernel<NDIM, TIndex>,
-                                config.block_count, config.thread_per_block, 0,
-                                d.stream(), output_rows, strides,
+                                config->block_count, config->thread_per_block,
+                                0, d.stream(), output_rows, strides,
                                 output.data()));
 
-    return Status::OK();
+    return absl::OkStatus();
   }
 };
 

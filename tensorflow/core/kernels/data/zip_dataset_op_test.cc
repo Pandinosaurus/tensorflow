@@ -14,7 +14,23 @@ limitations under the License.
 ==============================================================================*/
 #include "tensorflow/core/kernels/data/zip_dataset_op.h"
 
+#include <cstdint>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <gtest/gtest.h>
+#include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
+#include "xla/tsl/lib/core/status_test_util.h"
 #include "tensorflow/core/data/dataset_test_base.h"
+#include "tensorflow/core/data/name_utils.h"
+#include "tensorflow/core/framework/tensor.h"
+#include "tensorflow/core/framework/tensor_shape.h"
+#include "tensorflow/core/framework/types.h"
+#include "tensorflow/core/framework/types.pb.h"
+#include "tensorflow/core/platform/status.h"
+#include "tensorflow/core/platform/types.h"
 
 namespace tensorflow {
 namespace data {
@@ -28,12 +44,12 @@ class ZipDatasetParams : public DatasetParams {
   ZipDatasetParams(std::vector<T> input_dataset_params,
                    DataTypeVector output_dtypes,
                    std::vector<PartialTensorShape> output_shapes,
-                   int num_input_datasets, string node_name)
+                   int num_input_datasets, std::string node_name)
       : DatasetParams(std::move(output_dtypes), std::move(output_shapes),
                       std::move(node_name)),
         num_input_datasets_(num_input_datasets) {
     for (auto& params : input_dataset_params) {
-      input_dataset_params_.push_back(absl::make_unique<T>(params));
+      input_dataset_params_.push_back(std::make_unique<T>(params));
     }
 
     iterator_prefix_ =
@@ -43,28 +59,31 @@ class ZipDatasetParams : public DatasetParams {
 
   std::vector<Tensor> GetInputTensors() const override { return {}; }
 
-  Status GetInputNames(std::vector<string>* input_names) const override {
+  absl::Status GetInputNames(
+      std::vector<std::string>* input_names) const override {
     input_names->clear();
     for (int i = 0; i < num_input_datasets_; ++i) {
       input_names->emplace_back(
           absl::StrCat(ZipDatasetOp::kDatasetType, "_", i));
     }
-    return Status::OK();
+    return absl::OkStatus();
   }
 
-  Status GetAttributes(AttributeVector* attr_vector) const override {
+  absl::Status GetAttributes(AttributeVector* attr_vector) const override {
     attr_vector->clear();
     attr_vector->emplace_back("output_types", output_dtypes_);
     attr_vector->emplace_back("output_shapes", output_shapes_);
     attr_vector->emplace_back("N", num_input_datasets_);
     attr_vector->emplace_back("metadata", "");
-    return Status::OK();
+    return absl::OkStatus();
   }
 
-  string dataset_type() const override { return ZipDatasetOp::kDatasetType; }
+  std::string dataset_type() const override {
+    return ZipDatasetOp::kDatasetType;
+  }
 
  private:
-  int32 num_input_datasets_;
+  int32_t num_input_datasets_;
 };
 
 class ZipDatasetOpTest : public DatasetOpsTestBase {};

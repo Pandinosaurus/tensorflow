@@ -1,4 +1,24 @@
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
+load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
+load("@rules_cc//cc:cc_test.bzl", "cc_test")
+load("//tensorflow/lite/delegates/gpu:build_defs.bzl", "gtest_main_no_heapcheck_deps")
+
 package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:LICENSE"],
     default_visibility = ["//visibility:public"],
     licenses = ["notice"],
 )
@@ -21,9 +41,32 @@ cc_binary(
     ],
 )
 
+cc_test(
+    name = "gpu_model_test",
+    srcs = ["gpu_model_test.cc"],
+    tags = [
+        "noasan",
+        "nomsan",
+        "notsan",
+        "requires-gpu-sm90",
+    ],
+    deps = [
+        "//tensorflow/lite/delegates/gpu/cl/kernels:cl_test",
+        "//tensorflow/lite/delegates/gpu/common:gpu_model_test_util",
+        "//tensorflow/lite/delegates/gpu/common:status",
+    ] + gtest_main_no_heapcheck_deps(),  # constant buffers leak on nvidia
+)
+
 cc_binary(
     name = "internal_api_samples",
     srcs = ["internal_api_samples.cc"],
+    linkopts = select({
+        "//tensorflow:android": [
+            "-lEGL",
+            "-lGLESv3",
+        ],
+        "//conditions:default": [],
+    }),
     tags = [
         "nobuilder",
         "notap",
@@ -44,15 +87,37 @@ cc_binary(
 )
 
 cc_binary(
-    name = "performance_profiling",
-    srcs = ["performance_profiling.cc"],
+    name = "memory_sharing_sample",
+    srcs = ["memory_sharing_sample.cc"],
     deps = [
+        "//tensorflow/lite/core/kernels:builtin_ops",
         "//tensorflow/lite/delegates/gpu/cl:environment",
         "//tensorflow/lite/delegates/gpu/cl:inference_context",
         "//tensorflow/lite/delegates/gpu/common:model",
         "//tensorflow/lite/delegates/gpu/common:model_builder",
         "//tensorflow/lite/delegates/gpu/common:status",
-        "//tensorflow/lite/kernels:builtin_ops",
         "@com_google_absl//absl/time",
+    ],
+)
+
+cc_binary(
+    name = "performance_profiling",
+    srcs = ["performance_profiling.cc"],
+    copts = [
+        "-DGOOGLE_COMMANDLINEFLAGS_FULL_API=1",
+    ],
+    deps = [
+        "//tensorflow/lite/core/kernels:builtin_ops",
+        "//tensorflow/lite/delegates/gpu/cl:cl_command_buffer",
+        "//tensorflow/lite/delegates/gpu/cl:environment",
+        "//tensorflow/lite/delegates/gpu/cl:inference_context",
+        "//tensorflow/lite/delegates/gpu/cl:opencl_wrapper",
+        "//tensorflow/lite/delegates/gpu/common:model",
+        "//tensorflow/lite/delegates/gpu/common:model_builder",
+        "//tensorflow/lite/delegates/gpu/common:status",
+        "@com_google_absl//absl/flags:flag",
+        "@com_google_absl//absl/flags:parse",
+        "@com_google_absl//absl/time",
+        "@opencl_headers",
     ],
 )

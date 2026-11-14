@@ -17,9 +17,17 @@ limitations under the License.
 #include <stdlib.h>
 
 #include <atomic>
+#include <cstdint>
 #include <functional>
+#include <limits>
+#include <string>
 #include <utility>
 
+#include "absl/log/check.h"
+#include "absl/log/log.h"
+#include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
+#include "absl/synchronization/notification.h"
 #include "tensorflow/core/common_runtime/collective_rma_local.h"
 #include "tensorflow/core/common_runtime/collective_util.h"
 #include "tensorflow/core/common_runtime/copy_tensor.h"
@@ -33,7 +41,6 @@ limitations under the License.
 #include "tensorflow/core/framework/tensor.h"
 #include "tensorflow/core/framework/types.h"
 #include "tensorflow/core/lib/core/errors.h"
-#include "tensorflow/core/lib/core/notification.h"
 #include "tensorflow/core/lib/core/status.h"
 #include "tensorflow/core/lib/strings/str_util.h"
 #include "tensorflow/core/lib/strings/strcat.h"
@@ -42,7 +49,8 @@ limitations under the License.
 #include "tensorflow/core/profiler/lib/traceme.h"
 
 namespace tensorflow {
-Status RingGatherer::InitializeCollectiveParams(CollectiveParams* col_params) {
+absl::Status RingGatherer::InitializeCollectiveParams(
+    CollectiveParams* col_params) {
   DCHECK_EQ(col_params->instance.type, GATHER_COLLECTIVE);
   DCHECK_EQ(col_params->instance.impl_details.collective_name, "RingGather");
   // TODO(tucker): Maybe add subdiv support.  It's only useful with
@@ -51,7 +59,7 @@ Status RingGatherer::InitializeCollectiveParams(CollectiveParams* col_params) {
   if (!col_params->instance.impl_details.subdiv_offsets.empty() &&
       (col_params->instance.impl_details.subdiv_offsets.size() > 1 ||
        col_params->instance.impl_details.subdiv_offsets[0] != 0)) {
-    return errors::InvalidArgument(
+    return absl::InvalidArgumentError(
         "RingGather cannot take any subdiv offset other than 0.");
   }
   if (col_params->instance.impl_details.subdiv_offsets.empty()) {
@@ -68,9 +76,21 @@ void RingGatherer::Run(StatusCallback done) {
   num_subdivs_ = static_cast<int>(
       col_params_->instance.impl_details.subdiv_permutations.size());
   DCHECK_GT(num_subdivs_, 0);
+  if (static_cast<int64_t>(group_size_) * static_cast<int64_t>(num_subdivs_) >
+      std::numeric_limits<int32_t>::max()) {
+    // The collective parameters, including group_size and subdivision details,
+    // originate from the user's graph and device placement. If their product
+    // exceeds a reasonable limit, it indicates an issue with the provided
+    // configuration.
+    done_(absl::InvalidArgumentError(
+        "group_size * num_subdivs exceeds int32 limit, which is required "
+        "because this value is used to size internal vectors or buffers that "
+        "use 32-bit indices."));
+    return;
+  }
 
   if (VLOG_IS_ON(1)) {
-    string buf;
+    std::string buf;
     for (int r = 0; r < col_params_->group.members.size(); ++r) {
       strings::StrAppend(&buf, "dev ", r, " : ",
                          col_params_->group.members[r].device.name(), "\n");
@@ -78,10 +98,10 @@ void RingGatherer::Run(StatusCallback done) {
     for (int sd = 0;
          sd < col_params_->instance.impl_details.subdiv_permutations.size();
          ++sd) {
-      strings::StrAppend(&buf, "\nsubdiv ", sd, " perm: ");
+      absl::StrAppend(&buf, "\nsubdiv ", sd, " perm: ");
       for (auto x :
            col_params_->instance.impl_details.subdiv_permutations[sd]) {
-        strings::StrAppend(&buf, x, ", ");
+        absl::StrAppend(&buf, x, ", ");
       }
     }
     VLOG(1) << "RingGatherer::Run for device " << col_ctx_->device_name
@@ -99,16 +119,17 @@ void RingGatherer::Run(StatusCallback done) {
   // We are running in a blockable thread and the callback can't block so
   // just wait here on the copy.
   {
-    profiler::TraceMe activity("MemCpyAsync", profiler::TraceMeLevel::kInfo);
-    Notification note;
-    Status status;
+    tsl::profiler::TraceMe activity("MemCpyAsync",
+                                    tsl::profiler::TraceMeLevel::kInfo);
+    absl::Notification note;
+    absl::Status status;
     Tensor alias_chunk(ca_->ChunkAlias(col_params_->subdiv_rank[0]));
     CollectiveRemoteAccessLocal::MemCpyAsync(
         col_ctx_->op_ctx->op_device_context(),
         col_ctx_->op_ctx->op_device_context(), col_ctx_->device,
         col_ctx_->device, col_ctx_->op_ctx->input_alloc_attr(0),
         col_ctx_->op_ctx->output_alloc_attr(0), col_ctx_->input, &alias_chunk,
-        0 /*dev_to_dev_stream_index*/, [&note, &status](const Status& s) {
+        0 /*dev_to_dev_stream_index*/, [&note, &status](const absl::Status& s) {
           status.Update(s);
           note.Notify();
         });
@@ -137,24 +158,24 @@ bool RingGatherer::RunAsyncParts() {
       ready_queue.Enqueue(&rfv_[rf_index]);
     }
   }
-  const DeviceBase::GpuDeviceInfo* gpu_info =
-      col_ctx_->device->tensorflow_gpu_device_info();
+  const DeviceBase::AcceleratorDeviceInfo* gpu_info =
+      col_ctx_->device->tensorflow_accelerator_device_info();
   if (gpu_info) {
     // Wait for all currently queued events on the CPU compute stream to
     // complete before proceeding.  The previous InitRingField calls allocated
     // temp memory buffers that are not guaranteed to be valid (e.g. for RDMA
     // write) unless we do.
-    profiler::TraceMe activity("WaitForQueuedEvents",
-                               profiler::TraceMeLevel::kInfo);
-    Notification note;
-    Status s = gpu_info->default_context->ThenExecute(
+    tsl::profiler::TraceMe activity("WaitForQueuedEvents",
+                                    tsl::profiler::TraceMeLevel::kInfo);
+    absl::Notification note;
+    absl::Status s = gpu_info->default_context->ThenExecute(
         col_ctx_->device, gpu_info->stream, [&note]() { note.Notify(); });
     if (s.ok()) {
       note.WaitForNotification();
     } else {
       mutex_lock l(status_mu_);
       status_ =
-          errors::Internal("Failed to dispatch ThenExecute in RingGatherer");
+          absl::InternalError("Failed to dispatch ThenExecute in RingGatherer");
       return false;
     }
   }
@@ -166,7 +187,7 @@ bool RingGatherer::RunAsyncParts() {
 
   // Loop until all RingFields have advanced to completion.
   {
-    profiler::TraceMe activity("Loop", profiler::TraceMeLevel::kInfo);
+    tsl::profiler::TraceMe activity("Loop", tsl::profiler::TraceMeLevel::kInfo);
     while (field_done_count < rfv_.size()) {
       VLOG(4) << FieldState();
       // Wait for a RingField to appear in the ready_queue.
@@ -185,7 +206,8 @@ bool RingGatherer::RunAsyncParts() {
           case RF_INIT:
             if (rf->do_recv) {
               rf->action = RF_RECV;
-              auto requeue = [this, rf, &ready_queue, &aborted](Status s) {
+              auto requeue = [this, rf, &ready_queue,
+                              &aborted](absl::Status s) {
                 if (!s.ok()) {
                   aborted = true;
                   StartAbort(s);
@@ -214,7 +236,7 @@ bool RingGatherer::RunAsyncParts() {
             if (rf->do_send) {
               rf->action = RF_SEND;
               auto send_complete = [this, rf, &ready_queue,
-                                    &aborted](Status s) {
+                                    &aborted](absl::Status s) {
                 if (!s.ok()) {
                   aborted = true;
                   StartAbort(s);

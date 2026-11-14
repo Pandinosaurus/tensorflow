@@ -13,10 +13,6 @@
 # limitations under the License.
 # ==============================================================================
 """Fast-Fourier Transform ops."""
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import re
 
 import numpy as np
@@ -25,11 +21,39 @@ from tensorflow.python.framework import dtypes as _dtypes
 from tensorflow.python.framework import ops as _ops
 from tensorflow.python.framework import tensor_util as _tensor_util
 from tensorflow.python.ops import array_ops as _array_ops
+from tensorflow.python.ops import array_ops_stack as _array_ops_stack
 from tensorflow.python.ops import gen_spectral_ops
 from tensorflow.python.ops import manip_ops
 from tensorflow.python.ops import math_ops as _math_ops
 from tensorflow.python.util import dispatch
 from tensorflow.python.util.tf_export import tf_export
+
+
+def _infer_fft_length_for_fftn(input_tensor):
+  return _array_ops.shape(input_tensor)[-len(input_tensor.shape) :]
+
+
+def _infer_fft_length_for_irfftn(input_tensor):
+  fft_shape = input_tensor.get_shape()[-len(input_tensor.shape) :]
+  fft_length = fft_shape.as_list()
+  # A rank 0 input leaves nothing to index, as in _infer_fft_length_for_irfft.
+  if fft_length:
+    fft_length[-1] = max(0, 2 * (fft_length[-1] - 1))
+  return _ops.convert_to_tensor(fft_length, _dtypes.int32)
+
+
+def _infer_axes_for_fftn(input_tensor):
+  return _ops.convert_to_tensor(
+      np.arange(len(input_tensor.shape)), _dtypes.int32
+  )
+
+
+def _process_empty_axes(input_tensor, axes):
+  if axes is None:
+    axes = _infer_axes_for_fftn(input_tensor)
+  else:
+    axes = _ops.convert_to_tensor(axes, _dtypes.int32)
+  return axes
 
 
 def _infer_fft_length_for_rfft(input_tensor, fft_rank):
@@ -52,15 +76,33 @@ def _infer_fft_length_for_irfft(input_tensor, fft_rank):
 
   # If any dim is unknown, fall back to tensor-based math.
   if not fft_shape.is_fully_defined():
-    fft_length = _array_ops.unstack(_array_ops.shape(input_tensor)[-fft_rank:])
+    fft_length = _array_ops_stack.unstack(
+        _array_ops.shape(input_tensor)[-fft_rank:])
     fft_length[-1] = _math_ops.maximum(0, 2 * (fft_length[-1] - 1))
-    return _array_ops.stack(fft_length)
+    return _array_ops_stack.stack(fft_length)
 
   # Otherwise, return a constant.
   fft_length = fft_shape.as_list()
   if fft_length:
     fft_length[-1] = max(0, 2 * (fft_length[-1] - 1))
   return _ops.convert_to_tensor(fft_length, _dtypes.int32)
+
+
+def _validate_static_irfft_fft_length(fft_length_static, fft_rank):
+  if fft_length_static is None:
+    return
+  fft_length_static = np.asarray(fft_length_static)
+  if fft_length_static.ndim != 1:
+    raise ValueError("Shape %s must have rank 1" % (fft_length_static.shape,))
+  if fft_length_static.size != fft_rank:
+    raise ValueError(
+        "Dimension must be %d but is %d" % (fft_rank, fft_length_static.size)
+    )
+  if fft_length_static.size == 0:
+    return
+  fft_length_last = fft_length_static[-1]
+  if fft_length_last <= 0:
+    raise ValueError("fft_length[-1] must be > 0, got %d" % fft_length_last)
 
 
 def _maybe_pad_for_rfft(input_tensor, fft_rank, fft_length, is_reverse=False):
@@ -70,6 +112,11 @@ def _maybe_pad_for_rfft(input_tensor, fft_rank, fft_length, is_reverse=False):
   # Edge case: skip padding empty tensors.
   if (input_tensor.shape.ndims is not None and
       any(dim.value == 0 for dim in input_tensor.shape.dims)):
+    return input_tensor
+
+  # An N-D transform over a rank 0 input has no dimensions to pad, and the
+  # reverse branch below would index off the end of an empty fft_shape.
+  if fft_rank == 0:
     return input_tensor
 
   # If we know the shapes ahead of time, we can either skip or pre-compute the
@@ -106,9 +153,15 @@ def _maybe_pad_for_rfft(input_tensor, fft_rank, fft_length, is_reverse=False):
                                     fft_length[-1:] // 2 + 1], 0)
   fft_paddings = _math_ops.maximum(0, fft_length - input_fft_shape)
   paddings = _array_ops.concat([outer_paddings, fft_paddings], 0)
-  paddings = _array_ops.stack([_array_ops.zeros_like(paddings), paddings],
-                              axis=1)
+  paddings = _array_ops_stack.stack(
+      [_array_ops.zeros_like(paddings), paddings], axis=1)
   return _array_ops.pad(input_tensor, paddings)
+
+
+def _rename_input_arg_doc(doc):
+  """Renames input to input_tensor in generated op docstrings."""
+  doc = doc.replace("`input`", "`input_tensor`")
+  return re.sub(r"(?m)^( +)input:", r"\1input_tensor:", doc)
 
 
 def _rfft_wrapper(fft_fn, fft_rank, default_name):
@@ -141,7 +194,9 @@ def _rfft_wrapper(fft_fn, fft_rank, default_name):
       if fft_length_static is not None:
         fft_length = fft_length_static
       return fft_fn(input_tensor, fft_length, Tcomplex=complex_dtype, name=name)
-  _rfft.__doc__ = re.sub("    Tcomplex.*?\n", "", fft_fn.__doc__)
+  if fft_fn.__doc__ is not None:
+    _rfft.__doc__ = re.sub("    Tcomplex.*?\n", "", fft_fn.__doc__)
+    _rfft.__doc__ = _rename_input_arg_doc(_rfft.__doc__)
   return _rfft
 
 
@@ -165,14 +220,222 @@ def _irfft_wrapper(ifft_fn, fft_rank, default_name):
         fft_length = _infer_fft_length_for_irfft(input_tensor, fft_rank)
       else:
         fft_length = _ops.convert_to_tensor(fft_length, _dtypes.int32)
+      fft_length_static = _tensor_util.constant_value(fft_length)
+      is_empty = input_tensor.shape.num_elements() == 0
+      if not is_empty:
+        _validate_static_irfft_fft_length(fft_length_static, fft_rank)
       input_tensor = _maybe_pad_for_rfft(input_tensor, fft_rank, fft_length,
                                          is_reverse=True)
-      fft_length_static = _tensor_util.constant_value(fft_length)
       if fft_length_static is not None:
         fft_length = fft_length_static
       return ifft_fn(input_tensor, fft_length, Treal=real_dtype, name=name)
-  _irfft.__doc__ = re.sub("    Treal.*?\n", "", ifft_fn.__doc__)
+
+  if ifft_fn.__doc__ is not None:
+    _irfft.__doc__ = re.sub("    Treal.*?\n", "", ifft_fn.__doc__)
+    _irfft.__doc__ = _rename_input_arg_doc(_irfft.__doc__)
   return _irfft
+
+
+def _fftn_wrapper(fft_n, default_name):
+  """Wrapper around gen_spectral_ops.fftn."""
+
+  def _fftn(input_tensor, fft_length=None, axes=None, norm=None, name=None):
+    """Wrapper around gen_spectral_ops.*fft that infers fft_length and axes arguments."""
+    with _ops.name_scope(
+        name, default_name, [input_tensor, fft_length, axes]
+    ) as name:
+      # Convert first: inferring the axes reads `input_tensor.shape`,
+      # which a list or a scalar does not have.
+      input_tensor = _ops.convert_to_tensor(
+          input_tensor, preferred_dtype=_dtypes.complex64
+      )
+      axes = _process_empty_axes(input_tensor, axes)
+      fft_rank = axes.shape[-1] if axes.shape.ndims else 0
+      input_tensor.shape.with_rank_at_least(fft_rank)
+      if fft_length is None:
+        fft_length = _infer_fft_length_for_fftn(input_tensor)
+      else:
+        fft_length = _ops.convert_to_tensor(fft_length, _dtypes.int32)
+      input_tensor = _maybe_pad_for_rfft(input_tensor, fft_rank, fft_length)
+
+      fft_length_static = _tensor_util.constant_value(fft_length)
+      if fft_length_static is not None:
+        fft_length = fft_length_static
+      if norm is None:
+        norm = "backward"
+      n = 1
+      if norm != "backward":
+        for fft_length_i in fft_length:
+          n *= fft_length_i
+        if norm == "forward":
+          input_tensor /= n
+        elif norm == "ortho":
+          input_tensor /= np.sqrt(n)  # should be sqrt(N)
+      return fft_n(input_tensor, fft_length, axes, name=name)
+
+  if fft_n.__doc__ is not None:
+    _fftn.__doc__ = re.sub(r"    Tcomplex.*?\n", "", fft_n.__doc__)
+    _fftn.__doc__ = _rename_input_arg_doc(_fftn.__doc__)
+  return _fftn
+
+
+def _ifftn_wrapper(ifft_n, default_name):
+  """Wrapper around gen_spectral_ops.ifftn."""
+
+  def _ifftn(input_tensor, fft_length=None, axes=None, norm=None, name=None):
+    """Wrapper around gen_spectral_ops.*fft that infers fft_length and axes arguments."""
+    with _ops.name_scope(
+        name, default_name, [input_tensor, fft_length, axes]
+    ) as name:
+      # Convert first: inferring the axes reads `input_tensor.shape`,
+      # which a list or a scalar does not have.
+      input_tensor = _ops.convert_to_tensor(
+          input_tensor, preferred_dtype=_dtypes.complex64
+      )
+      axes = _process_empty_axes(input_tensor, axes)
+      fft_rank = axes.shape[-1] if axes.shape.ndims else 0
+      input_tensor.shape.with_rank_at_least(fft_rank)
+      if fft_length is None:
+        fft_length = _infer_fft_length_for_fftn(input_tensor)
+      else:
+        fft_length = _ops.convert_to_tensor(fft_length, _dtypes.int32)
+      input_tensor = _maybe_pad_for_rfft(input_tensor, fft_rank, fft_length)
+
+      fft_length_static = _tensor_util.constant_value(fft_length)
+      if fft_length_static is not None:
+        fft_length = fft_length_static
+      if norm is None:
+        norm = "backward"
+      n = 1
+      if norm != "backward":
+        for fft_length_i in fft_length:
+          n *= fft_length_i
+        if norm == "forward":
+          input_tensor *= n
+        elif norm == "ortho":
+          input_tensor *= np.sqrt(n)  # should be sqrt(N)
+      return ifft_n(input_tensor, fft_length, axes, name=name)
+
+  if ifft_n.__doc__ is not None:
+    _ifftn.__doc__ = re.sub(r"    Tcomplex.*?\n", "", ifft_n.__doc__)
+    _ifftn.__doc__ = _rename_input_arg_doc(_ifftn.__doc__)
+  return _ifftn
+
+
+def _rfftn_wrapper(rfft_n, default_name):
+  """Wrapper around gen_spectral_ops.rfftn."""
+
+  def _rfftn(input_tensor, fft_length=None, axes=None, norm=None, name=None):
+    """Wrapper around gen_spectral_ops.*fft that infers fft_length and axes arguments."""
+    with _ops.name_scope(
+        name, default_name, [input_tensor, fft_length, axes]
+    ) as name:
+      # Convert first: inferring the axes reads `input_tensor.shape`,
+      # which a list or a scalar does not have.
+      input_tensor = _ops.convert_to_tensor(
+          input_tensor, preferred_dtype=_dtypes.float32
+      )
+      axes = _process_empty_axes(input_tensor, axes)
+      fft_rank = axes.shape[-1] if axes.shape.ndims else 0
+      if input_tensor.dtype not in (_dtypes.float32, _dtypes.float64):
+        raise ValueError(
+            "RFFT requires tf.float32 or tf.float64 inputs, got: %s"
+            % input_tensor
+        )
+      real_dtype = input_tensor.dtype
+      if real_dtype == _dtypes.float32:
+        complex_dtype = _dtypes.complex64
+      else:
+        assert real_dtype == _dtypes.float64
+        complex_dtype = _dtypes.complex128
+      input_tensor.shape.with_rank_at_least(fft_rank)
+      if fft_length is None:
+        fft_length = _infer_fft_length_for_fftn(input_tensor)
+      else:
+        fft_length = _ops.convert_to_tensor(fft_length, _dtypes.int32)
+      input_tensor = _maybe_pad_for_rfft(input_tensor, fft_rank, fft_length)
+
+      fft_length_static = _tensor_util.constant_value(fft_length)
+      if fft_length_static is not None:
+        fft_length = fft_length_static
+      if norm is None:
+        norm = "backward"
+      n = 1
+      if norm != "backward":
+        for fft_length_i in fft_length:
+          n *= fft_length_i
+        if norm == "forward":
+          input_tensor /= n
+        elif norm == "ortho":
+          input_tensor /= np.sqrt(n)  # should be sqrt(N)
+      return rfft_n(
+          input_tensor,
+          fft_length,
+          axes,
+          Tcomplex=complex_dtype,
+          name=name,
+      )
+
+  if rfft_n.__doc__ is not None:
+    _rfftn.__doc__ = re.sub(r"    Tcomplex.*?\n", "", rfft_n.__doc__)
+    _rfftn.__doc__ = _rename_input_arg_doc(_rfftn.__doc__)
+  return _rfftn
+
+
+def _irfftn_wrapper(irfft_n, default_name):
+  """Wrapper around gen_spectral_ops.irfftn."""
+
+  def _irfftn(input_tensor, fft_length=None, axes=None, norm=None, name=None):
+    """Wrapper irfft* that infers fft_length argument."""
+    with _ops.name_scope(
+        name, default_name, [input_tensor, fft_length]
+    ) as name:
+      # Convert first: inferring the axes reads `input_tensor.shape`,
+      # which a list or a scalar does not have.
+      input_tensor = _ops.convert_to_tensor(
+          input_tensor, preferred_dtype=_dtypes.complex64
+      )
+      axes = _process_empty_axes(input_tensor, axes)
+      fft_rank = axes.shape[-1] if axes.shape.ndims else 0
+      input_tensor.shape.with_rank_at_least(fft_rank)
+      if input_tensor.dtype not in (_dtypes.complex64, _dtypes.complex128):
+        raise ValueError(
+            "IRFFT requires tf.complex64 or tf.complex128 inputs, got: %s"
+            % input_tensor
+        )
+      complex_dtype = input_tensor.dtype
+      real_dtype = complex_dtype.real_dtype
+      if fft_length is None:
+        fft_length = _infer_fft_length_for_irfftn(input_tensor)
+      else:
+        fft_length = _ops.convert_to_tensor(fft_length, _dtypes.int32)
+      fft_length_static = _tensor_util.constant_value(fft_length)
+      if input_tensor.shape.num_elements() != 0:
+        _validate_static_irfft_fft_length(fft_length_static, fft_rank)
+      input_tensor = _maybe_pad_for_rfft(
+          input_tensor, fft_rank, fft_length, is_reverse=True
+      )
+      if fft_length_static is not None:
+        fft_length = fft_length_static
+
+      if norm is None:
+        norm = "backward"
+      n = 1
+      if norm != "backward":
+        for fft_length_i in fft_length:
+          n *= fft_length_i
+        if norm == "forward":
+          input_tensor *= n
+        elif norm == "ortho":
+          input_tensor *= np.sqrt(n)  # should be sqrt(N)
+      return irfft_n(
+          input_tensor, fft_length, axes, Treal=real_dtype, name=name
+      )
+
+  if irfft_n.__doc__ is not None:
+    _irfftn.__doc__ = re.sub(r"    Treal.*?\n", "", irfft_n.__doc__)
+    _irfftn.__doc__ = _rename_input_arg_doc(_irfftn.__doc__)
+  return _irfftn
 
 
 # FFT/IFFT 1/2/3D are exported via
@@ -183,6 +446,14 @@ fft2d = gen_spectral_ops.fft2d
 ifft2d = gen_spectral_ops.ifft2d
 fft3d = gen_spectral_ops.fft3d
 ifft3d = gen_spectral_ops.ifft3d
+fftnd = _fftn_wrapper(gen_spectral_ops.fftnd, "fftnd")
+tf_export("signal.fftnd")(
+    dispatch.add_dispatch_support(fftnd)
+)
+ifftnd = _ifftn_wrapper(gen_spectral_ops.ifftnd, "ifftnd")
+tf_export("signal.ifftnd")(
+    dispatch.add_dispatch_support(ifftnd)
+)
 rfft = _rfft_wrapper(gen_spectral_ops.rfft, 1, "rfft")
 tf_export("signal.rfft", v1=["signal.rfft", "spectral.rfft"])(
     dispatch.add_dispatch_support(rfft))
@@ -201,6 +472,14 @@ tf_export("signal.rfft3d", v1=["signal.rfft3d", "spectral.rfft3d"])(
 irfft3d = _irfft_wrapper(gen_spectral_ops.irfft3d, 3, "irfft3d")
 tf_export("signal.irfft3d", v1=["signal.irfft3d", "spectral.irfft3d"])(
     dispatch.add_dispatch_support(irfft3d))
+rfftnd = _rfftn_wrapper(gen_spectral_ops.rfftnd, "rfftnd")
+tf_export("signal.rfftnd")(
+    dispatch.add_dispatch_support(rfftnd)
+)
+irfftnd = _irfftn_wrapper(gen_spectral_ops.irfftnd, "irfftnd")
+tf_export("signal.irfftnd")(
+    dispatch.add_dispatch_support(irfftnd)
+)
 
 
 def _fft_size_for_grad(grad, rank):
@@ -403,7 +682,10 @@ def fftshift(x, axes=None, name=None):
   with _ops.name_scope(name, "fftshift") as name:
     x = _ops.convert_to_tensor(x)
     if axes is None:
-      axes = tuple(range(x.shape.ndims))
+      if x.shape.ndims is not None:
+        axes = tuple(range(x.shape.ndims))
+      else:
+        axes = _math_ops.range(_array_ops.rank(x))
       shift = _array_ops.shape(x) // 2
     elif isinstance(axes, int):
       shift = _array_ops.shape(x)[axes] // 2
@@ -448,7 +730,10 @@ def ifftshift(x, axes=None, name=None):
   with _ops.name_scope(name, "ifftshift") as name:
     x = _ops.convert_to_tensor(x)
     if axes is None:
-      axes = tuple(range(x.shape.ndims))
+      if x.shape.ndims is not None:
+        axes = tuple(range(x.shape.ndims))
+      else:
+        axes = _math_ops.range(_array_ops.rank(x))
       shift = -(_array_ops.shape(x) // 2)
     elif isinstance(axes, int):
       shift = -(_array_ops.shape(x)[axes] // 2)

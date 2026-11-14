@@ -37,7 +37,7 @@ namespace tensorflow {
 
 class QuantizedReshapeTest : public OpsTestBase {
  protected:
-  QuantizedReshapeTest() {}
+  QuantizedReshapeTest() = default;
 };
 
 TEST_F(QuantizedReshapeTest, Reshape) {
@@ -56,7 +56,7 @@ TEST_F(QuantizedReshapeTest, Reshape) {
     expected.flat<quint8>()(i) = quint8(i);
   }
   AddInputFromArray<quint8>(input.shape(), input.flat<quint8>());
-  AddInputFromList<int32>({3}, {5, 10, 4});  // shape
+  AddInputFromList<int32_t>({3}, {5, 10, 4});  // shape
   AddInputFromArray<float>(TensorShape({1}), {-10});
   AddInputFromArray<float>(TensorShape({1}), {20});
   TF_ASSERT_OK(RunOpKernel());

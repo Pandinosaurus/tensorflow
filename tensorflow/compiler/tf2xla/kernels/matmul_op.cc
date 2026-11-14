@@ -15,13 +15,22 @@ limitations under the License.
 
 // XLA-specific MatMul Op.
 
-#include "tensorflow/compiler/tf2xla/xla_helpers.h"
+#include <array>
+#include <optional>
+
+#include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
 #include "tensorflow/compiler/tf2xla/xla_op_kernel.h"
 #include "tensorflow/compiler/tf2xla/xla_op_registry.h"
-#include "tensorflow/compiler/xla/client/lib/matrix.h"
-#include "tensorflow/compiler/xla/client/xla_builder.h"
+#include "xla/hlo/builder/lib/matrix.h"
+#include "xla/hlo/builder/xla_builder.h"
+#include "xla/xla_data.pb.h"
 #include "tensorflow/core/framework/op_kernel.h"
+#include "tensorflow/core/framework/op_requires.h"
+#include "tensorflow/core/framework/tensor_shape.h"
 #include "tensorflow/core/framework/types.pb.h"
+#include "tensorflow/core/platform/errors.h"
+#include "tsl/platform/tensor_float_32_utils.h"
 
 namespace tensorflow {
 namespace {
@@ -33,9 +42,16 @@ constexpr std::array<DataType, 10> kMatmulTypes = {
 class MatMulOp : public XlaOpKernel {
  public:
   explicit MatMulOp(OpKernelConstruction* ctx, bool is_sparse = false)
-      : XlaOpKernel(ctx), is_sparse_(is_sparse) {
+      : XlaOpKernel(ctx),
+        is_sparse_(is_sparse),
+        grad_a_(false),
+        grad_b_(false) {
     OP_REQUIRES_OK(ctx, ctx->GetAttr("transpose_a", &transpose_a_));
     OP_REQUIRES_OK(ctx, ctx->GetAttr("transpose_b", &transpose_b_));
+    if (!is_sparse) {
+      OP_REQUIRES_OK(ctx, ctx->GetAttr("grad_a", &grad_a_));
+      OP_REQUIRES_OK(ctx, ctx->GetAttr("grad_b", &grad_b_));
+    }
     if (is_sparse) {
       OP_REQUIRES_OK(ctx, ctx->GetAttr("Ta", &a_type_));
       OP_REQUIRES_OK(ctx, ctx->GetAttr("Tb", &b_type_));
@@ -58,25 +74,25 @@ class MatMulOp : public XlaOpKernel {
 
     // Check that the dimensions of the two matrices are valid.
     OP_REQUIRES(ctx, a_shape.dims() == b_shape.dims(),
-                errors::InvalidArgument("In[0] and In[1] has different ndims: ",
-                                        a_shape.DebugString(), " vs. ",
-                                        b_shape.DebugString()));
-    OP_REQUIRES(
-        ctx, TensorShapeUtils::IsMatrix(a_shape),
-        errors::InvalidArgument("In[0] is not a matrix. Instead it has shape ",
-                                a_shape.DebugString()));
-    OP_REQUIRES(
-        ctx, TensorShapeUtils::IsMatrix(b_shape),
-        errors::InvalidArgument("In[1] is not a matrix. Instead it has shape ",
-                                b_shape.DebugString()));
+                absl::InvalidArgumentError(absl::StrCat(
+                    "In[0] and In[1] has different ndims: ",
+                    a_shape.DebugString(), " vs. ", b_shape.DebugString())));
+    OP_REQUIRES(ctx, TensorShapeUtils::IsMatrix(a_shape),
+                absl::InvalidArgumentError(
+                    absl::StrCat("In[0] is not a matrix. Instead it has shape ",
+                                 a_shape.DebugString())));
+    OP_REQUIRES(ctx, TensorShapeUtils::IsMatrix(b_shape),
+                absl::InvalidArgumentError(
+                    absl::StrCat("In[1] is not a matrix. Instead it has shape ",
+                                 b_shape.DebugString())));
     int first_index = transpose_a_ ? 0 : 1;
     int second_index = transpose_b_ ? 1 : 0;
 
     OP_REQUIRES(ctx,
                 a_shape.dim_size(first_index) == b_shape.dim_size(second_index),
-                errors::InvalidArgument(
+                absl::InvalidArgumentError(absl::StrCat(
                     "Matrix size-incompatible: In[0]: ", a_shape.DebugString(),
-                    ", In[1]: ", b_shape.DebugString()));
+                    ", In[1]: ", b_shape.DebugString())));
 
     xla::XlaOp a = ctx->Input(0);
     xla::XlaOp b = ctx->Input(1);
@@ -88,13 +104,20 @@ class MatMulOp : public XlaOpKernel {
         b = xla::ConvertElementType(b, xla::F32);
       }
     }
-    ctx->SetOutput(0, xla::BatchDot(a, transpose_a_, b, transpose_b_));
+    xla::PrecisionConfig::Precision precision =
+        tsl::tensor_float_32_execution_enabled()
+            ? xla::PrecisionConfig::DEFAULT
+            : xla::PrecisionConfig::HIGHEST;
+    ctx->SetOutput(0, xla::BatchDot(a, transpose_a_, b, transpose_b_, precision,
+                                    std::nullopt, grad_a_, grad_b_));
   }
 
  private:
   bool is_sparse_;
   bool transpose_a_;
   bool transpose_b_;
+  bool grad_a_;
+  bool grad_b_;
   DataType a_type_;
   DataType b_type_;
 };

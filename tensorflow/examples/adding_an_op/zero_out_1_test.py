@@ -15,10 +15,6 @@
 
 """Test for version 1 of the zero_out op."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import os.path
 
 import tensorflow as tf
@@ -44,7 +40,7 @@ class ZeroOut1Test(tf.test.TestCase):
     result = zero_out_op_1.namespace_nested_zero_out([5, 4, 3, 2, 1])
     self.assertAllEqual(result, [5, 0, 0, 0, 0])
 
-  def testLoadTwice(self):
+  def test_load_twice(self):
     zero_out_loaded_again = tf.load_op_library(os.path.join(
         tf.compat.v1.resource_loader.get_data_files_path(),
         'zero_out_op_kernel_1.so'))

@@ -33,7 +33,7 @@ class Device;
 class FunctionLibraryRuntime;
 class ProcessFunctionLibraryRuntime;
 struct SessionOptions;
-class StaticDeviceMgr;
+class DynamicDeviceMgr;
 
 namespace test {
 
@@ -48,37 +48,37 @@ class Benchmark {
   //   * In the new API, the timer starts automatically at the first
   //     iteration of the loop and stops after the last iteration.
   // TODO(vyng) Remove this once we have migrated all code to newer API.
-  Benchmark(const string& device, Graph* g,
+  Benchmark(const std::string& device, Graph* g,
             const SessionOptions* options = nullptr, Graph* init = nullptr,
             Rendezvous* rendez = nullptr, const char* executor_type = "",
             bool old_benchmark_api = false);
 
-  Benchmark(const string& device, Graph* g, bool old_benchmark_api);
+  Benchmark(const std::string& device, Graph* g, bool old_benchmark_api);
 
   ~Benchmark();
 
   void Run(benchmark::State& state);
 
   void RunWithRendezvousArgs(
-      const std::vector<std::pair<string, Tensor>>& inputs,
-      const std::vector<string>& outputs, benchmark::State& state);
+      const std::vector<std::pair<std::string, Tensor>>& inputs,
+      const std::vector<std::string>& outputs, benchmark::State& state);
 
  private:
   thread::ThreadPool* pool_ = nullptr;  // Not owned.
   Device* device_ = nullptr;            // Not owned.
   Rendezvous* rendez_ = nullptr;
-  std::unique_ptr<StaticDeviceMgr> device_mgr_;
+  std::unique_ptr<DynamicDeviceMgr> device_mgr_;
   std::unique_ptr<FunctionLibraryDefinition> flib_def_;
   std::unique_ptr<ProcessFunctionLibraryRuntime> pflr_;
   FunctionLibraryRuntime* flr_;  // Not owned.
   std::unique_ptr<Executor> exec_;
-  bool old_benchmark_api_;
 
-  TF_DISALLOW_COPY_AND_ASSIGN(Benchmark);
+  Benchmark(const Benchmark&) = delete;
+  void operator=(const Benchmark&) = delete;
 };
 
 // Returns the rendezvous key associated with the given Send/Recv node.
-string GetRendezvousKey(const Node* node);
+std::string GetRendezvousKey(const Node* node);
 
 }  // end namespace test
 }  // end namespace tensorflow

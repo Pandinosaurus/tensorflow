@@ -1,6 +1,23 @@
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("//tensorflow:tensorflow.bzl", "if_google")
 
 package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:LICENSE"],
     default_visibility = ["//visibility:public"],
     licenses = ["notice"],
 )
@@ -88,6 +105,7 @@ cc_library(
         ":simple_selectors",
         ":subgraph",
         "//tensorflow/lite/delegates/gpu/common:data_type",
+        "//tensorflow/lite/delegates/gpu/common:flops_util",
         "//tensorflow/lite/delegates/gpu/common:gpu_info",
         "//tensorflow/lite/delegates/gpu/common:model",
         "//tensorflow/lite/delegates/gpu/common:model_hints",
@@ -95,16 +113,19 @@ cc_library(
         "//tensorflow/lite/delegates/gpu/common:shape",
         "//tensorflow/lite/delegates/gpu/common:status",
         "//tensorflow/lite/delegates/gpu/common:tensor",
+        "//tensorflow/lite/delegates/gpu/common:types",
+        "//tensorflow/lite/delegates/gpu/common:util",
         "//tensorflow/lite/delegates/gpu/common:winograd_util",
         "//tensorflow/lite/delegates/gpu/common/task:gpu_operation",
-        "//tensorflow/lite/delegates/gpu/common/task:storage_type_util",
         "//tensorflow/lite/delegates/gpu/common/task:tensor_desc",
         "//tensorflow/lite/delegates/gpu/common/task:weights_conversion",
+        "//tensorflow/lite/delegates/gpu/common/task:weights_layout",
         "//tensorflow/lite/delegates/gpu/common/tasks:elementwise",
         "//tensorflow/lite/delegates/gpu/common/tasks:mean_stddev_normalization",
-        "//tensorflow/lite/delegates/gpu/common/tasks:transpose",
+        "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/types:any",
+        "@com_google_absl//absl/types:span",
     ],
 )
 
@@ -113,18 +134,23 @@ cc_library(
     srcs = ["simple_selectors.cc"],
     hdrs = ["simple_selectors.h"],
     deps = [
+        "//tensorflow/lite/delegates/gpu/common:data_type",
         "//tensorflow/lite/delegates/gpu/common:gpu_info",
         "//tensorflow/lite/delegates/gpu/common:operations",
         "//tensorflow/lite/delegates/gpu/common:shape",
         "//tensorflow/lite/delegates/gpu/common:status",
+        "//tensorflow/lite/delegates/gpu/common:tensor",
         "//tensorflow/lite/delegates/gpu/common/task:gpu_operation",
         "//tensorflow/lite/delegates/gpu/common/tasks:add",
+        "//tensorflow/lite/delegates/gpu/common/tasks:cast",
         "//tensorflow/lite/delegates/gpu/common/tasks:concat_xy",
         "//tensorflow/lite/delegates/gpu/common/tasks:concat_z",
+        "//tensorflow/lite/delegates/gpu/common/tasks:cumsum",
         "//tensorflow/lite/delegates/gpu/common/tasks:depthwise_conv",
         "//tensorflow/lite/delegates/gpu/common/tasks:gather",
         "//tensorflow/lite/delegates/gpu/common/tasks:lstm",
         "//tensorflow/lite/delegates/gpu/common/tasks:max_unpooling",
+        "//tensorflow/lite/delegates/gpu/common/tasks:one_hot",
         "//tensorflow/lite/delegates/gpu/common/tasks:padding",
         "//tensorflow/lite/delegates/gpu/common/tasks:pooling",
         "//tensorflow/lite/delegates/gpu/common/tasks:prelu",
@@ -135,6 +161,7 @@ cc_library(
         "//tensorflow/lite/delegates/gpu/common/tasks:reshape",
         "//tensorflow/lite/delegates/gpu/common/tasks:reshapex4",
         "//tensorflow/lite/delegates/gpu/common/tasks:resize",
+        "//tensorflow/lite/delegates/gpu/common/tasks:select_v2",
         "//tensorflow/lite/delegates/gpu/common/tasks:softmax",
         "//tensorflow/lite/delegates/gpu/common/tasks:softmax1x1",
         "//tensorflow/lite/delegates/gpu/common/tasks:space_to_depth",
@@ -143,7 +170,6 @@ cc_library(
         "//tensorflow/lite/delegates/gpu/common/tasks:tile",
         "//tensorflow/lite/delegates/gpu/common/tasks:transpose",
         "//tensorflow/lite/delegates/gpu/common/tasks:winograd",
-        "@com_google_absl//absl/memory",
     ],
 )
 
@@ -153,19 +179,18 @@ cc_library(
     hdrs = ["special_selector.h"],
     deps = [
         ":subgraph",
-        "//tensorflow/lite/delegates/gpu/common:data_type",
         "//tensorflow/lite/delegates/gpu/common:gpu_info",
         "//tensorflow/lite/delegates/gpu/common:model",
-        "//tensorflow/lite/delegates/gpu/common:operations",
-        "//tensorflow/lite/delegates/gpu/common:shape",
+        "//tensorflow/lite/delegates/gpu/common:model_hints",
+        "//tensorflow/lite/delegates/gpu/common:precision",
         "//tensorflow/lite/delegates/gpu/common:status",
-        "//tensorflow/lite/delegates/gpu/common:tensor",
         "//tensorflow/lite/delegates/gpu/common/task:gpu_operation",
         "//tensorflow/lite/delegates/gpu/common/task:tensor_desc",
+        "//tensorflow/lite/delegates/gpu/common/tasks:mean_stddev_normalization",
         "//tensorflow/lite/delegates/gpu/common/tasks/special:conv_pointwise",
-        "//tensorflow/lite/delegates/gpu/common/tasks/special:depthwise_conv_plus_1x1_conv",
+        "//tensorflow/lite/delegates/gpu/common/tasks/special:dw7x7_conv2to6_concat_conv8to8",
         "//tensorflow/lite/delegates/gpu/common/tasks/special:fc_fc_add",
-        "@com_google_absl//absl/types:any",
+        "//tensorflow/lite/delegates/gpu/common/tasks/special:thin_pointwise_fuser",
     ],
 )
 
@@ -175,6 +200,7 @@ cc_library(
     hdrs = ["subgraph.h"],
     deps = [
         "//tensorflow/lite/delegates/gpu/common:model",
+        "//tensorflow/lite/delegates/gpu/common:shape",
         "//tensorflow/lite/delegates/gpu/common/task:gpu_operation",
         "//tensorflow/lite/delegates/gpu/common/task:tensor_desc",
     ],

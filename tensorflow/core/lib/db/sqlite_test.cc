@@ -17,11 +17,11 @@ limitations under the License.
 #include <array>
 #include <climits>
 
-#include "tensorflow/core/lib/core/status_test_util.h"
+#include "xla/tsl/lib/core/status_test_util.h"
 #include "tensorflow/core/lib/core/stringpiece.h"
-#include "tensorflow/core/lib/io/path.h"
-#include "tensorflow/core/lib/strings/stringprintf.h"
+#include "tensorflow/core/platform/status.h"
 #include "tensorflow/core/platform/test.h"
+#include "tensorflow/core/platform/types.h"
 
 namespace tensorflow {
 namespace {
@@ -89,7 +89,7 @@ TEST_F(SqliteTest, Json1Extension) {
 #endif //DSQLITE_ENABLE_JSON1
 
 TEST_F(SqliteTest, NulCharsInString) {
-  string s;  // XXX: Want to write {2, '\0'} but not sure why not.
+  std::string s;  // XXX: Want to write {2, '\0'} but not sure why not.
   s.append(static_cast<size_t>(2), '\0');
   auto stmt = db_->PrepareOrDie("INSERT INTO T (a, b) VALUES (?, ?)");
   stmt.BindBlob(1, s);
@@ -108,7 +108,7 @@ TEST_F(SqliteTest, NulCharsInString) {
 }
 
 TEST_F(SqliteTest, Unicode) {
-  string s = "要依法治国是赞美那些谁是公义的和惩罚恶人。 - 韩非";
+  std::string s = "要依法治国是赞美那些谁是公义的和惩罚恶人。 - 韩非";
   auto stmt = db_->PrepareOrDie("INSERT INTO T (a, b) VALUES (?, ?)");
   stmt.BindBlob(1, s);
   stmt.BindText(2, s);
@@ -134,7 +134,7 @@ TEST_F(SqliteTest, StepAndResetClearsBindings) {
 }
 
 TEST_F(SqliteTest, SafeBind) {
-  string s = "hello";
+  std::string s = "hello";
   auto stmt = db_->PrepareOrDie("INSERT INTO T (a, b) VALUES (?, ?)");
   stmt.BindBlob(1, s);
   stmt.BindText(2, s);
@@ -147,7 +147,7 @@ TEST_F(SqliteTest, SafeBind) {
 }
 
 TEST_F(SqliteTest, UnsafeBind) {
-  string s = "hello";
+  std::string s = "hello";
   auto stmt = db_->PrepareOrDie("INSERT INTO T (a, b) VALUES (?, ?)");
   stmt.BindBlobUnsafe(1, s);
   stmt.BindTextUnsafe(2, s);
@@ -169,8 +169,8 @@ TEST_F(SqliteTest, UnsafeColumn) {
   TF_ASSERT_OK(stmt.StepAndReset());
   stmt = db_->PrepareOrDie("SELECT b FROM T ORDER BY a");
   TF_ASSERT_OK(stmt.Step(&is_done_));
-  StringPiece p = stmt.ColumnStringUnsafe(0);
-  EXPECT_EQ('h', *p.data());
+  absl::string_view p = stmt.ColumnStringUnsafe(0);
+  EXPECT_EQ('h', p[0]);
   TF_ASSERT_OK(stmt.Step(&is_done_));
   // This will actually happen, but it's not safe to test this behavior.
   // EXPECT_EQ('t', *p.data());
@@ -214,19 +214,19 @@ TEST_F(SqliteTest, Statement_MoveAssignment) {
 TEST_F(SqliteTest, PrepareFailed) {
   SqliteLock lock(*db_);
   SqliteStatement stmt;
-  Status s = db_->Prepare("SELECT", &stmt);
+  absl::Status s = db_->Prepare("SELECT", &stmt);
   ASSERT_FALSE(s.ok());
-  EXPECT_NE(string::npos, s.error_message().find("SELECT"));
+  EXPECT_NE(std::string::npos, s.message().find("SELECT"));
   EXPECT_EQ(SQLITE_ERROR, db_->errcode());
 }
 
 TEST_F(SqliteTest, BindFailed) {
   auto stmt = db_->PrepareOrDie("INSERT INTO T (a) VALUES (123)");
   stmt.BindInt(1, 123);
-  Status s = stmt.StepOnce();
-  EXPECT_NE(string::npos,
-            s.error_message().find("INSERT INTO T (a) VALUES (123)"))
-      << s.error_message();
+  absl::Status s = stmt.StepOnce();
+  EXPECT_NE(std::string::npos,
+            s.message().find("INSERT INTO T (a) VALUES (123)"))
+      << s.message();
 }
 
 TEST_F(SqliteTest, SnappyExtension) {

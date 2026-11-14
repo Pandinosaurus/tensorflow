@@ -13,10 +13,20 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include <cstdint>
+
+#include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
 #include "tensorflow/compiler/tf2xla/xla_op_kernel.h"
-#include "tensorflow/compiler/xla/client/lib/matrix.h"
-#include "tensorflow/compiler/xla/client/lib/qr.h"
-#include "tensorflow/compiler/xla/client/xla_builder.h"
+#include "tensorflow/compiler/tf2xla/xla_op_registry.h"
+#include "xla/hlo/builder/lib/matrix.h"
+#include "xla/hlo/builder/lib/qr.h"
+#include "xla/hlo/builder/xla_builder.h"
+#include "xla/xla_data.pb.h"
+#include "tensorflow/core/framework/op_kernel.h"
+#include "tensorflow/core/framework/op_requires.h"
+#include "tensorflow/core/framework/tensor_shape.h"
+#include "tensorflow/core/platform/errors.h"
 
 namespace tensorflow {
 namespace {
@@ -30,14 +40,15 @@ class MatrixInverseOp : public XlaOpKernel {
   void Compile(XlaOpKernelContext* ctx) override {
     const TensorShape input_shape = ctx->InputShape(0);
     int64_t ndims = input_shape.dims();
-    OP_REQUIRES(
-        ctx, ndims >= 2,
-        errors::InvalidArgument("Input must have rank >= 2, got ", ndims));
+    OP_REQUIRES(ctx, ndims >= 2,
+                absl::InvalidArgumentError(
+                    absl::StrCat("Input must have rank >= 2, got ", ndims)));
     OP_REQUIRES(
         ctx, input_shape.dim_size(ndims - 2) == input_shape.dim_size(ndims - 1),
-        errors::InvalidArgument("Input matrices must be squares, got",
-                                input_shape.dim_size(ndims - 2),
-                                " != ", input_shape.dim_size(ndims - 1)));
+        absl::InvalidArgumentError(
+            absl::StrCat("Input matrices must be squares, got",
+                         input_shape.dim_size(ndims - 2),
+                         " != ", input_shape.dim_size(ndims - 1))));
 
     xla::XlaOp input = xla::MaybeTransposeInMinorDims(ctx->Input(0), adjoint_);
 
@@ -57,7 +68,8 @@ class MatrixInverseOp : public XlaOpKernel {
  private:
   bool adjoint_;
 
-  TF_DISALLOW_COPY_AND_ASSIGN(MatrixInverseOp);
+  MatrixInverseOp(const MatrixInverseOp&) = delete;
+  void operator=(const MatrixInverseOp&) = delete;
 };
 
 // TODO(b/135640736): Allow this for integer and complex types.

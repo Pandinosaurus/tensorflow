@@ -18,12 +18,10 @@ limitations under the License.
 #include <vector>
 
 #include "absl/memory/memory.h"
+#include "absl/status/status.h"
 #include "tensorflow/core/framework/full_type.pb.h"
 #include "tensorflow/core/framework/node_def_util.h"
-#include "tensorflow/core/framework/tensor.h"
-#include "tensorflow/core/lib/core/errors.h"
 #include "tensorflow/core/lib/core/status.h"
-#include "tensorflow/core/lib/gtl/inlined_vector.h"
 #include "tensorflow/core/platform/macros.h"
 
 namespace tensorflow {
@@ -125,7 +123,8 @@ class Dimension {
 
   friend class InferenceContext;
   friend class ShapeManager;
-  TF_DISALLOW_COPY_AND_ASSIGN(Dimension);
+  Dimension(const Dimension&) = delete;
+  void operator=(const Dimension&) = delete;
 };
 
 class DimensionHandle {
@@ -159,13 +158,14 @@ class Shape {
   Shape(const std::vector<DimensionHandle>& dims);
   ~Shape() {}
 
-  const int32 rank_;
+  const int32_t rank_;
   const std::vector<DimensionHandle> dims_;
 
   friend class InferenceContext;
   friend class ::tensorflow::grappler::SymbolicShapeManager;
 
-  TF_DISALLOW_COPY_AND_ASSIGN(Shape);
+  Shape(const Shape&) = delete;
+  void operator=(const Shape&) = delete;
 };
 
 class ShapeHandle {
@@ -275,8 +275,9 @@ class InferenceContext {
   // argument, returns the status of the inference.
   //
   // On error, additional context is provided in the error message.
-  Status Run(
-      const std::function<Status(shape_inference::InferenceContext* c)>& fn);
+  absl::Status Run(
+      const std::function<absl::Status(shape_inference::InferenceContext* c)>&
+          fn);
 
   // Merge the stored shape of the input in position idx with <shape> according
   // to the following rules:
@@ -295,6 +296,7 @@ class InferenceContext {
   // This requires idx to be in the [0, num_inputs) range. If the merge is
   // successful, return true. Return false otherwise.
   bool MergeInput(int idx, ShapeHandle shape) {
+    if (idx < 0 || idx >= num_inputs()) return false;
     ShapeHandle new_shape;
     if (!Merge(inputs_[idx], shape, &new_shape).ok()) return false;
     inputs_[idx] = new_shape;
@@ -339,7 +341,8 @@ class InferenceContext {
   void SetInput(int idx, ShapeHandle shape) { inputs_[idx] = shape; }
 
   ShapeHandle input(int64_t idx) const { return inputs_[idx]; }
-  Status input(StringPiece input_name, std::vector<ShapeHandle>* output) const;
+  absl::Status input(absl::string_view input_name,
+                     std::vector<ShapeHandle>* output) const;
   int num_inputs() const { return inputs_.size(); }
 
   // Returns the input tensor at index <idx>, or nullptr if the input tensor is
@@ -392,19 +395,20 @@ class InferenceContext {
 
   ShapeHandle output(int64_t idx) const { return outputs_.at(idx); }
   void set_output(int idx, ShapeHandle shape) { outputs_.at(idx) = shape; }
-  Status set_output(StringPiece output_name,
-                    const std::vector<ShapeHandle>& shapes);
+  absl::Status set_output(absl::string_view output_name,
+                          const std::vector<ShapeHandle>& shapes);
 
   int num_outputs() const { return outputs_.size(); }
   ShapeHandle output(int idx) const { return outputs_.at(idx); }
-  Status output(StringPiece output_name,
-                std::vector<ShapeHandle>* output) const;
+  absl::Status output(absl::string_view output_name,
+                      std::vector<ShapeHandle>* output) const;
 
   // Returns the value for attribute named `attr_name`.
-  Status GetAttr(StringPiece attr_name, const AttrValue** attr_value) const {
+  absl::Status GetAttr(absl::string_view attr_name,
+                       const AttrValue** attr_value) const {
     return attrs_.Find(attr_name, attr_value);
   }
-  const AttrValue* GetAttr(StringPiece attr_name) const {
+  const AttrValue* GetAttr(absl::string_view attr_name) const {
     return attrs_.Find(attr_name);
   }
 
@@ -427,7 +431,7 @@ class InferenceContext {
     return s->dims_[idx];
   }
 
-  static int32 Rank(ShapeHandle s) {
+  static int32_t Rank(ShapeHandle s) {
     return s.IsSet() ? s->rank_ : kUnknownRank;
   }
   static bool RankKnown(ShapeHandle s) {
@@ -443,6 +447,7 @@ class InferenceContext {
   // Fills the output proto with the shape defined by the handle.
   // "proto" is expected to be empty prior to the call.
   void ShapeHandleToProto(ShapeHandle handle, TensorShapeProto* proto);
+  TensorShapeProto ShapeHandleToProto(ShapeHandle handle);
 
   // Returns true if the rank and all dimensions of the Shape are known.
   bool FullyDefined(ShapeHandle s);
@@ -454,7 +459,7 @@ class InferenceContext {
   std::string DebugString(ShapeHandle s);
   std::string DebugString(DimensionHandle d);
   std::string DebugString(const ShapeAndType& shape_and_type);
-  std::string DebugString(gtl::ArraySlice<ShapeAndType> shape_and_types);
+  std::string DebugString(absl::Span<const ShapeAndType> shape_and_types);
 
   // Describes the whole context, for debugging purposes.
   std::string DebugString() const;
@@ -463,67 +468,63 @@ class InferenceContext {
   // the shape with asserted rank in <*out>. Otherwise return an error.
   //
   // Note that <*out> may be set to <shape>.
-  Status WithRank(ShapeHandle shape, int64_t rank,
-                  ShapeHandle* out) TF_MUST_USE_RESULT;
-  Status WithRankAtLeast(ShapeHandle shape, int64_t rank,
-                         ShapeHandle* out) TF_MUST_USE_RESULT;
-  Status WithRankAtMost(ShapeHandle shape, int64_t rank,
-                        ShapeHandle* out) TF_MUST_USE_RESULT;
+  absl::Status WithRank(ShapeHandle shape, int64_t rank, ShapeHandle* out);
+  absl::Status WithRankAtLeast(ShapeHandle shape, int64_t rank,
+                               ShapeHandle* out);
+  absl::Status WithRankAtMost(ShapeHandle shape, int64_t rank,
+                              ShapeHandle* out);
 
   // If <dim> has value <value>, or its value is unknown, returns OK and returns
   // the dimension with asserted value in <*out>. Otherwise returns an error.
   //
   // Note that <*out> may be set to <dim>.
-  Status WithValue(DimensionHandle dim, int64_t value,
-                   DimensionHandle* out) TF_MUST_USE_RESULT;
+  absl::Status WithValue(DimensionHandle dim, int64_t value,
+                         DimensionHandle* out);
 
   // Merges <s0> and <s1> and returns the merged shape in <*out>. See
   // 'MergeInput' function for full details and examples.
-  Status Merge(ShapeHandle s0, ShapeHandle s1,
-               ShapeHandle* out) TF_MUST_USE_RESULT;
+  absl::Status Merge(ShapeHandle s0, ShapeHandle s1, ShapeHandle* out);
 
   // Asserts that <s>'s rank >= <prefix>'s rank, and the first
   // <prefix.rank> dimensions of <s> are compatible with the dimensions of
   // <prefix>.
   // Returns the merged results in <*s_out> and <*prefix_out>.
-  Status MergePrefix(ShapeHandle s, ShapeHandle prefix, ShapeHandle* s_out,
-                     ShapeHandle* prefix_out) TF_MUST_USE_RESULT;
+  absl::Status MergePrefix(ShapeHandle s, ShapeHandle prefix,
+                           ShapeHandle* s_out, ShapeHandle* prefix_out);
 
   // Merges <d0> and <d1> and returns the merged dimension in <*out>. If <d0>
   // and <d1> have incompatible values, returns an error.
   //
   // Note that <*out> may be set to <d0> or <d1>.
-  Status Merge(DimensionHandle d0, DimensionHandle d1,
-               DimensionHandle* out) TF_MUST_USE_RESULT;
+  absl::Status Merge(DimensionHandle d0, DimensionHandle d1,
+                     DimensionHandle* out);
 
   // Returns in <*out> a sub-shape of <s> with dimensions [start:].
   // <start> can be negative to index from the end of the shape. If <start> >
   // rank of <s>, then an empty subshape is returned.
-  Status Subshape(ShapeHandle s, int64_t start,
-                  ShapeHandle* out) TF_MUST_USE_RESULT;
+  absl::Status Subshape(ShapeHandle s, int64_t start, ShapeHandle* out);
 
   // Returns in <*out> a sub-shape of <s>, with dimensions [start:end].
   // <start> and <end> can be negative, to index from the end of the shape.
   // <start> and <end> are set to the rank of <s> if > rank of <s>.
-  Status Subshape(ShapeHandle s, int64_t start, int64_t end,
-                  ShapeHandle* out) TF_MUST_USE_RESULT;
+  absl::Status Subshape(ShapeHandle s, int64_t start, int64_t end,
+                        ShapeHandle* out);
 
   // Returns in <*out> a sub-shape of <s>, with dimensions [start:end:stride].
   // <start> and <end> can be negative, to index from the end of the shape.
   // <start> and <end> are set to the rank of <s> if > rank of <s>.
   // <stride> can be negative, to reverse the <s>.
-  Status Subshape(ShapeHandle s, int64_t start, int64_t end, int64_t stride,
-                  ShapeHandle* out) TF_MUST_USE_RESULT;
+  absl::Status Subshape(ShapeHandle s, int64_t start, int64_t end,
+                        int64_t stride, ShapeHandle* out);
 
   // Returns in <*out> the result of appending the dimensions of <s2> to those
   // of <s1>.
-  Status Concatenate(ShapeHandle s1, ShapeHandle s2,
-                     ShapeHandle* out) TF_MUST_USE_RESULT;
+  absl::Status Concatenate(ShapeHandle s1, ShapeHandle s2, ShapeHandle* out);
 
   // Returns in <out> the shape from replacing <s.dim[dim_index]> with
   // <new_dim>.
-  Status ReplaceDim(ShapeHandle s, int64_t dim_index, DimensionHandle new_dim,
-                    ShapeHandle* out) TF_MUST_USE_RESULT;
+  absl::Status ReplaceDim(ShapeHandle s, int64_t dim_index,
+                          DimensionHandle new_dim, ShapeHandle* out);
 
   // Returns a new shape with the given dims. The returned value is owned by
   // this context.
@@ -548,24 +549,27 @@ class InferenceContext {
   // Returns in <out> a new shape whose dimension sizes come from input tensor
   // <input_idx>. The tensor must be a 1-dimensional int32 or int64 tensor.  If
   // the input tensor is NULL, then an unknown shape is returned.
-  Status MakeShapeFromShapeTensor(int input_idx, ShapeHandle* out);
+  absl::Status MakeShapeFromShapeTensor(int input_idx, ShapeHandle* out);
 
   // Like the function above, but treats scalar values as unknown
   // shapes.  **NOTE** If the scalar is statically known, its value
   // must be -1 or an error is returned.
-  Status MakeShapeFromShapeTensorTreatScalarAsUnknownShape(int input_idx,
-                                                           ShapeHandle* out);
+  absl::Status MakeShapeFromShapeTensorTreatScalarAsUnknownShape(
+      int input_idx, ShapeHandle* out);
 
   // Returns in <out> a new shape corresponding to <proto>.
-  Status MakeShapeFromShapeProto(const TensorShapeProto& proto,
-                                 ShapeHandle* out);
+  absl::Status MakeShapeFromShapeProto(const TensorShapeProto& proto,
+                                       ShapeHandle* out);
 
   // Returns in <out> a new shape corresponding to <partial_shape>.
-  Status MakeShapeFromPartialTensorShape(
+  absl::Status MakeShapeFromPartialTensorShape(
       const PartialTensorShape& partial_shape, ShapeHandle* out);
 
   // Returns in <out> a new shape corresponding to <shape>.
-  Status MakeShapeFromTensorShape(const TensorShape& shape, ShapeHandle* out);
+  absl::Status MakeShapeFromTensorShape(const TensorShape& shape,
+                                        ShapeHandle* out);
+  absl::StatusOr<ShapeHandle> MakeShapeFromShapeTensor(
+      const TensorShape& shape);
 
   // Returns a new dimension of the given size.  The returned value is owned by
   // this context.
@@ -578,61 +582,62 @@ class InferenceContext {
   // Returns in <val> a scalar value from an input tensor <t>.  The input tensor
   // must be a 0-dimensional int32 or int64 tensor.  Caller must ensure that the
   // input tensor is not NULL.
-  Status GetScalarFromTensor(const Tensor* t, int64_t* val);
+  absl::Status GetScalarFromTensor(const Tensor* t, int64_t* val);
 
   // Returns in <val> a scalar value from a 1D input tensor <t> with int32 or
   // int64 elements. Caller must ensure that the input tensor is not NULL.
-  Status GetScalarFromTensor(const Tensor* t, int64_t idx, int64_t* val);
+  absl::Status GetScalarFromTensor(const Tensor* t, int64_t idx, int64_t* val);
 
   // Returns a new dimension whose value is given by a scalar input tensor.
   // The input tensor must be in host memory, since it is dereferenced to get
   // the value.
-  Status MakeDimForScalarInput(int idx, DimensionHandle* out);
+  absl::Status MakeDimForScalarInput(int idx, DimensionHandle* out);
 
   // Returns a new dimension whose value is given by a scalar input tensor.
   // This allows for a negative input dimension given the rank of a separate
   // tensor.  This rank can be negative if unknown.
   // The input tensor must be in host memory, since it is dereferenced to get
   // the value.
-  Status MakeDimForScalarInputWithNegativeIndexing(int idx, int input_rank,
-                                                   DimensionHandle* out);
+  absl::Status MakeDimForScalarInputWithNegativeIndexing(int idx,
+                                                         int input_rank,
+                                                         DimensionHandle* out);
 
   // Look up the attr being evaluated with name attr_name and set *value to its
   // value. If no attr with attr_name is found in def(), or the attr does not
   // have a matching type, a non-ok status will be returned.
   template <class T>
-  Status GetAttr(StringPiece attr_name, T* value) const;
+  absl::Status GetAttr(absl::string_view attr_name, T* value) const;
 
   // Returns in <out> the result of dividing <dividend> by <divisor>.
   // Returns an error if <divisor>  is not positive or if <evenly_divisible>
   // and <divisor> does not evenly divide <dividend>.
-  Status Divide(DimensionHandle dividend, DimensionOrConstant divisor,
-                bool evenly_divisible, DimensionHandle* out);
+  absl::Status Divide(DimensionHandle dividend, DimensionOrConstant divisor,
+                      bool evenly_divisible, DimensionHandle* out);
 
   // Returns in <out> the sum of <first> and <second>.
-  Status Add(DimensionHandle first, DimensionOrConstant second,
-             DimensionHandle* out);
+  absl::Status Add(DimensionHandle first, DimensionOrConstant second,
+                   DimensionHandle* out);
 
   // Returns in <out> the dimension that is <first> minus <second>.
-  Status Subtract(DimensionHandle first, DimensionOrConstant second,
-                  DimensionHandle* out);
+  absl::Status Subtract(DimensionHandle first, DimensionOrConstant second,
+                        DimensionHandle* out);
 
   // Returns in <out> the product of <first> and <second>.
-  Status Multiply(DimensionHandle first, DimensionOrConstant second,
-                  DimensionHandle* out);
+  absl::Status Multiply(DimensionHandle first, DimensionOrConstant second,
+                        DimensionHandle* out);
 
   // Returns in <out> the minimum of <first> and <second>. If either <first> or
   // <second> is zero the results is zero. Otherwise, if either <first> or
   // <second> is unknown the results is unknown.
-  Status Min(DimensionHandle first, DimensionOrConstant second,
-             DimensionHandle* out);
+  absl::Status Min(DimensionHandle first, DimensionOrConstant second,
+                   DimensionHandle* out);
 
   // Returns in <out> the maximum of <first> and <second>. If either <first> or
   // <second> is unknown the results is unknown.
-  Status Max(DimensionHandle first, DimensionOrConstant second,
-             DimensionHandle* out);
+  absl::Status Max(DimensionHandle first, DimensionOrConstant second,
+                   DimensionHandle* out);
 
-  Status construction_status() const { return construction_status_; }
+  absl::Status construction_status() const { return construction_status_; }
 
   // Methods to propagate shape and dtype on edges of handles. Handles are the
   // dtype DT_RESOURCE which can be used to access state stored in a
@@ -651,14 +656,12 @@ class InferenceContext {
   // return true.  Return false otherwise.
   //
   // See 'MergeInput' function for full details and examples.
-  bool MergeInputHandleShapesAndTypes(
-      int idx,
-      const std::vector<ShapeAndType>& shapes_and_types) TF_MUST_USE_RESULT;
+  TF_MUST_USE_RESULT bool MergeInputHandleShapesAndTypes(
+      int idx, const std::vector<ShapeAndType>& shapes_and_types);
 
   // As MergeInputHandleShapesAndTypes, but for an output.
-  bool MergeOutputHandleShapesAndTypes(
-      int idx,
-      const std::vector<ShapeAndType>& shapes_and_types) TF_MUST_USE_RESULT;
+  TF_MUST_USE_RESULT bool MergeOutputHandleShapesAndTypes(
+      int idx, const std::vector<ShapeAndType>& shapes_and_types);
 
   // Relaxes the stored shapes and types corresponding to the input handle in
   // position idx with the specified shapes and types. This requires idx to be
@@ -669,37 +672,51 @@ class InferenceContext {
   // Return false otherwise.
   //
   // See 'RelaxInput' function for full details and examples.
-  bool RelaxInputHandleShapesAndMergeTypes(
-      int idx,
-      const std::vector<ShapeAndType>& shapes_and_types) TF_MUST_USE_RESULT;
+  TF_MUST_USE_RESULT bool RelaxInputHandleShapesAndMergeTypes(
+      int idx, const std::vector<ShapeAndType>& shapes_and_types);
 
   // As RelaxInputHandleShapesAndTypes, but for an output.
-  bool RelaxOutputHandleShapesAndMergeTypes(
-      int idx,
-      const std::vector<ShapeAndType>& shapes_and_types) TF_MUST_USE_RESULT;
+  TF_MUST_USE_RESULT bool RelaxOutputHandleShapesAndMergeTypes(
+      int idx, const std::vector<ShapeAndType>& shapes_and_types);
 
   void set_input_handle_shapes_and_types(
       int idx, const std::vector<ShapeAndType>& shapes_and_types) {
+    CHECK_GE(idx, 0) << "idx must be non-negative. Got idx: " << idx << ".";
+    CHECK_LT(idx, input_handle_shapes_and_types_.size())
+        << "Got idx: " << idx << " but only "
+        << input_handle_shapes_and_types_.size() << " inputs.";
     input_handle_shapes_and_types_[idx] =
-        absl::make_unique<std::vector<ShapeAndType>>(shapes_and_types);
+        std::make_unique<std::vector<ShapeAndType>>(shapes_and_types);
   }
 
   // Returns the output handle shapes and types, for the resource tensor output
   // at index <idx>. Returns NULL if the shape and types were never set.
   const std::vector<ShapeAndType>* output_handle_shapes_and_types(int idx) {
+    CHECK_GE(idx, 0) << "idx must be non-negative. Got idx: " << idx << ".";
+    CHECK_LT(idx, output_handle_shapes_and_types_.size())
+        << "Got idx: " << idx << " but only "
+        << output_handle_shapes_and_types_.size() << " outputs.";
     return output_handle_shapes_and_types_[idx].get();
   }
 
-  // Returns the inputs handle shapes and types, for the resource tensor output
+  // Returns the inputs handle shapes and types, for the resource tensor input
   // at index <idx>. Returns NULL if the shape and types were not available.
   const std::vector<ShapeAndType>* input_handle_shapes_and_types(int idx) {
+    CHECK_GE(idx, 0) << "idx must be non-negative. Got idx: " << idx << ".";
+    CHECK_LT(idx, input_handle_shapes_and_types_.size())
+        << "Got idx: " << idx << " but only "
+        << input_handle_shapes_and_types_.size() << " inputs.";
     return input_handle_shapes_and_types_[idx].get();
   }
 
   void set_output_handle_shapes_and_types(
       int idx, const std::vector<ShapeAndType>& shapes_and_types) {
-    output_handle_shapes_and_types_[idx].reset(
-        new std::vector<ShapeAndType>(shapes_and_types));
+    CHECK_GE(idx, 0) << "idx must be non-negative. Got idx: " << idx << ".";
+    CHECK_LT(idx, output_handle_shapes_and_types_.size())
+        << "Got idx: " << idx << " but only "
+        << output_handle_shapes_and_types_.size() << " inputs.";
+    output_handle_shapes_and_types_[idx] =
+        std::make_unique<std::vector<ShapeAndType>>(shapes_and_types);
   }
 
   // Note that shape functions should usually call MakeShapeFromShapeTensor,
@@ -708,8 +725,8 @@ class InferenceContext {
   // Returns in <out> a new shape whose dimension sizes come from tensor <t>.
   // The tensor must be a 1-dimensional int32 or int64 tensor.  If <t> is NULL,
   // then an unknown shape is returned.
-  Status MakeShapeFromTensor(const Tensor* t, ShapeHandle tensor_shape,
-                             ShapeHandle* out);
+  absl::Status MakeShapeFromTensor(const Tensor* t, ShapeHandle tensor_shape,
+                                   ShapeHandle* out);
 
   int graph_def_version() const { return graph_def_version_; }
 
@@ -722,7 +739,7 @@ class InferenceContext {
   }
 
   // Adds new outputs; useful when mutating the graph.
-  Status ExpandOutputs(int new_output_size);
+  absl::Status ExpandOutputs(int new_output_size);
 
  private:
   // Creates and stores shapes for use in InferenceContext.
@@ -767,18 +784,18 @@ class InferenceContext {
   void PostInputInit(std::vector<std::unique_ptr<std::vector<ShapeAndType>>>
                          input_handle_data);
 
-  Status ReturnUnknownShape(ShapeHandle* out) {
+  absl::Status ReturnUnknownShape(ShapeHandle* out) {
     *out = UnknownShape();
-    return Status::OK();
+    return absl::OkStatus();
   }
-  Status ReturnCreatedShape(const std::vector<DimensionHandle>& dims,
-                            ShapeHandle* out) {
+  absl::Status ReturnCreatedShape(const std::vector<DimensionHandle>& dims,
+                                  ShapeHandle* out) {
     *out = MakeShape(dims);
-    return Status::OK();
+    return absl::OkStatus();
   }
 
   // Adds additional context to the given status.
-  Status AttachContext(const Status& status);
+  absl::Status AttachContext(const absl::Status& status);
 
   // Relaxes an existing value <d_old> with a new value <d_new> and returns the
   // relaxed dimension in <*out>. If <d_old> and <d_new> have incompatible
@@ -794,14 +811,14 @@ class InferenceContext {
 
   // Used to implement MergeInputHandleShapesAndTypes and
   // MergeOutputHandleShapesAndTypes.
-  bool MergeHandleShapesAndTypes(
+  TF_MUST_USE_RESULT bool MergeHandleShapesAndTypes(
       const std::vector<ShapeAndType>& shapes_and_types,
-      std::vector<ShapeAndType>* to_update) TF_MUST_USE_RESULT;
+      std::vector<ShapeAndType>* to_update);
   // Used to implement RelaxInputHandleShapesAndMergeTypes and
   // RelaxOutputHandleShapesAndMergeTypes.
-  bool RelaxHandleShapesAndMergeTypes(
+  TF_MUST_USE_RESULT bool RelaxHandleShapesAndMergeTypes(
       const std::vector<ShapeAndType>& shapes_and_types,
-      std::vector<ShapeAndType>* to_update) TF_MUST_USE_RESULT;
+      std::vector<ShapeAndType>* to_update);
 
   // Forget all the previous merged shapes and dims.
   void ForgetMerges() {
@@ -810,7 +827,7 @@ class InferenceContext {
   }
 
   // Helper method for MakeShapeFromTensor and MakeShapeFromShapeTensor.
-  Status InternalMakeShapeFromTensor(
+  absl::Status InternalMakeShapeFromTensor(
       bool treat_unknown_scalar_tensor_as_unknown_shape, const Tensor* t,
       ShapeHandle tensor_shape, ShapeHandle* out);
 
@@ -852,7 +869,7 @@ class InferenceContext {
 
   // An error set during construction. TODO(cwhipkey): remove when test
   // constructor is removed.
-  Status construction_status_;
+  absl::Status construction_status_;
 
   // Pair of shape or dim handles that are equivalent, ie that represent the
   // same underlying shape of dimension. Note that for each pair at least one of
@@ -861,7 +878,8 @@ class InferenceContext {
   std::vector<std::pair<ShapeHandle, ShapeHandle>> merged_shapes_;
   std::vector<std::pair<DimensionHandle, DimensionHandle>> merged_dims_;
 
-  TF_DISALLOW_COPY_AND_ASSIGN(InferenceContext);
+  InferenceContext(const InferenceContext&) = delete;
+  void operator=(const InferenceContext&) = delete;
 };
 
 // -----------------------------------------------------------------------------
@@ -880,7 +898,7 @@ inline Shape::Shape(const std::vector<DimensionHandle>& dims)
     : rank_(dims.size()), dims_(dims) {}
 
 inline DimensionOrConstant::DimensionOrConstant(DimensionHandle dim)
-    : dim(dim) {
+    : dim(dim), val(InferenceContext::kUnknownDim) {
   DCHECK(dim.IsSet()) << "Internal error: Got nullptr for Dimension.";
 }
 
@@ -892,7 +910,8 @@ inline DimensionOrConstant::DimensionOrConstant(int64_t val) : val(val) {
 }
 
 template <class T>
-Status InferenceContext::GetAttr(StringPiece attr_name, T* value) const {
+absl::Status InferenceContext::GetAttr(absl::string_view attr_name,
+                                       T* value) const {
   return GetNodeAttr(attrs_, attr_name, value);
 }
 

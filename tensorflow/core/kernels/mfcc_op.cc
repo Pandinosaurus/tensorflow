@@ -25,7 +25,7 @@ limitations under the License.
 
 namespace tensorflow {
 
-// Create a speech fingerpring from spectrogram data.
+// Create a speech fingerprint from spectrogram data.
 class MfccOp : public OpKernel {
  public:
   explicit MfccOp(OpKernelConstruction* context) : OpKernel(context) {
@@ -42,14 +42,15 @@ class MfccOp : public OpKernel {
   void Compute(OpKernelContext* context) override {
     const Tensor& spectrogram = context->input(0);
     OP_REQUIRES(context, spectrogram.dims() == 3,
-                errors::InvalidArgument("spectrogram must be 3-dimensional",
-                                        spectrogram.shape().DebugString()));
+                absl::InvalidArgumentError(
+                    absl::StrCat("spectrogram must be 3-dimensional",
+                                 spectrogram.shape().DebugString())));
     const Tensor& sample_rate_tensor = context->input(1);
     OP_REQUIRES(context, TensorShapeUtils::IsScalar(sample_rate_tensor.shape()),
-                errors::InvalidArgument(
+                absl::InvalidArgumentError(absl::StrCat(
                     "Input sample_rate should be a scalar tensor, got ",
-                    sample_rate_tensor.shape().DebugString(), " instead."));
-    const int32_t sample_rate = sample_rate_tensor.scalar<int32>()();
+                    sample_rate_tensor.shape().DebugString(), " instead.")));
+    const int32_t sample_rate = sample_rate_tensor.scalar<int32_t>()();
 
     const int spectrogram_channels = spectrogram.dim_size(2);
     const int spectrogram_samples = spectrogram.dim_size(1);
@@ -60,10 +61,12 @@ class MfccOp : public OpKernel {
     mfcc.set_lower_frequency_limit(lower_frequency_limit_);
     mfcc.set_filterbank_channel_count(filterbank_channel_count_);
     mfcc.set_dct_coefficient_count(dct_coefficient_count_);
-    OP_REQUIRES(context, mfcc.Initialize(spectrogram_channels, sample_rate),
-                errors::InvalidArgument(
-                    "Mfcc initialization failed for channel count ",
-                    spectrogram_channels, " and sample rate ", sample_rate));
+    OP_REQUIRES(
+        context, mfcc.Initialize(spectrogram_channels, sample_rate),
+        absl::InvalidArgumentError(absl::StrCat(
+            "Mfcc initialization failed for channel count ",
+            spectrogram_channels, ", sample rate ", sample_rate,
+            " and filterbank_channel_count ", filterbank_channel_count_)));
 
     Tensor* output_tensor = nullptr;
     OP_REQUIRES_OK(context,
@@ -103,8 +106,8 @@ class MfccOp : public OpKernel {
  private:
   float upper_frequency_limit_;
   float lower_frequency_limit_;
-  int32 filterbank_channel_count_;
-  int32 dct_coefficient_count_;
+  int32_t filterbank_channel_count_;
+  int32_t dct_coefficient_count_;
 };
 REGISTER_KERNEL_BUILDER(Name("Mfcc").Device(DEVICE_CPU), MfccOp);
 

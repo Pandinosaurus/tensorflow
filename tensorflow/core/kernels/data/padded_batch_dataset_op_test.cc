@@ -31,7 +31,7 @@ class PaddedBatchDatasetParams : public DatasetParams {
                            bool drop_remainder, bool parallel_copy,
                            DataTypeVector output_dtypes,
                            std::vector<PartialTensorShape> output_shapes,
-                           int num_padded_shapes, string node_name)
+                           int num_padded_shapes, std::string node_name)
       : DatasetParams(std::move(output_dtypes), std::move(output_shapes),
                       std::move(node_name)),
         batch_size_(batch_size),
@@ -40,7 +40,7 @@ class PaddedBatchDatasetParams : public DatasetParams {
         drop_remainder_(drop_remainder),
         parallel_copy_(parallel_copy),
         num_padded_shapes_(num_padded_shapes) {
-    input_dataset_params_.push_back(absl::make_unique<T>(input_dataset_params));
+    input_dataset_params_.push_back(std::make_unique<T>(input_dataset_params));
     op_version_ = kOpVersion;
     iterator_prefix_ =
         name_utils::IteratorPrefix(input_dataset_params.dataset_type(),
@@ -62,33 +62,34 @@ class PaddedBatchDatasetParams : public DatasetParams {
     return input_tensors;
   }
 
-  Status GetInputNames(std::vector<string>* input_names) const override {
+  absl::Status GetInputNames(
+      std::vector<std::string>* input_names) const override {
     *input_names = {PaddedBatchDatasetOp::kInputDataset,
                     PaddedBatchDatasetOp::kBatchSize};
     // Create the input names for the input padded_shapes.
     for (int i = 0; i < num_padded_shapes_; ++i) {
       input_names->emplace_back(
-          strings::StrCat(PaddedBatchDatasetOp::kPaddedShapes, "_", i));
+          absl::StrCat(PaddedBatchDatasetOp::kPaddedShapes, "_", i));
     }
     // Create the input names for the input padding_values.
     for (int j = 0; j < padded_values_.size(); ++j) {
       input_names->emplace_back(
-          strings::StrCat(PaddedBatchDatasetOp::kPaddingValues, "_", j));
+          absl::StrCat(PaddedBatchDatasetOp::kPaddingValues, "_", j));
     }
     input_names->push_back(PaddedBatchDatasetOp::kDropRemainder);
-    return Status::OK();
+    return absl::OkStatus();
   }
 
-  Status GetAttributes(AttributeVector* attr_vector) const override {
+  absl::Status GetAttributes(AttributeVector* attr_vector) const override {
     *attr_vector = {{"parallel_copy", parallel_copy_},
                     {"Toutput_types", output_dtypes_},
                     {"output_shapes", output_shapes_},
                     {"N", num_padded_shapes_},
                     {"metadata", ""}};
-    return Status::OK();
+    return absl::OkStatus();
   }
 
-  string dataset_type() const override {
+  std::string dataset_type() const override {
     return PaddedBatchDatasetOp::kDatasetType;
   }
 
@@ -729,7 +730,7 @@ TEST_F(PaddedBatchDatasetOpTest, InvalidPaddedShapes) {
   EXPECT_EQ(
       iterator_->GetNext(iterator_ctx_.get(), &out_tensors, &end_of_sequence)
           .code(),
-      tensorflow::error::INVALID_ARGUMENT);
+      absl::StatusCode::kInvalidArgument);
 }
 
 class ParameterizedInvalidArgumentTest
@@ -739,7 +740,7 @@ class ParameterizedInvalidArgumentTest
 TEST_P(ParameterizedInvalidArgumentTest, InvalidPredicateFunc) {
   auto dataset_params = GetParam();
   EXPECT_EQ(Initialize(dataset_params).code(),
-            tensorflow::error::INVALID_ARGUMENT);
+            absl::StatusCode::kInvalidArgument);
 }
 
 INSTANTIATE_TEST_SUITE_P(

@@ -19,6 +19,7 @@ limitations under the License.
 #include <memory>
 #include <string>
 
+#include "absl/synchronization/mutex.h"
 #include "tensorflow/c/tf_status_helper.h"
 #include "tensorflow/core/framework/tensor_shape.h"
 #include "tensorflow/core/platform/status.h"
@@ -39,10 +40,10 @@ class TensorSliceReader;
 // variables.
 class CheckpointReader {
  public:
-  CheckpointReader(const string& filename, TF_Status* status);
+  CheckpointReader(const std::string& filename, TF_Status* status);
 
-  bool HasTensor(const string& name) const;
-  const string DebugString() const;
+  bool HasTensor(const std::string& name) const;
+  const std::string DebugString() const;
 
   // Returns a map from variable names to their shapes.  Slices of a partitioned
   // tensor are combined into a single entry.
@@ -54,7 +55,7 @@ class CheckpointReader {
 
   // Attempts to look up the tensor named "name" and stores the found result in
   // "out_tensor".
-  void GetTensor(const string& name,
+  void GetTensor(const std::string& name,
                  std::unique_ptr<tensorflow::Tensor>* out_tensor,
                  TF_Status* out_status) const;
 
@@ -73,7 +74,12 @@ class CheckpointReader {
   std::unique_ptr<TensorSliceReader::VarToShapeMap> var_to_shape_map_;
   std::unique_ptr<TensorSliceReader::VarToDataTypeMap> var_to_data_type_map_;
 
-  TF_DISALLOW_COPY_AND_ASSIGN(CheckpointReader);
+  // BundleReader and TensorSliceReader do not provide same-instance
+  // concurrent access guarantees. Serialize runtime reader operations.
+  mutable absl::Mutex reader_mu_;
+
+  CheckpointReader(const CheckpointReader&) = delete;
+  void operator=(const CheckpointReader&) = delete;
 };
 
 }  // namespace checkpoint

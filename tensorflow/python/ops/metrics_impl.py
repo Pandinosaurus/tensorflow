@@ -13,25 +13,24 @@
 # ==============================================================================
 """Implementation of tf.metrics module."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
-from tensorflow.python.distribute import distribution_strategy_context
+from tensorflow.python.distribute import distribute_lib
 from tensorflow.python.eager import context
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import ops
 from tensorflow.python.framework import sparse_tensor
 from tensorflow.python.ops import array_ops
+from tensorflow.python.ops import array_ops_stack
 from tensorflow.python.ops import check_ops
+from tensorflow.python.ops import cond
 from tensorflow.python.ops import confusion_matrix
-from tensorflow.python.ops import control_flow_ops
 from tensorflow.python.ops import math_ops
 from tensorflow.python.ops import nn
 from tensorflow.python.ops import sets
 from tensorflow.python.ops import sparse_ops
 from tensorflow.python.ops import state_ops
 from tensorflow.python.ops import variable_scope
+from tensorflow.python.ops import variable_v1
+from tensorflow.python.ops import variables
 from tensorflow.python.ops import weights_broadcast_ops
 from tensorflow.python.platform import tf_logging as logging
 from tensorflow.python.util.deprecation import deprecated
@@ -56,7 +55,7 @@ def metric_variable(shape, dtype, validate_shape=True, name=None):
       the final answer should be computed once instead of in every
       replica. Both of these are accomplished by running the computation
       of the final result value inside
-      `distribution_strategy_context.get_replica_context().merge_call(fn)`.
+      `distribute_lib.get_replica_context().merge_call(fn)`.
       Inside the `merge_call()`, ops are only added to the graph once
       and access to a sync on read variable in a computation returns
       the sum across all replicas.
@@ -73,15 +72,15 @@ def metric_variable(shape, dtype, validate_shape=True, name=None):
     `DistributionStrategy` scope a sync on read variable container.
   """
   # Note that synchronization "ON_READ" implies trainable=False.
-  return variable_scope.variable(
+  return variable_v1.VariableV1(
       lambda: array_ops.zeros(shape, dtype),
       trainable=False,
       collections=[
           ops.GraphKeys.LOCAL_VARIABLES, ops.GraphKeys.METRIC_VARIABLES
       ],
       validate_shape=validate_shape,
-      synchronization=variable_scope.VariableSynchronization.ON_READ,
-      aggregation=variable_scope.VariableAggregation.SUM,
+      synchronization=variables.VariableSynchronization.ON_READ,
+      aggregation=variables.VariableAggregation.SUM,
       name=name)
 
 
@@ -137,7 +136,7 @@ def _remove_squeezable_dimensions(predictions, labels, weights):
     rank_diff = weights_rank_tensor - array_ops.rank(predictions)
 
     def _maybe_expand_weights():
-      return control_flow_ops.cond(
+      return cond.cond(
           math_ops.equal(rank_diff, -1),
           lambda: array_ops.expand_dims(weights, [-1]), lambda: weights)
 
@@ -149,13 +148,13 @@ def _remove_squeezable_dimensions(predictions, labels, weights):
       maybe_squeeze_weights = lambda: array_ops.squeeze(weights, [-1])
 
     def _maybe_adjust_weights():
-      return control_flow_ops.cond(
+      return cond.cond(
           math_ops.equal(rank_diff, 1), maybe_squeeze_weights,
           _maybe_expand_weights)
 
     # If weights are scalar, do nothing. Otherwise, try to add or remove a
     # dimension to match predictions.
-    weights = control_flow_ops.cond(
+    weights = cond.cond(
         math_ops.equal(weights_rank_tensor, 0), lambda: weights,
         _maybe_adjust_weights)
   return predictions, labels, weights
@@ -182,7 +181,7 @@ def _maybe_expand_labels(labels, predictions):
 
     # If sparse, expand sparse shape.
     if isinstance(labels, sparse_tensor.SparseTensor):
-      return control_flow_ops.cond(
+      return cond.cond(
           math_ops.equal(
               array_ops.rank(predictions),
               array_ops.size(labels.dense_shape) + 1),
@@ -207,7 +206,7 @@ def _maybe_expand_labels(labels, predictions):
             'same rank as labels rank or labels rank plus one .')
 
     # Otherwise, use dynamic shape.
-    return control_flow_ops.cond(
+    return cond.cond(
         math_ops.equal(array_ops.rank(predictions),
                        array_ops.rank(labels) + 1),
         lambda: array_ops.expand_dims(labels, -1, name=scope), lambda: labels)
@@ -309,7 +308,7 @@ def _aggregate_across_replicas(metrics_collections, metric_value_fn, *args):
       ops.add_to_collections(metrics_collections, metric_value)
     return metric_value
 
-  return distribution_strategy_context.get_replica_context().merge_call(
+  return distribute_lib.get_replica_context().merge_call(
       fn, args=args)
 
 
@@ -355,6 +354,91 @@ def mean(values,
       or if either `metrics_collections` or `updates_collections` are not a list
       or tuple.
     RuntimeError: If eager execution is enabled.
+
+  @compatibility(TF2)
+  `tf.compat.v1.metrics.mean` is not compatible with eager
+  execution or `tf.function`.
+  Please use `tf.keras.metrics.Mean` instead for TF2 migration. After
+  instantiating a `tf.keras.metrics.Mean` object, you can first call the
+  `update_state()` method to record the new values, and then call the
+  `result()` method to get the mean eagerly. You can also attach it to a
+  Keras model with the `add_metric` method.  Please refer to the [migration
+  guide](https://www.tensorflow.org/guide/migrate#new-style_metrics_and_losses)
+  for more details.
+
+  #### Structural Mapping to TF2
+
+  Before:
+
+  ```python
+  mean, update_op = tf.compat.v1.metrics.mean(
+    values=values,
+    weights=weights,
+    metrics_collections=metrics_collections,
+    update_collections=update_collections,
+    name=name)
+  ```
+
+  After:
+
+  ```python
+   m = tf.keras.metrics.Mean(
+     name=name)
+
+   m.update_state(
+     values=values,
+     sample_weight=weights)
+
+   mean = m.result()
+  ```
+
+  #### How to Map Arguments
+
+  | TF1 Arg Name          | TF2 Arg Name    | Note                       |
+  | :-------------------- | :-------------- | :------------------------- |
+  | `values`              | `values`        | In `update_state()` method |
+  | `weights`             | `sample_weight` | In `update_state()` method |
+  | `metrics_collections` | Not supported   | Metrics should be tracked  |
+  :                       :                 : explicitly or with Keras   :
+  :                       :                 : APIs, for example,         :
+  :                       :                 : [add_metric][add_metric],  :
+  :                       :                 : instead of via collections :
+  | `updates_collections` | Not supported   | -                          |
+  | `name`                | `name`          | In constructor             |
+
+  [add_metric]:https://www.tensorflow.org/api_docs/python/tf/keras/layers/Layer#add_metric
+
+
+  #### Before & After Usage Example
+
+  Before:
+
+  >>> g = tf.Graph()
+  >>> with g.as_default():
+  ...   values = [1, 2, 3]
+  ...   mean, update_op = tf.compat.v1.metrics.mean(values)
+  ...   global_init = tf.compat.v1.global_variables_initializer()
+  ...   local_init = tf.compat.v1.local_variables_initializer()
+  >>> sess = tf.compat.v1.Session(graph=g)
+  >>> sess.run([global_init, local_init])
+  >>> sess.run(update_op)
+  >>> sess.run(mean)
+  2.0
+
+
+  After:
+
+  >>> m = tf.keras.metrics.Mean()
+  >>> m.update_state([1, 2, 3])
+  >>> m.result().numpy()
+  2.0
+
+  ```python
+  # Used within Keras model
+  model.add_metric(tf.keras.metrics.Mean()(values))
+  ```
+
+  @end_compatibility
   """
   if context.executing_eagerly():
     raise RuntimeError('tf.metrics.mean is not supported when eager execution '
@@ -499,7 +583,7 @@ def accuracy(labels,
   | `updates_collections` | Not supported   | -                          |
   | `name`                | `name`          | In constructor             |
 
-  [add_metric]:https//www.tensorflow.org/api_docs/python/tf/keras/layers/Layer#add_metric
+  [add_metric]:https://www.tensorflow.org/api_docs/python/tf/keras/layers/Layer#add_metric
 
 
   #### Before & After Usage Example
@@ -635,7 +719,7 @@ def _confusion_matrix_at_thresholds(labels,
     num_predictions = array_ops.shape(predictions_2d)[0]
   thresh_tiled = array_ops.tile(
       array_ops.expand_dims(array_ops.constant(thresholds), [1]),
-      array_ops.stack([1, num_predictions]))
+      array_ops_stack.stack([1, num_predictions]))
 
   # Tile the predictions after thresholding them across different thresholds.
   pred_is_pos = math_ops.greater(
@@ -3316,7 +3400,7 @@ def _clean_out_of_range_indices(labels, num_classes):
 
   max_labels = math_ops.reduce_max(
       labels.values if _labels_is_sparse() else labels)
-  return control_flow_ops.cond(
+  return cond.cond(
       math_ops.greater_equal(max_labels, num_classes),
       _clean_labels_out_of_range,
       lambda: labels)

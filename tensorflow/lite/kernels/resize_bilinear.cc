@@ -14,8 +14,8 @@ limitations under the License.
 ==============================================================================*/
 #include <stdint.h>
 
-#include "tensorflow/lite/c/builtin_op_data.h"
-#include "tensorflow/lite/c/common.h"
+#include "tensorflow/lite/core/c/builtin_op_data.h"
+#include "tensorflow/lite/core/c/common.h"
 #include "tensorflow/lite/kernels/internal/compatibility.h"
 #include "tensorflow/lite/kernels/internal/optimized/neon_check.h"
 #include "tensorflow/lite/kernels/internal/optimized/optimized_ops.h"
@@ -74,13 +74,14 @@ TfLiteStatus Prepare(TfLiteContext* context, TfLiteNode* node) {
   // TODO(ahentz): Our current implementations rely on the inputs being 4D.
   TF_LITE_ENSURE_EQ(context, NumDimensions(input), 4);
   TF_LITE_ENSURE_EQ(context, NumDimensions(size), 1);
+  TF_LITE_ENSURE_EQ(context, size->dims->data[0], 2);
 
   TF_LITE_ENSURE_EQ(context, size->type, kTfLiteInt32);
   // ResizeBilinear creates a float tensor even when the input is made of
   // integers.
   output->type = input->type;
 
-  if (!IsConstantTensor(size)) {
+  if (!IsConstantOrPersistentTensor(size)) {
     SetTensorToDynamic(output);
     return kTfLiteOk;
   }
@@ -89,7 +90,7 @@ TfLiteStatus Prepare(TfLiteContext* context, TfLiteNode* node) {
   auto* params =
       reinterpret_cast<TfLiteResizeBilinearParams*>(node->builtin_data);
   if (params->half_pixel_centers && params->align_corners) {
-    context->ReportError(
+    TF_LITE_KERNEL_LOG(
         context, "If half_pixel_centers is True, align_corners must be False.");
     return kTfLiteError;
   }
@@ -146,8 +147,8 @@ TfLiteStatus Eval(TfLiteContext* context, TfLiteNode* node) {
     TF_LITE_RESIZE_BILINEAR(reference_ops, ResizeBilinearInteger, int16_t);
 #undef TF_LITE_RESIZE_BILINEAR
   } else {
-    context->ReportError(context, "Output type is %d, requires float.",
-                         output->type);
+    TF_LITE_KERNEL_LOG(context, "Output type is %d, requires float.",
+                       output->type);
     return kTfLiteError;
   }
 

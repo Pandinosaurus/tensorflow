@@ -1,8 +1,25 @@
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
 load("@build_bazel_rules_android//android:rules.bzl", "android_library")
-load("//tensorflow/lite:build_def.bzl", "tflite_jni_binary")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("//tensorflow/lite:build_def.bzl", "tflite_jni_binary", "tflite_jni_linkopts")
 load("//tensorflow/lite/java:aar_with_jni.bzl", "aar_with_jni")
 
 package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:LICENSE"],
     default_visibility = ["//visibility:public"],
     licenses = ["notice"],
 )
@@ -11,6 +28,10 @@ package(
 # The Hexagon backend-related targets are intentionally not included in BUILD.bazel.
 tflite_jni_binary(
     name = "libtensorflowlite_hexagon_jni.so",
+    linkopts = tflite_jni_linkopts() + select({
+        "//tensorflow:android": ["-ldl"],
+        "//conditions:default": [],
+    }),
     linkscript = "//tensorflow/lite/delegates/hexagon:version_script.lds",
     tags = [
         "manual",

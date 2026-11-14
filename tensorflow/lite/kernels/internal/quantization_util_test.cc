@@ -14,6 +14,7 @@ limitations under the License.
 ==============================================================================*/
 #include "tensorflow/lite/kernels/internal/quantization_util.h"
 
+#include <cmath>
 #include <limits>
 
 #include <gmock/gmock.h>
@@ -66,6 +67,20 @@ void RunSafeCastTests() {
   EXPECT_EQ(SafeCast<IntOut>(std::numeric_limits<FloatIn>::infinity()), imax);
   EXPECT_EQ(SafeCast<IntOut>(-std::numeric_limits<FloatIn>::infinity()), imin);
   EXPECT_EQ(SafeCast<IntOut>(std::numeric_limits<FloatIn>::quiet_NaN()), 0);
+
+  constexpr FloatIn max_exclusive =
+      static_cast<FloatIn>(std::numeric_limits<IntOut>::max() / 2 + 1) *
+      FloatIn{2};
+  EXPECT_EQ(SafeCast<IntOut>(max_exclusive), imax);
+  const FloatIn max_in_range =
+      std::nextafter(max_exclusive, static_cast<FloatIn>(0));
+  EXPECT_EQ(SafeCast<IntOut>(max_in_range), static_cast<IntOut>(max_in_range));
+
+  const FloatIn min_value = static_cast<FloatIn>(imin);
+  EXPECT_EQ(SafeCast<IntOut>(min_value), imin);
+  EXPECT_EQ(SafeCast<IntOut>(std::nextafter(
+                min_value, std::numeric_limits<FloatIn>::lowest())),
+            imin);
 
   // Some larger numbers.
   if (sizeof(IntOut) >= 4 && sizeof(FloatIn) > 4) {
@@ -152,6 +167,13 @@ TEST(QuantizationUtilTest, SafeCast) {
   RunSafeCastTests<double, uint64_t>();
 }
 
+TEST(QuantizationUtilTest, SafeCastUsesProvidedNaNResult) {
+  const float nan = std::numeric_limits<float>::quiet_NaN();
+  EXPECT_EQ(SafeCast<int32_t>(nan, std::numeric_limits<int32_t>::max()),
+            std::numeric_limits<int32_t>::max());
+  EXPECT_EQ(SafeCast<uint8_t>(nan, uint8_t{42}), 42);
+}
+
 // Example taken from http://www.tensorflow.org/performance/quantization
 //
 //  Quantized | Float
@@ -160,37 +182,37 @@ TEST(QuantizationUtilTest, SafeCast) {
 //  255       | 30.0
 //  128       | 10.0
 TEST(QuantizationUtilTest, ChooseQuantizationParams) {
-  QuantizationParams qp = ChooseQuantizationParams<uint8>(-10.0, 30.0);
+  QuantizationParams qp = ChooseQuantizationParams<uint8_t>(-10.0, 30.0);
   EXPECT_NEAR(qp.scale, 0.156863, 1e-5);
   EXPECT_EQ(qp.zero_point, 64);
 }
 
 TEST(QuantizationUtilTest, ChooseQuantizationParamsZeroPointOnMinBoundary) {
-  QuantizationParams qp = ChooseQuantizationParams<uint8>(0.0, 30.0);
+  QuantizationParams qp = ChooseQuantizationParams<uint8_t>(0.0, 30.0);
   EXPECT_NEAR(qp.scale, 0.117647, 1e-5);
   EXPECT_EQ(qp.zero_point, 0);
 }
 
-#ifdef GTEST_HAS_DEATH_TEST
+#if GTEST_HAS_DEATH_TEST
 TEST(QuantizationUtilTest, ChooseQuantizationParamsZeroNotInRange) {
   // Assumption is that zero is within the range.
-  EXPECT_DEATH(ChooseQuantizationParams<uint8>(10.0, 30.0), "");
+  EXPECT_DEATH(ChooseQuantizationParams<uint8_t>(10.0, 30.0), "");
 }
 
 TEST(QuantizationUtilTest, ChooseQuantizationParamsEmptyRangePositive) {
   // Assumption is that zero is within the range.
-  EXPECT_DEATH(ChooseQuantizationParams<uint8>(30.0, 30.0), "");
+  EXPECT_DEATH(ChooseQuantizationParams<uint8_t>(30.0, 30.0), "");
 }
 #endif  // GTEST_HAS_DEATH_TEST
 
 TEST(QuantizationUtilTest, ChooseQuantizationParamsEmptyRangeZero) {
-  QuantizationParams qp = ChooseQuantizationParams<uint8>(0.0, 0.0);
+  QuantizationParams qp = ChooseQuantizationParams<uint8_t>(0.0, 0.0);
   EXPECT_NEAR(qp.scale, 0.0, 1e-5);
   EXPECT_EQ(qp.zero_point, 0);
 }
 
 TEST(QuantizationUtilTest, ChooseQuantizationParamsZeroPointOnMaxBoundary) {
-  QuantizationParams qp = ChooseQuantizationParams<uint8>(-10.0, 0.0);
+  QuantizationParams qp = ChooseQuantizationParams<uint8_t>(-10.0, 0.0);
   EXPECT_NEAR(qp.scale, 0.039216, 1e-5);
   EXPECT_EQ(qp.zero_point, 255);
 }
@@ -328,9 +350,9 @@ TEST(QuantizationUtilTest, IntegerDoubleCompare) {
   EXPECT_EQ(1, IntegerDoubleCompare(INFINITY, NAN));
 }
 
-#ifdef GTEST_HAS_DEATH_TEST
+#if GTEST_HAS_DEATH_TEST
 TEST(QuantizationUtilTest, ChooseQuantizationParamsInvalidRange) {
-  EXPECT_DEATH(ChooseQuantizationParams<uint8>(10.0, -30.0), "");
+  EXPECT_DEATH(ChooseQuantizationParams<uint8_t>(10.0, -30.0), "");
 }
 
 TEST(QuantizationUtilTest, QuantizeMultiplierSmallerThanOneExp) {
@@ -433,17 +455,21 @@ TEST(QuantizationUtilTest, MultiplyByQuantizedMultiplierInt32) {
   EXPECT_EQ(quant_and_multiply(0, 0.1), 0);
   EXPECT_EQ(quant_and_multiply(1, 0), 0);
   EXPECT_EQ(quant_and_multiply(10000, 0.00097656), 10);
-  EXPECT_EQ(quant_and_multiply(10000, -0.00097656), -10);
   EXPECT_EQ(quant_and_multiply(-10000, 0.00097656), -10);
-  EXPECT_EQ(quant_and_multiply(-10000, -0.00097656), 10);
   EXPECT_EQ(quant_and_multiply(std::numeric_limits<int32_t>::min(), 0.00001),
             -21475);
-  EXPECT_EQ(quant_and_multiply(std::numeric_limits<int32_t>::min(), -0.00001),
-            21475);
   EXPECT_EQ(quant_and_multiply(std::numeric_limits<int32_t>::max(), 0.00001),
+            21475);
+#if !TFLITE_SINGLE_ROUNDING
+  // Single-rounding doesn't support negative multipliers, only test negative
+  // multipliers in double-rounding mode.
+  EXPECT_EQ(quant_and_multiply(10000, -0.00097656), -10);
+  EXPECT_EQ(quant_and_multiply(-10000, -0.00097656), 10);
+  EXPECT_EQ(quant_and_multiply(std::numeric_limits<int32_t>::min(), -0.00001),
             21475);
   EXPECT_EQ(quant_and_multiply(std::numeric_limits<int32_t>::max(), -0.00001),
             -21475);
+#endif
 
   // Test with maximum possible x and quantized_multiplier
   const int32_t x = std::numeric_limits<int32_t>::max();
@@ -496,6 +522,16 @@ TEST(QuantizationUtilTest, PreprocessSoftmaxScaling) {
     return std::pair<int32_t, int>{q, s};
   };
 
+#if TFLITE_SINGLE_ROUNDING
+  // If beta * scale is greater than fits in the number of integer bits, the
+  // result is move near the maximum. Otherwise they quantize as expected.
+  // With 4 integer bits we can represent up to 8.0.
+  EXPECT_THAT(quantize(1.0, 8.0, 4), Pair(2147483646, 30));
+  EXPECT_THAT(quantize(1.0, 4.0, 4), Pair(1073741824, 30));
+  // But with 5 bits we can go further.
+  EXPECT_THAT(quantize(2.0, 8.0, 5), Pair(2147483646, 30));
+  EXPECT_THAT(quantize(2.0, 4.0, 5), Pair(1073741824, 30));
+#else
   // If beta * scale is greater than fits in the number of integer bits, the
   // result is move near the maximum. Otherwise they quantize as expected.
   // With 4 integer bits we can represent up to 16.0.
@@ -504,6 +540,7 @@ TEST(QuantizationUtilTest, PreprocessSoftmaxScaling) {
   // But with 5 bits we can go further.
   EXPECT_THAT(quantize(2.0, 16.0, 5), Pair(2147483647, 31));
   EXPECT_THAT(quantize(2.0, 8.0, 5), Pair(1073741824, 31));
+#endif
 }
 #endif  // GTEST_HAS_DEATH_TEST
 
@@ -518,12 +555,12 @@ TEST(QuantizationUtilTest, QuantizeMultiplierArray) {
   const std::vector<double> weights = {-4,    -2,   -1,  -0.5, -0.25, -0.125, 0,
                                        0.125, 0.25, 0.5, 1,    2,     4};
   const int size = weights.size();
-  std::vector<int32> effective_scale_significand(size);
+  std::vector<int32_t> effective_scale_significand(size);
   std::vector<int> effective_scale_shift(size);
   QuantizeMultiplierArray(weights.data(), size,
                           effective_scale_significand.data(),
                           effective_scale_shift.data());
-  const std::vector<int32> expected_effective_scale_significand = {
+  const std::vector<int32_t> expected_effective_scale_significand = {
       -1073741824,  // float scale = -4
       -1073741824,  // float scale = -2
       -1073741824,  // float scale = -1

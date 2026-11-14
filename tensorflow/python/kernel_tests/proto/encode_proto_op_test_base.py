@@ -19,10 +19,6 @@ It tests that encode_proto is a lossless inverse of decode_proto
 (for the specified fields).
 """
 # Python3 readiness boilerplate
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 from absl.testing import parameterized
 import numpy as np
 
@@ -59,7 +55,7 @@ class EncodeProtoOpTestBase(test_base.ProtoOpTestBase, parameterized.TestCase):
     else:
       expected_error = (ValueError,
                         r'Shape must be at least rank 2 but is rank 0')
-    with self.assertRaisesRegexp(*expected_error):
+    with self.assertRaisesRegex(*expected_error):
       self.evaluate(
           self._encode_module.encode_proto(
               sizes=1,
@@ -193,12 +189,10 @@ class EncodeProtoOpTestBase(test_base.ProtoOpTestBase, parameterized.TestCase):
     # format being the same for packed and unpacked fields, and reparse the test
     # message using the packed version of the proto.
     in_bufs = [
-        # Note: float_format='.17g' is necessary to ensure preservation of
-        # doubles and floats in text format.
         text_format.Parse(
-            text_format.MessageToString(
-                value, float_format='.17g'),
-            test_example_pb2.PackedTestValue()).SerializeToString()
+            text_format.MessageToString(value),
+            test_example_pb2.PackedTestValue(),
+        ).SerializeToString()
         for value in case.values
     ]
 

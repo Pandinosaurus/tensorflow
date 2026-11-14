@@ -15,6 +15,8 @@ limitations under the License.
 #include <fstream>
 #include <iostream>
 #include <sstream>
+#include <string>
+#include <vector>
 
 #include "absl/strings/str_split.h"
 #include "tensorflow/lite/tools/command_line_flags.h"

@@ -14,16 +14,13 @@
 # ==============================================================================
 """`LinearOperator` acting like a lower triangular matrix."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 from tensorflow.python.framework import ops
 from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import math_ops
 from tensorflow.python.ops.linalg import linalg_impl as linalg
 from tensorflow.python.ops.linalg import linear_operator
 from tensorflow.python.ops.linalg import linear_operator_util
+from tensorflow.python.ops.linalg import property_hint_util
 from tensorflow.python.util.tf_export import tf_export
 
 __all__ = [
@@ -165,7 +162,11 @@ class LinearOperatorLowerTriangular(linear_operator.LinearOperator):
           is_square=is_square,
           parameters=parameters,
           name=name)
-      self._set_graph_parents([self._tril])
+
+  @property
+  def tril(self):
+    """The lower triangular matrix defining this operator."""
+    return self._tril
 
   def _check_tril(self, tril):
     """Static check of the `tril` argument."""
@@ -198,6 +199,29 @@ class LinearOperatorLowerTriangular(linear_operator.LinearOperator):
     return math_ops.matmul(
         self._get_tril(), x, adjoint_a=adjoint, adjoint_b=adjoint_arg)
 
+  def _linop_matmul(
+      self,
+      left_operator: linear_operator.LinearOperator,
+      right_operator: linear_operator.LinearOperator,
+  ) -> linear_operator.LinearOperator:
+    # instance check of linear_operator_diag.LinearOperatorDiag
+    if (hasattr(right_operator, "_check_diag") and
+        isinstance(left_operator, LinearOperatorLowerTriangular)):
+      is_non_singular = property_hint_util.combined_non_singular_hint(
+          left_operator, right_operator)
+      is_self_adjoint = property_hint_util.combined_commuting_self_adjoint_hint(
+          left_operator, right_operator)
+      return LinearOperatorLowerTriangular(
+          tril=left_operator.to_dense() * array_ops.expand_dims(
+              right_operator.diag, axis=-2),
+          is_non_singular=is_non_singular,
+          # This is safe to do since the Triangular matrix is only self-adjoint
+          # when it is a diagonal matrix, and hence commutes.
+          is_self_adjoint=is_self_adjoint,
+          is_positive_definite=None,
+          is_square=True)
+    return super()._linop_matmul(left_operator, right_operator)
+
   def _determinant(self):
     return math_ops.reduce_prod(self._get_diag(), axis=[-1])
 
@@ -219,3 +243,7 @@ class LinearOperatorLowerTriangular(linear_operator.LinearOperator):
   @property
   def _composite_tensor_fields(self):
     return ("tril",)
+
+  @property
+  def _experimental_parameter_ndims_to_matrix_ndims(self):
+    return {"tril": 2}

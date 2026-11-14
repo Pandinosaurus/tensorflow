@@ -24,6 +24,7 @@ namespace function {
 
 // {} -> y:DT_STRING (device where this op runs).
 FunctionDef FindDevice();
+FunctionDef FindDeviceWithUuid();
 
 class BlockingOpState {
  public:
@@ -43,8 +44,8 @@ FunctionDef BlockingOpFn();
 
 // Adds a function call to the given scope and returns the output for the node.
 // TODO(phawkins): replace with C++ API for calling functions, when that exists.
-Output Call(Scope* scope, const string& op_name, const string& fn_name,
-            gtl::ArraySlice<Input> inputs);
+Output Call(Scope* scope, const std::string& op_name,
+            const std::string& fn_name, absl::Span<const Input> inputs);
 
 }  // namespace function
 }  // namespace test

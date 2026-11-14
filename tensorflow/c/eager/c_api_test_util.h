@@ -15,6 +15,8 @@ limitations under the License.
 #ifndef TENSORFLOW_C_EAGER_C_API_TEST_UTIL_H_
 #define TENSORFLOW_C_EAGER_C_API_TEST_UTIL_H_
 
+#include <vector>
+
 #include "tensorflow/c/eager/c_api.h"
 #include "tensorflow/c/eager/c_api_experimental.h"
 #include "tensorflow/c/tf_datatype.h"
@@ -89,7 +91,7 @@ TFE_TensorHandle* TestMatrixTensorHandle3X2(TFE_Context* ctx);
 // Return a variable handle referring to a variable with the given initial value
 // on the given device.
 TFE_TensorHandle* TestVariable(TFE_Context* ctx, float value,
-                               const tensorflow::string& device_name = "");
+                               const std::string& device_name = "");
 
 // Return an add op multiplying `a` by `b`.
 TFE_Op* AddOp(TFE_Context* ctx, TFE_TensorHandle* a, TFE_TensorHandle* b);
@@ -111,15 +113,15 @@ TFE_Op* AllReduceOp(TFE_Context* ctx, TFE_TensorHandle* in, int group_size);
 TFE_Op* SendOp(TFE_Context* ctx, TFE_TensorHandle* in,
                const std::string& op_name, const std::string& send_device,
                const std::string& recv_device,
-               tensorflow::uint64 send_device_incarnation);
+               uint64_t send_device_incarnation);
 
 // Return a RecvOp op `op_name` with the attributes `send_device`,
 // `recv_device`, and `send_device_incarnation` set.
 TFE_Op* RecvOp(TFE_Context* ctx, const std::string& op_name,
                const std::string& send_device, const std::string& recv_device,
-               tensorflow::uint64 send_device_incarnation);
+               uint64_t send_device_incarnation);
 
-// Return an 1-D INT32 tensor containing a single value 1.
+// Return a 1-D INT32 tensor containing a single value 1.
 TFE_TensorHandle* TestAxisTensorHandle(TFE_Context* ctx);
 
 // Return an op taking minimum of `input` long `axis` dimension.
@@ -129,12 +131,11 @@ TFE_Op* MinOp(TFE_Context* ctx, TFE_TensorHandle* input,
 // If there is a device of type `device_type`, returns true
 // and sets 'device_name' accordingly.
 // `device_type` must be either "GPU" or "TPU".
-bool GetDeviceName(TFE_Context* ctx, tensorflow::string* device_name,
+bool GetDeviceName(TFE_Context* ctx, std::string* device_name,
                    const char* device_type);
 
 // Create a ServerDef with the given `job_name` and add `num_tasks` tasks in it.
-tensorflow::ServerDef GetServerDef(const tensorflow::string& job_name,
-                                   int num_tasks);
+tensorflow::ServerDef GetServerDef(const std::string& job_name, int num_tasks);
 
 // Create a ServerDef with job name "localhost" and add `num_tasks` tasks in it.
 tensorflow::ServerDef GetServerDef(int num_tasks);
@@ -144,5 +145,29 @@ tensorflow::ServerDef GetServerDef(int num_tasks);
 tensorflow::ServerDef GetMultiClientServerDef(const std::string& job_name,
                                               int num_tasks,
                                               int num_virtual_gpus = 0);
+
+// Create a variable handle with name `variable_name` on a device with name
+// `device_name`.
+TFE_TensorHandle* CreateVarHandle(TFE_Context* ctx,
+                                  const std::string& device_name,
+                                  const std::string& variable_name);
+
+// Create a variable with value `value` and name `variable_name` on a device
+// with name `device_name`.
+TFE_TensorHandle* CreateVariable(TFE_Context* ctx, float value,
+                                 const std::string& device_name,
+                                 const std::string& variable_name);
+
+TFE_Context* CreateContext(const std::string& serialized_server_def,
+                           bool isolate_session_state,
+                           int64_t init_timeout_in_ms);
+
+tensorflow::ServerDef ReplaceTaskInServerDef(
+    const tensorflow::ServerDef& server_def, int task_index);
+
+void ReplaceTaskInServerDef(tensorflow::ServerDef* server_def, int task_index,
+                            const std::string& host, int port);
+
+std::vector<std::string> ListDeviceNames(TFE_Context* ctx);
 
 #endif  // TENSORFLOW_C_EAGER_C_API_TEST_UTIL_H_

@@ -14,10 +14,6 @@
 # ==============================================================================
 """Tests for tensorflow.python.util.module_wrapper."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import pickle
 import types
 
@@ -172,6 +168,19 @@ class LazyLoadingWrapperTest(test.TestCase):
     self.assertFalse(module_wrapper.TFModuleWrapper.compat_v1_usage_recorded)
     mock_tf_v2_v1_wrapped.cosh  # pylint: disable=pointless-statement
     self.assertTrue(module_wrapper.TFModuleWrapper.compat_v1_usage_recorded)
+
+  def testDelAttr(self):
+    module = MockModule('test')
+    wrapped_module = module_wrapper.TFModuleWrapper(module, 'test')
+    setattr(wrapped_module, 'foo', 1)
+    self.assertEqual(wrapped_module.foo, 1)
+    delattr(wrapped_module, 'foo')
+    self.assertFalse(hasattr(wrapped_module, 'foo'))
+    # Try setting the attr again
+    setattr(wrapped_module, 'foo', 1)
+    self.assertEqual(wrapped_module.foo, 1)
+    delattr(wrapped_module, 'foo')
+    self.assertFalse(hasattr(wrapped_module, 'foo'))
 
 
 class PickleTest(test.TestCase):

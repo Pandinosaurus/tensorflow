@@ -1,10 +1,23 @@
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
 load("//tensorflow/core/platform:rules_cc.bzl", "cc_library")
 
 package(
-    default_visibility = [
-        "//tensorflow/compiler/tf2xla:internal",
-        "//tensorflow/core/tpu:__subpackages__",
-    ],
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
+    default_visibility = ["//tensorflow/compiler/tf2xla:internal"],
     licenses = ["notice"],
 )
 
@@ -17,29 +30,31 @@ XLA_OPS_DEPS = [
     "//tensorflow/compiler/jit:flags",
     "//tensorflow/compiler/jit:xla_activity_listener",
     "//tensorflow/compiler/jit:xla_activity_proto_cc",
-    "//tensorflow/compiler/jit:xla_compilation_cache",
+    "//tensorflow/compiler/jit:device_compiler",
+    "//tensorflow/compiler/jit:variable_info",
+    "//tensorflow/compiler/jit:variable_info_util",
     "//tensorflow/compiler/jit:xla_device_no_jit_rewrite_registration",
     "//tensorflow/compiler/jit:xla_cluster_util",
+    "//tensorflow/compiler/jit:xla_host_recv_device_context",
+    "//tensorflow/compiler/jit:xla_host_send_device_context",
     "//tensorflow/compiler/jit:xla_launch_util",
     "//tensorflow/compiler/tf2xla:common",
     "//tensorflow/compiler/tf2xla:tf2xla_util",
     "//tensorflow/compiler/tf2xla:xla_compiler",
     "//tensorflow/compiler/tf2xla:xla_helpers",
     "//tensorflow/compiler/tf2xla:xla_op_registry",
-    "//tensorflow/compiler/xla:executable_run_options",
-    "//tensorflow/compiler/xla:status_macros",
-    "//tensorflow/compiler/xla:statusor",
-    "//tensorflow/compiler/xla/client:client_library",
-    "//tensorflow/compiler/xla/client:local_client",
-    "//tensorflow/compiler/xla/service:compiler",
-    "//tensorflow/compiler/xla/service/gpu:gpu_executable_run_options",
+    "@xla//xla:executable_run_options",
+    "@xla//xla:status_macros",
+    "@xla//xla/client:client_library",
+    "@xla//xla/client:local_client",
+    "@xla//xla/service:compiler",
     "//tensorflow/core:core_cpu_internal",
     "//tensorflow/core:framework",
     "//tensorflow/core:lib",
     "//tensorflow/core:state_ops_op_lib",
     "//tensorflow/core/platform:stream_executor_no_cuda",
     "//tensorflow/core/profiler/lib:traceme",
-    "//tensorflow/stream_executor:tf_allocator_adapter",
+    "@xla//xla/stream_executor/integrations:tf_allocator_adapter",
     "@com_google_absl//absl/types:optional",
 ]
 
@@ -48,7 +63,34 @@ cc_library(
     name = "xla_ops_no_jit_rewrite_registration",
     srcs = ["xla_ops.cc"],
     hdrs = ["xla_ops.h"],
-    deps = XLA_OPS_DEPS + ["//tensorflow/core/platform:refcount"],
+    deps = XLA_OPS_DEPS + [
+        "//tensorflow/compiler/jit:device_compilation_cache",
+        "//tensorflow/compiler/jit:device_compilation_profiler",
+        "//tensorflow/compiler/jit:pjrt_compile_util",
+        "//tensorflow/compiler/jit:tf_graph_to_hlo_compiler",
+        "//tensorflow/compiler/jit:tf_to_hlo_compiler",
+        "//tensorflow/compiler/jit:xla_compile_util",
+        "//tensorflow/core:framework_internal",
+        "//tensorflow/core:protos_all_cc",
+        "//tensorflow/core/platform:refcount",
+        "@com_google_absl//absl/base:core_headers",
+        "@com_google_absl//absl/container:node_hash_map",
+        "@com_google_absl//absl/log",
+        "@com_google_absl//absl/log:check",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/strings:string_view",
+        "@com_google_absl//absl/types:span",
+        "@tsl//tsl/profiler/lib:traceme",
+        "@xla//xla/hlo/ir:hlo",
+        "@xla//xla/pjrt:pjrt_client",
+        "@xla//xla/service:executable",
+        "@xla//xla/service/gpu:gpu_executable_run_options",
+        "@xla//xla/stream_executor/host:host_platform_id",
+        "@xla//xla/tsl/concurrency:async_value",
+        "@xla//xla/tsl/protobuf:error_codes_proto_impl_cc",
+    ],
     alwayslink = 1,
 )
 
@@ -58,6 +100,7 @@ cc_library(
     deps = XLA_OPS_DEPS + [
         ":xla_ops_no_jit_rewrite_registration",
         "//tensorflow/compiler/jit:jit_compilation_passes",
+        "//tensorflow/core:protos_all_cc",
     ],
     alwayslink = 1,
 )

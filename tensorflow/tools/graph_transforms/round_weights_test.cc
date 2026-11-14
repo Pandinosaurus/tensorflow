@@ -29,9 +29,9 @@ namespace tensorflow {
 namespace graph_transforms {
 
 // Declare here, so we don't need a public header.
-Status RoundWeights(const GraphDef& input_graph_def,
-                    const TransformFuncContext& context,
-                    GraphDef* output_graph_def);
+absl::Status RoundWeights(const GraphDef& input_graph_def,
+                          const TransformFuncContext& context,
+                          GraphDef* output_graph_def);
 
 class RoundWeightsTest : public ::testing::Test {
  protected:
@@ -78,7 +78,7 @@ class RoundWeightsTest : public ::testing::Test {
 
     test::ExpectTensorNear<float>(original_outputs[0], rounded_outputs[0], 0.5);
 
-    std::map<string, const NodeDef*> node_lookup;
+    std::map<std::string, const NodeDef*> node_lookup;
     MapNamesToNodes(rounded_graph_def, &node_lookup);
     EXPECT_EQ(1, node_lookup.count("input_op"));
     const NodeDef* r_input_op = node_lookup.at("input_op");

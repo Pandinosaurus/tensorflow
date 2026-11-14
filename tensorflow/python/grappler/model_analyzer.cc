@@ -15,10 +15,15 @@ limitations under the License.
 
 #include "tensorflow/python/grappler/model_analyzer.h"
 
-#include <iomanip>
+#include <ostream>
+#include <vector>
+
+#include "absl/status/status.h"
+#include "tensorflow/core/framework/node_def.pb.h"
 #include "tensorflow/core/framework/op.h"
 #include "tensorflow/core/framework/tensor_shape.pb.h"
 #include "tensorflow/core/grappler/costs/graph_properties.h"
+#include "tensorflow/core/grappler/costs/op_performance_data.pb.h"
 #include "tensorflow/core/grappler/grappler_item.h"
 
 namespace tensorflow {
@@ -26,8 +31,8 @@ namespace grappler {
 
 ModelAnalyzer::ModelAnalyzer(const GrapplerItem& item) : item_(item) {}
 
-Status ModelAnalyzer::GenerateReport(bool debug, bool assume_valid_feeds,
-                                     std::ostream& os) {
+absl::Status ModelAnalyzer::GenerateReport(bool debug, bool assume_valid_feeds,
+                                           std::ostream& os) {
   GraphProperties properties(item_);
   TF_RETURN_IF_ERROR(properties.InferStatically(assume_valid_feeds));
 
@@ -38,7 +43,7 @@ Status ModelAnalyzer::GenerateReport(bool debug, bool assume_valid_feeds,
     PrintNodeInfo(node, properties, debug, os);
   }
 
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 void ModelAnalyzer::PrintNodeInfo(const NodeDef* node,
@@ -80,7 +85,8 @@ void ModelAnalyzer::PrintNodeInfo(const NodeDef* node,
 
   if (debug) {
     const OpRegistrationData* op_reg_data;
-    Status status = OpRegistry::Global()->LookUp(node->op(), &op_reg_data);
+    absl::Status status =
+        OpRegistry::Global()->LookUp(node->op(), &op_reg_data);
     if (!status.ok()) {
       os << "\tCouldn't find op registration for " << node->op() << std::endl;
     } else if (!op_reg_data->shape_inference_fn) {

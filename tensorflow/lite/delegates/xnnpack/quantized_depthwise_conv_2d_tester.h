@@ -20,7 +20,9 @@ limitations under the License.
 #include <vector>
 
 #include <gtest/gtest.h>
-#include "tensorflow/lite/c/common.h"
+#include "tensorflow/lite/core/c/common.h"
+#include "tensorflow/lite/delegates/xnnpack/test_util.h"
+#include "tensorflow/lite/delegates/xnnpack/xnnpack_delegate.h"
 #include "tensorflow/lite/interpreter.h"
 #include "tensorflow/lite/schema/schema_generated.h"
 
@@ -31,7 +33,8 @@ namespace xnnpack {
 // input, output, and weights, runs this model in two TensorFlow Lite
 // interpreters, one with the delegate applied, and the other without, and
 // compares the results.
-class QuantizedDepthwiseConv2DTester {
+class QuantizedDepthwiseConv2DTester
+    : public ModelCache<QuantizedDepthwiseConv2DTester> {
  public:
   QuantizedDepthwiseConv2DTester() = default;
   QuantizedDepthwiseConv2DTester(const QuantizedDepthwiseConv2DTester&) =
@@ -250,14 +253,20 @@ class QuantizedDepthwiseConv2DTester {
     return *this;
   }
 
+  inline QuantizedDepthwiseConv2DTester& WeightsCache(
+      TfLiteXNNPackDelegateWeightsCache* weights_cache) {
+    weights_cache_ = weights_cache;
+    return *this;
+  }
+
   template <class T>
   void Test(Interpreter* delegate_interpreter,
             Interpreter* default_interpreter) const;
 
-  void Test(TfLiteDelegate* delegate) const;
+  void Test(TfLiteDelegate* delegate);
 
  private:
-  std::vector<char> CreateTfLiteModel() const;
+  std::vector<char> CreateTfLiteModel() const override;
 
   inline ::tflite::Padding Padding() const { return padding_; }
 
@@ -286,6 +295,7 @@ class QuantizedDepthwiseConv2DTester {
   ::tflite::Padding padding_ = ::tflite::Padding_VALID;
   ::tflite::ActivationFunctionType activation_ =
       ::tflite::ActivationFunctionType_NONE;
+  TfLiteXNNPackDelegateWeightsCache* weights_cache_ = nullptr;
 };
 
 }  // namespace xnnpack

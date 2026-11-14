@@ -14,10 +14,6 @@
 # ==============================================================================
 """Tests for compute_gradient."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import numpy as np
 
 from tensorflow.python.eager import backprop
@@ -259,7 +255,8 @@ class GradientCheckerTest(test.TestCase):
         *gradient_checker.compute_gradient(f, [x]))
     # Typical test would assert error < max_err, so assert this test would
     # raise AssertionError, since NaN is not < 1.0.
-    with self.assertRaisesRegex(AssertionError, "nan not less than 1.0"):
+    error_msg = r"(nan|np.float32\(nan\)) not less than 1.0"
+    with self.assertRaisesRegex(AssertionError, error_msg):
       self.assertLess(error, 1.0)
 
   def testGradGrad(self):

@@ -44,7 +44,7 @@ namespace tensorflow {
 class Spectrogram {
  public:
   Spectrogram() : initialized_(false) {}
-  ~Spectrogram() {}
+  ~Spectrogram() = default;
 
   // Initializes the class with a given window length and step length
   // (both in samples). Internally a Hann window is used as the window
@@ -117,7 +117,8 @@ class Spectrogram {
   std::vector<int> fft_integer_working_area_;
   std::vector<double> fft_double_working_area_;
 
-  TF_DISALLOW_COPY_AND_ASSIGN(Spectrogram);
+  Spectrogram(const Spectrogram&) = delete;
+  void operator=(const Spectrogram&) = delete;
 };
 
 }  // namespace tensorflow

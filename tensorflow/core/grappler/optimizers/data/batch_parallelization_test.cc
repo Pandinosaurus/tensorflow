@@ -28,8 +28,8 @@ namespace tensorflow {
 namespace grappler {
 namespace {
 
-Status OptimizeWithBatchParallelization(const GrapplerItem& item,
-                                        GraphDef* output, bool autotune) {
+absl::Status OptimizeWithBatchParallelization(const GrapplerItem& item,
+                                              GraphDef* output, bool autotune) {
   BatchParallelization optimizer;
   RewriterConfig_CustomGraphOptimizer config;
   if (autotune) {
@@ -75,10 +75,10 @@ TEST_P(AutotuneSetting, BatchParallelizationTest) {
 
 INSTANTIATE_TEST_SUITE_P(Test, AutotuneSetting, ::testing::Values(false, true));
 
-class FromFunctionDef : public ::testing::TestWithParam<string> {};
+class FromFunctionDef : public ::testing::TestWithParam<std::string> {};
 
 TEST_P(FromFunctionDef, BatchParallelizationTest) {
-  const string op = GetParam();
+  const std::string op = GetParam();
   bool from_function_def = (op == "_Retval");
 
   using test::function::NDef;

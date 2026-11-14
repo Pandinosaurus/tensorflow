@@ -16,6 +16,7 @@ limitations under the License.
 #ifndef TENSORFLOW_CORE_GRAPPLER_OPTIMIZERS_DATA_AUTOTUNE_BUFFER_SIZES_H_
 #define TENSORFLOW_CORE_GRAPPLER_OPTIMIZERS_DATA_AUTOTUNE_BUFFER_SIZES_H_
 
+#include "absl/status/status.h"
 #include "tensorflow/core/framework/attr_value.pb.h"
 #include "tensorflow/core/grappler/optimizers/data/optimizer_base.h"
 
@@ -38,29 +39,31 @@ class AutotuneBufferSizes : public TFDataOptimizerBase {
   AutotuneBufferSizes() = default;
   ~AutotuneBufferSizes() override = default;
 
-  string name() const override { return "autotune_buffer_sizes"; };
+  std::string name() const override { return "autotune_buffer_sizes"; };
 
   bool UsesFunctionLibrary() const override { return false; }
 
-  Status Init(
+  absl::Status Init(
       const tensorflow::RewriterConfig_CustomGraphOptimizer* config) override {
-    if (!config) return Status::OK();
+    if (!config) return absl::OkStatus();
 
-    const string& autotune = config->parameter_map().at(kAutotune).s();
+    const std::string& autotune = config->parameter_map().at(kAutotune).s();
     if (autotune == "true") {
       autotune_ = true;
     } else if (autotune == "false") {
       autotune_ = false;
     } else {
-      return errors::InvalidArgument("Received an invalid value for parameter ",
-                                     kAutotune, ": ", autotune);
+      return absl::InvalidArgumentError(
+          absl::StrCat("Received an invalid value for parameter ", kAutotune,
+                       ": ", autotune));
     }
-    return Status::OK();
+    return absl::OkStatus();
   }
 
-  Status OptimizeAndCollectStats(Cluster* cluster, const GrapplerItem& item,
-                                 GraphDef* output,
-                                 OptimizationStats* stats) override;
+  absl::Status OptimizeAndCollectStats(Cluster* cluster,
+                                       const GrapplerItem& item,
+                                       GraphDef* output,
+                                       OptimizationStats* stats) override;
 
  private:
   bool autotune_ = true;

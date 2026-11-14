@@ -1,7 +1,25 @@
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
 # Description:
 #   Contains the legacy TF RNN APIs (internal TensorFlow version).
 
+load("@xla//third_party/rules_python/python:defs.bzl", "py_library")
+
 package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
     default_visibility = [
         "//tensorflow:__subpackages__",
         "//tensorflow/python/keras:__subpackages__",
@@ -19,32 +37,36 @@ py_library(
     name = "rnn_cell_impl",
     srcs = ["rnn_cell_impl.py"],
     srcs_version = "PY3",
+    strict_deps = False,
     deps = [
         ":rnn_cell_wrapper_impl",
-        "//tensorflow/python:array_ops",
-        "//tensorflow/python:clip_ops",
-        "//tensorflow/python:constant_op",
-        "//tensorflow/python:dtypes",
-        "//tensorflow/python:framework_ops",
-        "//tensorflow/python:init_ops",
-        "//tensorflow/python:layers_base",
-        "//tensorflow/python:math_ops",
-        "//tensorflow/python:nn_ops",
-        "//tensorflow/python:partitioned_variables",
-        "//tensorflow/python:platform",
-        "//tensorflow/python:tensor_shape",
-        "//tensorflow/python:tensor_util",
-        "//tensorflow/python:util",
-        "//tensorflow/python:variable_scope",
-        "//tensorflow/python:variables",
         "//tensorflow/python/eager:context",
+        "//tensorflow/python/framework:constant_op",
+        "//tensorflow/python/framework:dtypes",
+        "//tensorflow/python/framework:ops",
+        "//tensorflow/python/framework:tensor",
+        "//tensorflow/python/framework:tensor_conversion",
+        "//tensorflow/python/framework:tensor_shape",
+        "//tensorflow/python/framework:tensor_util",
         "//tensorflow/python/keras:activations",
         "//tensorflow/python/keras/engine:input_spec",
         "//tensorflow/python/keras/initializers",
         "//tensorflow/python/keras/legacy_tf_layers:layers_base",
         "//tensorflow/python/keras/saving",
         "//tensorflow/python/keras/utils:tf_utils",
-        "//tensorflow/python/training/tracking:base",
+        "//tensorflow/python/layers:layers_base",
+        "//tensorflow/python/ops:array_ops",
+        "//tensorflow/python/ops:clip_ops",
+        "//tensorflow/python/ops:init_ops",
+        "//tensorflow/python/ops:math_ops",
+        "//tensorflow/python/ops:nn_ops",
+        "//tensorflow/python/ops:partitioned_variables",
+        "//tensorflow/python/ops:variable_scope",
+        "//tensorflow/python/ops:variables",
+        "//tensorflow/python/platform:tf_logging",
+        "//tensorflow/python/trackable:base",
+        "//tensorflow/python/util:nest",
+        "//tensorflow/python/util:tf_export",
     ],
 )
 
@@ -52,16 +74,18 @@ py_library(
     name = "rnn_cell_wrapper_impl",
     srcs = ["rnn_cell_wrapper_impl.py"],
     srcs_version = "PY3",
+    strict_deps = False,
     deps = [
-        "//tensorflow/python:array_ops",
-        "//tensorflow/python:framework_ops",
-        "//tensorflow/python:math_ops",
-        "//tensorflow/python:nn_ops",
-        "//tensorflow/python:random_ops",
-        "//tensorflow/python:tensor_array_ops",
-        "//tensorflow/python:tensor_shape",
-        "//tensorflow/python:tensor_util",
-        "//tensorflow/python:util",
+        "//tensorflow/python/framework:ops",
+        "//tensorflow/python/framework:tensor_conversion",
+        "//tensorflow/python/framework:tensor_shape",
+        "//tensorflow/python/framework:tensor_util",
         "//tensorflow/python/keras/utils:generic_utils",
+        "//tensorflow/python/ops:array_ops",
+        "//tensorflow/python/ops:math_ops",
+        "//tensorflow/python/ops:nn_ops",
+        "//tensorflow/python/ops:random_ops",
+        "//tensorflow/python/ops:tensor_array_ops",
+        "//tensorflow/python/util:nest",
     ],
 )

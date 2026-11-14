@@ -15,15 +15,18 @@ limitations under the License.
 #ifndef TENSORFLOW_C_EXPERIMENTAL_OPS_GEN_COMMON_VIEW_UTIL_H_
 #define TENSORFLOW_C_EXPERIMENTAL_OPS_GEN_COMMON_VIEW_UTIL_H_
 
+#include <vector>
+
 #include "tensorflow/core/platform/types.h"
 
 namespace tensorflow {
 namespace generator {
 
-string Call(const string &function, std::vector<string> arguments);
-string Call(const string &object, const string &method,
-            std::vector<string> arguments, const char *oper = "->");
-string Quoted(const string &s);
+std::string Call(const std::string& function,
+                 std::vector<std::string> arguments);
+std::string Call(const std::string& object, const std::string& method,
+                 std::vector<std::string> arguments, const char* oper = "->");
+std::string Quoted(const std::string& s);
 
 }  // namespace generator
 }  // namespace tensorflow

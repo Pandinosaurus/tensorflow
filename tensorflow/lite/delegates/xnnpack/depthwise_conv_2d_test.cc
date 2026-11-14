@@ -20,16 +20,15 @@ limitations under the License.
 
 #include <gtest/gtest.h>
 #include "tensorflow/lite/delegates/xnnpack/depthwise_conv_2d_tester.h"
+#include "tensorflow/lite/delegates/xnnpack/fingerprint_test_helpers.h"
 #include "tensorflow/lite/delegates/xnnpack/xnnpack_delegate.h"
 
 namespace tflite {
 namespace xnnpack {
 
-TEST(DepthwiseConv2D, 1x1) {
-  std::unique_ptr<TfLiteDelegate, decltype(&TfLiteXNNPackDelegateDelete)>
-      xnnpack_delegate(TfLiteXNNPackDelegateCreate(nullptr),
-                       TfLiteXNNPackDelegateDelete);
+struct DepthwiseConv2D : DelegateTest {};
 
+TEST_F(DepthwiseConv2D, 1x1) {
   std::random_device random_device;
   auto rng = std::mt19937(random_device());
   auto input_rng =
@@ -37,20 +36,19 @@ TEST(DepthwiseConv2D, 1x1) {
   auto channel_rng =
       std::bind(std::uniform_int_distribution<int32_t>(3, 32), std::ref(rng));
 
-  DepthwiseConv2DTester()
-      .InputHeight(input_rng())
+  DepthwiseConv2DTester tester;
+  tester.InputHeight(input_rng())
       .InputWidth(input_rng())
       .InputChannels(channel_rng())
       .KernelHeight(1)
       .KernelWidth(1)
-      .Test(xnnpack_delegate.get());
+      .ReuseGeneratedModel(true);
+  tester.Test(xnnpack_delegate.get());
+  // Second run to test cache lookup runs.
+  tester.Test(xnnpack_delegate.get());
 }
 
-TEST(DepthwiseConv2D, 2x2) {
-  std::unique_ptr<TfLiteDelegate, decltype(&TfLiteXNNPackDelegateDelete)>
-      xnnpack_delegate(TfLiteXNNPackDelegateCreate(nullptr),
-                       TfLiteXNNPackDelegateDelete);
-
+TEST_F(DepthwiseConv2D, 2x2) {
   std::random_device random_device;
   auto rng = std::mt19937(random_device());
   auto input_rng =
@@ -58,21 +56,20 @@ TEST(DepthwiseConv2D, 2x2) {
   auto channel_rng =
       std::bind(std::uniform_int_distribution<int32_t>(3, 32), std::ref(rng));
 
-  DepthwiseConv2DTester()
-      .InputHeight(input_rng())
+  DepthwiseConv2DTester tester;
+  tester.InputHeight(input_rng())
       .InputWidth(input_rng())
       .InputChannels(channel_rng())
       .KernelHeight(2)
       .KernelWidth(2)
       .SamePadding()
-      .Test(xnnpack_delegate.get());
+      .ReuseGeneratedModel(true);
+  tester.Test(xnnpack_delegate.get());
+  // Second run to test cache lookup runs.
+  tester.Test(xnnpack_delegate.get());
 }
 
-TEST(DepthwiseConv2D, 3x3) {
-  std::unique_ptr<TfLiteDelegate, decltype(&TfLiteXNNPackDelegateDelete)>
-      xnnpack_delegate(TfLiteXNNPackDelegateCreate(nullptr),
-                       TfLiteXNNPackDelegateDelete);
-
+TEST_F(DepthwiseConv2D, 3x3) {
   std::random_device random_device;
   auto rng = std::mt19937(random_device());
   auto input_rng =
@@ -80,21 +77,20 @@ TEST(DepthwiseConv2D, 3x3) {
   auto channel_rng =
       std::bind(std::uniform_int_distribution<int32_t>(3, 32), std::ref(rng));
 
-  DepthwiseConv2DTester()
-      .InputHeight(input_rng())
+  DepthwiseConv2DTester tester;
+  tester.InputHeight(input_rng())
       .InputWidth(input_rng())
       .InputChannels(channel_rng())
       .KernelHeight(3)
       .KernelWidth(3)
       .SamePadding()
-      .Test(xnnpack_delegate.get());
+      .ReuseGeneratedModel(true);
+  tester.Test(xnnpack_delegate.get());
+  // Second run to test cache lookup runs.
+  tester.Test(xnnpack_delegate.get());
 }
 
-TEST(DepthwiseConv2D, 3x3Stride2) {
-  std::unique_ptr<TfLiteDelegate, decltype(&TfLiteXNNPackDelegateDelete)>
-      xnnpack_delegate(TfLiteXNNPackDelegateCreate(nullptr),
-                       TfLiteXNNPackDelegateDelete);
-
+TEST_F(DepthwiseConv2D, 3x3Stride2) {
   std::random_device random_device;
   auto rng = std::mt19937(random_device());
   auto input_rng =
@@ -102,54 +98,8 @@ TEST(DepthwiseConv2D, 3x3Stride2) {
   auto channel_rng =
       std::bind(std::uniform_int_distribution<int32_t>(3, 32), std::ref(rng));
 
-  DepthwiseConv2DTester()
-      .InputHeight(input_rng())
-      .InputWidth(input_rng())
-      .InputChannels(channel_rng())
-      .KernelHeight(3)
-      .KernelWidth(3)
-      .StrideHeight(2)
-      .StrideWidth(2)
-      .SamePadding()
-      .Test(xnnpack_delegate.get());
-}
-
-TEST(DepthwiseConv2D, 5x5) {
-  std::unique_ptr<TfLiteDelegate, decltype(&TfLiteXNNPackDelegateDelete)>
-      xnnpack_delegate(TfLiteXNNPackDelegateCreate(nullptr),
-                       TfLiteXNNPackDelegateDelete);
-
-  std::random_device random_device;
-  auto rng = std::mt19937(random_device());
-  auto input_rng =
-      std::bind(std::uniform_int_distribution<int32_t>(5, 25), std::ref(rng));
-  auto channel_rng =
-      std::bind(std::uniform_int_distribution<int32_t>(3, 32), std::ref(rng));
-
-  DepthwiseConv2DTester()
-      .InputHeight(input_rng())
-      .InputWidth(input_rng())
-      .InputChannels(channel_rng())
-      .KernelHeight(3)
-      .KernelWidth(3)
-      .SamePadding()
-      .Test(xnnpack_delegate.get());
-}
-
-TEST(DepthwiseConv2D, 5x5Stride2) {
-  std::unique_ptr<TfLiteDelegate, decltype(&TfLiteXNNPackDelegateDelete)>
-      xnnpack_delegate(TfLiteXNNPackDelegateCreate(nullptr),
-                       TfLiteXNNPackDelegateDelete);
-
-  std::random_device random_device;
-  auto rng = std::mt19937(random_device());
-  auto input_rng =
-      std::bind(std::uniform_int_distribution<int32_t>(5, 25), std::ref(rng));
-  auto channel_rng =
-      std::bind(std::uniform_int_distribution<int32_t>(3, 32), std::ref(rng));
-
-  DepthwiseConv2DTester()
-      .InputHeight(input_rng())
+  DepthwiseConv2DTester tester;
+  tester.InputHeight(input_rng())
       .InputWidth(input_rng())
       .InputChannels(channel_rng())
       .KernelHeight(3)
@@ -157,14 +107,57 @@ TEST(DepthwiseConv2D, 5x5Stride2) {
       .StrideHeight(2)
       .StrideWidth(2)
       .SamePadding()
-      .Test(xnnpack_delegate.get());
+      .ReuseGeneratedModel(true);
+  tester.Test(xnnpack_delegate.get());
+  // Second run to test cache lookup runs.
+  tester.Test(xnnpack_delegate.get());
 }
 
-TEST(DepthwiseConv2D, SmallKernelWithSamePadding) {
-  std::unique_ptr<TfLiteDelegate, decltype(&TfLiteXNNPackDelegateDelete)>
-      xnnpack_delegate(TfLiteXNNPackDelegateCreate(nullptr),
-                       TfLiteXNNPackDelegateDelete);
+TEST_F(DepthwiseConv2D, 5x5) {
+  std::random_device random_device;
+  auto rng = std::mt19937(random_device());
+  auto input_rng =
+      std::bind(std::uniform_int_distribution<int32_t>(5, 25), std::ref(rng));
+  auto channel_rng =
+      std::bind(std::uniform_int_distribution<int32_t>(3, 32), std::ref(rng));
 
+  DepthwiseConv2DTester tester;
+  tester.InputHeight(input_rng())
+      .InputWidth(input_rng())
+      .InputChannels(channel_rng())
+      .KernelHeight(5)
+      .KernelWidth(5)
+      .SamePadding()
+      .ReuseGeneratedModel(true);
+  tester.Test(xnnpack_delegate.get());
+  // Second run to test cache lookup runs.
+  tester.Test(xnnpack_delegate.get());
+}
+
+TEST_F(DepthwiseConv2D, 5x5Stride2) {
+  std::random_device random_device;
+  auto rng = std::mt19937(random_device());
+  auto input_rng =
+      std::bind(std::uniform_int_distribution<int32_t>(5, 25), std::ref(rng));
+  auto channel_rng =
+      std::bind(std::uniform_int_distribution<int32_t>(3, 32), std::ref(rng));
+
+  DepthwiseConv2DTester tester;
+  tester.InputHeight(input_rng())
+      .InputWidth(input_rng())
+      .InputChannels(channel_rng())
+      .KernelHeight(5)
+      .KernelWidth(5)
+      .StrideHeight(2)
+      .StrideWidth(2)
+      .SamePadding()
+      .ReuseGeneratedModel(true);
+  tester.Test(xnnpack_delegate.get());
+  // Second run to test cache lookup runs.
+  tester.Test(xnnpack_delegate.get());
+}
+
+TEST_F(DepthwiseConv2D, SmallKernelWithSamePadding) {
   std::random_device random_device;
   auto rng = std::mt19937(random_device());
   auto batch_rng =
@@ -176,22 +169,21 @@ TEST(DepthwiseConv2D, SmallKernelWithSamePadding) {
   auto channel_rng =
       std::bind(std::uniform_int_distribution<int32_t>(3, 32), std::ref(rng));
 
-  DepthwiseConv2DTester()
-      .BatchSize(batch_rng())
+  DepthwiseConv2DTester tester;
+  tester.BatchSize(batch_rng())
       .InputHeight(input_rng())
       .InputWidth(input_rng())
       .InputChannels(channel_rng())
       .KernelHeight(kernel_rng())
       .KernelWidth(kernel_rng())
       .SamePadding()
-      .Test(xnnpack_delegate.get());
+      .ReuseGeneratedModel(true);
+  tester.Test(xnnpack_delegate.get());
+  // Second run to test cache lookup runs.
+  tester.Test(xnnpack_delegate.get());
 }
 
-TEST(DepthwiseConv2D, SmallKernelWithValidPadding) {
-  std::unique_ptr<TfLiteDelegate, decltype(&TfLiteXNNPackDelegateDelete)>
-      xnnpack_delegate(TfLiteXNNPackDelegateCreate(nullptr),
-                       TfLiteXNNPackDelegateDelete);
-
+TEST_F(DepthwiseConv2D, SmallKernelWithValidPadding) {
   std::random_device random_device;
   auto rng = std::mt19937(random_device());
   auto batch_rng =
@@ -203,22 +195,21 @@ TEST(DepthwiseConv2D, SmallKernelWithValidPadding) {
   auto channel_rng =
       std::bind(std::uniform_int_distribution<int32_t>(3, 32), std::ref(rng));
 
-  DepthwiseConv2DTester()
-      .BatchSize(batch_rng())
+  DepthwiseConv2DTester tester;
+  tester.BatchSize(batch_rng())
       .InputHeight(input_rng())
       .InputWidth(input_rng())
       .InputChannels(channel_rng())
       .KernelHeight(kernel_rng())
       .KernelWidth(kernel_rng())
       .ValidPadding()
-      .Test(xnnpack_delegate.get());
+      .ReuseGeneratedModel(true);
+  tester.Test(xnnpack_delegate.get());
+  // Second run to test cache lookup runs.
+  tester.Test(xnnpack_delegate.get());
 }
 
-TEST(DepthwiseConv2D, StrideWithSamePadding) {
-  std::unique_ptr<TfLiteDelegate, decltype(&TfLiteXNNPackDelegateDelete)>
-      xnnpack_delegate(TfLiteXNNPackDelegateCreate(nullptr),
-                       TfLiteXNNPackDelegateDelete);
-
+TEST_F(DepthwiseConv2D, StrideWithSamePadding) {
   std::random_device random_device;
   auto rng = std::mt19937(random_device());
   auto batch_rng =
@@ -232,8 +223,8 @@ TEST(DepthwiseConv2D, StrideWithSamePadding) {
   auto channel_rng =
       std::bind(std::uniform_int_distribution<int32_t>(3, 32), std::ref(rng));
 
-  DepthwiseConv2DTester()
-      .BatchSize(batch_rng())
+  DepthwiseConv2DTester tester;
+  tester.BatchSize(batch_rng())
       .InputHeight(input_rng())
       .InputWidth(input_rng())
       .InputChannels(channel_rng())
@@ -242,14 +233,13 @@ TEST(DepthwiseConv2D, StrideWithSamePadding) {
       .StrideHeight(stride_rng())
       .StrideWidth(stride_rng())
       .SamePadding()
-      .Test(xnnpack_delegate.get());
+      .ReuseGeneratedModel(true);
+  tester.Test(xnnpack_delegate.get());
+  // Second run to test cache lookup runs.
+  tester.Test(xnnpack_delegate.get());
 }
 
-TEST(DepthwiseConv2D, StrideWithValidPadding) {
-  std::unique_ptr<TfLiteDelegate, decltype(&TfLiteXNNPackDelegateDelete)>
-      xnnpack_delegate(TfLiteXNNPackDelegateCreate(nullptr),
-                       TfLiteXNNPackDelegateDelete);
-
+TEST_F(DepthwiseConv2D, StrideWithValidPadding) {
   std::random_device random_device;
   auto rng = std::mt19937(random_device());
   auto batch_rng =
@@ -263,8 +253,8 @@ TEST(DepthwiseConv2D, StrideWithValidPadding) {
   auto channel_rng =
       std::bind(std::uniform_int_distribution<int32_t>(3, 32), std::ref(rng));
 
-  DepthwiseConv2DTester()
-      .BatchSize(batch_rng())
+  DepthwiseConv2DTester tester;
+  tester.BatchSize(batch_rng())
       .InputHeight(input_rng())
       .InputWidth(input_rng())
       .InputChannels(channel_rng())
@@ -273,14 +263,13 @@ TEST(DepthwiseConv2D, StrideWithValidPadding) {
       .StrideHeight(stride_rng())
       .StrideWidth(stride_rng())
       .ValidPadding()
-      .Test(xnnpack_delegate.get());
+      .ReuseGeneratedModel(true);
+  tester.Test(xnnpack_delegate.get());
+  // Second run to test cache lookup runs.
+  tester.Test(xnnpack_delegate.get());
 }
 
-TEST(DepthwiseConv2D, DilationWithSamePadding) {
-  std::unique_ptr<TfLiteDelegate, decltype(&TfLiteXNNPackDelegateDelete)>
-      xnnpack_delegate(TfLiteXNNPackDelegateCreate(nullptr),
-                       TfLiteXNNPackDelegateDelete);
-
+TEST_F(DepthwiseConv2D, DilationWithSamePadding) {
   std::random_device random_device;
   auto rng = std::mt19937(random_device());
   auto batch_rng =
@@ -294,8 +283,8 @@ TEST(DepthwiseConv2D, DilationWithSamePadding) {
   auto channel_rng =
       std::bind(std::uniform_int_distribution<int32_t>(3, 32), std::ref(rng));
 
-  DepthwiseConv2DTester()
-      .BatchSize(batch_rng())
+  DepthwiseConv2DTester tester;
+  tester.BatchSize(batch_rng())
       .InputHeight(input_rng())
       .InputWidth(input_rng())
       .InputChannels(channel_rng())
@@ -304,14 +293,13 @@ TEST(DepthwiseConv2D, DilationWithSamePadding) {
       .DilationHeight(dilation_rng())
       .DilationWidth(dilation_rng())
       .SamePadding()
-      .Test(xnnpack_delegate.get());
+      .ReuseGeneratedModel(true);
+  tester.Test(xnnpack_delegate.get());
+  // Second run to test cache lookup runs.
+  tester.Test(xnnpack_delegate.get());
 }
 
-TEST(DepthwiseConv2D, DilationWithValidPadding) {
-  std::unique_ptr<TfLiteDelegate, decltype(&TfLiteXNNPackDelegateDelete)>
-      xnnpack_delegate(TfLiteXNNPackDelegateCreate(nullptr),
-                       TfLiteXNNPackDelegateDelete);
-
+TEST_F(DepthwiseConv2D, DilationWithValidPadding) {
   std::random_device random_device;
   auto rng = std::mt19937(random_device());
   auto batch_rng =
@@ -325,8 +313,8 @@ TEST(DepthwiseConv2D, DilationWithValidPadding) {
   auto channel_rng =
       std::bind(std::uniform_int_distribution<int32_t>(3, 32), std::ref(rng));
 
-  DepthwiseConv2DTester()
-      .BatchSize(batch_rng())
+  DepthwiseConv2DTester tester;
+  tester.BatchSize(batch_rng())
       .InputHeight(input_rng())
       .InputWidth(input_rng())
       .InputChannels(channel_rng())
@@ -335,14 +323,13 @@ TEST(DepthwiseConv2D, DilationWithValidPadding) {
       .DilationHeight(dilation_rng())
       .DilationWidth(dilation_rng())
       .ValidPadding()
-      .Test(xnnpack_delegate.get());
+      .ReuseGeneratedModel(true);
+  tester.Test(xnnpack_delegate.get());
+  // Second run to test cache lookup runs.
+  tester.Test(xnnpack_delegate.get());
 }
 
-TEST(DepthwiseConv2D, DepthMultiplier) {
-  std::unique_ptr<TfLiteDelegate, decltype(&TfLiteXNNPackDelegateDelete)>
-      xnnpack_delegate(TfLiteXNNPackDelegateCreate(nullptr),
-                       TfLiteXNNPackDelegateDelete);
-
+TEST_F(DepthwiseConv2D, DepthMultiplier) {
   std::random_device random_device;
   auto rng = std::mt19937(random_device());
   auto batch_rng =
@@ -358,8 +345,8 @@ TEST(DepthwiseConv2D, DepthMultiplier) {
   auto multiplier_rng =
       std::bind(std::uniform_int_distribution<int32_t>(2, 8), std::ref(rng));
 
-  DepthwiseConv2DTester()
-      .BatchSize(batch_rng())
+  DepthwiseConv2DTester tester;
+  tester.BatchSize(batch_rng())
       .InputHeight(input_rng())
       .InputWidth(input_rng())
       .InputChannels(channel_rng())
@@ -368,14 +355,13 @@ TEST(DepthwiseConv2D, DepthMultiplier) {
       .StrideHeight(stride_rng())
       .StrideWidth(stride_rng())
       .DepthMultiplier(multiplier_rng())
-      .Test(xnnpack_delegate.get());
+      .ReuseGeneratedModel(true);
+  tester.Test(xnnpack_delegate.get());
+  // Second run to test cache lookup runs.
+  tester.Test(xnnpack_delegate.get());
 }
 
-TEST(DepthwiseConv2D, FP16Weights) {
-  std::unique_ptr<TfLiteDelegate, decltype(&TfLiteXNNPackDelegateDelete)>
-      xnnpack_delegate(TfLiteXNNPackDelegateCreate(nullptr),
-                       TfLiteXNNPackDelegateDelete);
-
+TEST_F(DepthwiseConv2D, FP16Weights) {
   std::random_device random_device;
   auto rng = std::mt19937(random_device());
   auto batch_rng =
@@ -389,8 +375,8 @@ TEST(DepthwiseConv2D, FP16Weights) {
   auto channel_rng =
       std::bind(std::uniform_int_distribution<int32_t>(3, 32), std::ref(rng));
 
-  DepthwiseConv2DTester()
-      .BatchSize(batch_rng())
+  DepthwiseConv2DTester tester;
+  tester.BatchSize(batch_rng())
       .InputHeight(input_rng())
       .InputWidth(input_rng())
       .InputChannels(channel_rng())
@@ -399,14 +385,13 @@ TEST(DepthwiseConv2D, FP16Weights) {
       .StrideHeight(stride_rng())
       .StrideWidth(stride_rng())
       .FP16Weights()
-      .Test(xnnpack_delegate.get());
+      .ReuseGeneratedModel(true);
+  tester.Test(xnnpack_delegate.get());
+  // Second run to test cache lookup runs.
+  tester.Test(xnnpack_delegate.get());
 }
 
-TEST(DepthwiseConv2D, INT8Weights) {
-  std::unique_ptr<TfLiteDelegate, decltype(&TfLiteXNNPackDelegateDelete)>
-      xnnpack_delegate(TfLiteXNNPackDelegateCreate(nullptr),
-                       TfLiteXNNPackDelegateDelete);
-
+TEST_F(DepthwiseConv2D, TensorWiseQuantizedInt8Weights) {
   std::random_device random_device;
   auto rng = std::mt19937(random_device());
   auto batch_rng =
@@ -420,8 +405,8 @@ TEST(DepthwiseConv2D, INT8Weights) {
   auto channel_rng =
       std::bind(std::uniform_int_distribution<int32_t>(3, 32), std::ref(rng));
 
-  DepthwiseConv2DTester()
-      .BatchSize(batch_rng())
+  DepthwiseConv2DTester tester;
+  tester.BatchSize(batch_rng())
       .InputHeight(input_rng())
       .InputWidth(input_rng())
       .InputChannels(channel_rng())
@@ -429,15 +414,14 @@ TEST(DepthwiseConv2D, INT8Weights) {
       .KernelWidth(kernel_rng())
       .StrideHeight(stride_rng())
       .StrideWidth(stride_rng())
-      .INT8Weights()
-      .Test(xnnpack_delegate.get());
+      .TensorWiseQuantizedInt8Weights()
+      .ReuseGeneratedModel(true);
+  tester.Test(xnnpack_delegate.get());
+  // Second run to test cache lookup runs.
+  tester.Test(xnnpack_delegate.get());
 }
 
-TEST(DepthwiseConv2D, SparseWeights) {
-  std::unique_ptr<TfLiteDelegate, decltype(&TfLiteXNNPackDelegateDelete)>
-      xnnpack_delegate(TfLiteXNNPackDelegateCreate(nullptr),
-                       TfLiteXNNPackDelegateDelete);
-
+TEST_F(DepthwiseConv2D, ChannelWiseQuantizedInt8Weights) {
   std::random_device random_device;
   auto rng = std::mt19937(random_device());
   auto batch_rng =
@@ -451,8 +435,38 @@ TEST(DepthwiseConv2D, SparseWeights) {
   auto channel_rng =
       std::bind(std::uniform_int_distribution<int32_t>(3, 32), std::ref(rng));
 
-  DepthwiseConv2DTester()
-      .BatchSize(batch_rng())
+  DepthwiseConv2DTester tester;
+  tester.BatchSize(batch_rng())
+      .InputHeight(input_rng())
+      .InputWidth(input_rng())
+      .InputChannels(channel_rng())
+      .KernelHeight(kernel_rng())
+      .KernelWidth(kernel_rng())
+      .StrideHeight(stride_rng())
+      .StrideWidth(stride_rng())
+      .ChannelWiseQuantizedInt8Weights()
+      .ReuseGeneratedModel(true);
+  tester.Test(xnnpack_delegate.get());
+  // Second run to test cache lookup runs.
+  tester.Test(xnnpack_delegate.get());
+}
+
+TEST_F(DepthwiseConv2D, SparseWeights) {
+  std::random_device random_device;
+  auto rng = std::mt19937(random_device());
+  auto batch_rng =
+      std::bind(std::uniform_int_distribution<int32_t>(2, 4), std::ref(rng));
+  auto input_rng =
+      std::bind(std::uniform_int_distribution<int32_t>(10, 25), std::ref(rng));
+  auto kernel_rng =
+      std::bind(std::uniform_int_distribution<int32_t>(3, 5), std::ref(rng));
+  auto stride_rng =
+      std::bind(std::uniform_int_distribution<int32_t>(2, 3), std::ref(rng));
+  auto channel_rng =
+      std::bind(std::uniform_int_distribution<int32_t>(3, 32), std::ref(rng));
+
+  DepthwiseConv2DTester tester;
+  tester.BatchSize(batch_rng())
       .InputHeight(input_rng())
       .InputWidth(input_rng())
       .InputChannels(channel_rng())
@@ -461,14 +475,13 @@ TEST(DepthwiseConv2D, SparseWeights) {
       .StrideHeight(stride_rng())
       .StrideWidth(stride_rng())
       .SparseWeights()
-      .Test(xnnpack_delegate.get());
+      .ReuseGeneratedModel(true);
+  tester.Test(xnnpack_delegate.get());
+  // Second run to test cache lookup runs.
+  tester.Test(xnnpack_delegate.get());
 }
 
-TEST(DepthwiseConv2D, ReluActivation) {
-  std::unique_ptr<TfLiteDelegate, decltype(&TfLiteXNNPackDelegateDelete)>
-      xnnpack_delegate(TfLiteXNNPackDelegateCreate(nullptr),
-                       TfLiteXNNPackDelegateDelete);
-
+TEST_F(DepthwiseConv2D, SparseFP16Weights) {
   std::random_device random_device;
   auto rng = std::mt19937(random_device());
   auto batch_rng =
@@ -482,8 +495,101 @@ TEST(DepthwiseConv2D, ReluActivation) {
   auto channel_rng =
       std::bind(std::uniform_int_distribution<int32_t>(3, 32), std::ref(rng));
 
-  DepthwiseConv2DTester()
-      .BatchSize(batch_rng())
+  DepthwiseConv2DTester tester;
+  tester.BatchSize(batch_rng())
+      .InputHeight(input_rng())
+      .InputWidth(input_rng())
+      .InputChannels(channel_rng())
+      .KernelHeight(kernel_rng())
+      .KernelWidth(kernel_rng())
+      .StrideHeight(stride_rng())
+      .StrideWidth(stride_rng())
+      .SparseWeights()
+      .FP16Weights()
+      .ReuseGeneratedModel(true);
+  tester.Test(xnnpack_delegate.get());
+  // Second run to test cache lookup runs.
+  tester.Test(xnnpack_delegate.get());
+}
+
+TEST_F(DepthwiseConv2D, SparseTensorWiseQuantizedInt8Weights) {
+  std::random_device random_device;
+  auto rng = std::mt19937(random_device());
+  auto batch_rng =
+      std::bind(std::uniform_int_distribution<int32_t>(2, 4), std::ref(rng));
+  auto input_rng =
+      std::bind(std::uniform_int_distribution<int32_t>(10, 25), std::ref(rng));
+  auto kernel_rng =
+      std::bind(std::uniform_int_distribution<int32_t>(3, 5), std::ref(rng));
+  auto stride_rng =
+      std::bind(std::uniform_int_distribution<int32_t>(2, 3), std::ref(rng));
+  auto channel_rng =
+      std::bind(std::uniform_int_distribution<int32_t>(3, 32), std::ref(rng));
+
+  DepthwiseConv2DTester tester;
+  tester.BatchSize(batch_rng())
+      .InputHeight(input_rng())
+      .InputWidth(input_rng())
+      .InputChannels(channel_rng())
+      .KernelHeight(kernel_rng())
+      .KernelWidth(kernel_rng())
+      .StrideHeight(stride_rng())
+      .StrideWidth(stride_rng())
+      .SparseWeights()
+      .TensorWiseQuantizedInt8Weights()
+      .ReuseGeneratedModel(true);
+  tester.Test(xnnpack_delegate.get());
+  // Second run to test cache lookup runs.
+  tester.Test(xnnpack_delegate.get());
+}
+
+TEST_F(DepthwiseConv2D, SparseChannelWiseQuantizedInt8Weights) {
+  std::random_device random_device;
+  auto rng = std::mt19937(random_device());
+  auto batch_rng =
+      std::bind(std::uniform_int_distribution<int32_t>(2, 4), std::ref(rng));
+  auto input_rng =
+      std::bind(std::uniform_int_distribution<int32_t>(10, 25), std::ref(rng));
+  auto kernel_rng =
+      std::bind(std::uniform_int_distribution<int32_t>(3, 5), std::ref(rng));
+  auto stride_rng =
+      std::bind(std::uniform_int_distribution<int32_t>(2, 3), std::ref(rng));
+  auto channel_rng =
+      std::bind(std::uniform_int_distribution<int32_t>(3, 32), std::ref(rng));
+
+  DepthwiseConv2DTester tester;
+  tester.BatchSize(batch_rng())
+      .InputHeight(input_rng())
+      .InputWidth(input_rng())
+      .InputChannels(channel_rng())
+      .KernelHeight(kernel_rng())
+      .KernelWidth(kernel_rng())
+      .StrideHeight(stride_rng())
+      .StrideWidth(stride_rng())
+      .SparseWeights()
+      .ChannelWiseQuantizedInt8Weights()
+      .ReuseGeneratedModel(true);
+  tester.Test(xnnpack_delegate.get());
+  // Second run to test cache lookup runs.
+  tester.Test(xnnpack_delegate.get());
+}
+
+TEST_F(DepthwiseConv2D, ReluActivation) {
+  std::random_device random_device;
+  auto rng = std::mt19937(random_device());
+  auto batch_rng =
+      std::bind(std::uniform_int_distribution<int32_t>(2, 4), std::ref(rng));
+  auto input_rng =
+      std::bind(std::uniform_int_distribution<int32_t>(10, 25), std::ref(rng));
+  auto kernel_rng =
+      std::bind(std::uniform_int_distribution<int32_t>(3, 5), std::ref(rng));
+  auto stride_rng =
+      std::bind(std::uniform_int_distribution<int32_t>(2, 3), std::ref(rng));
+  auto channel_rng =
+      std::bind(std::uniform_int_distribution<int32_t>(3, 32), std::ref(rng));
+
+  DepthwiseConv2DTester tester;
+  tester.BatchSize(batch_rng())
       .InputHeight(input_rng())
       .InputWidth(input_rng())
       .InputChannels(channel_rng())
@@ -492,14 +598,13 @@ TEST(DepthwiseConv2D, ReluActivation) {
       .StrideHeight(stride_rng())
       .StrideWidth(stride_rng())
       .ReluActivation()
-      .Test(xnnpack_delegate.get());
+      .ReuseGeneratedModel(true);
+  tester.Test(xnnpack_delegate.get());
+  // Second run to test cache lookup runs.
+  tester.Test(xnnpack_delegate.get());
 }
 
-TEST(DepthwiseConv2D, Relu6Activation) {
-  std::unique_ptr<TfLiteDelegate, decltype(&TfLiteXNNPackDelegateDelete)>
-      xnnpack_delegate(TfLiteXNNPackDelegateCreate(nullptr),
-                       TfLiteXNNPackDelegateDelete);
-
+TEST_F(DepthwiseConv2D, Relu6Activation) {
   std::random_device random_device;
   auto rng = std::mt19937(random_device());
   auto batch_rng =
@@ -513,8 +618,8 @@ TEST(DepthwiseConv2D, Relu6Activation) {
   auto channel_rng =
       std::bind(std::uniform_int_distribution<int32_t>(3, 32), std::ref(rng));
 
-  DepthwiseConv2DTester()
-      .BatchSize(batch_rng())
+  DepthwiseConv2DTester tester;
+  tester.BatchSize(batch_rng())
       .InputHeight(input_rng())
       .InputWidth(input_rng())
       .InputChannels(channel_rng())
@@ -523,14 +628,13 @@ TEST(DepthwiseConv2D, Relu6Activation) {
       .StrideHeight(stride_rng())
       .StrideWidth(stride_rng())
       .Relu6Activation()
-      .Test(xnnpack_delegate.get());
+      .ReuseGeneratedModel(true);
+  tester.Test(xnnpack_delegate.get());
+  // Second run to test cache lookup runs.
+  tester.Test(xnnpack_delegate.get());
 }
 
-TEST(DepthwiseConv2D, ReluMinus1To1Activation) {
-  std::unique_ptr<TfLiteDelegate, decltype(&TfLiteXNNPackDelegateDelete)>
-      xnnpack_delegate(TfLiteXNNPackDelegateCreate(nullptr),
-                       TfLiteXNNPackDelegateDelete);
-
+TEST_F(DepthwiseConv2D, ReluMinus1To1Activation) {
   std::random_device random_device;
   auto rng = std::mt19937(random_device());
   auto batch_rng =
@@ -544,8 +648,8 @@ TEST(DepthwiseConv2D, ReluMinus1To1Activation) {
   auto channel_rng =
       std::bind(std::uniform_int_distribution<int32_t>(3, 32), std::ref(rng));
 
-  DepthwiseConv2DTester()
-      .BatchSize(batch_rng())
+  DepthwiseConv2DTester tester;
+  tester.BatchSize(batch_rng())
       .InputHeight(input_rng())
       .InputWidth(input_rng())
       .InputChannels(channel_rng())
@@ -554,14 +658,13 @@ TEST(DepthwiseConv2D, ReluMinus1To1Activation) {
       .StrideHeight(stride_rng())
       .StrideWidth(stride_rng())
       .ReluMinus1To1Activation()
-      .Test(xnnpack_delegate.get());
+      .ReuseGeneratedModel(true);
+  tester.Test(xnnpack_delegate.get());
+  // Second run to test cache lookup runs.
+  tester.Test(xnnpack_delegate.get());
 }
 
-TEST(DepthwiseConv2D, DISABLED_TanhActivation) {
-  std::unique_ptr<TfLiteDelegate, decltype(&TfLiteXNNPackDelegateDelete)>
-      xnnpack_delegate(TfLiteXNNPackDelegateCreate(nullptr),
-                       TfLiteXNNPackDelegateDelete);
-
+TEST_F(DepthwiseConv2D, DISABLED_TanhActivation) {
   std::random_device random_device;
   auto rng = std::mt19937(random_device());
   auto batch_rng =
@@ -575,8 +678,8 @@ TEST(DepthwiseConv2D, DISABLED_TanhActivation) {
   auto channel_rng =
       std::bind(std::uniform_int_distribution<int32_t>(3, 32), std::ref(rng));
 
-  DepthwiseConv2DTester()
-      .BatchSize(batch_rng())
+  DepthwiseConv2DTester tester;
+  tester.BatchSize(batch_rng())
       .InputHeight(input_rng())
       .InputWidth(input_rng())
       .InputChannels(channel_rng())
@@ -585,14 +688,13 @@ TEST(DepthwiseConv2D, DISABLED_TanhActivation) {
       .StrideHeight(stride_rng())
       .StrideWidth(stride_rng())
       .TanhActivation()
-      .Test(xnnpack_delegate.get());
+      .ReuseGeneratedModel(true);
+  tester.Test(xnnpack_delegate.get());
+  // Second run to test cache lookup runs.
+  tester.Test(xnnpack_delegate.get());
 }
 
-TEST(DepthwiseConv2D, DISABLED_SignBitActivation) {
-  std::unique_ptr<TfLiteDelegate, decltype(&TfLiteXNNPackDelegateDelete)>
-      xnnpack_delegate(TfLiteXNNPackDelegateCreate(nullptr),
-                       TfLiteXNNPackDelegateDelete);
-
+TEST_F(DepthwiseConv2D, DISABLED_SignBitActivation) {
   std::random_device random_device;
   auto rng = std::mt19937(random_device());
   auto batch_rng =
@@ -606,8 +708,8 @@ TEST(DepthwiseConv2D, DISABLED_SignBitActivation) {
   auto channel_rng =
       std::bind(std::uniform_int_distribution<int32_t>(3, 32), std::ref(rng));
 
-  DepthwiseConv2DTester()
-      .BatchSize(batch_rng())
+  DepthwiseConv2DTester tester;
+  tester.BatchSize(batch_rng())
       .InputHeight(input_rng())
       .InputWidth(input_rng())
       .InputChannels(channel_rng())
@@ -616,16 +718,17 @@ TEST(DepthwiseConv2D, DISABLED_SignBitActivation) {
       .StrideHeight(stride_rng())
       .StrideWidth(stride_rng())
       .SignBitActivation()
-      .Test(xnnpack_delegate.get());
+      .ReuseGeneratedModel(true);
+  tester.Test(xnnpack_delegate.get());
+  // Second run to test cache lookup runs.
+  tester.Test(xnnpack_delegate.get());
 }
 
-TEST(DepthwiseConv2D, MultiThreading) {
+TEST_F(DepthwiseConv2D, MultiThreading) {
   TfLiteXNNPackDelegateOptions delegate_options =
       TfLiteXNNPackDelegateOptionsDefault();
   delegate_options.num_threads = 2;
-  std::unique_ptr<TfLiteDelegate, decltype(&TfLiteXNNPackDelegateDelete)>
-      xnnpack_delegate(TfLiteXNNPackDelegateCreate(&delegate_options),
-                       TfLiteXNNPackDelegateDelete);
+  UseCustomDelegate(delegate_options);
 
   std::random_device random_device;
   auto rng = std::mt19937(random_device());
@@ -640,8 +743,8 @@ TEST(DepthwiseConv2D, MultiThreading) {
   auto channel_rng =
       std::bind(std::uniform_int_distribution<int32_t>(3, 32), std::ref(rng));
 
-  DepthwiseConv2DTester()
-      .BatchSize(batch_rng())
+  DepthwiseConv2DTester tester;
+  tester.BatchSize(batch_rng())
       .InputHeight(input_rng())
       .InputWidth(input_rng())
       .InputChannels(channel_rng())
@@ -649,7 +752,82 @@ TEST(DepthwiseConv2D, MultiThreading) {
       .KernelWidth(kernel_rng())
       .StrideHeight(stride_rng())
       .StrideWidth(stride_rng())
-      .Test(xnnpack_delegate.get());
+      .ReuseGeneratedModel(true);
+  tester.Test(xnnpack_delegate.get());
+  // Second run to test cache lookup runs.
+  tester.Test(xnnpack_delegate.get());
+}
+
+TEST_F(DepthwiseConv2D, WeightsCache) {
+  TfLiteXNNPackDelegateOptions delegate_options =
+      TfLiteXNNPackDelegateOptionsDefault();
+  std::unique_ptr<TfLiteXNNPackDelegateWeightsCache,
+                  decltype(&TfLiteXNNPackDelegateWeightsCacheDelete)>
+      weights_cache(TfLiteXNNPackDelegateWeightsCacheCreate(),
+                    TfLiteXNNPackDelegateWeightsCacheDelete);
+  delegate_options.weights_cache = weights_cache.get();
+  UseCustomDelegate(delegate_options);
+
+  std::random_device random_device;
+  auto rng = std::mt19937(random_device());
+  auto batch_rng =
+      std::bind(std::uniform_int_distribution<int32_t>(2, 4), std::ref(rng));
+  auto input_rng =
+      std::bind(std::uniform_int_distribution<int32_t>(10, 25), std::ref(rng));
+  auto kernel_rng =
+      std::bind(std::uniform_int_distribution<int32_t>(3, 5), std::ref(rng));
+  auto stride_rng =
+      std::bind(std::uniform_int_distribution<int32_t>(2, 3), std::ref(rng));
+  auto channel_rng =
+      std::bind(std::uniform_int_distribution<int32_t>(3, 32), std::ref(rng));
+
+  DepthwiseConv2DTester tester;
+  tester.BatchSize(batch_rng())
+      .InputHeight(input_rng())
+      .InputWidth(input_rng())
+      .InputChannels(channel_rng())
+      .KernelHeight(kernel_rng())
+      .KernelWidth(kernel_rng())
+      .StrideHeight(stride_rng())
+      .StrideWidth(stride_rng())
+      .WeightsCache(weights_cache.get())
+      .ReuseGeneratedModel(true);
+  tester.Test(xnnpack_delegate.get());
+  // Second run to test cache lookup runs.
+  tester.Test(xnnpack_delegate.get());
+}
+
+TEST_F(DepthwiseConv2D, TransientIndirectionBuffer) {
+  TfLiteXNNPackDelegateOptions xnnpack_options =
+      TfLiteXNNPackDelegateOptionsDefault();
+  xnnpack_options.num_threads = 2;
+  xnnpack_options.flags |=
+      TFLITE_XNNPACK_DELEGATE_FLAG_TRANSIENT_INDIRECTION_BUFFER;
+  UseCustomDelegate(xnnpack_options);
+
+  std::random_device random_device;
+  auto rng = std::mt19937(random_device());
+  auto input_rng =
+      std::bind(std::uniform_int_distribution<int32_t>(5, 25), std::ref(rng));
+  auto kernel_rng =
+      std::bind(std::uniform_int_distribution<int32_t>(3, 5), std::ref(rng));
+  auto stride_rng =
+      std::bind(std::uniform_int_distribution<int32_t>(2, 3), std::ref(rng));
+  auto channel_rng =
+      std::bind(std::uniform_int_distribution<int32_t>(3, 32), std::ref(rng));
+
+  DepthwiseConv2DTester tester;
+  tester.InputHeight(input_rng())
+      .InputWidth(input_rng())
+      .InputChannels(channel_rng())
+      .KernelHeight(kernel_rng())
+      .KernelWidth(kernel_rng())
+      .StrideHeight(stride_rng())
+      .StrideWidth(stride_rng())
+      .ReuseGeneratedModel(true);
+  tester.Test(xnnpack_delegate.get());
+  // Second run to test cache lookup runs.
+  tester.Test(xnnpack_delegate.get());
 }
 
 }  // namespace xnnpack

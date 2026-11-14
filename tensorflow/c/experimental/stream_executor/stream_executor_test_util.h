@@ -18,8 +18,10 @@ limitations under the License.
 #include "tensorflow/c/experimental/stream_executor/stream_executor.h"
 
 struct SP_Stream_st {
-  explicit SP_Stream_st(int id) : stream_id(id) {}
+  explicit SP_Stream_st(int stream_id, int priority = 0)
+      : stream_id(stream_id), priority(priority) {}
   int stream_id;
+  int priority;
 };
 
 struct SP_Event_st {
@@ -45,7 +47,7 @@ void PopulateDefaultTimerFns(SP_TimerFns* timer_fns);
 void PopulateDefaultPlatform(SP_Platform* platform,
                              SP_PlatformFns* platform_fns);
 void PopulateDefaultPlatformRegistrationParams(
-    SE_PlatformRegistrationParams* const params);
+    SE_PlatformRegistrationParams* params);
 
 void DestroyPlatform(SP_Platform* platform);
 void DestroyPlatformFns(SP_PlatformFns* platform_fns);

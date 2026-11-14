@@ -1,15 +1,31 @@
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
 # Description:
 # Code examples referenced by adding_an_op
 
+load("@xla//third_party/rules_python/python:py_library.bzl", "py_library")
+load("//tensorflow:tensorflow.bzl", "py_test", "tf_cc_binary", "tf_custom_op_library")
 load(
     "//tensorflow/core/platform:build_config_root.bzl",
     "tf_cuda_tests_tags",
     "tf_exec_properties",
 )
-load("//tensorflow:tensorflow.bzl", "tf_cc_binary", "tf_custom_op_library")
 
 package(
-    default_visibility = ["//tensorflow:internal"],
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
     licenses = ["notice"],
 )
 
@@ -22,7 +38,7 @@ py_library(
     name = "zero_out_op_1",
     srcs = ["zero_out_op_1.py"],
     data = [":zero_out_op_kernel_1.so"],
-    srcs_version = "PY3",
+    strict_deps = True,
     deps = ["//tensorflow:tensorflow_py"],
 )
 
@@ -35,7 +51,7 @@ py_library(
     name = "zero_out_op_2",
     srcs = ["zero_out_op_2.py"],
     data = [":zero_out_op_kernel_2.so"],
-    srcs_version = "PY3",
+    strict_deps = True,
     deps = ["//tensorflow:tensorflow_py"],
 )
 
@@ -48,66 +64,63 @@ py_library(
     name = "zero_out_op_3",
     srcs = ["zero_out_op_3.py"],
     data = [":zero_out_op_kernel_3.so"],
-    srcs_version = "PY3",
+    strict_deps = True,
     deps = ["//tensorflow:tensorflow_py"],
 )
 
 py_library(
     name = "zero_out_grad_2",
     srcs = ["zero_out_grad_2.py"],
-    srcs_version = "PY3",
+    strict_deps = True,
     deps = [
-        "//tensorflow/python:array_ops",
-        "//tensorflow/python:framework_for_generated_wrappers",
-        "//tensorflow/python:sparse_ops",
+        "//tensorflow/python/framework:ops",
+        "//tensorflow/python/ops:array_ops",
+        "//tensorflow/python/ops:sparse_ops",
     ],
 )
 
 py_test(
     name = "zero_out_1_test",
-    size = "small",
+    size = "medium",
     srcs = ["zero_out_1_test.py"],
-    python_version = "PY3",
-    srcs_version = "PY3",
+    strict_deps = True,
     tags = [
-        "no_pip",
         "notap",
     ],
     deps = [
         ":zero_out_op_1",
+        # copybara:uncomment "//third_party/py/google/protobuf:use_fast_cpp_protos",
         "//tensorflow:tensorflow_py",
     ],
 )
 
 py_test(
     name = "zero_out_2_test",
-    size = "small",
+    size = "medium",
     srcs = ["zero_out_2_test.py"],
-    python_version = "PY3",
-    srcs_version = "PY3",
+    strict_deps = True,
     tags = [
-        "no_pip",
         "notap",
     ],
     deps = [
         ":zero_out_grad_2",
         ":zero_out_op_2",
+        # copybara:uncomment "//third_party/py/google/protobuf:use_fast_cpp_protos",
         "//tensorflow:tensorflow_py",
     ],
 )
 
 py_test(
     name = "zero_out_3_test",
-    size = "small",
+    size = "medium",
     srcs = ["zero_out_3_test.py"],
-    python_version = "PY3",
-    srcs_version = "PY3",
+    strict_deps = True,
     tags = [
-        "no_pip",
         "notap",
     ],
     deps = [
         ":zero_out_op_3",
+        # copybara:uncomment "//third_party/py/google/protobuf:use_fast_cpp_protos",
         "//tensorflow:tensorflow_py",
     ],
 )
@@ -122,7 +135,7 @@ py_library(
     name = "cuda_op",
     srcs = ["cuda_op.py"],
     data = [":cuda_op_kernel.so"],
-    srcs_version = "PY3",
+    strict_deps = True,
     deps = ["//tensorflow:tensorflow_py"],
 )
 
@@ -131,14 +144,13 @@ py_test(
     size = "small",
     srcs = ["cuda_op_test.py"],
     exec_properties = tf_exec_properties({"tags": tf_cuda_tests_tags()}),
-    python_version = "PY3",
-    srcs_version = "PY3",
+    strict_deps = True,
     tags = tf_cuda_tests_tags() + [
         "notap",
-        "no_pip",
     ],
     deps = [
         ":cuda_op",
+        # copybara:uncomment "//third_party/py/google/protobuf:use_fast_cpp_protos",
         "//tensorflow:tensorflow_py",
     ],
 )
@@ -147,9 +159,12 @@ py_test(
     name = "fact_test",
     size = "small",
     srcs = ["fact_test.py"],
-    python_version = "PY3",
-    srcs_version = "PY3",
-    deps = ["//tensorflow:tensorflow_py"],
+    strict_deps = True,
+    deps = [
+        # copybara:uncomment "//third_party/py/google/protobuf:use_fast_cpp_protos",
+        "//tensorflow:tensorflow_py",
+        "//tensorflow/python/framework:test_lib",
+    ],
 )
 
 tf_cc_binary(

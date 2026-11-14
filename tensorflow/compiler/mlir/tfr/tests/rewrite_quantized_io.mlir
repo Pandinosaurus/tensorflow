@@ -1,3 +1,17 @@
+// Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+// ==============================================================================
 // RUN: tfr-opt %s -tfr-decompose -tfr-rewrite-quantized-io -verify-diagnostics | FileCheck %s
 
 // CHECK-LABEL: @tf__my_requantize
@@ -15,15 +29,15 @@ tfr.func @tf__intermediate(%arg0: !tfr.tensor) -> !tfr.tensor {
 }
 
 // CHECK-LABEL: remove_quantized_io
-func @remove_quantized_io(
+func.func @remove_quantized_io(
   %arg0: tensor<1x10x!quant.uniform<i8:f32, 0.1:-128>>,
   %arg1: tensor<1x5xf32>) -> (tensor<1x10x!quant.uniform<i8:f32, 0.2:42>>, tensor<1x5xf32>) {
   %0 = "tf.MyRequantize"(%arg0) : (tensor<1x10x!quant.uniform<i8:f32, 0.1:-128>>) -> tensor<1x10x!quant.uniform<i8:f32, 0.2:42>>
   %1 = "tf.Intermediate"(%arg1) : (tensor<1x5xf32>) -> tensor<1x5xf32>
-  return %0, %1 : tensor<1x10x!quant.uniform<i8:f32, 0.2:42>>, tensor<1x5xf32>
+  func.return %0, %1 : tensor<1x10x!quant.uniform<i8:f32, 0.2:42>>, tensor<1x5xf32>
 
-// CHECK-DAG: %[[scale:.*]] = "tf.Const"() {value = dense<1.000000e-01> : tensor<f32>} : () -> tensor<f32>
-// CHECK-DAG: %[[zp:.*]] = "tf.Const"() {value = dense<-128> : tensor<i32>} : () -> tensor<i32>
+// CHECK-DAG: %[[scale:.*]] = "tf.Const"() <{value = dense<1.000000e-01> : tensor<f32>}> : () -> tensor<f32>
+// CHECK-DAG: %[[zp:.*]] = "tf.Const"() <{value = dense<-128> : tensor<i32>}> : () -> tensor<i32>
 // CHECK: %[[quant:.*]] = "tfr.cast"(%arg0) : (tensor<1x10xi8>) -> !tfr.tensor
 // CHECK: %[[scale_cast:.*]] = "tfr.cast"(%[[scale]])
 // CHECK: %[[zp_cast:.*]] = "tfr.cast"(%[[zp]])
@@ -36,9 +50,9 @@ func @remove_quantized_io(
 
 // CHECK-LABEL: quant_input_multiple_users
 // expected-error@+1 {{The argument with type tensor<1x10x!quant.uniform<i8:f32, 1.000000e-01>> should have one user}}
-func @quant_input_multiple_users(%arg0: tensor<1x10x!quant.uniform<i8:f32, 0.1>>) -> (!tfr.tensor, !tfr.tensor) {
+func.func @quant_input_multiple_users(%arg0: tensor<1x10x!quant.uniform<i8:f32, 0.1>>) -> (!tfr.tensor, !tfr.tensor) {
   %0 = "tfr.cast"(%arg0) : (tensor<1x10x!quant.uniform<i8:f32, 0.1>>) -> !tfr.tensor
   %1 = "tfr.cast"(%arg0) : (tensor<1x10x!quant.uniform<i8:f32, 0.1>>) -> !tfr.tensor
-  return %0, %1 : !tfr.tensor, !tfr.tensor
+  func.return %0, %1 : !tfr.tensor, !tfr.tensor
 }
 

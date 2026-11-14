@@ -1,0 +1,86 @@
+# Copyright 2026 The OpenXLA Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
+load("@bazel_skylib//rules:build_test.bzl", "build_test")
+load("@llvm-project//llvm:lit_test.bzl", "lit_expand_template", "lit_test")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+
+package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
+    licenses = ["notice"],
+)
+
+[
+    lit_test(
+        # Prevents creation of the files with identical names located in different
+        # directories on Windows platform.
+        name = "%s.test" % src.replace("/", "_"),
+        srcs = [src],
+        data = [
+            "lit.cfg.py",
+            "lit.site.cfg.py",
+            "//xla/mlir_hlo:mlir-hlo-opt",
+            "@llvm-project//llvm:FileCheck",
+            "@llvm-project//llvm:count",
+            "@llvm-project//llvm:not",
+            "@llvm-project//mlir:libmlir_c_runner_utils.so",
+            "@llvm-project//mlir:libmlir_runner_utils.so",
+            "@llvm-project//mlir:mlir-runner",
+        ],
+        # copybara:uncomment driver = "@llvm-project//mlir:run_lit",
+        tags = [
+            "nomsan",  # The execution engine doesn't work with msan, see b/248097619.
+        ],
+        deps = ["@pypi//lit"],  # copybara:comment
+    )
+    for src in glob(["**/*.mlir"])
+]
+
+cc_library(
+    name = "capi_test",
+    srcs = ["capi_test.c"],
+    deps = [
+        "//xla/mlir_hlo:CAPI",
+    ],
+)
+
+build_test(
+    name = "capi_build_test",
+    testonly = True,
+    targets = ["capi_test"],
+)
+
+# Generates lit config input file by applying path placeholder substitutions
+# similar to the configure_lit_site_cfg CMake macro.
+lit_expand_template(
+    name = "lit_site_cfg_py",
+    testonly = True,
+    out = "lit.site.cfg.py",
+    dirname_substitutions = {
+        "@LLVM_TOOLS_DIR@": "@llvm-project//llvm:FileCheck",
+        "@MLIR_LIB_DIR@": "@llvm-project//mlir:mlir-runner",
+        "@MLIR_BINARY_DIR@": "@llvm-project//mlir:mlir-runner",
+        # Separate '@' (reference to main repo) to avoid confusing copybara.
+        "@MLIR_HLO_TOOLS_DIR@": "@" + "//xla/mlir_hlo:mlir-hlo-opt",
+        "@MLIR_HLO_SOURCE_DIR@": "@" + "//xla/mlir_hlo:mlir-hlo-opt",
+    },
+    substitutions = {
+        "@SHLIBEXT@": ".so",
+        "@ENABLE_SHARED@": "1",
+        "@ENABLE_ASSERTIONS@": "1",
+    },
+    template = "lit.site.cfg.py.in",
+    visibility = ["//visibility:private"],
+)

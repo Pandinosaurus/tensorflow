@@ -6,299 +6,307 @@ tf_module {
   }
   member {
     name: "AggregationMethod"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "AttrValue"
-    mtype: "<class \'google.protobuf.pyext.cpp_message.GeneratedProtocolMessageType\'>"
+    mtype: "<class \'google._upb._message.MessageMeta\'>"
   }
   member {
     name: "COMPILER_VERSION"
-    mtype: "<type \'str\'>"
+    mtype: "<class \'str\'>"
   }
   member {
     name: "CXX11_ABI_FLAG"
-    mtype: "<type \'int\'>"
+    mtype: "<class \'int\'>"
+  }
+  member {
+    name: "CXX_VERSION"
+    mtype: "<class \'int\'>"
   }
   member {
     name: "ConditionalAccumulator"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "ConditionalAccumulatorBase"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "ConfigProto"
-    mtype: "<class \'google.protobuf.pyext.cpp_message.GeneratedProtocolMessageType\'>"
+    mtype: "<class \'google._upb._message.MessageMeta\'>"
   }
   member {
     name: "CriticalSection"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "DType"
-    mtype: "<class \'pybind11_builtins.pybind11_type\'>"
+    mtype: "<class \'tensorflow.python.framework.dtypes.DTypeMeta\'>"
   }
   member {
     name: "DeviceSpec"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "Dimension"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "Event"
-    mtype: "<class \'google.protobuf.pyext.cpp_message.GeneratedProtocolMessageType\'>"
+    mtype: "<class \'google._upb._message.MessageMeta\'>"
   }
   member {
     name: "FIFOQueue"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "FixedLenFeature"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "FixedLenSequenceFeature"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "FixedLengthRecordReader"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "GIT_VERSION"
-    mtype: "<type \'str\'>"
+    mtype: "<class \'str\'>"
   }
   member {
     name: "GPUOptions"
-    mtype: "<class \'google.protobuf.pyext.cpp_message.GeneratedProtocolMessageType\'>"
+    mtype: "<class \'google._upb._message.MessageMeta\'>"
   }
   member {
     name: "GRAPH_DEF_VERSION"
-    mtype: "<type \'int\'>"
+    mtype: "<class \'int\'>"
   }
   member {
     name: "GRAPH_DEF_VERSION_MIN_CONSUMER"
-    mtype: "<type \'int\'>"
+    mtype: "<class \'int\'>"
   }
   member {
     name: "GRAPH_DEF_VERSION_MIN_PRODUCER"
-    mtype: "<type \'int\'>"
+    mtype: "<class \'int\'>"
   }
   member {
     name: "GradientTape"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "Graph"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "GraphDef"
-    mtype: "<class \'google.protobuf.pyext.cpp_message.GeneratedProtocolMessageType\'>"
+    mtype: "<class \'google._upb._message.MessageMeta\'>"
   }
   member {
     name: "GraphKeys"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "GraphOptions"
-    mtype: "<class \'google.protobuf.pyext.cpp_message.GeneratedProtocolMessageType\'>"
+    mtype: "<class \'google._upb._message.MessageMeta\'>"
   }
   member {
     name: "HistogramProto"
-    mtype: "<class \'google.protobuf.pyext.cpp_message.GeneratedProtocolMessageType\'>"
+    mtype: "<class \'google._upb._message.MessageMeta\'>"
   }
   member {
     name: "IdentityReader"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "IndexedSlices"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'abc.ABCMeta\'>"
   }
   member {
     name: "IndexedSlicesSpec"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'abc.ABCMeta\'>"
   }
   member {
     name: "InteractiveSession"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "LMDBReader"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "LogMessage"
-    mtype: "<class \'google.protobuf.pyext.cpp_message.GeneratedProtocolMessageType\'>"
+    mtype: "<class \'google._upb._message.MessageMeta\'>"
   }
   member {
     name: "MONOLITHIC_BUILD"
-    mtype: "<type \'int\'>"
+    mtype: "<class \'int\'>"
   }
   member {
     name: "MetaGraphDef"
-    mtype: "<class \'google.protobuf.pyext.cpp_message.GeneratedProtocolMessageType\'>"
+    mtype: "<class \'google._upb._message.MessageMeta\'>"
   }
   member {
     name: "Module"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "NameAttrList"
-    mtype: "<class \'google.protobuf.pyext.cpp_message.GeneratedProtocolMessageType\'>"
+    mtype: "<class \'google._upb._message.MessageMeta\'>"
   }
   member {
     name: "NodeDef"
-    mtype: "<class \'google.protobuf.pyext.cpp_message.GeneratedProtocolMessageType\'>"
+    mtype: "<class \'google._upb._message.MessageMeta\'>"
+  }
+  member {
+    name: "NoneTensorSpec"
+    mtype: "<class \'abc.ABCMeta\'>"
   }
   member {
     name: "OpError"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "Operation"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "OptimizerOptions"
-    mtype: "<class \'google.protobuf.pyext.cpp_message.GeneratedProtocolMessageType\'>"
+    mtype: "<class \'google._upb._message.MessageMeta\'>"
   }
   member {
     name: "OptionalSpec"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'abc.ABCMeta\'>"
   }
   member {
     name: "PaddingFIFOQueue"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "PriorityQueue"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "QUANTIZED_DTYPES"
-    mtype: "<type \'frozenset\'>"
+    mtype: "<class \'frozenset\'>"
   }
   member {
     name: "QueueBase"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "RaggedTensor"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'abc.ABCMeta\'>"
   }
   member {
     name: "RaggedTensorSpec"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'abc.ABCMeta\'>"
   }
   member {
     name: "RandomShuffleQueue"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "ReaderBase"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "RegisterGradient"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "RunMetadata"
-    mtype: "<class \'google.protobuf.pyext.cpp_message.GeneratedProtocolMessageType\'>"
+    mtype: "<class \'google._upb._message.MessageMeta\'>"
   }
   member {
     name: "RunOptions"
-    mtype: "<class \'google.protobuf.pyext.cpp_message.GeneratedProtocolMessageType\'>"
+    mtype: "<class \'google._upb._message.MessageMeta\'>"
   }
   member {
     name: "Session"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "SessionLog"
-    mtype: "<class \'google.protobuf.pyext.cpp_message.GeneratedProtocolMessageType\'>"
+    mtype: "<class \'google._upb._message.MessageMeta\'>"
   }
   member {
     name: "SparseConditionalAccumulator"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "SparseFeature"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "SparseTensor"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'abc.ABCMeta\'>"
   }
   member {
     name: "SparseTensorSpec"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'abc.ABCMeta\'>"
   }
   member {
     name: "SparseTensorValue"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "Summary"
-    mtype: "<class \'google.protobuf.pyext.cpp_message.GeneratedProtocolMessageType\'>"
+    mtype: "<class \'google._upb._message.MessageMeta\'>"
   }
   member {
     name: "SummaryMetadata"
-    mtype: "<class \'google.protobuf.pyext.cpp_message.GeneratedProtocolMessageType\'>"
+    mtype: "<class \'google._upb._message.MessageMeta\'>"
   }
   member {
     name: "TFRecordReader"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "Tensor"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "TensorArray"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "TensorArraySpec"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'abc.ABCMeta\'>"
   }
   member {
     name: "TensorInfo"
-    mtype: "<class \'google.protobuf.pyext.cpp_message.GeneratedProtocolMessageType\'>"
+    mtype: "<class \'google._upb._message.MessageMeta\'>"
   }
   member {
     name: "TensorShape"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'abc.ABCMeta\'>"
   }
   member {
     name: "TensorSpec"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'abc.ABCMeta\'>"
   }
   member {
     name: "TextLineReader"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "TypeSpec"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'abc.ABCMeta\'>"
   }
   member {
     name: "UnconnectedGradients"
-    mtype: "<class \'enum.EnumMeta\'>"
+    mtype: "<class \'enum.EnumType\'>"
   }
   member {
     name: "VERSION"
-    mtype: "<type \'str\'>"
+    mtype: "<class \'str\'>"
   }
   member {
     name: "VarLenFeature"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "Variable"
@@ -306,31 +314,31 @@ tf_module {
   }
   member {
     name: "VariableAggregation"
-    mtype: "<class \'enum.EnumMeta\'>"
+    mtype: "<class \'enum.EnumType\'>"
   }
   member {
     name: "VariableScope"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "VariableSynchronization"
-    mtype: "<class \'enum.EnumMeta\'>"
+    mtype: "<class \'enum.EnumType\'>"
   }
   member {
     name: "WholeFileReader"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "app"
-    mtype: "<type \'module\'>"
+    mtype: "<class \'module\'>"
   }
   member {
     name: "audio"
-    mtype: "<type \'module\'>"
+    mtype: "<class \'module\'>"
   }
   member {
     name: "autograph"
-    mtype: "<type \'module\'>"
+    mtype: "<class \'module\'>"
   }
   member {
     name: "bfloat16"
@@ -338,7 +346,7 @@ tf_module {
   }
   member {
     name: "bitwise"
-    mtype: "<type \'module\'>"
+    mtype: "<class \'module\'>"
   }
   member {
     name: "bool"
@@ -346,7 +354,7 @@ tf_module {
   }
   member {
     name: "compat"
-    mtype: "<type \'module\'>"
+    mtype: "<class \'module\'>"
   }
   member {
     name: "complex128"
@@ -358,27 +366,27 @@ tf_module {
   }
   member {
     name: "config"
-    mtype: "<type \'module\'>"
+    mtype: "<class \'module\'>"
   }
   member {
     name: "constant_initializer"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "data"
-    mtype: "<type \'module\'>"
+    mtype: "<class \'module\'>"
   }
   member {
     name: "debugging"
-    mtype: "<type \'module\'>"
+    mtype: "<class \'module\'>"
   }
   member {
     name: "distribute"
-    mtype: "<type \'module\'>"
+    mtype: "<class \'module\'>"
   }
   member {
     name: "distributions"
-    mtype: "<type \'module\'>"
+    mtype: "<class \'module\'>"
   }
   member {
     name: "double"
@@ -386,27 +394,23 @@ tf_module {
   }
   member {
     name: "dtypes"
-    mtype: "<type \'module\'>"
+    mtype: "<class \'module\'>"
   }
   member {
     name: "errors"
-    mtype: "<type \'module\'>"
-  }
-  member {
-    name: "estimator"
-    mtype: "<type \'module\'>"
+    mtype: "<class \'module\'>"
   }
   member {
     name: "experimental"
-    mtype: "<type \'module\'>"
+    mtype: "<class \'module\'>"
   }
   member {
     name: "feature_column"
-    mtype: "<type \'module\'>"
+    mtype: "<class \'module\'>"
   }
   member {
     name: "flags"
-    mtype: "<type \'module\'>"
+    mtype: "<class \'module\'>"
   }
   member {
     name: "float16"
@@ -422,19 +426,19 @@ tf_module {
   }
   member {
     name: "gfile"
-    mtype: "<type \'module\'>"
+    mtype: "<class \'module\'>"
   }
   member {
     name: "glorot_normal_initializer"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "glorot_uniform_initializer"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "graph_util"
-    mtype: "<type \'module\'>"
+    mtype: "<class \'module\'>"
   }
   member {
     name: "half"
@@ -442,11 +446,11 @@ tf_module {
   }
   member {
     name: "image"
-    mtype: "<type \'module\'>"
+    mtype: "<class \'module\'>"
   }
   member {
     name: "initializers"
-    mtype: "<type \'module\'>"
+    mtype: "<class \'module\'>"
   }
   member {
     name: "int16"
@@ -466,87 +470,87 @@ tf_module {
   }
   member {
     name: "io"
-    mtype: "<type \'module\'>"
+    mtype: "<class \'module\'>"
   }
   member {
     name: "keras"
-    mtype: "<type \'module\'>"
+    mtype: "<class \'module\'>"
   }
   member {
     name: "layers"
-    mtype: "<type \'module\'>"
+    mtype: "<class \'module\'>"
   }
   member {
     name: "linalg"
-    mtype: "<type \'module\'>"
+    mtype: "<class \'module\'>"
   }
   member {
     name: "lite"
-    mtype: "<type \'module\'>"
+    mtype: "<class \'module\'>"
   }
   member {
     name: "logging"
-    mtype: "<type \'module\'>"
+    mtype: "<class \'module\'>"
   }
   member {
     name: "lookup"
-    mtype: "<type \'module\'>"
+    mtype: "<class \'module\'>"
   }
   member {
     name: "losses"
-    mtype: "<type \'module\'>"
+    mtype: "<class \'module\'>"
   }
   member {
     name: "manip"
-    mtype: "<type \'module\'>"
+    mtype: "<class \'module\'>"
   }
   member {
     name: "math"
-    mtype: "<type \'module\'>"
+    mtype: "<class \'module\'>"
   }
   member {
     name: "metrics"
-    mtype: "<type \'module\'>"
+    mtype: "<class \'module\'>"
   }
   member {
     name: "mixed_precision"
-    mtype: "<type \'module\'>"
+    mtype: "<class \'module\'>"
   }
   member {
     name: "mlir"
-    mtype: "<type \'module\'>"
+    mtype: "<class \'module\'>"
   }
   member {
     name: "name_scope"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'abc.ABCMeta\'>"
   }
   member {
     name: "nest"
-    mtype: "<type \'module\'>"
+    mtype: "<class \'module\'>"
   }
   member {
     name: "newaxis"
-    mtype: "<type \'NoneType\'>"
+    mtype: "<class \'NoneType\'>"
   }
   member {
     name: "nn"
-    mtype: "<type \'module\'>"
+    mtype: "<class \'module\'>"
   }
   member {
     name: "ones_initializer"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "orthogonal_initializer"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "profiler"
-    mtype: "<type \'module\'>"
+    mtype: "<class \'module\'>"
   }
   member {
     name: "python_io"
-    mtype: "<type \'module\'>"
+    mtype: "<class \'module\'>"
   }
   member {
     name: "qint16"
@@ -562,11 +566,11 @@ tf_module {
   }
   member {
     name: "quantization"
-    mtype: "<type \'module\'>"
+    mtype: "<class \'module\'>"
   }
   member {
     name: "queue"
-    mtype: "<type \'module\'>"
+    mtype: "<class \'module\'>"
   }
   member {
     name: "quint16"
@@ -578,23 +582,23 @@ tf_module {
   }
   member {
     name: "ragged"
-    mtype: "<type \'module\'>"
+    mtype: "<class \'module\'>"
   }
   member {
     name: "random"
-    mtype: "<type \'module\'>"
+    mtype: "<class \'module\'>"
   }
   member {
     name: "random_normal_initializer"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "random_uniform_initializer"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "raw_ops"
-    mtype: "<type \'module\'>"
+    mtype: "<class \'module\'>"
   }
   member {
     name: "resource"
@@ -602,27 +606,27 @@ tf_module {
   }
   member {
     name: "resource_loader"
-    mtype: "<type \'module\'>"
+    mtype: "<class \'module\'>"
   }
   member {
     name: "saved_model"
-    mtype: "<type \'module\'>"
+    mtype: "<class \'module\'>"
   }
   member {
     name: "sets"
-    mtype: "<type \'module\'>"
+    mtype: "<class \'module\'>"
   }
   member {
     name: "signal"
-    mtype: "<type \'module\'>"
+    mtype: "<class \'module\'>"
   }
   member {
     name: "sparse"
-    mtype: "<type \'module\'>"
+    mtype: "<class \'module\'>"
   }
   member {
     name: "spectral"
-    mtype: "<type \'module\'>"
+    mtype: "<class \'module\'>"
   }
   member {
     name: "string"
@@ -630,35 +634,35 @@ tf_module {
   }
   member {
     name: "strings"
-    mtype: "<type \'module\'>"
+    mtype: "<class \'module\'>"
   }
   member {
     name: "summary"
-    mtype: "<type \'module\'>"
+    mtype: "<class \'module\'>"
   }
   member {
     name: "sysconfig"
-    mtype: "<type \'module\'>"
+    mtype: "<class \'module\'>"
   }
   member {
     name: "test"
-    mtype: "<type \'module\'>"
+    mtype: "<class \'module\'>"
   }
   member {
     name: "tpu"
-    mtype: "<type \'module\'>"
+    mtype: "<class \'module\'>"
   }
   member {
     name: "train"
-    mtype: "<type \'module\'>"
+    mtype: "<class \'module\'>"
   }
   member {
     name: "truncated_normal_initializer"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "types"
-    mtype: "<type \'module\'>"
+    mtype: "<class \'module\'>"
   }
   member {
     name: "uint16"
@@ -678,19 +682,19 @@ tf_module {
   }
   member {
     name: "uniform_unit_scaling_initializer"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "user_ops"
-    mtype: "<type \'module\'>"
+    mtype: "<class \'module\'>"
   }
   member {
     name: "variable_scope"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "variance_scaling_initializer"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "variant"
@@ -698,15 +702,15 @@ tf_module {
   }
   member {
     name: "version"
-    mtype: "<type \'module\'>"
+    mtype: "<class \'module\'>"
   }
   member {
     name: "xla"
-    mtype: "<type \'module\'>"
+    mtype: "<class \'module\'>"
   }
   member {
     name: "zeros_initializer"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member_method {
     name: "Assert"
@@ -767,6 +771,10 @@ tf_module {
   member_method {
     name: "angle"
     argspec: "args=[\'input\', \'name\'], varargs=None, keywords=None, defaults=[\'None\'], "
+  }
+  member_method {
+    name: "approx_top_k"
+    argspec: "args=[\'input\', \'k\', \'reduction_dimension\', \'recall_target\', \'is_max_k\', \'reduction_input_size_override\', \'aggregate_to_topk\', \'name\'], varargs=None, keywords=None, defaults=[\'-1\', \'0.95\', \'True\', \'-1\', \'True\', \'None\'], "
   }
   member_method {
     name: "arg_max"
@@ -969,6 +977,10 @@ tf_module {
     argspec: "args=[\'tensor\', \'message\', \'name\'], varargs=None, keywords=None, defaults=[\'None\'], "
   }
   member_method {
+    name: "check_pinned"
+    argspec: "args=[\'tensor\', \'name\'], varargs=None, keywords=None, defaults=[\'None\'], "
+  }
+  member_method {
     name: "cholesky"
     argspec: "args=[\'input\', \'name\'], varargs=None, keywords=None, defaults=[\'None\'], "
   }
@@ -1031,6 +1043,18 @@ tf_module {
   member_method {
     name: "control_flow_v2_enabled"
     argspec: "args=[], varargs=None, keywords=None, defaults=None"
+  }
+  member_method {
+    name: "conv"
+    argspec: "args=[\'input\', \'filter\', \'strides\', \'padding\', \'explicit_paddings\', \'data_format\', \'dilations\', \'batch_dims\', \'groups\', \'name\'], varargs=None, keywords=None, defaults=[\'[]\', \'CHANNELS_LAST\', \'[]\', \'1\', \'1\', \'None\'], "
+  }
+  member_method {
+    name: "conv2d_backprop_filter_v2"
+    argspec: "args=[\'input\', \'filter\', \'out_backprop\', \'strides\', \'padding\', \'use_cudnn_on_gpu\', \'explicit_paddings\', \'data_format\', \'dilations\', \'name\'], varargs=None, keywords=None, defaults=[\'True\', \'[]\', \'NHWC\', \'[1, 1, 1, 1]\', \'None\'], "
+  }
+  member_method {
+    name: "conv2d_backprop_input_v2"
+    argspec: "args=[\'input\', \'filter\', \'out_backprop\', \'strides\', \'padding\', \'use_cudnn_on_gpu\', \'explicit_paddings\', \'data_format\', \'dilations\', \'name\'], varargs=None, keywords=None, defaults=[\'True\', \'[]\', \'NHWC\', \'[1, 1, 1, 1]\', \'None\'], "
   }
   member_method {
     name: "convert_to_tensor"
@@ -1305,8 +1329,12 @@ tf_module {
     argspec: "args=[\'input\', \'name\'], varargs=None, keywords=None, defaults=[\'None\'], "
   }
   member_method {
+    name: "fftnd"
+    argspec: "args=[\'input\', \'fft_length\', \'axes\', \'name\'], varargs=None, keywords=None, defaults=[\'None\'], "
+  }
+  member_method {
     name: "fill"
-    argspec: "args=[\'dims\', \'value\', \'name\'], varargs=None, keywords=None, defaults=[\'None\'], "
+    argspec: "args=[\'dims\', \'value\', \'name\', \'layout\'], varargs=None, keywords=None, defaults=[\'None\', \'None\'], "
   }
   member_method {
     name: "fingerprint"
@@ -1342,7 +1370,7 @@ tf_module {
   }
   member_method {
     name: "function"
-    argspec: "args=[\'func\', \'input_signature\', \'autograph\', \'jit_compile\', \'experimental_implements\', \'experimental_autograph_options\', \'experimental_relax_shapes\', \'experimental_compile\', \'experimental_follow_type_hints\'], varargs=None, keywords=None, defaults=[\'None\', \'None\', \'True\', \'None\', \'None\', \'None\', \'False\', \'None\', \'None\'], "
+    argspec: "args=[\'func\', \'input_signature\', \'autograph\', \'jit_compile\', \'reduce_retracing\', \'experimental_implements\', \'experimental_autograph_options\', \'experimental_attributes\', \'experimental_relax_shapes\', \'experimental_compile\', \'experimental_follow_type_hints\'], varargs=None, keywords=None, defaults=[\'None\', \'None\', \'True\', \'None\', \'False\', \'None\', \'None\', \'None\', \'None\', \'None\', \'None\'], "
   }
   member_method {
     name: "gather"
@@ -1350,7 +1378,7 @@ tf_module {
   }
   member_method {
     name: "gather_nd"
-    argspec: "args=[\'params\', \'indices\', \'name\', \'batch_dims\'], varargs=None, keywords=None, defaults=[\'None\', \'0\'], "
+    argspec: "args=[\'params\', \'indices\', \'name\', \'batch_dims\', \'bad_indices_policy\'], varargs=None, keywords=None, defaults=[\'None\', \'0\', \'\'], "
   }
   member_method {
     name: "get_collection"
@@ -1469,6 +1497,10 @@ tf_module {
     argspec: "args=[\'input\', \'name\'], varargs=None, keywords=None, defaults=[\'None\'], "
   }
   member_method {
+    name: "ifftnd"
+    argspec: "args=[\'input\', \'fft_length\', \'axes\', \'name\'], varargs=None, keywords=None, defaults=[\'None\'], "
+  }
+  member_method {
     name: "igamma"
     argspec: "args=[\'a\', \'x\', \'name\'], varargs=None, keywords=None, defaults=[\'None\'], "
   }
@@ -1509,6 +1541,10 @@ tf_module {
     argspec: "args=[\'x\', \'name\'], varargs=None, keywords=None, defaults=[\'None\'], "
   }
   member_method {
+    name: "irfftnd"
+    argspec: "args=[\'input\', \'fft_length\', \'axes\', \'Treal\', \'name\'], varargs=None, keywords=None, defaults=[\"<dtype: \'float32\'>\", \'None\'], "
+  }
+  member_method {
     name: "is_finite"
     argspec: "args=[\'x\', \'name\'], varargs=None, keywords=None, defaults=[\'None\'], "
   }
@@ -1531,6 +1567,10 @@ tf_module {
   member_method {
     name: "is_strictly_increasing"
     argspec: "args=[\'x\', \'name\'], varargs=None, keywords=None, defaults=[\'None\'], "
+  }
+  member_method {
+    name: "is_symbolic_tensor"
+    argspec: "args=[\'tensor\'], varargs=None, keywords=None, defaults=None"
   }
   member_method {
     name: "is_tensor"
@@ -1634,7 +1674,7 @@ tf_module {
   }
   member_method {
     name: "matmul"
-    argspec: "args=[\'a\', \'b\', \'transpose_a\', \'transpose_b\', \'adjoint_a\', \'adjoint_b\', \'a_is_sparse\', \'b_is_sparse\', \'output_type\', \'name\'], varargs=None, keywords=None, defaults=[\'False\', \'False\', \'False\', \'False\', \'False\', \'False\', \'None\', \'None\'], "
+    argspec: "args=[\'a\', \'b\', \'transpose_a\', \'transpose_b\', \'adjoint_a\', \'adjoint_b\', \'a_is_sparse\', \'b_is_sparse\', \'output_type\', \'grad_a\', \'grad_b\', \'name\'], varargs=None, keywords=None, defaults=[\'False\', \'False\', \'False\', \'False\', \'False\', \'False\', \'None\', \'False\', \'False\', \'None\'], "
   }
   member_method {
     name: "matrix_band_part"
@@ -1746,7 +1786,7 @@ tf_module {
   }
   member_method {
     name: "numpy_function"
-    argspec: "args=[\'func\', \'inp\', \'Tout\', \'name\'], varargs=None, keywords=None, defaults=[\'None\'], "
+    argspec: "args=[\'func\', \'inp\', \'Tout\', \'stateful\', \'name\'], varargs=None, keywords=None, defaults=[\'None\', \'None\', \'None\', \'True\', \'None\'], "
   }
   member_method {
     name: "one_hot"
@@ -1754,7 +1794,7 @@ tf_module {
   }
   member_method {
     name: "ones"
-    argspec: "args=[\'shape\', \'dtype\', \'name\'], varargs=None, keywords=None, defaults=[\"<dtype: \'float32\'>\", \'None\'], "
+    argspec: "args=[\'shape\', \'dtype\', \'name\', \'layout\'], varargs=None, keywords=None, defaults=[\"<dtype: \'float32\'>\", \'None\', \'None\'], "
   }
   member_method {
     name: "ones_like"
@@ -1814,7 +1854,7 @@ tf_module {
   }
   member_method {
     name: "py_function"
-    argspec: "args=[\'func\', \'inp\', \'Tout\', \'name\'], varargs=None, keywords=None, defaults=[\'None\'], "
+    argspec: "args=[\'func\', \'inp\', \'Tout\', \'name\'], varargs=None, keywords=None, defaults=[\'None\', \'None\', \'None\', \'None\'], "
   }
   member_method {
     name: "qr"
@@ -1833,12 +1873,24 @@ tf_module {
     argspec: "args=[\'concat_dim\', \'values\', \'input_mins\', \'input_maxes\', \'name\'], varargs=None, keywords=None, defaults=[\'None\'], "
   }
   member_method {
+    name: "ragged_fill_empty_rows"
+    argspec: "args=[\'value_rowids\', \'values\', \'nrows\', \'default_value\', \'name\'], varargs=None, keywords=None, defaults=[\'None\'], "
+  }
+  member_method {
+    name: "ragged_fill_empty_rows_grad"
+    argspec: "args=[\'reverse_index_map\', \'grad_values\', \'name\'], varargs=None, keywords=None, defaults=[\'None\'], "
+  }
+  member_method {
     name: "random_crop"
     argspec: "args=[\'value\', \'size\', \'seed\', \'name\'], varargs=None, keywords=None, defaults=[\'None\', \'None\'], "
   }
   member_method {
     name: "random_gamma"
     argspec: "args=[\'shape\', \'alpha\', \'beta\', \'dtype\', \'seed\', \'name\'], varargs=None, keywords=None, defaults=[\'None\', \"<dtype: \'float32\'>\", \'None\', \'None\'], "
+  }
+  member_method {
+    name: "random_index_shuffle"
+    argspec: "args=[\'index\', \'seed\', \'max_index\', \'rounds\', \'name\'], varargs=None, keywords=None, defaults=[\'4\', \'None\'], "
   }
   member_method {
     name: "random_normal"
@@ -1965,6 +2017,10 @@ tf_module {
     argspec: "args=[\'tensor\', \'axis\', \'name\'], varargs=None, keywords=None, defaults=[\'None\'], "
   }
   member_method {
+    name: "rfftnd"
+    argspec: "args=[\'input\', \'fft_length\', \'axes\', \'Tcomplex\', \'name\'], varargs=None, keywords=None, defaults=[\"<dtype: \'complex64\'>\", \'None\'], "
+  }
+  member_method {
     name: "rint"
     argspec: "args=[\'x\', \'name\'], varargs=None, keywords=None, defaults=[\'None\'], "
   }
@@ -2014,7 +2070,7 @@ tf_module {
   }
   member_method {
     name: "scatter_nd"
-    argspec: "args=[\'indices\', \'updates\', \'shape\', \'name\'], varargs=None, keywords=None, defaults=[\'None\'], "
+    argspec: "args=[\'indices\', \'updates\', \'shape\', \'bad_indices_policy\', \'name\'], varargs=None, keywords=None, defaults=[\'\', \'None\'], "
   }
   member_method {
     name: "scatter_nd_add"
@@ -2094,7 +2150,7 @@ tf_module {
   }
   member_method {
     name: "shape"
-    argspec: "args=[\'input\', \'name\', \'out_type\'], varargs=None, keywords=None, defaults=[\'None\', \"<dtype: \'int32\'>\"], "
+    argspec: "args=[\'input\', \'name\', \'out_type\'], varargs=None, keywords=None, defaults=[\'None\', \'None\'], "
   }
   member_method {
     name: "shape_n"
@@ -2118,7 +2174,7 @@ tf_module {
   }
   member_method {
     name: "size"
-    argspec: "args=[\'input\', \'name\', \'out_type\'], varargs=None, keywords=None, defaults=[\'None\', \"<dtype: \'int32\'>\"], "
+    argspec: "args=[\'input\', \'name\', \'out_type\'], varargs=None, keywords=None, defaults=[\'None\', \'None\'], "
   }
   member_method {
     name: "slice"
@@ -2210,15 +2266,15 @@ tf_module {
   }
   member_method {
     name: "sparse_segment_mean"
-    argspec: "args=[\'data\', \'indices\', \'segment_ids\', \'name\', \'num_segments\'], varargs=None, keywords=None, defaults=[\'None\', \'None\'], "
+    argspec: "args=[\'data\', \'indices\', \'segment_ids\', \'name\', \'num_segments\', \'sparse_gradient\'], varargs=None, keywords=None, defaults=[\'None\', \'None\', \'False\'], "
   }
   member_method {
     name: "sparse_segment_sqrt_n"
-    argspec: "args=[\'data\', \'indices\', \'segment_ids\', \'name\', \'num_segments\'], varargs=None, keywords=None, defaults=[\'None\', \'None\'], "
+    argspec: "args=[\'data\', \'indices\', \'segment_ids\', \'name\', \'num_segments\', \'sparse_gradient\'], varargs=None, keywords=None, defaults=[\'None\', \'None\', \'False\'], "
   }
   member_method {
     name: "sparse_segment_sum"
-    argspec: "args=[\'data\', \'indices\', \'segment_ids\', \'name\', \'num_segments\'], varargs=None, keywords=None, defaults=[\'None\', \'None\'], "
+    argspec: "args=[\'data\', \'indices\', \'segment_ids\', \'name\', \'num_segments\', \'sparse_gradient\'], varargs=None, keywords=None, defaults=[\'None\', \'None\', \'False\'], "
   }
   member_method {
     name: "sparse_slice"
@@ -2342,23 +2398,23 @@ tf_module {
   }
   member_method {
     name: "tensor_scatter_add"
-    argspec: "args=[\'tensor\', \'indices\', \'updates\', \'name\'], varargs=None, keywords=None, defaults=[\'None\'], "
+    argspec: "args=[\'tensor\', \'indices\', \'updates\', \'bad_indices_policy\', \'name\'], varargs=None, keywords=None, defaults=[\'\', \'None\'], "
   }
   member_method {
     name: "tensor_scatter_nd_add"
-    argspec: "args=[\'tensor\', \'indices\', \'updates\', \'name\'], varargs=None, keywords=None, defaults=[\'None\'], "
+    argspec: "args=[\'tensor\', \'indices\', \'updates\', \'bad_indices_policy\', \'name\'], varargs=None, keywords=None, defaults=[\'\', \'None\'], "
   }
   member_method {
     name: "tensor_scatter_nd_max"
-    argspec: "args=[\'tensor\', \'indices\', \'updates\', \'name\'], varargs=None, keywords=None, defaults=[\'None\'], "
+    argspec: "args=[\'tensor\', \'indices\', \'updates\', \'bad_indices_policy\', \'name\'], varargs=None, keywords=None, defaults=[\'\', \'None\'], "
   }
   member_method {
     name: "tensor_scatter_nd_min"
-    argspec: "args=[\'tensor\', \'indices\', \'updates\', \'name\'], varargs=None, keywords=None, defaults=[\'None\'], "
+    argspec: "args=[\'tensor\', \'indices\', \'updates\', \'bad_indices_policy\', \'name\'], varargs=None, keywords=None, defaults=[\'\', \'None\'], "
   }
   member_method {
     name: "tensor_scatter_nd_sub"
-    argspec: "args=[\'tensor\', \'indices\', \'updates\', \'name\'], varargs=None, keywords=None, defaults=[\'None\'], "
+    argspec: "args=[\'tensor\', \'indices\', \'updates\', \'bad_indices_policy\', \'name\'], varargs=None, keywords=None, defaults=[\'\', \'None\'], "
   }
   member_method {
     name: "tensor_scatter_nd_update"
@@ -2366,7 +2422,7 @@ tf_module {
   }
   member_method {
     name: "tensor_scatter_sub"
-    argspec: "args=[\'tensor\', \'indices\', \'updates\', \'name\'], varargs=None, keywords=None, defaults=[\'None\'], "
+    argspec: "args=[\'tensor\', \'indices\', \'updates\', \'bad_indices_policy\', \'name\'], varargs=None, keywords=None, defaults=[\'\', \'None\'], "
   }
   member_method {
     name: "tensor_scatter_update"
@@ -2506,7 +2562,7 @@ tf_module {
   }
   member_method {
     name: "vectorized_map"
-    argspec: "args=[\'fn\', \'elems\', \'fallback_to_while_loop\'], varargs=None, keywords=None, defaults=[\'True\'], "
+    argspec: "args=[\'fn\', \'elems\', \'fallback_to_while_loop\', \'warn\'], varargs=None, keywords=None, defaults=[\'True\', \'True\'], "
   }
   member_method {
     name: "verify_tensor_all_finite"
@@ -2534,7 +2590,7 @@ tf_module {
   }
   member_method {
     name: "zeros"
-    argspec: "args=[\'shape\', \'dtype\', \'name\'], varargs=None, keywords=None, defaults=[\"<dtype: \'float32\'>\", \'None\'], "
+    argspec: "args=[\'shape\', \'dtype\', \'name\', \'layout\'], varargs=None, keywords=None, defaults=[\"<dtype: \'float32\'>\", \'None\', \'None\'], "
   }
   member_method {
     name: "zeros_like"

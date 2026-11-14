@@ -14,10 +14,6 @@
 # ==============================================================================
 """Utilities for multi-worker distribution strategies."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 from tensorflow.core.protobuf import cluster_pb2
 from tensorflow.python.distribute import distribute_coordinator_context as dc_context
 from tensorflow.python.training import server_lib
@@ -64,7 +60,7 @@ def _validate_cluster_spec(cluster_spec,
   2) whether there is such a task type as `task_type` in the `cluster_spec`. The
      only exception is `evaluator`. In other words, it is still a valid
      configuration when `task_type` is `evaluator` but it doesn't appear in
-     `cluster_spec`. This is to be compatible with `TF_CONFIG` in Estimator.
+     `cluster_spec`.
   3) whether there is at most one "chief" job.
   4) whether there is at most one "evaluator" job.
   5) whether the `task_id` is smaller than the number of tasks for that
@@ -173,6 +169,35 @@ def collective_leader(cluster_spec, task_type, task_id):
   # Only one evaluator, so no need to set collective leader.
   if task_type == "evaluator":
     return ""
+
+  # Use chief if chief is in the cluster.
+  if "chief" in cluster_spec.jobs:
+    return "/job:chief/replica:0/task:0"
+
+  # Use worker 0 if no chief job.
+  assert "worker" in cluster_spec.jobs
+  return "/job:worker/replica:0/task:0"
+
+
+def coordination_leader(cluster_spec):
+  """Return the task name of the coordination service leader.
+
+  Args:
+    cluster_spec: a dict, `ClusterDef` or `ClusterSpec` object sxpecifying the
+      cluster configurations.
+
+  Returns:
+    a string indicating the task name of the coordination service leader.
+  """
+  cluster_spec = normalize_cluster_spec(cluster_spec)
+
+  # No need to set coordination service leader for local.
+  if not cluster_spec.as_dict():
+    return ""
+
+  # Use PS 0 if parameter servers are in the cluster
+  if "ps" in cluster_spec.jobs:
+    return "/job:ps/replica:0/task:0"
 
   # Use chief if chief is in the cluster.
   if "chief" in cluster_spec.jobs:

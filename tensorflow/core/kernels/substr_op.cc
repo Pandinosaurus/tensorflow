@@ -17,7 +17,7 @@ limitations under the License.
 #include <cstdlib>
 #include <string>
 
-#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
+#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
 #include "tensorflow/core/framework/bounds_check.h"
 #include "tensorflow/core/framework/kernel_def_builder.h"
 #include "tensorflow/core/framework/op.h"
@@ -39,7 +39,7 @@ template <typename T>
 class SubstrOp : public OpKernel {
  public:
   explicit SubstrOp(OpKernelConstruction* ctx) : OpKernel(ctx) {
-    string unit;
+    std::string unit;
     OP_REQUIRES_OK(ctx, ctx->GetAttr("unit", &unit));
     OP_REQUIRES_OK(ctx, ParseCharUnit(unit, &unit_));
   }
@@ -52,10 +52,11 @@ class SubstrOp : public OpKernel {
     const TensorShape& input_shape = input_tensor.shape();
     const TensorShape& pos_shape = pos_tensor.shape();
     const TensorShape& len_shape = len_tensor.shape();
-    OP_REQUIRES(context, (pos_shape == len_shape),
-                errors::InvalidArgument(
-                    "pos and len should have the same shape, got: ",
-                    pos_shape.DebugString(), " vs. ", len_shape.DebugString()));
+    OP_REQUIRES(
+        context, (pos_shape == len_shape),
+        absl::InvalidArgumentError(absl::StrCat(
+            "pos and len should have the same shape, got: ",
+            pos_shape.DebugString(), " vs. ", len_shape.DebugString())));
 
     bool is_scalar = TensorShapeUtils::IsScalar(pos_shape);
 
@@ -78,7 +79,7 @@ class SubstrOp : public OpKernel {
         const T len =
             tensorflow::internal::SubtleMustCopy(len_tensor.scalar<T>()());
         for (size_t i = 0; i < input_tensor.NumElements(); ++i) {
-          StringPiece in(input(i));
+          absl::string_view in(input(i));
           T byte_pos = pos;
           T byte_len = len;
           switch (unit_) {
@@ -95,7 +96,7 @@ class SubstrOp : public OpKernel {
                   errors::InvalidArgument("pos ", pos, " out of range for ",
                                           "string b'", in, "' at index ", i));
           }
-          StringPiece sub_in = in.substr(byte_pos, byte_len);
+          absl::string_view sub_in = in.substr(byte_pos, byte_len);
           output(i).assign(sub_in.data(), sub_in.size());
         }
       } else {
@@ -103,7 +104,7 @@ class SubstrOp : public OpKernel {
         auto pos_flat = pos_tensor.flat<T>();
         auto len_flat = len_tensor.flat<T>();
         for (size_t i = 0; i < input_tensor.NumElements(); ++i) {
-          StringPiece in(input(i));
+          absl::string_view in(input(i));
           const T pos = tensorflow::internal::SubtleMustCopy(pos_flat(i));
           const T len = tensorflow::internal::SubtleMustCopy(len_flat(i));
           T byte_pos = pos;
@@ -122,7 +123,7 @@ class SubstrOp : public OpKernel {
                   errors::InvalidArgument("pos ", pos, " out of range for ",
                                           "string b'", in, "' at index ", i));
           }
-          StringPiece sub_in = in.substr(byte_pos, byte_len);
+          absl::string_view sub_in = in.substr(byte_pos, byte_len);
           output(i).assign(sub_in.data(), sub_in.size());
         }
       }
@@ -133,11 +134,12 @@ class SubstrOp : public OpKernel {
       //       this should be parallelized.
 
       // Create BCast helper with shape of input and pos/len
-      BCast bcast(BCast::FromShape(input_shape), BCast::FromShape(pos_shape));
+      BCast bcast(BCast::FromShape(input_shape), BCast::FromShape(pos_shape),
+                  /*fewer_dims_optimization*/ false);
       OP_REQUIRES(context, bcast.IsValid(),
-                  errors::InvalidArgument(
+                  absl::InvalidArgumentError(absl::StrCat(
                       "Incompatible shapes: ", input_shape.DebugString(),
-                      " vs. ", pos_shape.DebugString()));
+                      " vs. ", pos_shape.DebugString())));
       TensorShape output_shape = BCast::ToShape(bcast.result_shape());
       int ndims = output_shape.dims();
       Tensor* output_tensor = nullptr;
@@ -173,7 +175,7 @@ class SubstrOp : public OpKernel {
 
           // Iterate through broadcasted tensors and perform substr
           for (int i = 0; i < output_shape.dim_size(0); ++i) {
-            StringPiece in(input(input.dimension(0) > 1 ? i : 0));
+            absl::string_view in(input(input.dimension(0) > 1 ? i : 0));
             const T pos = tensorflow::internal::SubtleMustCopy(pos_bcast(i));
             const T len = tensorflow::internal::SubtleMustCopy(len_bcast(i));
             T byte_pos = pos;
@@ -192,7 +194,7 @@ class SubstrOp : public OpKernel {
                     errors::InvalidArgument("pos ", pos, " out of range for ",
                                             "string b'", in, "' at index ", i));
             }
-            StringPiece sub_in = in.substr(byte_pos, byte_len);
+            absl::string_view sub_in = in.substr(byte_pos, byte_len);
             output(i).assign(sub_in.data(), sub_in.size());
           }
           break;
@@ -227,8 +229,8 @@ class SubstrOp : public OpKernel {
           // Iterate through broadcasted tensors and perform substr
           for (int i = 0; i < output_shape.dim_size(0); ++i) {
             for (int j = 0; j < output_shape.dim_size(1); ++j) {
-              StringPiece in(input(input.dimension(0) > 1 ? i : 0,
-                                   input.dimension(1) > 1 ? j : 0));
+              absl::string_view in(input(input.dimension(0) > 1 ? i : 0,
+                                         input.dimension(1) > 1 ? j : 0));
               const T pos =
                   tensorflow::internal::SubtleMustCopy(pos_bcast(i, j));
               const T len =
@@ -250,15 +252,15 @@ class SubstrOp : public OpKernel {
                                               "string b'", in, "' at index (",
                                               i, ", ", j, ")"));
               }
-              StringPiece sub_in = in.substr(byte_pos, byte_len);
+              absl::string_view sub_in = in.substr(byte_pos, byte_len);
               output(i, j).assign(sub_in.data(), sub_in.size());
             }
           }
           break;
         }
         default: {
-          context->SetStatus(errors::Unimplemented(
-              "Substr broadcast not implemented for ", ndims, " dimensions"));
+          context->SetStatus(absl::UnimplementedError(absl::StrCat(
+              "Substr broadcast not implemented for ", ndims, " dimensions")));
         }
       }
     }
@@ -267,7 +269,8 @@ class SubstrOp : public OpKernel {
  private:
   // This adjusts the requested position. Note it does not perform any bound
   // checks.
-  static inline T AdjustedPosIndex(const T pos_requested, const StringPiece s) {
+  static inline T AdjustedPosIndex(const T pos_requested,
+                                   const absl::string_view s) {
     if (pos_requested < 0) {
       return s.size() + pos_requested;
     }
@@ -276,7 +279,7 @@ class SubstrOp : public OpKernel {
 
   // Return true if successful; otherwise, return false if the `pos` argument
   // is out of range in the string.
-  static inline bool UpdatePosAndLenForUtf8(const StringPiece in, T* pos,
+  static inline bool UpdatePosAndLenForUtf8(const absl::string_view in, T* pos,
                                             T* len) {
     if (*pos >= 0) {
       return UpdatePositivePosAndLenForUtf8(in, *pos, *len, pos, len);
@@ -285,9 +288,9 @@ class SubstrOp : public OpKernel {
     }
   }
 
-  static bool UpdatePositivePosAndLenForUtf8(const StringPiece in, const T pos,
-                                             const T len, T* char_pos,
-                                             T* char_len) {
+  static bool UpdatePositivePosAndLenForUtf8(const absl::string_view in,
+                                             const T pos, const T len,
+                                             T* char_pos, T* char_len) {
     *char_pos = 0;
     // Determine byte position of the substring start.
     if (!ForwardNUTF8CharPositions(in, pos, char_pos)) {
@@ -306,9 +309,9 @@ class SubstrOp : public OpKernel {
   // This function expects a negative position relative to the end of the
   // string, but will update the character position to a positive number
   // relative to the beginning of the string.
-  static bool UpdateNegativePosAndLenForUtf8(const StringPiece in, const T pos,
-                                             const T len, T* char_pos,
-                                             T* char_len) {
+  static bool UpdateNegativePosAndLenForUtf8(const absl::string_view in,
+                                             const T pos, const T len,
+                                             T* char_pos, T* char_len) {
     // Initially treat the length as position of the end of the substring.
     *char_len = in.size();
     // This is the number of character to skip from the end of the string to
@@ -340,6 +343,6 @@ class SubstrOp : public OpKernel {
   REGISTER_KERNEL_BUILDER(                                         \
       Name("Substr").Device(DEVICE_CPU).TypeConstraint<type>("T"), \
       SubstrOp<type>);
-REGISTER_SUBSTR(int32);
+REGISTER_SUBSTR(int32_t);
 REGISTER_SUBSTR(int64_t);
 }  // namespace tensorflow

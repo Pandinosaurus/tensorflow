@@ -27,18 +27,19 @@ class FilterFusion : public TFDataOptimizerBase {
   FilterFusion() = default;
   ~FilterFusion() override = default;
 
-  string name() const override { return "filter_fusion"; };
+  std::string name() const override { return "filter_fusion"; };
 
   bool UsesFunctionLibrary() const override { return false; }
 
-  Status Init(
+  absl::Status Init(
       const tensorflow::RewriterConfig_CustomGraphOptimizer* config) override {
-    return Status::OK();
+    return absl::OkStatus();
   }
 
-  Status OptimizeAndCollectStats(Cluster* cluster, const GrapplerItem& item,
-                                 GraphDef* output,
-                                 OptimizationStats* stats) override;
+  absl::Status OptimizeAndCollectStats(Cluster* cluster,
+                                       const GrapplerItem& item,
+                                       GraphDef* output,
+                                       OptimizationStats* stats) override;
 };
 
 }  // namespace grappler

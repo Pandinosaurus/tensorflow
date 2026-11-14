@@ -14,10 +14,6 @@
 # ======================================
 """Library of Cloud TPU helper functions for data loading."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 from typing import Callable, Optional, Text, Union
 
 from tensorflow.python.data.experimental.ops import interleave_ops
@@ -28,6 +24,7 @@ from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import function
 from tensorflow.python.framework import ops
 from tensorflow.python.ops import functional_ops
+from tensorflow.python.types import data as data_types
 
 
 def _TextLineDataset(filename: Text) -> dataset_ops.Dataset:
@@ -141,7 +138,7 @@ def StreamingFilesDataset(
   with ops.device(file_reader_device):
     if isinstance(files, str):
       source_dataset = dataset_ops.Dataset.list_files(files)
-    elif isinstance(files, dataset_ops.DatasetV2):
+    elif isinstance(files, data_types.DatasetV2):
       source_dataset = files
     else:
       raise ValueError(

@@ -14,10 +14,6 @@
 # ==============================================================================
 """Tests for bucketize_op."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 from tensorflow.compiler.tests import xla_test
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import errors_impl
@@ -37,6 +33,15 @@ class BucketizationOpTest(xla_test.XLATestCase):
       expected_out = [0, 1, 1, 2, 2, 3, 3, 4, 4]
       self.assertAllEqual(expected_out,
                           sess.run(op, {p: [-5, 0, 2, 3, 5, 8, 10, 11, 12]}))
+
+  def testIntWithFloatBoundaries(self):
+    for dtype in [dtypes.int32, dtypes.int64]:
+      with self.session() as sess:
+        p = array_ops.placeholder(dtype)
+        with self.test_scope():
+          op = math_ops._bucketize(p, boundaries=[0.1, 1.1])
+        expected_out = [0, 1, 2, 2]
+        self.assertAllEqual(expected_out, sess.run(op, {p: [0, 1, 2, 3]}))
 
   def testFloat(self):
     with self.session() as sess:

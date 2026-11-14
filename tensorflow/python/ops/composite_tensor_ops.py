@@ -18,6 +18,7 @@ from tensorflow.core.protobuf import composite_tensor_variant_pb2
 from tensorflow.python.framework import composite_tensor
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import ops
+from tensorflow.python.framework import tensor
 from tensorflow.python.ops import gen_composite_tensor_ops
 from tensorflow.python.saved_model import nested_structure_coder
 from tensorflow.python.util import nest
@@ -47,10 +48,9 @@ def composite_tensor_to_variants(value, type_spec=None, name=None):
   if not type_spec.is_compatible_with(value):
     raise ValueError(f"`type_spec` {type_spec} is not compatible with `value` "
                      f"{value!r}.")
-  coder = nested_structure_coder.StructureCoder()
   metadata = composite_tensor_variant_pb2.CompositeTensorVariantMetadata()
   metadata.type_spec_proto.CopyFrom(
-      coder.encode_structure(type_spec).type_spec_value)
+      nested_structure_coder.encode_structure(type_spec).type_spec_value)
 
   return gen_composite_tensor_ops.CompositeTensorVariantFromComponents(
       components=nest.flatten(value, expand_composites=True),
@@ -75,17 +75,16 @@ def composite_tensor_from_variant(encoded, type_spec, name=None):
     TypeError: If `encoded` is not a Tensor with dtype=variant.
     InvalidArgumentError: If `encoded` is not compatible with `type_spec`.
   """
-  if not isinstance(encoded, ops.Tensor):
+  if not isinstance(encoded, tensor.Tensor):
     raise TypeError(f"Expected `encoded` to be a Tensor, got {encoded!r}.")
   if encoded.dtype != dtypes.variant:
     raise TypeError("Expected `encoded` to have dtype=variant, got "
                     f"{encoded!r}.")
   encoded.shape.assert_is_compatible_with(())
 
-  coder = nested_structure_coder.StructureCoder()
   metadata = composite_tensor_variant_pb2.CompositeTensorVariantMetadata()
   metadata.type_spec_proto.CopyFrom(
-      coder.encode_structure(type_spec).type_spec_value)
+      nested_structure_coder.encode_structure(type_spec).type_spec_value)
 
   component_dtypes = [
       t.dtype for t in nest.flatten(type_spec, expand_composites=True)

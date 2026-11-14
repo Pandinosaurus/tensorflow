@@ -14,21 +14,26 @@ limitations under the License.
 ==============================================================================*/
 #include "tensorflow/lite/kernels/parse_example/parse_example.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <initializer_list>
+#include <string>
+#include <vector>
 
+#include <gmock/gmock.h>
+#include <gtest/gtest.h>
 #include "flatbuffers/flexbuffers.h"  // from @flatbuffers
 #include "tensorflow/core/example/feature_util.h"
 #include "tensorflow/core/framework/node_def.pb.h"
 #include "tensorflow/core/platform/protobuf.h"
 #include "tensorflow/core/platform/tstring.h"
-#include "tensorflow/lite/c/common.h"
 #include "tensorflow/lite/core/api/op_resolver.h"
-#include "tensorflow/lite/interpreter.h"
-#include "tensorflow/lite/interpreter_builder.h"
-#include "tensorflow/lite/kernels/register.h"
+#include "tensorflow/lite/core/c/common.h"
+#include "tensorflow/lite/core/interpreter.h"
+#include "tensorflow/lite/core/interpreter_builder.h"
+#include "tensorflow/lite/core/kernels/register.h"
+#include "tensorflow/lite/core/model_builder.h"
 #include "tensorflow/lite/kernels/test_util.h"
-#include "tensorflow/lite/model_builder.h"
 #include "tensorflow/lite/schema/schema_generated.h"
 #include "tensorflow/lite/string_util.h"
 
@@ -312,9 +317,20 @@ TEST(ParseExampleOpsTest, SimpleTest) {
   ParseExampleOpModel<float> m({example.SerializeAsString()}, {}, {"time"},
                                {0.f, 0.f}, {TensorType_FLOAT32}, {},
                                kNodeDefTxt);
-  m.Invoke();
+  ASSERT_EQ(m.Invoke(), kTfLiteOk);
   EXPECT_THAT(m.GetDenseOutput<float>(0),
               ElementsAreArray(ArrayFloatNear({1.5f, 1.5f})));
+}
+
+TEST(ParseExampleOpsTest, BatchSizeMismatchTest) {
+  tf::Example example;
+  tf::AppendFeatureValues<float>({1.5f, 1.5f}, "time", &example);
+  ParseExampleOpModel<float> m({example.SerializeAsString()}, {}, {"time"},
+                               {0.f, 0.f}, {TensorType_FLOAT32}, {},
+                               kNodeDefTxt);
+  m.PopulateStringTensor(m.string_indices_[0], {example.SerializeAsString(),
+                                                example.SerializeAsString()});
+  EXPECT_NE(m.Invoke(), kTfLiteOk);
 }
 
 TEST(ParseExampleOpsTest, SparseTest) {
@@ -322,7 +338,7 @@ TEST(ParseExampleOpsTest, SparseTest) {
   tf::AppendFeatureValues<float>({1.5f}, "time", &example);
   ParseExampleOpModel<float> m({example.SerializeAsString()}, {"time"}, {}, {},
                                {}, {TensorType_FLOAT32}, kNodeDefTxt2, 0);
-  m.Invoke();
+  ASSERT_EQ(m.Invoke(), kTfLiteOk);
   EXPECT_THAT(m.GetSparseIndicesOutput<int64_t>(0),
               ElementsAreArray(ArrayFloatNear({0, 0})));
   EXPECT_THAT(m.GetSparseValuesOutput<float>(0),
@@ -341,7 +357,7 @@ TEST(ParseExampleOpsTest, SimpleBytesTest) {
                                      {"time"}, {default_value},
                                      {TensorType_STRING}, {}, kNodeDefTxt3, 1);
   m.PopulateStringTensor(m.DenseDefaults(), {default_value});
-  m.Invoke();
+  ASSERT_EQ(m.Invoke(), kTfLiteOk);
   std::vector<string> c = m.GetStringOutput(m.DenseOutputs(0));
   EXPECT_EQ(1, c.size());
   EXPECT_EQ(test_data, c[0]);
@@ -356,7 +372,7 @@ TEST(ParseExampleOpsTest, SparseBytesTest) {
   ParseExampleOpModel<std::string> m({example.SerializeAsString()}, {"time"},
                                      {}, {}, {}, {TensorType_STRING},
                                      kNodeDefTxt4, 0);
-  m.Invoke();
+  ASSERT_EQ(m.Invoke(), kTfLiteOk);
   EXPECT_THAT(m.GetSparseIndicesOutput<int64_t>(0),
               testing::ElementsAreArray({0, 0, 0, 1}));
   auto values = m.GetStringOutput(m.SparseValuesOutputs(0));
@@ -387,7 +403,7 @@ TEST(ParseExampleOpsTest, ResizeTest) {
 
   ParseExampleOpModel<float> m(inputs[0], {}, {"time"}, {0.f, 0.f},
                                {TensorType_FLOAT32}, {}, kNodeDefTxt);
-  m.Invoke();
+  ASSERT_EQ(m.Invoke(), kTfLiteOk);
   EXPECT_THAT(m.GetDenseOutput<float>(0),
               ElementsAreArray(ArrayFloatNear(expected[0])));
 
@@ -395,7 +411,7 @@ TEST(ParseExampleOpsTest, ResizeTest) {
     m.ResizeInputTensor({{sizes[i]}});
     m.AllocateAndDelegate(false);
     m.PopulateStringTensor(0, inputs[i]);
-    m.Invoke();
+    ASSERT_EQ(m.Invoke(), kTfLiteOk);
     EXPECT_THAT(m.GetDenseOutput<float>(0),
                 ElementsAreArray(ArrayFloatNear(expected[i])));
   }
@@ -421,7 +437,7 @@ TEST(ParseExampleOpsTest, ResizeMissingInfoTest) {
 
   ParseExampleOpModel<float> m(inputs[0], {}, {"time"}, {0.f, 0.f},
                                {TensorType_FLOAT32}, {}, kNodeDefTxt5);
-  m.Invoke();
+  ASSERT_EQ(m.Invoke(), kTfLiteOk);
   EXPECT_THAT(m.GetDenseOutput<float>(0),
               ElementsAreArray(ArrayFloatNear(expected[0])));
 
@@ -429,7 +445,7 @@ TEST(ParseExampleOpsTest, ResizeMissingInfoTest) {
     m.ResizeInputTensor({{sizes[i]}});
     m.AllocateAndDelegate(false);
     m.PopulateStringTensor(0, inputs[i]);
-    m.Invoke();
+    ASSERT_EQ(m.Invoke(), kTfLiteOk);
     EXPECT_THAT(m.GetDenseOutput<float>(0),
                 ElementsAreArray(ArrayFloatNear(expected[i])));
   }

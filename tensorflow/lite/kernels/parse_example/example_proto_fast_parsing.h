@@ -14,8 +14,7 @@ limitations under the License.
 ==============================================================================*/
 #ifndef TENSORFLOW_LITE_KERNELS_PARSE_EXAMPLE_EXAMPLE_PROTO_FAST_PARSING_H_
 #define TENSORFLOW_LITE_KERNELS_PARSE_EXAMPLE_EXAMPLE_PROTO_FAST_PARSING_H_
-#include "tensorflow/core/util/example_proto_fast_parsing.h"
-
+#include <algorithm>
 #include <vector>
 
 #include "absl/base/casts.h"
@@ -27,14 +26,15 @@ limitations under the License.
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/register_types.h"
 #include "tensorflow/core/framework/types.pb.h"
-#include "tensorflow/core/lib/core/blocking_counter.h"
 #include "tensorflow/core/lib/core/errors.h"
 #include "tensorflow/core/lib/core/threadpool.h"
 #include "tensorflow/core/lib/gtl/inlined_vector.h"
 #include "tensorflow/core/lib/monitoring/counter.h"
+#include "tensorflow/core/platform/blocking_counter.h"
 #include "tensorflow/core/platform/byte_order.h"
 #include "tensorflow/core/platform/logging.h"
 #include "tensorflow/core/platform/protobuf.h"
+#include "tensorflow/core/util/example_proto_fast_parsing.h"
 #include "tensorflow/core/util/presized_cuckoo_map.h"
 #include "tensorflow/core/util/sparse/sparse_tensor.h"
 
@@ -101,11 +101,11 @@ auto EnableAliasing(A* a) -> decltype(a->EnableAliasing(true), void()) {
 template <typename A>
 void EnableAliasing(A&& a) {}
 
-uint8 PeekTag(protobuf::io::CodedInputStream* stream);
+uint8_t PeekTag(protobuf::io::CodedInputStream* stream);
 
-constexpr uint8 kVarintTag(uint32 tag) { return (tag << 3) | 0; }
-constexpr uint8 kDelimitedTag(uint32 tag) { return (tag << 3) | 2; }
-constexpr uint8 kFixed32Tag(uint32 tag) { return (tag << 3) | 5; }
+constexpr uint8_t kVarintTag(uint32_t tag) { return (tag << 3) | 0; }
+constexpr uint8_t kDelimitedTag(uint32_t tag) { return (tag << 3) | 2; }
+constexpr uint8_t kFixed32Tag(uint32_t tag) { return (tag << 3) | 5; }
 
 namespace parsed {
 
@@ -113,15 +113,15 @@ namespace parsed {
 class Feature {
  public:
   Feature() {}
-  explicit Feature(StringPiece serialized) : serialized_(serialized) {}
+  explicit Feature(absl::string_view serialized) : serialized_(serialized) {}
 
-  Status ParseDataType(DataType* dtype) {
+  absl::Status ParseDataType(DataType* dtype) {
     DCHECK(dtype != nullptr);
     if (serialized_.empty()) {
       *dtype = DT_INVALID;
-      return Status::OK();
+      return absl::OkStatus();
     }
-    uint8 oneof_tag = static_cast<uint8>(*serialized_.data());
+    uint8_t oneof_tag = static_cast<uint8_t>(*serialized_.data());
     serialized_.remove_prefix(1);
     switch (oneof_tag) {
       case kDelimitedTag(1):
@@ -136,22 +136,23 @@ class Feature {
       default:
         // Initialize variable to avoid compiler warning
         *dtype = DT_INVALID;
-        return errors::InvalidArgument("Unsupported datatype.");
+        return absl::InvalidArgumentError("Unsupported datatype.");
     }
-    return Status::OK();
+    return absl::OkStatus();
   }
 
   bool GetNumElementsInBytesList(int* num_elements) {
     protobuf::io::CodedInputStream stream(
-        reinterpret_cast<const uint8*>(serialized_.data()), serialized_.size());
+        reinterpret_cast<const uint8_t*>(serialized_.data()),
+        serialized_.size());
     EnableAliasing(&stream);
-    uint32 length = 0;
+    uint32_t length = 0;
     if (!stream.ReadVarint32(&length)) return false;
     auto limit = stream.PushLimit(length);
     *num_elements = 0;
     while (!stream.ExpectAtEnd()) {
       if (!stream.ExpectTag(kDelimitedTag(1))) return false;
-      uint32 bytes_length = 0;
+      uint32_t bytes_length = 0;
       if (!stream.ReadVarint32(&bytes_length)) return false;
       if (!stream.Skip(bytes_length)) return false;
       ++*num_elements;
@@ -176,18 +177,19 @@ class Feature {
     DCHECK(bytes_list != nullptr);
 
     protobuf::io::CodedInputStream stream(
-        reinterpret_cast<const uint8*>(serialized_.data()), serialized_.size());
+        reinterpret_cast<const uint8_t*>(serialized_.data()),
+        serialized_.size());
 
     EnableAliasing(&stream);
 
-    uint32 length;
+    uint32_t length;
     if (!stream.ReadVarint32(&length)) return false;
     auto limit = stream.PushLimit(length);
 
     while (!stream.ExpectAtEnd()) {
       if (!stream.ExpectTag(kDelimitedTag(1))) return false;
       // parse string
-      uint32 bytes_length;
+      uint32_t bytes_length;
       if (!stream.ReadVarint32(&bytes_length)) return false;
       tstring* bytes = construct_at_end(bytes_list);
       if (bytes == nullptr) return false;
@@ -202,14 +204,15 @@ class Feature {
   bool ParseFloatList(Result* float_list) {
     DCHECK(float_list != nullptr);
     protobuf::io::CodedInputStream stream(
-        reinterpret_cast<const uint8*>(serialized_.data()), serialized_.size());
+        reinterpret_cast<const uint8_t*>(serialized_.data()),
+        serialized_.size());
     EnableAliasing(&stream);
-    uint32 length;
+    uint32_t length;
     if (!stream.ReadVarint32(&length)) return false;
     auto limit = stream.PushLimit(length);
 
     if (!stream.ExpectAtEnd()) {
-      uint8 peek_tag = PeekTag(&stream);
+      uint8_t peek_tag = PeekTag(&stream);
       if (peek_tag != kDelimitedTag(1) && peek_tag != kFixed32Tag(1)) {
         return false;
       }
@@ -217,7 +220,7 @@ class Feature {
       constexpr int32_t kNumFloatBytes = 4;
       if (peek_tag == kDelimitedTag(1)) {                       // packed
         if (!stream.ExpectTag(kDelimitedTag(1))) return false;  // packed tag
-        uint32 packed_length;
+        uint32_t packed_length;
         if (!stream.ReadVarint32(&packed_length)) return false;
         auto packed_limit = stream.PushLimit(packed_length);
 
@@ -233,16 +236,16 @@ class Feature {
             sizeof(typename Result::value_type) == kNumFloatBytes) {
           // Calculate the length of the buffer available what can be less than
           // what we requested in resize in case of a LimitedArraySlice.
-          const uint32 bytes_to_copy =
-              std::min(static_cast<uint32>((float_list->size() - initial_size) *
-                                           kNumFloatBytes),
-                       packed_length);
+          const uint32_t bytes_to_copy = std::min(
+              static_cast<uint32_t>((float_list->size() - initial_size) *
+                                    kNumFloatBytes),
+              packed_length);
           if (!stream.ReadRaw(float_list->data() + initial_size, bytes_to_copy))
             return false;
         } else {
           int64_t index = initial_size;
           while (!stream.ExpectAtEnd()) {
-            uint32 buffer32;
+            uint32_t buffer32;
             if (!stream.ReadLittleEndian32(&buffer32)) return false;
             if (index < float_list->size()) {
               float_list->data()[index] = absl::bit_cast<float>(buffer32);
@@ -262,10 +265,12 @@ class Feature {
         int64_t index = initial_size;
         while (!stream.ExpectAtEnd()) {
           if (!stream.ExpectTag(kFixed32Tag(1))) return false;
-          uint32 buffer32;
+          uint32_t buffer32;
           if (!stream.ReadLittleEndian32(&buffer32)) return false;
-          float_list->data()[index] = absl::bit_cast<float>(buffer32);
-          ++index;
+          if (index < static_cast<int64_t>(float_list->size())) {
+            float_list->data()[index] = absl::bit_cast<float>(buffer32);
+            ++index;
+          }
         }
       }
     }
@@ -278,20 +283,21 @@ class Feature {
   bool ParseInt64List(Result* int64_list) {
     DCHECK(int64_list != nullptr);
     protobuf::io::CodedInputStream stream(
-        reinterpret_cast<const uint8*>(serialized_.data()), serialized_.size());
+        reinterpret_cast<const uint8_t*>(serialized_.data()),
+        serialized_.size());
     EnableAliasing(&stream);
-    uint32 length;
+    uint32_t length;
     if (!stream.ReadVarint32(&length)) return false;
     auto limit = stream.PushLimit(length);
 
     if (!stream.ExpectAtEnd()) {
-      uint8 peek_tag = PeekTag(&stream);
+      uint8_t peek_tag = PeekTag(&stream);
       if (peek_tag != kDelimitedTag(1) && peek_tag != kVarintTag(1)) {
         return false;
       }
       if (peek_tag == kDelimitedTag(1)) {                       // packed
         if (!stream.ExpectTag(kDelimitedTag(1))) return false;  // packed tag
-        uint32 packed_length;
+        uint32_t packed_length;
         if (!stream.ReadVarint32(&packed_length)) return false;
         auto packed_limit = stream.PushLimit(packed_length);
 
@@ -315,19 +321,19 @@ class Feature {
     return true;
   }
 
-  StringPiece GetSerialized() const { return serialized_; }
+  absl::string_view GetSerialized() const { return serialized_; }
 
  private:
-  StringPiece serialized_;
+  absl::string_view serialized_;
 };
 
-using FeatureMapEntry = std::pair<StringPiece, Feature>;
+using FeatureMapEntry = std::pair<absl::string_view, Feature>;
 using Example = std::vector<FeatureMapEntry>;
 
 }  // namespace parsed
 
 inline bool SkipExtraneousTag(protobuf::io::CodedInputStream* stream) {
-  uint32 data;
+  uint32_t data;
   protobuf_uint64 dummy;
   switch (stream->ReadTag() & 0x7) {
     case 0:  // varint
@@ -351,7 +357,8 @@ inline bool SkipExtraneousTag(protobuf::io::CodedInputStream* stream) {
   return false;  // unrecognized tag type
 }
 
-bool ParseString(protobuf::io::CodedInputStream* stream, StringPiece* result);
+bool ParseString(protobuf::io::CodedInputStream* stream,
+                 absl::string_view* result);
 
 bool ParseFeatureMapEntry(protobuf::io::CodedInputStream* stream,
                           parsed::FeatureMapEntry* feature_map_entry);
@@ -362,7 +369,7 @@ bool ParseFeatures(protobuf::io::CodedInputStream* stream,
 bool ParseExample(protobuf::io::CodedInputStream* stream,
                   parsed::Example* example);
 
-bool ParseExample(StringPiece serialized, parsed::Example* example);
+bool ParseExample(absl::string_view serialized, parsed::Example* example);
 
 using Config = FastParseExampleConfig;
 
@@ -386,10 +393,10 @@ struct SparseBuffer {
 };
 
 struct SeededHasher {
-  uint64 operator()(StringPiece s) const {
+  uint64_t operator()(absl::string_view s) const {
     return Hash64(s.data(), s.size(), seed);
   }
-  uint64 seed{0xDECAFCAFFE};
+  uint64_t seed{0xDECAFCAFFE};
 };
 
 // Use this in the "default" clause of switch statements when dispatching
@@ -435,7 +442,7 @@ struct FeatureProtos {
   // Proto substrings from each serialized SequenceExample that correspond
   // with this feature.  `protos_present` records whether the proto had a
   // value defined (even if that value is empty).
-  std::vector<StringPiece> protos;
+  std::vector<absl::string_view> protos;
   std::vector<bool> protos_present;
 
   // Information derived from protos:
@@ -448,37 +455,42 @@ struct FeatureProtos {
 };
 
 // Map from feature name to FeatureProtos for that feature.
-using FeatureProtosMap = absl::flat_hash_map<StringPiece, FeatureProtos>;
+using FeatureProtosMap = absl::flat_hash_map<absl::string_view, FeatureProtos>;
 
-string ExampleName(const gtl::ArraySlice<tstring> example_names, int n);
+std::string ExampleName(const absl::Span<const tstring> example_names, int n);
 
 // Return the number of bytes elements parsed, or -1 on error. If out is null,
 // this method simply counts the number of elements without any copying.
 inline int ParseBytesFeature(protobuf::io::CodedInputStream* stream,
                              tstring* out) {
   int num_elements = 0;
-  uint32 length;
+  uint32_t length;
   if (!stream->ExpectTag(kDelimitedTag(1)) || !stream->ReadVarint32(&length)) {
     return -1;
   }
   if (length > 0) {
     auto limit = stream->PushLimit(length);
     while (!stream->ExpectAtEnd()) {
-      uint32 bytes_length;
+      uint32_t bytes_length;
       if (!stream->ExpectTag(kDelimitedTag(1)) ||
           !stream->ReadVarint32(&bytes_length)) {
         return -1;
       }
       if (out == nullptr) {
-        stream->Skip(bytes_length);
+        if (!stream->Skip(bytes_length)) {
+          return -1;
+        }
       } else {
+        if (static_cast<int64_t>(bytes_length) > stream->BytesUntilLimit()) {
+          return -1;
+        }
         out->resize_uninitialized(bytes_length);
         if (!stream->ReadRaw(out->data(), bytes_length)) {
           return -1;
         }
-        out++;
+        ++out;
       }
-      num_elements++;
+      ++num_elements;
     }
     stream->PopLimit(limit);
   }
@@ -502,22 +514,22 @@ inline void PadInt64Feature(int num_to_pad, int64_t* out) {
 inline int ParseFloatFeature(protobuf::io::CodedInputStream* stream,
                              float* out) {
   int num_elements = 0;
-  uint32 length;
+  uint32_t length;
   if (!stream->ExpectTag(kDelimitedTag(2)) || !stream->ReadVarint32(&length)) {
     return -1;
   }
   if (length > 0) {
     auto limit = stream->PushLimit(length);
-    uint8 peek_tag = PeekTag(stream);
+    uint8_t peek_tag = PeekTag(stream);
     if (peek_tag == kDelimitedTag(1)) {  // packed
-      uint32 packed_length;
+      uint32_t packed_length;
       if (!stream->ExpectTag(kDelimitedTag(1)) ||
           !stream->ReadVarint32(&packed_length)) {
         return -1;
       }
       auto packed_limit = stream->PushLimit(packed_length);
       while (!stream->ExpectAtEnd()) {
-        uint32 buffer32;
+        uint32_t buffer32;
         if (!stream->ReadLittleEndian32(&buffer32)) {
           return -1;
         }
@@ -529,7 +541,7 @@ inline int ParseFloatFeature(protobuf::io::CodedInputStream* stream,
       stream->PopLimit(packed_limit);
     } else if (peek_tag == kFixed32Tag(1)) {
       while (!stream->ExpectAtEnd()) {
-        uint32 buffer32;
+        uint32_t buffer32;
         if (!stream->ExpectTag(kFixed32Tag(1)) ||
             !stream->ReadLittleEndian32(&buffer32)) {
           return -1;
@@ -553,15 +565,15 @@ inline int ParseFloatFeature(protobuf::io::CodedInputStream* stream,
 inline int ParseInt64Feature(protobuf::io::CodedInputStream* stream,
                              int64_t* out) {
   int num_elements = 0;
-  uint32 length;
+  uint32_t length;
   if (!stream->ExpectTag(kDelimitedTag(3)) || !stream->ReadVarint32(&length)) {
     return -1;
   }
   if (length > 0) {
     auto limit = stream->PushLimit(length);
-    uint8 peek_tag = PeekTag(stream);
+    uint8_t peek_tag = PeekTag(stream);
     if (peek_tag == kDelimitedTag(1)) {  // packed
-      uint32 packed_length;
+      uint32_t packed_length;
       if (!stream->ExpectTag(kDelimitedTag(1)) ||
           !stream->ReadVarint32(&packed_length)) {
         return -1;
@@ -645,7 +657,7 @@ inline int GetFeatureLength(DataType dtype,
 }
 
 inline DataType ParseDataType(protobuf::io::CodedInputStream* stream) {
-  uint8 peek_tag = PeekTag(stream);
+  uint8_t peek_tag = PeekTag(stream);
   switch (peek_tag) {
     case kDelimitedTag(1):
       return DT_STRING;
@@ -679,7 +691,7 @@ inline bool SkipEmptyFeature(protobuf::io::CodedInputStream* stream,
     default:
       return false;
   }
-  uint32 length;
+  uint32_t length;
   return stream->ReadVarint32(&length) && length == 0;
 }
 

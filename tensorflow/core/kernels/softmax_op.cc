@@ -18,7 +18,7 @@ limitations under the License.
 #include "tensorflow/core/lib/strings/str_util.h"
 #define EIGEN_USE_THREADS
 
-#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
+#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/register_types.h"
 #include "tensorflow/core/framework/tensor.h"
@@ -55,8 +55,9 @@ class SoftmaxOp : public OpKernel {
   void Compute(OpKernelContext* context) override {
     const Tensor& logits_in = context->input(0);
     OP_REQUIRES(context, TensorShapeUtils::IsVectorOrHigher(logits_in.shape()),
-                errors::InvalidArgument("logits must have >= 1 dimension, got ",
-                                        logits_in.shape().DebugString()));
+                absl::InvalidArgumentError(
+                    absl::StrCat("logits must have >= 1 dimension, got ",
+                                 logits_in.shape().DebugString())));
     Tensor* softmax_out = nullptr;
     OP_REQUIRES_OK(context, context->forward_input_or_allocate_output(
                                 {0}, 0, logits_in.shape(), &softmax_out));

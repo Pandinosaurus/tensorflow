@@ -15,10 +15,6 @@
 
 """Optimizer that implements cross-shard gradient reduction for TPU."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 
 from tensorflow.python.framework import ops
 from tensorflow.python.ops.losses import losses
@@ -63,9 +59,6 @@ class CrossShardOptimizer(optimizer.Optimizer):
           f"Keras Optimizer. Received: {opt}. "
           "If you are using TPUStrategy, "
           "Keras Optimizer will sum gradients across replicas."
-          "If you are using TPUEstimator, you may instead sum your gradients "
-          "with:\n"
-          "`grads = [tf.compat.v1.tpu.cross_replica_sum(g) for g in grads]`\n"
           "If you want to average your gradients, rescale your loss with: "
           "`loss /= global_batch_size`")
 

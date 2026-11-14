@@ -1,3 +1,18 @@
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
 # Description:
 # gif io package.
 
@@ -14,16 +29,21 @@ load(
 )
 
 package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
     default_visibility = ["//tensorflow/core:__pkg__"],
-    features = ["-parse_headers"],
     licenses = ["notice"],
+)
+
+filegroup(
+    name = "hdrs",
+    srcs = ["gif_io.h"],
+    visibility = ["//visibility:public"],
 )
 
 cc_library(
     name = "gif_internal",
     srcs = [
         "gif_io.cc",
-        "//tensorflow/core/platform:gif_hdrs",
     ],
     hdrs = ["gif_io.h"],
     copts = tf_copts(),
@@ -37,6 +57,7 @@ cc_library(
         "//tensorflow/core:lib_internal",
         "//tensorflow/core/platform:gif",
         "@com_google_absl//absl/strings",
+        "@gif",
     ],
 )
 
@@ -51,18 +72,27 @@ cc_library(
         "//tensorflow/core/lib/core:legacy_lib_core_stringpiece_header",
         "//tensorflow/core/lib/gtl:legacy_android_gif_internal_headers",
         "//tensorflow/core/platform:gif_internal_hdrs",
-        "//tensorflow/core/platform/default:integral_types.h",
-        "//tensorflow/core/platform/default:logging.h",
+        "@tsl//tsl/platform:gif_internal_hdrs",
     ],
     copts = tf_copts(),
+    features = ["-layering_check"],
     linkopts = if_android(["-ldl"]),
     deps = [
+        "//tensorflow/core/platform:byte_order",
+        "//tensorflow/core/platform:cord",
         "//tensorflow/core/platform:dynamic_annotations",
         "//tensorflow/core/platform:gif",
         "//tensorflow/core/platform:logging",
         "//tensorflow/core/platform:stringpiece",
         "@com_google_absl//absl/base:core_headers",
+        "@com_google_absl//absl/base:dynamic_annotations",
         "@com_google_absl//absl/strings",
+        "@eigen_archive//:eigen3",
+        "@gif",
+        "@tsl//tsl/platform:logging",
+        "@tsl//tsl/platform:tstring",
+        "@tsl//tsl/platform:types",
+        "@xla//xla/tsl/platform:types",
     ],
 )
 

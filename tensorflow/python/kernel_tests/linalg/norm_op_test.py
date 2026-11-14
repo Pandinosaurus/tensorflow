@@ -1,0 +1,272 @@
+# Copyright 2015 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+"""Tests for tensorflow.ops.tf.norm."""
+
+from absl.testing import parameterized
+import numpy as np
+
+from tensorflow.python.eager import backprop
+from tensorflow.python.eager import def_function
+from tensorflow.python.framework import constant_op
+from tensorflow.python.framework import dtypes
+from tensorflow.python.framework import test_util
+from tensorflow.python.ops import array_ops
+from tensorflow.python.ops import linalg_ops
+from tensorflow.python.ops import nn_impl
+from tensorflow.python.platform import test as test_lib
+
+
+def _AddTest(test, test_name, fn):
+  test_name = "_".join(["test", test_name])
+  if hasattr(test, test_name):
+    raise RuntimeError("Test %s defined more than once" % test_name)
+  setattr(test, test_name, fn)
+
+
+class NormOpTest(test_lib.TestCase):
+
+  @test_util.run_v1_only("b/120545219")
+  def testBadOrder(self):
+    matrix = [[0., 1.], [2., 3.]]
+    for ord_ in "fro", -7, -1.1, 0:
+      with self.assertRaisesRegex(ValueError,
+                                  "'ord' must be a supported vector norm"):
+        linalg_ops.norm(matrix, ord=ord_)
+
+    for ord_ in "fro", -7, -1.1, 0:
+      with self.assertRaisesRegex(ValueError,
+                                  "'ord' must be a supported vector norm"):
+        linalg_ops.norm(matrix, ord=ord_, axis=-1)
+
+    for ord_ in "foo", -7, -1.1, 1.1:
+      with self.assertRaisesRegex(ValueError,
+                                  "'ord' must be a supported matrix norm"):
+        linalg_ops.norm(matrix, ord=ord_, axis=[-2, -1])
+
+  @test_util.run_v1_only("b/120545219")
+  def testInvalidAxis(self):
+    matrix = [[0., 1.], [2., 3.]]
+    for axis_ in [], [1, 2, 3], [[1]], [[1], [2]], [3.1415], [1, 1]:
+      error_prefix = ("'axis' must be None, an integer, or a tuple of 2 unique "
+                      "integers")
+      with self.assertRaisesRegex(ValueError, error_prefix):
+        linalg_ops.norm(matrix, axis=axis_)
+
+  @test_util.run_v1_only("b/120545219")
+  def testAxisOutOfBounds(self):
+    matrix = constant_op.constant([[0.0, 1.0], [2.0, 3.0]])
+    for axis_ in 2, -3, (0, 2), (-3, -1):
+      with self.assertRaisesRegex(ValueError, "out of bounds"):
+        linalg_ops.norm(matrix, axis=axis_)
+    # In-bounds negative axes still work.
+    self.evaluate(linalg_ops.norm(matrix, axis=-1))
+    self.evaluate(linalg_ops.norm(matrix, axis=(-2, -1)))
+
+  @test_util.run_in_graph_and_eager_modes
+  def testEmptyInputIsZero(self):
+    # reduce_max over an empty axis is -inf. A norm of an empty input should be
+    # 0, like the Euclidean, Frobenius and p-norms of an empty input. (numpy
+    # raises a ValueError for the max-based norms here.) Each case gives the
+    # expected result shape too.
+    cases = [
+        (np.zeros([0]), np.inf, None, []),
+        (np.zeros([0, 3]), 2, (0, 1), []),
+        (np.zeros([3, 0]), 2, (0, 1), []),
+        (np.zeros([0, 0]), 2, (0, 1), []),
+        (np.zeros([0, 3]), 1, (0, 1), []),
+        (np.zeros([3, 0]), 1, (0, 1), []),
+        (np.zeros([0, 0]), 1, (0, 1), []),
+        (np.zeros([0, 3]), np.inf, (0, 1), []),
+        (np.zeros([3, 0]), np.inf, (0, 1), []),
+        (np.zeros([0, 0]), np.inf, (0, 1), []),
+        (np.zeros([2, 3, 0]), 1, (1, 2), [2]),
+        (np.zeros([2, 0, 3]), np.inf, (1, 2), [2]),
+    ]
+    # The norm of a complex input is real.
+    result_dtypes = {
+        np.float32: np.float32,
+        np.float64: np.float64,
+        np.complex64: np.float32,
+        np.complex128: np.float64,
+    }
+    for dtype_, result_dtype in result_dtypes.items():
+      for value, ord_, axis_, shape in cases:
+        with self.subTest(dtype=dtype_, shape=value.shape, ord=ord_):
+          result = self.evaluate(
+              linalg_ops.norm(
+                  constant_op.constant(value, dtype=dtype_),
+                  ord=ord_,
+                  axis=axis_,
+              )
+          )
+          self.assertEqual(result.dtype, result_dtype)
+          self.assertAllEqual(result, np.zeros(shape))
+
+      result = self.evaluate(
+          linalg_ops.norm(
+              constant_op.constant(np.zeros([0, 3]), dtype=dtype_),
+              ord=np.inf,
+              axis=(0, 1),
+              keepdims=True,
+          )
+      )
+      self.assertAllEqual(result, np.zeros([1, 1]))
+
+  @test_util.run_in_graph_and_eager_modes
+  def testFloat16LargeValuesDoNotOverflow(self):
+    vec = np.array([300.0, 400.0, 100.0], dtype=np.float16)
+    for ord_, np_ord in ("euclidean", None), (1, 1), (3, 3), (np.inf, np.inf):
+      with self.subTest(ord=ord_):
+        result = self.evaluate(
+            linalg_ops.norm(constant_op.constant(vec), ord=ord_)
+        )
+        self.assertEqual(result.dtype, np.float16)
+        expected = np.linalg.norm(vec.astype(np.float32), ord=np_ord)
+        self.assertAllClose(result, expected, rtol=1e-3)
+
+    mat = np.array([[300.0, 400.0], [100.0, 200.0]], dtype=np.float16)
+    for ord_ in "fro", 1, 2, np.inf:
+      with self.subTest(ord=ord_, matrix=True):
+        result = self.evaluate(
+            linalg_ops.norm(constant_op.constant(mat), ord=ord_, axis=(0, 1))
+        )
+        self.assertEqual(result.dtype, np.float16)
+        expected = np.linalg.norm(mat.astype(np.float32), ord=ord_)
+        self.assertAllClose(result, expected, rtol=1e-3)
+
+  @test_util.run_in_graph_and_eager_modes
+  def testFloat16LargeValuesKeepdims(self):
+    mat = np.array([[300.0, 400.0], [100.0, 200.0]], dtype=np.float16)
+    result = self.evaluate(
+        linalg_ops.norm(constant_op.constant(mat), axis=1, keepdims=True)
+    )
+    self.assertEqual(result.dtype, np.float16)
+    self.assertEqual(result.shape, (2, 1))
+    expected = np.linalg.norm(mat.astype(np.float32), axis=1, keepdims=True)
+    self.assertAllClose(result, expected, rtol=1e-3)
+
+  @test_util.run_in_graph_and_eager_modes
+  def testFloat16LargeValuesGradient(self):
+    vec = np.array([300.0, 400.0, 100.0], dtype=np.float16)
+    t = constant_op.constant(vec, dtype=dtypes.float16)
+    with backprop.GradientTape() as tape:
+      tape.watch(t)
+      norm = linalg_ops.norm(t)
+    grad = self.evaluate(tape.gradient(norm, t))
+    self.assertEqual(grad.dtype, np.float16)
+    v32 = vec.astype(np.float32)
+    self.assertAllClose(grad, v32 / np.linalg.norm(v32), rtol=1e-2)
+
+  @test_util.run_in_graph_and_eager_modes
+  def testFloat16LargeValuesNormalize(self):
+    vec = np.array([300.0, 400.0, 100.0], dtype=np.float16)
+    normalized, norm = nn_impl.normalize(constant_op.constant(vec))
+    normalized, norm = self.evaluate([normalized, norm])
+    self.assertEqual(normalized.dtype, np.float16)
+    expected_norm = np.linalg.norm(vec.astype(np.float32), keepdims=True)
+    self.assertAllClose(norm, expected_norm, rtol=1e-3)
+    self.assertAllClose(
+        normalized, vec.astype(np.float32) / expected_norm, rtol=2e-3
+    )
+
+
+class MatrixNormXlaTest(test_lib.TestCase, parameterized.TestCase):
+
+  @parameterized.named_parameters(
+      (f"{name}_keepdims_{keepdims}", shape, axis, keepdims)
+      for name, shape, axis in (
+          ("rank2", (3, 4), (0, 1)),
+          ("rank3_nonadjacent", (2, 3, 4), (0, 2)),
+          ("rank3_reversed", (2, 3, 4), (2, 0)),
+          ("rank4", (2, 3, 4, 5), (1, 2)),
+          ("rank4_negative", (2, 3, 4, 5), (-3, -2)),
+      )
+      for keepdims in (False, True)
+  )
+  @test_util.run_v2_only
+  def testMatrixNormOrd2XlaCompile(self, shape, axis, keepdims):
+    """Matrix 2-norm with static rank must compile without dynamic ListDiff."""
+    if not test_lib.is_built_with_xla():
+      self.skipTest("Test only applicable when running with XLA support")
+
+    matrix = np.random.RandomState(0).randn(*shape).astype(np.float32)
+    tensor = constant_op.constant(matrix)
+    expected = np.linalg.norm(matrix, ord=2, axis=axis, keepdims=keepdims)
+
+    def norm_fn(t):
+      return linalg_ops.norm(t, ord=2, axis=axis, keepdims=keepdims)
+
+    eager_result = norm_fn(tensor)
+    xla_result = def_function.function(norm_fn, jit_compile=True)(tensor)
+    self.assertAllEqual(expected.shape, xla_result.shape.as_list())
+    self.assertAllClose(expected, eager_result, rtol=1e-5, atol=1e-5)
+    self.assertAllClose(expected, xla_result, rtol=1e-5, atol=1e-5)
+
+
+def _GetNormOpTest(dtype_, shape_, ord_, axis_, keep_dims_, use_static_shape_):
+
+  def _CompareNorm(self, matrix):
+    np_norm = np.linalg.norm(matrix, ord=ord_, axis=axis_, keepdims=keep_dims_)
+    with self.cached_session() as sess:
+      if use_static_shape_:
+        tf_matrix = constant_op.constant(matrix)
+        tf_norm = linalg_ops.norm(
+            tf_matrix, ord=ord_, axis=axis_, keepdims=keep_dims_)
+        tf_norm_val = self.evaluate(tf_norm)
+      else:
+        tf_matrix = array_ops.placeholder(dtype_)
+        tf_norm = linalg_ops.norm(
+            tf_matrix, ord=ord_, axis=axis_, keepdims=keep_dims_)
+        tf_norm_val = sess.run(tf_norm, feed_dict={tf_matrix: matrix})
+    self.assertAllClose(np_norm, tf_norm_val, rtol=1e-5, atol=1e-5)
+
+  @test_util.run_v1_only("b/120545219")
+  def Test(self):
+    is_matrix_norm = (isinstance(axis_, tuple) or
+                      isinstance(axis_, list)) and len(axis_) == 2
+    is_fancy_p_norm = np.isreal(ord_) and np.floor(ord_) != ord_
+    if ((not is_matrix_norm and ord_ == "fro") or
+        (is_matrix_norm and is_fancy_p_norm)):
+      self.skipTest("Not supported by neither numpy.linalg.norm nor tf.norm")
+    if ord_ == "euclidean" or (axis_ is None and len(shape) > 2):
+      self.skipTest("Not supported by numpy.linalg.norm")
+    matrix = np.random.randn(*shape_).astype(dtype_)
+    if dtype_ in (np.complex64, np.complex128):
+      matrix += 1j * np.random.randn(*shape_).astype(dtype_)
+    _CompareNorm(self, matrix)
+
+  return Test
+
+# pylint: disable=redefined-builtin
+if __name__ == "__main__":
+  for use_static_shape in False, True:
+    for dtype in np.float32, np.float64, np.complex64, np.complex128:
+      for rows in 2, 5:
+        for cols in 2, 5:
+          for batch in [], [2], [2, 3]:
+            shape = batch + [rows, cols]
+            for ord in "euclidean", "fro", 0.5, 1, 2, np.inf:
+              for axis in [
+                  None, (-2, -1), (-1, -2), -len(shape), 0, len(shape) - 1
+              ]:
+                for keep_dims in False, True:
+                  name = "%s_%s_ord_%s_axis_%s_%s_%s" % (
+                      dtype.__name__, "_".join(map(str, shape)), ord, axis,
+                      keep_dims, use_static_shape)
+                  _AddTest(NormOpTest, "Norm_" + name,
+                           _GetNormOpTest(dtype, shape, ord, axis, keep_dims,
+                                          use_static_shape))
+
+  test_lib.main()

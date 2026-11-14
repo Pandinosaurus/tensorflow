@@ -14,34 +14,41 @@
 # ==============================================================================
 """Implementation of image ops."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import functools
+
 import numpy as np
 
+from tensorflow.python.eager import context
 from tensorflow.python.eager import def_function
+from tensorflow.python.framework import config
 from tensorflow.python.framework import constant_op
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import ops
 from tensorflow.python.framework import random_seed
+from tensorflow.python.framework import tensor as tensor_lib
 from tensorflow.python.framework import tensor_shape
 from tensorflow.python.framework import tensor_util
 from tensorflow.python.ops import array_ops
+from tensorflow.python.ops import array_ops_stack
 from tensorflow.python.ops import check_ops
+from tensorflow.python.ops import cond as tf_cond
+from tensorflow.python.ops import control_flow_assert
+from tensorflow.python.ops import control_flow_case
 from tensorflow.python.ops import control_flow_ops
 from tensorflow.python.ops import gen_image_ops
 from tensorflow.python.ops import math_ops
-from tensorflow.python.ops import nn
+from tensorflow.python.ops import nn_impl
 from tensorflow.python.ops import nn_ops
 from tensorflow.python.ops import random_ops
+from tensorflow.python.ops import ref_variable  # pylint: disable=unused-import
 from tensorflow.python.ops import sort_ops
 from tensorflow.python.ops import stateless_random_ops
 from tensorflow.python.ops import string_ops
 from tensorflow.python.ops import variables
+from tensorflow.python.ops import while_loop
 from tensorflow.python.util import deprecation
 from tensorflow.python.util import dispatch
+from tensorflow.python.util import numpy_compat
 from tensorflow.python.util.tf_export import tf_export
 
 ops.NotDifferentiable('RandomCrop')
@@ -78,7 +85,7 @@ def _assert(cond, ex_type, msg):
     A list, containing at most one assert op.
   """
   if _is_tensor(cond):
-    return [control_flow_ops.Assert(cond, [msg])]
+    return [control_flow_assert.Assert(cond, [msg])]
   else:
     if not cond:
       raise ex_type(msg)
@@ -95,7 +102,7 @@ def _is_tensor(x):
   Returns:
     `True` if `x` is a `tf.Tensor` or `tf.Variable`, otherwise `False`.
   """
-  return isinstance(x, (ops.Tensor, variables.Variable))
+  return isinstance(x, (tensor_lib.Tensor, variables.Variable))
 
 
 def _ImageDimensions(image, rank):
@@ -114,7 +121,7 @@ def _ImageDimensions(image, rank):
     return image.get_shape().as_list()
   else:
     static_shape = image.get_shape().with_rank(rank).as_list()
-    dynamic_shape = array_ops.unstack(array_ops.shape(image), rank)
+    dynamic_shape = array_ops_stack.unstack(array_ops.shape(image), rank)
     return [
         s if s is not None else d for s, d in zip(static_shape, dynamic_shape)
     ]
@@ -175,6 +182,31 @@ def _Assert3DImage(image):
   """
   return control_flow_ops.with_dependencies(
       _Check3DImage(image, require_static=False), image)
+
+
+def _AssertAtLeast1DImage(image):
+  """Assert that `image` has a channel dimension.
+
+  The RGB/YIQ/YUV conversions contract the last dimension of `image` against a
+  3-element kernel. A scalar has no such dimension, and without this check the
+  failure surfaces as an `IndexError` from inside `tensordot`.
+
+  Args:
+    image: >= 1-D Tensor of size [*, 3]
+
+  Raises:
+    ValueError: if the rank of `image` is known and is less than one.
+
+  Returns:
+    `image`, unchanged.
+  """
+  try:
+    image.get_shape().with_rank_at_least(1)
+  except ValueError:
+    raise ValueError(
+        "'images' (shape %s) must be at least one-dimensional." % image.shape
+    )
+  return image
 
 
 def _AssertAtLeast3DImage(image):
@@ -510,7 +542,7 @@ def _random_flip(image, flip_index, random_func, scope_name):
     def f_rank3():
       uniform_random = random_func(shape=[], minval=0, maxval=1.0)
       mirror_cond = math_ops.less(uniform_random, .5)
-      result = control_flow_ops.cond(
+      result = tf_cond.cond(
           mirror_cond,
           lambda: array_ops.reverse(image, [flip_index]),
           lambda: image,
@@ -528,7 +560,7 @@ def _random_flip(image, flip_index, random_func, scope_name):
 
     if shape.ndims is None:
       rank = array_ops.rank(image)
-      return control_flow_ops.cond(math_ops.equal(rank, 3), f_rank3, f_rank4)
+      return tf_cond.cond(math_ops.equal(rank, 3), f_rank3, f_rank4)
     if shape.ndims == 3:
       return f_rank3()
     elif shape.ndims == 4:
@@ -640,7 +672,7 @@ def _flip(image, flip_index, scope_name):
 
     if shape.ndims is None:
       rank = array_ops.rank(image)
-      return control_flow_ops.cond(math_ops.equal(rank, 3), f_rank3, f_rank4)
+      return tf_cond.cond(math_ops.equal(rank, 3), f_rank3, f_rank4)
     elif shape.ndims == 3:
       return f_rank3()
     elif shape.ndims == 4:
@@ -653,7 +685,7 @@ def _flip(image, flip_index, scope_name):
 @tf_export('image.rot90')
 @dispatch.add_dispatch_support
 def rot90(image, k=1, name=None):
-  """Rotate image(s) counter-clockwise by 90 degrees.
+  """Rotate image(s) by 90 degrees.
 
 
   For example:
@@ -670,11 +702,17 @@ def rot90(image, k=1, name=None):
   >>> print(a_rot[...,0].numpy())
   [[3 1]
    [4 2]]
+  >>> # rotating `a` clockwise by 180 degrees
+  >>> a_rot=tf.image.rot90(a, k=-2)
+  >>> print(a_rot[...,0].numpy())
+  [[4 3]
+   [2 1]]
 
   Args:
     image: 4-D Tensor of shape `[batch, height, width, channels]` or 3-D Tensor
       of shape `[height, width, channels]`.
-    k: A scalar integer. The number of times the image is rotated by 90 degrees.
+    k: A scalar integer tensor. The number of times the image(s) are rotated by
+      90 degrees.
     name: A name for this operation (optional).
 
   Returns:
@@ -700,7 +738,7 @@ def rot90(image, k=1, name=None):
       def f_rank4():
         return _rot90_4D(image, k, scope)
 
-      return control_flow_ops.cond(math_ops.equal(rank, 3), f_rank3, f_rank4)
+      return tf_cond.cond(math_ops.equal(rank, 3), f_rank3, f_rank4)
     elif shape.ndims == 3:
       return _rot90_3D(image, k, scope)
     elif shape.ndims == 4:
@@ -735,7 +773,7 @@ def _rot90_3D(image, k, name_scope):
   cases = [(math_ops.equal(k, 1), _rot90), (math_ops.equal(k, 2), _rot180),
            (math_ops.equal(k, 3), _rot270)]
 
-  result = control_flow_ops.case(
+  result = control_flow_case.case(
       cases, default=lambda: image, exclusive=True, name=name_scope)
   result.set_shape([None, None, image.get_shape()[2]])
   return result
@@ -766,7 +804,7 @@ def _rot90_4D(images, k, name_scope):
   cases = [(math_ops.equal(k, 1), _rot90), (math_ops.equal(k, 2), _rot180),
            (math_ops.equal(k, 3), _rot270)]
 
-  result = control_flow_ops.case(
+  result = control_flow_case.case(
       cases, default=lambda: images, exclusive=True, name=name_scope)
   shape = result.get_shape()
   result.set_shape([shape[0], None, None, shape[3]])
@@ -833,7 +871,7 @@ def transpose(image, name=None):
       def f_rank4():
         return array_ops.transpose(image, [0, 2, 1, 3], name=name)
 
-      return control_flow_ops.cond(math_ops.equal(rank, 3), f_rank3, f_rank4)
+      return tf_cond.cond(math_ops.equal(rank, 3), f_rank3, f_rank4)
     elif shape.ndims == 3:
       return array_ops.transpose(image, [1, 0, 2], name=name)
     elif shape.ndims == 4:
@@ -849,8 +887,10 @@ def central_crop(image, central_fraction):
   """Crop the central region of the image(s).
 
   Remove the outer parts of an image but retain the central region of the image
-  along each dimension. If we specify central_fraction = 0.5, this function
-  returns the region marked with "X" in the below diagram.
+  along each dimension. If we specify `central_fraction = 0.5`, this function
+  returns the region marked with "X" in the below diagram. The larger the value
+  of `central_fraction`, the larger the dimension of the region to be cropped
+  and retained.
 
        --------
       |        |
@@ -908,8 +948,10 @@ def central_crop(image, central_fraction):
         return image
     else:
       assert_ops = _assert(
-          math_ops.logical_or(central_fraction > 0.0, central_fraction <= 1.0),
-          ValueError, 'central_fraction must be within (0, 1]')
+          math_ops.logical_and(central_fraction > 0.0, central_fraction <= 1.0),
+          ValueError,
+          'central_fraction must be within (0, 1]',
+      )
       image = control_flow_ops.with_dependencies(assert_ops, image)
 
     _AssertAtLeast3DImage(image)
@@ -966,11 +1008,11 @@ def central_crop(image, central_fraction):
     bbox_w_size = img_w - bbox_w_start * 2
 
     if rank == 3:
-      bbox_begin = array_ops.stack([bbox_h_start, bbox_w_start, 0])
-      bbox_size = array_ops.stack([bbox_h_size, bbox_w_size, -1])
+      bbox_begin = array_ops_stack.stack([bbox_h_start, bbox_w_start, 0])
+      bbox_size = array_ops_stack.stack([bbox_h_size, bbox_w_size, -1])
     else:
-      bbox_begin = array_ops.stack([0, bbox_h_start, bbox_w_start, 0])
-      bbox_size = array_ops.stack([-1, bbox_h_size, bbox_w_size, -1])
+      bbox_begin = array_ops_stack.stack([0, bbox_h_start, bbox_w_start, 0])
+      bbox_size = array_ops_stack.stack([-1, bbox_h_size, bbox_w_size, -1])
 
     image = array_ops.slice(image, bbox_begin, bbox_size)
 
@@ -1046,6 +1088,57 @@ def pad_to_bounding_box(image, offset_height, offset_width, target_height,
       `target_*` arguments, or either `offset_height` or `offset_width` is
       negative.
   """
+  return pad_to_bounding_box_internal(
+      image,
+      offset_height,
+      offset_width,
+      target_height,
+      target_width,
+      check_dims=True)
+
+
+# TODO(b/190099338) Remove this internal method and remap call sites to call
+# image_ops.pad_to_bounding_box when asserts are no longer serialized. See also
+# b/204377079#comment6 for more context.
+def pad_to_bounding_box_internal(image, offset_height, offset_width,
+                                 target_height, target_width, check_dims):
+  """Pad `image` with zeros to the specified `height` and `width`.
+
+  Adds `offset_height` rows of zeros on top, `offset_width` columns of
+  zeros on the left, and then pads the image on the bottom and right
+  with zeros until it has dimensions `target_height`, `target_width`.
+
+  This op does nothing if `offset_*` is zero and the image already has size
+  `target_height` by `target_width`.
+
+  Args:
+    image: 4-D Tensor of shape `[batch, height, width, channels]` or 3-D Tensor
+      of shape `[height, width, channels]`.
+    offset_height: Number of rows of zeros to add on top.Must be 0-D `Tensor` of
+      dtype int32 or int64. Can also a python integer.
+    offset_width: Number of columns of zeros to add on the left.Must be 0-D
+      `Tensor` of dtype int32 or int64. Can also a python integer.
+    target_height: Height of output image.Must be 0-D `Tensor` of dtype int32 or
+      int64. Can also a python integer.
+    target_width: Width of output image.Must be 0-D `Tensor` of dtype int32 or
+      int64. Can also a python integer.
+    check_dims: If True, assert that dimensions are non-negative and in range.
+      In multi-GPU distributed settings, assertions can cause program slowdown.
+      Setting this parameter to `False` avoids this, resulting in faster speed
+      in some situations, with the tradeoff being that some error checking is
+      not happening.
+
+  Returns:
+    If `image` was 4-D, a 4-D float Tensor of shape
+    `[batch, target_height, target_width, channels]`
+    If `image` was 3-D, a 3-D float Tensor of shape
+    `[target_height, target_width, channels]`
+
+  Raises:
+    ValueError: If the shape of `image` is incompatible with the `offset_*` or
+      `target_*` arguments, or either `offset_height` or `offset_width` is
+      negative. Not raised if `check_dims` is `False`.
+  """
   with ops.name_scope(None, 'pad_to_bounding_box', [image]):
     image = ops.convert_to_tensor(image, name='image')
 
@@ -1063,26 +1156,27 @@ def pad_to_bounding_box(image, offset_height, offset_width, target_height,
           '\'image\' (shape %s) must have either 3 or 4 dimensions.' %
           image_shape)
 
-    assert_ops = _CheckAtLeast3DImage(image, require_static=False)
     batch, height, width, depth = _ImageDimensions(image, rank=4)
 
     after_padding_width = target_width - offset_width - width
 
     after_padding_height = target_height - offset_height - height
 
-    assert_ops += _assert(offset_height >= 0, ValueError,
-                          'offset_height must be >= 0')
-    assert_ops += _assert(offset_width >= 0, ValueError,
-                          'offset_width must be >= 0')
-    assert_ops += _assert(after_padding_width >= 0, ValueError,
-                          'width must be <= target - offset')
-    assert_ops += _assert(after_padding_height >= 0, ValueError,
-                          'height must be <= target - offset')
-    image = control_flow_ops.with_dependencies(assert_ops, image)
+    if check_dims:
+      assert_ops = _CheckAtLeast3DImage(image, require_static=False)
+      assert_ops += _assert(offset_height >= 0, ValueError,
+                            'offset_height must be >= 0')
+      assert_ops += _assert(offset_width >= 0, ValueError,
+                            'offset_width must be >= 0')
+      assert_ops += _assert(after_padding_width >= 0, ValueError,
+                            'width must be <= target - offset')
+      assert_ops += _assert(after_padding_height >= 0, ValueError,
+                            'height must be <= target - offset')
+      image = control_flow_ops.with_dependencies(assert_ops, image)
 
     # Do not pad on the depth dimensions.
     paddings = array_ops.reshape(
-        array_ops.stack([
+        array_ops_stack.stack([
             0, 0, offset_height, after_padding_height, offset_width,
             after_padding_width, 0, 0
         ]), [4, 2])
@@ -1129,11 +1223,13 @@ def crop_to_bounding_box(image, offset_height, offset_width, target_height,
     image: 4-D `Tensor` of shape `[batch, height, width, channels]` or 3-D
       `Tensor` of shape `[height, width, channels]`.
     offset_height: Vertical coordinate of the top-left corner of the bounding
-      box in `image`.
+      box in `image`. Must be 0-D int32 `Tensor` or python integer.
     offset_width: Horizontal coordinate of the top-left corner of the bounding
-      box in `image`.
-    target_height: Height of the bounding box.
-    target_width: Width of the bounding box.
+      box in `image`. Must be 0-D int32 `Tensor` or python integer.
+    target_height: Height of the bounding box. Must be 0-D int32 `Tensor` or
+      python integer.
+    target_width: Width of the bounding box. Must be 0-D int32 `Tensor` or
+      python integer.
 
   Returns:
     If `image` was 4-D, a 4-D `Tensor` of shape
@@ -1145,7 +1241,7 @@ def crop_to_bounding_box(image, offset_height, offset_width, target_height,
   Raises:
     ValueError: `image` is not a 3-D or 4-D `Tensor`.
     ValueError: `offset_width < 0` or `offset_height < 0`.
-    ValueError: `target_width <= 0` or `target_width <= 0`.
+    ValueError: `target_width <= 0` or `target_height <= 0`.
     ValueError: `width < offset_width + target_width` or
       `height < offset_height + target_height`.
   """
@@ -1185,9 +1281,13 @@ def crop_to_bounding_box(image, offset_height, offset_width, target_height,
     image = control_flow_ops.with_dependencies(assert_ops, image)
 
     cropped = array_ops.slice(
-        image, array_ops.stack([0, offset_height, offset_width, 0]),
-        array_ops.stack([array_ops.shape(image)[0], target_height, target_width,
-                         array_ops.shape(image)[3]]))
+        image,
+        array_ops_stack.stack([0, offset_height, offset_width, 0]),
+        array_ops_stack.stack([
+            array_ops.shape(image)[0],
+            target_height,
+            target_width,
+            array_ops.shape(image)[3]]))
 
     cropped_shape = [
         None if _is_tensor(i) else i
@@ -1359,7 +1459,7 @@ def resize_image_with_crop_or_pad(image, target_height, target_width):
 
 
 @tf_export(v1=['image.ResizeMethod'])
-class ResizeMethodV1(object):
+class ResizeMethodV1:
   """See `v1.image.resize` for details."""
   BILINEAR = 0
   NEAREST_NEIGHBOR = 1
@@ -1368,7 +1468,7 @@ class ResizeMethodV1(object):
 
 
 @tf_export('image.ResizeMethod', v1=[])
-class ResizeMethod(object):
+class ResizeMethod:
   """See `tf.image.resize` for details."""
   BILINEAR = 'bilinear'
   NEAREST_NEIGHBOR = 'nearest'
@@ -1580,23 +1680,51 @@ def resize_images_v2(images,
   >>> tf.image.resize(image[0], [3,5]).shape.as_list()
   [3, 5, 1]
 
-  When `antialias` is true, the sampling filter will anti-alias the input image
-  as well as interpolate.  When downsampling an image with [anti-aliasing](
-  https://en.wikipedia.org/wiki/Spatial_anti-aliasing) the sampling filter
-  kernel is scaled in order to properly anti-alias the input image signal.
-  `antialias` has no effect when upsampling an image:
+  When shrinking an image (downsampling), fine details or high-contrast patterns
+  can create jagged or distorted artifacts (called aliasing). Compare the first
+  example above (`antialias=False` by default) with `antialias=True`, which
+  smooths the image by blending neighboring pixels together:
 
-  >>> a = tf.image.resize(image, [5,10])
-  >>> b = tf.image.resize(image, [5,10], antialias=True)
+  >>> tf.image.resize(image, [3, 5], antialias=True)[0, ..., 0].numpy()
+  array([[0.5714286, 0.4285714, 0.       , 0.       , 0.       ],
+         [0.       , 0.2222222, 0.5555556, 0.2222222, 0.       ],
+         [0.       , 0.       , 0.       , 0.4285714, 0.5714285]],
+        dtype=float32)
+
+  How it works:
+  * When shrinking, the filter stretches out to cover more neighboring
+        pixels. The more you shrink the image, the wider the area it blends.
+  * For `bilinear`, it uses a smooth triangular blending filter. For `bicubic`,
+        it uses a Keys cubic filter.
+  * For `nearest`, `antialias` has no effect, since no filtering is applied.
+  * For `area`, `antialias` is ignored because area resampling already averages
+        over the whole output footprint, so it always anti-aliases.
+  * For `lanczos3`, `lanczos5`, `gaussian` and `mitchellcubic`, `antialias`
+        behaves the same way it does for `bilinear` and `bicubic`.
+  * When enlarging an image (upsampling), `antialias` has no effect because no
+        pixels are skipped:
+
+  >>> a = tf.image.resize(image, [5, 10])
+  >>> b = tf.image.resize(image, [5, 10], antialias=True)
   >>> tf.reduce_max(abs(a - b)).numpy()
   0.0
+
+  Note on OpenCV and Pillow:
+  Pillow scales its filter support by the reduction factor when downscaling, so
+  `antialias=True` brings TensorFlow close to Pillow rather than away from it.
+  OpenCV's `INTER_LINEAR` does not prefilter when shrinking, so results there
+  will differ; `INTER_AREA` is OpenCV's anti-aliased downsampling filter and is
+  the fairer comparison. Small differences remain in every case because the
+  kernels are not identical.
 
   The `method` argument expects an item from the `image.ResizeMethod` enum, or
   the string equivalent. The options are:
 
   *   <b>`bilinear`</b>: [Bilinear interpolation.](
     https://en.wikipedia.org/wiki/Bilinear_interpolation) If `antialias` is
-    true, becomes a hat/tent filter function with radius 1 when downsampling.
+    true, becomes a hat/tent filter function with radius 1, passed to
+    `ScaleAndTranslate` as the `'triangle'` kernel, whose support widens by the
+    downsampling factor.
   *   <b>`lanczos3`</b>:  [Lanczos kernel](
     https://en.wikipedia.org/wiki/Lanczos_resampling) with radius 3.
     High-quality practical filter but may have some ringing, especially on
@@ -1606,7 +1734,8 @@ def resize_images_v2(images,
     Very-high-quality filter but may have stronger ringing.
   *   <b>`bicubic`</b>: [Cubic interpolant](
     https://en.wikipedia.org/wiki/Bicubic_interpolation) of Keys. Equivalent to
-    Catmull-Rom kernel. Reasonably good quality and faster than Lanczos3Kernel,
+    Catmull-Rom kernel. If `antialias` is true, uses a smooth Keys cubic filter
+    when shrinking. Reasonably good quality and faster than Lanczos3Kernel,
     particularly when upsampling.
   *   <b>`gaussian`</b>: [Gaussian kernel](
     https://en.wikipedia.org/wiki/Gaussian_filter) with radius 3,
@@ -1645,6 +1774,12 @@ def resize_images_v2(images,
   >>> max_10_20.shape.as_list()
   [1, 10, 10, 1]
 
+  Note:
+    The `bicubic` interpolation method currently does not have a GPU kernel
+    implementation. As a result, `tf.image.resize(..., method='bicubic')`
+    always executes on the CPU, even when GPU devices are available.
+
+
   Args:
     images: 4-D Tensor of shape `[batch, height, width, channels]` or 3-D Tensor
       of shape `[height, width, channels]`.
@@ -1656,8 +1791,14 @@ def resize_images_v2(images,
       then `images` will be resized to a size that fits in `size` while
       preserving the aspect ratio of the original image. Scales up the image if
       `size` is bigger than the current size of the `image`. Defaults to False.
-    antialias: Whether to use an anti-aliasing filter when downsampling an
-      image.
+    antialias: bool. Whether to use an anti-aliasing filter when shrinking an
+      image. When True, the resampling filter is widened when shrinking so
+      neighboring pixels are blended to prevent jagged patterns. Honored by
+      `bilinear`, `bicubic`, `lanczos3`, `lanczos5`, `gaussian`, and
+      `mitchellcubic`; ignored by `nearest` (no filtering) and by `area` (which
+      always anti-aliases). Results differ from OpenCV's `INTER_LINEAR`, which
+      does not prefilter when shrinking; Pillow also scales its filter support
+      when shrinking. Defaults to False.
     name: A name for this operation (optional).
 
   Raises:
@@ -1750,39 +1891,44 @@ def _resize_image_with_pad_common(image, target_height, target_width,
 
     image = control_flow_ops.with_dependencies(assert_ops, image)
 
-    def max_(x, y):
-      if _is_tensor(x) or _is_tensor(y):
-        return math_ops.maximum(x, y)
-      else:
-        return max(x, y)
-
     _, height, width, _ = _ImageDimensions(image, rank=4)
 
-    # convert values to float, to ease divisions
-    f_height = math_ops.cast(height, dtype=dtypes.float32)
-    f_width = math_ops.cast(width, dtype=dtypes.float32)
-    f_target_height = math_ops.cast(target_height, dtype=dtypes.float32)
-    f_target_width = math_ops.cast(target_width, dtype=dtypes.float32)
+    # The image is scaled by min(target_width / width, target_height / height)
+    # so that it fits within the target. Compute the resized size and the
+    # padding in exact integer arithmetic: in float32 the scaled size can land
+    # just below a whole number, and the floor below would then drop a row or
+    # column of the image and pad it with zeros instead.
+    i_height = math_ops.cast(height, dtype=dtypes.int64)
+    i_width = math_ops.cast(width, dtype=dtypes.int64)
+    i_target_height = math_ops.cast(target_height, dtype=dtypes.int64)
+    i_target_width = math_ops.cast(target_width, dtype=dtypes.int64)
 
-    # Find the ratio by which the image must be adjusted
-    # to fit within the target
-    ratio = max_(f_width / f_target_width, f_height / f_target_height)
-    resized_height_float = f_height / ratio
-    resized_width_float = f_width / ratio
-    resized_height = math_ops.cast(
-        math_ops.floor(resized_height_float), dtype=dtypes.int32)
-    resized_width = math_ops.cast(
-        math_ops.floor(resized_width_float), dtype=dtypes.int32)
+    scaled_height = i_height * i_target_width
+    scaled_width = i_width * i_target_height
 
-    padding_height = (f_target_height - resized_height_float) / 2
-    padding_width = (f_target_width - resized_width_float) / 2
-    f_padding_height = math_ops.floor(padding_height)
-    f_padding_width = math_ops.floor(padding_width)
-    p_height = max_(0, math_ops.cast(f_padding_height, dtype=dtypes.int32))
-    p_width = max_(0, math_ops.cast(f_padding_width, dtype=dtypes.int32))
+    resized_height = math_ops.minimum(i_target_height, scaled_height // i_width)
+    resized_width = math_ops.minimum(i_target_width, scaled_width // i_height)
+
+    # floor((target - scaled size) / 2), where the scaled size need not be a
+    # whole number.
+    zero = constant_op.constant(0, dtype=dtypes.int64)
+    p_height = math_ops.maximum(
+        zero, (scaled_width - scaled_height) // (2 * i_width)
+    )
+    p_width = math_ops.maximum(
+        zero, (scaled_height - scaled_width) // (2 * i_height)
+    )
+    p_height = math_ops.cast(p_height, dtype=dtypes.int32)
+    p_width = math_ops.cast(p_width, dtype=dtypes.int32)
 
     # Resize first, then pad to meet requested dimensions
-    resized = resize_fn(image, [resized_height, resized_width])
+    resized = resize_fn(
+        image,
+        [
+            math_ops.cast(resized_height, dtype=dtypes.int32),
+            math_ops.cast(resized_width, dtype=dtypes.int32),
+        ],
+    )
 
     padded = pad_to_bounding_box(resized, p_height, p_width, target_height,
                                  target_width)
@@ -1862,7 +2008,8 @@ def resize_image_with_pad_v2(image,
     target_height: Target height.
     target_width: Target width.
     method: Method to use for resizing image. See `image.resize()`
-    antialias: Whether to use anti-aliasing when resizing. See 'image.resize()'.
+    antialias: bool. Whether to use an anti-aliasing filter when shrinking an
+      image. Passed directly to `tf.image.resize`. Defaults to False.
 
   Raises:
     ValueError: if `target_height` or `target_width` are zero or negative.
@@ -1942,6 +2089,7 @@ def per_image_standardization(image):
 
 
 @tf_export('image.random_brightness')
+@dispatch.register_unary_elementwise_api
 @dispatch.add_dispatch_support
 def random_brightness(image, max_delta, seed=None):
   """Adjust the brightness of images by a random factor.
@@ -1957,7 +2105,8 @@ def random_brightness(image, max_delta, seed=None):
 
   Args:
     image: An image or images to adjust.
-    max_delta: float, must be non-negative.
+    max_delta: float, must be non-negative. This parameter controls the maximum
+      relative change in brightness.
     seed: A Python integer. Used to create a random seed. See
       `tf.compat.v1.set_random_seed` for behavior.
 
@@ -1984,6 +2133,7 @@ def random_brightness(image, max_delta, seed=None):
 
 
 @tf_export('image.stateless_random_brightness', v1=[])
+@dispatch.register_unary_elementwise_api
 @dispatch.add_dispatch_support
 def stateless_random_brightness(image, max_delta, seed):
   """Adjust the brightness of images by a random factor deterministically.
@@ -2123,6 +2273,7 @@ def stateless_random_contrast(image, lower, upper, seed):
 
 
 @tf_export('image.adjust_brightness')
+@dispatch.register_unary_elementwise_api
 @dispatch.add_dispatch_support
 def adjust_brightness(image, delta):
   """Adjust the brightness of RGB or Grayscale images.
@@ -2194,6 +2345,8 @@ def adjust_contrast(images, contrast_factor):
   channel and then adjusts each component `x` of each pixel to
   `(x - mean) * contrast_factor + mean`.
 
+  `contrast_factor` must be in the interval `(-inf, inf)`.
+
   Usage Example:
 
   >>> x = [[[1.0, 2.0, 3.0],
@@ -2232,6 +2385,7 @@ def adjust_contrast(images, contrast_factor):
 
 
 @tf_export('image.adjust_gamma')
+@dispatch.register_unary_elementwise_api
 @dispatch.add_dispatch_support
 def adjust_gamma(image, gamma=1, gain=1):
   """Performs [Gamma Correction](http://en.wikipedia.org/wiki/Gamma_correction).
@@ -2297,6 +2451,7 @@ def adjust_gamma(image, gamma=1, gain=1):
 
 
 @tf_export('image.convert_image_dtype')
+@dispatch.register_unary_elementwise_api
 @dispatch.add_dispatch_support
 def convert_image_dtype(image, dtype, saturate=False, name=None):
   """Convert `image` to `dtype`, scaling its values if needed.
@@ -2423,12 +2578,14 @@ def convert_image_dtype(image, dtype, saturate=False, name=None):
 
   Raises:
     AttributeError: Raises an attribute error when dtype is neither
-    float nor integer
+    float nor integer.
   """
   image = ops.convert_to_tensor(image, name='image')
   dtype = dtypes.as_dtype(dtype)
   if not dtype.is_floating and not dtype.is_integer:
     raise AttributeError('dtype must be either floating point or integer')
+  if not image.dtype.is_floating and not image.dtype.is_integer:
+    raise AttributeError('image dtype must be either floating point or integer')
   if dtype == image.dtype:
     return array_ops.identity(image, name=name)
 
@@ -2465,12 +2622,34 @@ def convert_image_dtype(image, dtype, saturate=False, name=None):
     else:
       if image.dtype.is_integer:
         # Converting to float: first cast, then scale. No saturation possible.
+        if image.dtype.max > float(dtype.max):
+          # Large integers overflow half (uint16 max casts to inf), so scale in
+          # float32 and only cast the result, which is in [-1, 1], to `dtype`.
+          scaled = math_ops.multiply(
+              math_ops.cast(image, dtypes.float32), 1.0 / image.dtype.max
+          )
+          return math_ops.cast(scaled, dtype, name=name)
         cast = math_ops.cast(image, dtype)
         scale = 1. / image.dtype.max
         return math_ops.multiply(cast, scale, name=name)
       else:
         # Converting from float: first scale, then cast
         scale = dtype.max + 0.5  # avoid rounding problems in the cast
+        if (
+            float(image.dtype.max) < scale
+            or float(image.dtype.as_numpy_dtype(scale)) >= dtype.max + 1
+        ):
+          # The scale rounds up to dtype.max + 1 or more in the image's type
+          # (e.g. 256 in bfloat16 for uint8, 2**31 in float32 for int32), so
+          # 1.0 would overflow the cast. Scale half and bfloat16 in float32
+          # instead, and keep the scale below dtype.max + 1.
+          if image.dtype.size < 4:
+            image = math_ops.cast(image, dtypes.float32)
+          np_dtype = image.dtype.as_numpy_dtype
+          scale = min(
+              np_dtype(scale),
+              np.nextafter(np_dtype(dtype.max + 1), np_dtype(0)),
+          )
         scaled = math_ops.multiply(image, scale)
         if saturate:
           return math_ops.saturate_cast(scaled, dtype, name=name)
@@ -2502,6 +2681,7 @@ def rgb_to_grayscale(images, name=None):
   """
   with ops.name_scope(name, 'rgb_to_grayscale', [images]) as name:
     images = ops.convert_to_tensor(images, name='images')
+    images = _AssertAtLeast1DImage(images)
     # Remember original dtype to so we can convert back if needed
     orig_dtype = images.dtype
     flt_image = convert_image_dtype(images, dtypes.float32)
@@ -2632,7 +2812,7 @@ def stateless_random_hue(image, max_delta, seed):
     image: RGB image or images. The size of the last dimension must be 3.
     max_delta: float. The maximum value for the random delta.
     seed: A shape [2] Tensor, the seed to the random number generator. Must have
-      dtype `int32` or `int64`. (When using XLA, only `int32` is allowed.)
+      dtype `int32` or `int64`.
 
   Returns:
     Adjusted image(s), same shape and DType as `image`.
@@ -2689,6 +2869,11 @@ def adjust_hue(image, delta, name=None):
   Returns:
     Adjusted image(s), same shape and DType as `image`.
 
+  Raises:
+    InvalidArgumentError: image must have at least 3 dimensions.
+    InvalidArgumentError: The size of the last dimension must be 3.
+    ValueError: if `delta` is not in the interval of `[-1, 1]`.
+
   Usage Example:
 
   >>> image = [[[1, 2, 3], [4, 5, 6]],
@@ -2697,14 +2882,17 @@ def adjust_hue(image, delta, name=None):
   >>> image = tf.constant(image)
   >>> tf.image.adjust_hue(image, 0.2)
   <tf.Tensor: shape=(3, 2, 3), dtype=int32, numpy=
-  array([[[ 2,  1,  3],
-        [ 5,  4,  6]],
-       [[ 8,  7,  9],
-        [11, 10, 12]],
-       [[14, 13, 15],
-        [17, 16, 18]]], dtype=int32)>
+  array([[[ 2,  0,  2],
+        [ 5,  3,  5]],
+       [[ 8,  6,  8],
+        [11,  9, 11]],
+       [[14, 12, 14],
+        [17, 15, 17]]], dtype=int32)>
   """
   with ops.name_scope(name, 'adjust_hue', [image]) as name:
+    if context.executing_eagerly():
+      if delta < -1 or delta > 1:
+        raise ValueError('delta must be in the interval [-1, 1]')
     image = ops.convert_to_tensor(image, name='image')
     # Remember original dtype to so we can convert back if needed
     orig_dtype = image.dtype
@@ -2730,12 +2918,12 @@ def random_jpeg_quality(image, min_jpeg_quality, max_jpeg_quality, seed=None):
 
   Usage Example:
 
-  >>> x = [[[1.0, 2.0, 3.0],
-  ...       [4.0, 5.0, 6.0]],
-  ...     [[7.0, 8.0, 9.0],
-  ...       [10.0, 11.0, 12.0]]]
+  >>> x = tf.constant([[[1, 2, 3],
+  ...                   [4, 5, 6]],
+  ...                  [[7, 8, 9],
+  ...                   [10, 11, 12]]], dtype=tf.uint8)
   >>> tf.image.random_jpeg_quality(x, 75, 95)
-  <tf.Tensor: shape=(2, 2, 3), dtype=float32, numpy=...>
+  <tf.Tensor: shape=(2, 2, 3), dtype=uint8, numpy=...>
 
   For producing deterministic results given a `seed` value, use
   `tf.image.stateless_random_jpeg_quality`. Unlike using the `seed` param
@@ -2791,13 +2979,12 @@ def stateless_random_jpeg_quality(image,
 
   Usage Example:
 
-  >>> x = [[[1, 2, 3],
-  ...       [4, 5, 6]],
-  ...      [[7, 8, 9],
-  ...       [10, 11, 12]]]
-  >>> x_uint8 = tf.cast(x, tf.uint8)
+  >>> x = tf.constant([[[1, 2, 3],
+  ...                   [4, 5, 6]],
+  ...                  [[7, 8, 9],
+  ...                   [10, 11, 12]]], dtype=tf.uint8)
   >>> seed = (1, 2)
-  >>> tf.image.stateless_random_jpeg_quality(x_uint8, 75, 95, seed)
+  >>> tf.image.stateless_random_jpeg_quality(x, 75, 95, seed)
   <tf.Tensor: shape=(2, 2, 3), dtype=uint8, numpy=
   array([[[ 0,  4,  5],
           [ 1,  5,  6]],
@@ -2832,7 +3019,7 @@ def stateless_random_jpeg_quality(image,
 
 @tf_export('image.adjust_jpeg_quality')
 @dispatch.add_dispatch_support
-def adjust_jpeg_quality(image, jpeg_quality, name=None):
+def adjust_jpeg_quality(image, jpeg_quality, dct_method='', name=None):
   """Adjust jpeg encoding quality of an image.
 
   This is a convenience method that converts an image to uint8 representation,
@@ -2841,7 +3028,21 @@ def adjust_jpeg_quality(image, jpeg_quality, name=None):
 
   `jpeg_quality` must be in the interval `[0, 100]`.
 
-  Usage Example:
+  Usage Examples:
+
+  >>> x = [[[0.01, 0.02, 0.03],
+  ...       [0.04, 0.05, 0.06]],
+  ...      [[0.07, 0.08, 0.09],
+  ...       [0.10, 0.11, 0.12]]]
+  >>> x_jpeg = tf.image.adjust_jpeg_quality(x, 75)
+  >>> x_jpeg.numpy()
+  array([[[0.00392157, 0.01960784, 0.03137255],
+          [0.02745098, 0.04313726, 0.05490196]],
+         [[0.05882353, 0.07450981, 0.08627451],
+          [0.08235294, 0.09803922, 0.10980393]]], dtype=float32)
+
+  Note that floating point values are expected to have values in the range
+  [0,1) and values outside this range are clipped.
 
   >>> x = [[[1.0, 2.0, 3.0],
   ...       [4.0, 5.0, 6.0]],
@@ -2854,9 +3055,26 @@ def adjust_jpeg_quality(image, jpeg_quality, name=None):
          [[1., 1., 1.],
           [1., 1., 1.]]], dtype=float32)>
 
+  Note that `jpeg_quality` 100 is still lossy compression.
+
+  >>> x = tf.constant([[[1, 2, 3],
+  ...                   [4, 5, 6]],
+  ...                  [[7, 8, 9],
+  ...                   [10, 11, 12]]], dtype=tf.uint8)
+  >>> tf.image.adjust_jpeg_quality(x, 100)
+  <tf.Tensor: shape(2, 2, 3), dtype=uint8, numpy=
+  array([[[ 0,  1,  3],
+          [ 3,  4,  6]],
+         [[ 6,  7,  9],
+          [ 9, 10, 12]]], dtype=uint8)>
+
   Args:
     image: 3D image. The size of the last dimension must be None, 1 or 3.
     jpeg_quality: Python int or Tensor of type int32. jpeg encoding quality.
+    dct_method: An optional string. Specifies the DCT method to use for JPEG
+      decompression. Currently available options are ["INTEGER_FAST",
+      "INTEGER_ACCURATE"]. Defaults to "" which maps to "INTEGER_FAST",
+      sacrificing image quality for speed.
     name: A name for this operation (optional).
 
   Returns:
@@ -2877,7 +3095,9 @@ def adjust_jpeg_quality(image, jpeg_quality, name=None):
       jpeg_quality = ops.convert_to_tensor(jpeg_quality, dtype=dtypes.int32)
     image = gen_image_ops.encode_jpeg_variable_quality(image, jpeg_quality)
 
-    image = gen_image_ops.decode_jpeg(image, channels=channels)
+    image = gen_image_ops.decode_jpeg(
+        image, channels=channels, dct_method=dct_method
+    )
     return convert_image_dtype(image, orig_dtype, saturate=True)
 
 
@@ -2998,6 +3218,8 @@ def adjust_saturation(image, saturation_factor, name=None):
   converting the images to HSV and multiplying the saturation (S) channel by
   `saturation_factor` and clipping. The images are then converted back to RGB.
 
+  `saturation_factor` must be in the interval `[0, inf)`.
+
   Usage Example:
 
   >>> x = [[[1.0, 2.0, 3.0],
@@ -3072,39 +3294,49 @@ def _is_png(contents, name=None):
     return math_ops.equal(substr, b'\211PN', name=name)
 
 
-tf_export(
+decode_and_crop_jpeg = tf_export(
     'io.decode_and_crop_jpeg',
     'image.decode_and_crop_jpeg',
     v1=['io.decode_and_crop_jpeg', 'image.decode_and_crop_jpeg'])(
         dispatch.add_dispatch_support(gen_image_ops.decode_and_crop_jpeg))
 
-tf_export(
+decode_bmp = tf_export(
     'io.decode_bmp',
     'image.decode_bmp',
     v1=['io.decode_bmp', 'image.decode_bmp'])(
         dispatch.add_dispatch_support(gen_image_ops.decode_bmp))
-tf_export(
+decode_gif = tf_export(
     'io.decode_gif',
     'image.decode_gif',
     v1=['io.decode_gif', 'image.decode_gif'])(
         dispatch.add_dispatch_support(gen_image_ops.decode_gif))
-tf_export(
+decode_jpeg = tf_export(
     'io.decode_jpeg',
     'image.decode_jpeg',
     v1=['io.decode_jpeg', 'image.decode_jpeg'])(
         dispatch.add_dispatch_support(gen_image_ops.decode_jpeg))
-tf_export(
+decode_png = tf_export(
     'io.decode_png',
     'image.decode_png',
     v1=['io.decode_png', 'image.decode_png'])(
         dispatch.add_dispatch_support(gen_image_ops.decode_png))
+decode_webp = tf_export(
+    'io.decode_webp',
+    'image.decode_webp',
+    v1=['io.decode_webp', 'image.decode_webp'],
+)(dispatch.add_dispatch_support(gen_image_ops.decode_web_p))
+decode_jxl = tf_export(
+    'io.decode_jxl',
+    'image.decode_jxl',
+    v1=['io.decode_jxl', 'image.decode_jxl'],
+)(dispatch.add_dispatch_support(gen_image_ops.decode_jxl))
 
-tf_export(
+encode_jpeg = tf_export(
     'io.encode_jpeg',
     'image.encode_jpeg',
     v1=['io.encode_jpeg', 'image.encode_jpeg'])(
         dispatch.add_dispatch_support(gen_image_ops.encode_jpeg))
-tf_export(
+extract_jpeg_shape = tf_export(
     'io.extract_jpeg_shape',
     'image.extract_jpeg_shape',
     v1=['io.extract_jpeg_shape', 'image.extract_jpeg_shape'])(
@@ -3116,8 +3348,8 @@ tf_export(
 def encode_png(image, compression=-1, name=None):
   r"""PNG-encode an image.
 
-  `image` is a 3-D uint8 or uint16 Tensor of shape `[height, width, channels]`
-  where `channels` is:
+  `image` is a rank-N Tensor of type uint8 or uint16 with shape `batch_dims +
+  [height, width, channels]`, where `channels` is:
 
   *   1: for grayscale.
   *   2: for grayscale + alpha.
@@ -3130,21 +3362,72 @@ def encode_png(image, compression=-1, name=None):
 
   Args:
     image: A `Tensor`. Must be one of the following types: `uint8`, `uint16`.
-      3-D with shape `[height, width, channels]`.
+      Rank N >= 3 with shape `batch_dims + [height, width, channels]`.
     compression: An optional `int`. Defaults to `-1`. Compression level.
     name: A name for the operation (optional).
 
   Returns:
     A `Tensor` of type `string`.
   """
-  return gen_image_ops.encode_png(
-      ops.convert_to_tensor(image), compression, name)
+  image = ops.convert_to_tensor(image)
+  image = _AssertAtLeast3DImage(image)
+  return gen_image_ops.encode_png(image, compression, name)
+
+
+@tf_export(
+    'io.encode_jxl',
+    'image.encode_jxl',
+    v1=['io.encode_jxl', 'image.encode_jxl'],
+)
+@dispatch.add_dispatch_support
+def encode_jxl(image, quality=95.0, effort=7, name=None):
+  r"""JPEG XL-encode an image.
+
+  `image` is a rank-N Tensor of type uint8 or uint16 with shape `batch_dims +
+  [height, width, channels]`, where `channels` is:
+
+  *   1: for grayscale.
+  *   3: for RGB.
+  *   4: for RGBA.
+
+  `quality` is a JPEG-style quality factor in `[0.0, 100.0]`. It is mapped
+  internally to a JPEG XL Butteraugli distance using the same mapping as
+  `cjxl -q`: `100.0` encodes losslessly, `95.0` (the default) is high-quality
+  lossy encoding matching `encode_jpeg`, `90.0` is visually lossless, and
+  lower values compress more. Quality factors are not comparable across
+  codecs, so a given `quality` will not produce the same file size or visual
+  quality as the same value passed to `tf.io.encode_jpeg`.
+
+  The `effort` parameter (1 to 9) controls compression effort (default 7).
+
+  Args:
+    image: A `Tensor`. Must be one of the following types: `uint8`, `uint16`.
+      Rank N >= 3 with shape `batch_dims + [height, width, channels]`.
+    quality: An optional `float`. Defaults to `95.0`. Quality factor in `[0.0,
+      100.0]`; `100.0` encodes losslessly, `95.0` is high-quality lossy, and
+      lower values compress more.
+    effort: An optional `int`. Defaults to `7`. Effort setting from 1 (fastest)
+      to 9 (slowest, best compression).
+    name: A name for the operation (optional).
+
+  Returns:
+    A `Tensor` of type `string`.
+  """
+  image = ops.convert_to_tensor(image)
+  image = _AssertAtLeast3DImage(image)
+  return gen_image_ops.encode_jxl(
+      image,
+      quality=quality,
+      effort=effort,
+      name=name,
+  )
 
 
 @tf_export(
     'io.decode_image',
     'image.decode_image',
-    v1=['io.decode_image', 'image.decode_image'])
+    v1=['io.decode_image', 'image.decode_image'],
+)
 @dispatch.add_dispatch_support
 def decode_image(contents,
                  channels=None,
@@ -3153,17 +3436,18 @@ def decode_image(contents,
                  expand_animations=True):
   """Function for `decode_bmp`, `decode_gif`, `decode_jpeg`, and `decode_png`.
 
-  Detects whether an image is a BMP, GIF, JPEG, or PNG, and performs the
-  appropriate operation to convert the input bytes `string` into a `Tensor`
-  of type `dtype`.
+  Detects whether an image is a BMP, GIF, JPEG, JPEG XL, WebP or PNG, and
+  performs the appropriate operation to convert the input bytes `string` into a
+  `Tensor` of type `dtype`.
 
-  Note: `decode_gif` returns a 4-D array `[num_frames, height, width, 3]`, as
-  opposed to `decode_bmp`, `decode_jpeg` and `decode_png`, which return 3-D
-  arrays `[height, width, num_channels]`. Make sure to take this into account
-  when constructing your graph if you are intermixing GIF files with BMP, JPEG,
-  and/or PNG files. Alternately, set the `expand_animations` argument of this
-  function to `False`, in which case the op will return 3-dimensional tensors
-  and will truncate animated GIF files to the first frame.
+  Note: `decode_gif` and `decode_webp` return a 4-D array of
+  `[num_frames, height, width, 3]`, as opposed to the other image
+  formats which always return 3-D arrays of the form `[height, width,
+  num_channels]`. Make sure to take this into account when
+  constructing your graph if you are intermixing animation with static
+  images. Alternately, set the `expand_animations` argument of this
+  function to `False`, in which case the op will return 3-dimensional
+  tensors and will truncate animations to the first frame.
 
   NOTE: If the first frame of an animated GIF does not occupy the entire
   canvas (maximum frame width x maximum frame height), then it fills the
@@ -3179,10 +3463,9 @@ def decode_image(contents,
     name: A name for the operation (optional)
     expand_animations: An optional `bool`. Defaults to `True`. Controls the
       shape of the returned op's output. If `True`, the returned op will produce
-      a 3-D tensor for PNG, JPEG, and BMP files; and a 4-D tensor for all GIFs,
-      whether animated or not. If, `False`, the returned op will produce a 3-D
-      tensor for all file types and will truncate animated GIFs to the first
-      frame.
+      a 4-D tensor for all GIFs and WebP images, animated or not, and a 3-D
+      tensor in all other cases. If, `False`, the returned op will produce a 3-D
+      tensor for all file types and will truncate animations to the first frame.
 
   Returns:
     `Tensor` with type `dtype` and a 3- or 4-dimensional shape, depending on
@@ -3193,21 +3476,31 @@ def decode_image(contents,
   """
   with ops.name_scope(name, 'decode_image'):
     channels = 0 if channels is None else channels
+    original_dtype = dtype
     if dtype not in [dtypes.float32, dtypes.uint8, dtypes.uint16]:
-      dest_dtype = dtype
-      dtype = dtypes.uint16
-      return convert_image_dtype(
-          gen_image_ops.decode_image(
-              contents=contents,
-              channels=channels,
-              expand_animations=expand_animations,
-              dtype=dtype), dest_dtype)
+      dtype_for_decode = dtypes.uint16
     else:
-      return gen_image_ops.decode_image(
-          contents=contents,
-          channels=channels,
-          expand_animations=expand_animations,
-          dtype=dtype)
+      dtype_for_decode = dtype
+
+    image = gen_image_ops.decode_image(
+        contents=contents,
+        channels=channels,
+        expand_animations=expand_animations,
+        dtype=dtype_for_decode,
+    )
+
+    if dtype_for_decode != original_dtype:
+      image = convert_image_dtype(image, original_dtype)
+
+    if not expand_animations:
+      # If not expanding animations, the output is always 3D.
+      if channels != 0:
+        image.set_shape([None, None, channels])
+      else:
+        # We can still set the rank, which is what matters for the resize op.
+        image.set_shape([None, None, None])
+
+    return image
 
 
 @tf_export('image.total_variation')
@@ -3246,6 +3539,7 @@ def total_variation(images, name=None):
   """
 
   with ops.name_scope(name, 'total_variation'):
+    images = ops.convert_to_tensor(images, name='images')
     ndims = images.get_shape().ndims
 
     if ndims == 3:
@@ -3381,8 +3675,19 @@ def sample_distorted_bounding_box_v2(image_size,
     bboxes: A `Tensor` of type `float32`. 3-D with shape `[1, 1, 4]` containing
     the distorted bounding box.
     Provide as input to `tf.image.draw_bounding_boxes`.
+
+  Raises:
+    ValueError: If no seed is specified and op determinism is enabled.
   """
-  seed1, seed2 = random_seed.get_seed(seed) if seed else (0, 0)
+  if seed:
+    seed1, seed2 = random_seed.get_seed(seed)
+  else:
+    if config.is_op_determinism_enabled():
+      raise ValueError(
+          f'tf.image.sample_distorted_bounding_box requires a non-zero seed to '
+          f'be passed in when determinism is enabled, but got seed={seed}. '
+          f'Please pass in a non-zero seed, e.g. by passing "seed=1".')
+    seed1, seed2 = (0, 0)
   with ops.name_scope(name, 'sample_distorted_bounding_box'):
     return gen_image_ops.sample_distorted_bounding_box_v2(
         image_size,
@@ -3621,7 +3926,16 @@ def sample_distorted_bounding_box(image_size,
     bboxes: A `Tensor` of type `float32`. 3-D with shape `[1, 1, 4]` containing
     the distorted bounding box.
       Provide as input to `tf.image.draw_bounding_boxes`.
+
+  Raises:
+    ValueError: If no seed is specified and op determinism is enabled.
   """
+  if not seed and not seed2 and config.is_op_determinism_enabled():
+    raise ValueError(
+        f'tf.compat.v1.image.sample_distorted_bounding_box requires "seed" or '
+        f'"seed2" to be non-zero when determinism is enabled. Please pass in '
+        f'a non-zero seed, e.g. by passing "seed=1". Got seed={seed} and '
+        f"seed2={seed2}")
   with ops.name_scope(name, 'sample_distorted_bounding_box'):
     return gen_image_ops.sample_distorted_bounding_box_v2(
         image_size,
@@ -3725,14 +4039,17 @@ def non_max_suppression_with_scores(boxes,
   Bodla et al, https://arxiv.org/abs/1704.04503) where boxes reduce the score
   of other overlapping boxes instead of directly causing them to be pruned.
   Consequently, in contrast to `tf.image.non_max_suppression`,
-  `tf.image.non_max_suppression_padded` returns the new scores of each input box
-  in the second output, `selected_scores`.
+  `tf.image.non_max_suppression_with_scores` returns the new scores of each
+  input box in the second output, `selected_scores`.
 
   To enable this Soft-NMS mode, set the `soft_nms_sigma` parameter to be
   larger than 0.  When `soft_nms_sigma` equals 0, the behavior of
-  `tf.image.non_max_suppression_padded` is identical to that of
+  `tf.image.non_max_suppression_with_scores` is identical to that of
   `tf.image.non_max_suppression` (except for the extra output) both in function
   and in running time.
+
+  Note that when `soft_nms_sigma` > 0, Soft-NMS is performed and `iou_threshold`
+  is ignored. `iou_threshold` is only used for standard NMS.
 
   Args:
     boxes: A 2-D float `Tensor` of shape `[num_boxes, 4]`.
@@ -3854,6 +4171,7 @@ def rgb_to_yiq(images):
     images: tensor with the same shape as `images`.
   """
   images = ops.convert_to_tensor(images, name='images')
+  images = _AssertAtLeast1DImage(images)
   kernel = ops.convert_to_tensor(
       _rgb_to_yiq_kernel, dtype=images.dtype, name='kernel')
   ndims = images.get_shape().ndims
@@ -3882,6 +4200,7 @@ def yiq_to_rgb(images):
     images: tensor with the same shape as `images`.
   """
   images = ops.convert_to_tensor(images, name='images')
+  images = _AssertAtLeast1DImage(images)
   kernel = ops.convert_to_tensor(
       _yiq_to_rgb_kernel, dtype=images.dtype, name='kernel')
   ndims = images.get_shape().ndims
@@ -3913,6 +4232,7 @@ def rgb_to_yuv(images):
     images: tensor with the same shape as `images`.
   """
   images = ops.convert_to_tensor(images, name='images')
+  images = _AssertAtLeast1DImage(images)
   kernel = ops.convert_to_tensor(
       _rgb_to_yuv_kernel, dtype=images.dtype, name='kernel')
   ndims = images.get_shape().ndims
@@ -3966,6 +4286,7 @@ def yuv_to_rgb(images):
     images: tensor with the same shape as `images`.
   """
   images = ops.convert_to_tensor(images, name='images')
+  images = _AssertAtLeast1DImage(images)
   kernel = ops.convert_to_tensor(
       _yuv_to_rgb_kernel, dtype=images.dtype, name='kernel')
   ndims = images.get_shape().ndims
@@ -4006,11 +4327,11 @@ def _verify_compatible_image_shapes(img1, img2):
   # TODO(sjhwang): Check if shape1[:-3] and shape2[:-3] are broadcastable.
   checks = []
   checks.append(
-      control_flow_ops.Assert(
+      control_flow_assert.Assert(
           math_ops.greater_equal(array_ops.size(shape1), 3), [shape1, shape2],
           summarize=10))
   checks.append(
-      control_flow_ops.Assert(
+      control_flow_assert.Assert(
           math_ops.reduce_all(math_ops.equal(shape1[-3:], shape2[-3:])),
           [shape1, shape2],
           summarize=10))
@@ -4055,21 +4376,33 @@ def psnr(a, b, max_val, name=None):
     and shape [batch_size, 1].
   """
   with ops.name_scope(name, 'PSNR', [a, b]):
+    # Convert first: max_val is cast to the dtype of `a` below, and the shape
+    # check reads their static shapes, neither of which an unconverted value
+    # has.
+    a = ops.convert_to_tensor(a, name='a')
+    b = ops.convert_to_tensor(b, name='b')
+
     # Need to convert the images to float32.  Scale max_val accordingly so that
     # PSNR is computed correctly.
     max_val = math_ops.cast(max_val, a.dtype)
     max_val = convert_image_dtype(max_val, dtypes.float32)
     a = convert_image_dtype(a, dtypes.float32)
     b = convert_image_dtype(b, dtypes.float32)
-    mse = math_ops.reduce_mean(math_ops.squared_difference(a, b), [-3, -2, -1])
-    psnr_val = math_ops.subtract(
-        20 * math_ops.log(max_val) / math_ops.log(10.0),
-        np.float32(10 / np.log(10)) * math_ops.log(mse),
-        name='psnr')
 
+    # Check the shapes before reducing, so a rank below 3 is reported as such
+    # rather than surfacing from the reduction. This has to come after the
+    # conversions above: the check compares the two shapes with an op that
+    # needs both images to have the same dtype.
     _, _, checks = _verify_compatible_image_shapes(a, b)
     with ops.control_dependencies(checks):
-      return array_ops.identity(psnr_val)
+      a = array_ops.identity(a)
+
+    mse = math_ops.reduce_mean(math_ops.squared_difference(a, b), [-3, -2, -1])
+    return math_ops.subtract(
+        20 * math_ops.log(max_val) / math_ops.log(10.0),
+        np.float32(10 / np.log(10)) * math_ops.log(mse),
+        name='psnr',
+    )
 
 
 def _ssim_helper(x, y, reducer, max_val, compensation=1.0, k1=0.01, k2=0.03):
@@ -4153,7 +4486,8 @@ def _ssim_per_channel(img1,
                       filter_size=11,
                       filter_sigma=1.5,
                       k1=0.01,
-                      k2=0.03):
+                      k2=0.03,
+                      return_index_map=False):
   """Computes SSIM index between img1 and img2 per color channel.
 
   This function matches the standard SSIM implementation from:
@@ -4175,6 +4509,7 @@ def _ssim_per_channel(img1,
     k1: Default value 0.01
     k2: Default value 0.03 (SSIM is less sensitivity to K2 for lower values, so
       it would be better if we took the values in the range of 0 < K2 < 0.4).
+    return_index_map: If True returns local SSIM map instead of the global mean.
 
   Returns:
     A pair of tensors containing and channel-wise SSIM and contrast-structure
@@ -4185,12 +4520,12 @@ def _ssim_per_channel(img1,
 
   shape1, shape2 = array_ops.shape_n([img1, img2])
   checks = [
-      control_flow_ops.Assert(
+      control_flow_assert.Assert(
           math_ops.reduce_all(
               math_ops.greater_equal(shape1[-3:-1], filter_size)),
           [shape1, filter_size],
           summarize=8),
-      control_flow_ops.Assert(
+      control_flow_assert.Assert(
           math_ops.reduce_all(
               math_ops.greater_equal(shape2[-3:-1], filter_size)),
           [shape2, filter_size],
@@ -4215,7 +4550,8 @@ def _ssim_per_channel(img1,
   def reducer(x):
     shape = array_ops.shape(x)
     x = array_ops.reshape(x, shape=array_ops.concat([[-1], shape[-3:]], 0))
-    y = nn.depthwise_conv2d(x, kernel, strides=[1, 1, 1, 1], padding='VALID')
+    y = nn_impl.depthwise_conv2d(
+        x, kernel, strides=[1, 1, 1, 1], padding='VALID')
     return array_ops.reshape(
         y, array_ops.concat([shape[:-3], array_ops.shape(y)[1:]], 0))
 
@@ -4223,9 +4559,12 @@ def _ssim_per_channel(img1,
                                k2)
 
   # Average over the second and the third from the last: height, width.
-  axes = constant_op.constant([-3, -2], dtype=dtypes.int32)
-  ssim_val = math_ops.reduce_mean(luminance * cs, axes)
-  cs = math_ops.reduce_mean(cs, axes)
+  if return_index_map:
+    ssim_val = luminance * cs
+  else:
+    axes = constant_op.constant([-3, -2], dtype=dtypes.int32)
+    ssim_val = math_ops.reduce_mean(luminance * cs, axes)
+    cs = math_ops.reduce_mean(cs, axes)
   return ssim_val, cs
 
 
@@ -4237,7 +4576,8 @@ def ssim(img1,
          filter_size=11,
          filter_sigma=1.5,
          k1=0.01,
-         k2=0.03):
+         k2=0.03,
+         return_index_map=False):
   """Computes SSIM index between img1 and img2.
 
   This function is based on the standard SSIM implementation from:
@@ -4290,11 +4630,15 @@ def ssim(img1,
     k1: Default value 0.01
     k2: Default value 0.03 (SSIM is less sensitivity to K2 for lower values, so
       it would be better if we took the values in the range of 0 < K2 < 0.4).
+    return_index_map: If True returns local SSIM map instead of the global mean.
 
   Returns:
-    A tensor containing an SSIM value for each image in batch.  Returned SSIM
-    values are in range (-1, 1], when pixel values are non-negative. Returns
-    a tensor with shape: broadcast(img1.shape[:-3], img2.shape[:-3]).
+    A tensor containing an SSIM value for each image in batch or a tensor
+    containing an SSIM value for each pixel for each image in batch if
+    return_index_map is True. Returned SSIM values are in range (-1, 1], when
+    pixel values are non-negative. Returns a tensor with shape:
+    broadcast(img1.shape[:-3], img2.shape[:-3]) or broadcast(img1.shape[:-1],
+    img2.shape[:-1]).
   """
   with ops.name_scope(None, 'SSIM', [img1, img2]):
     # Convert to tensor if needed.
@@ -4312,7 +4656,8 @@ def ssim(img1,
     img1 = convert_image_dtype(img1, dtypes.float32)
     img2 = convert_image_dtype(img2, dtypes.float32)
     ssim_per_channel, _ = _ssim_per_channel(img1, img2, max_val, filter_size,
-                                            filter_sigma, k1, k2)
+                                            filter_sigma, k1, k2,
+                                            return_index_map)
     # Compute average over color channels.
     return math_ops.reduce_mean(ssim_per_channel, [-1])
 
@@ -4412,9 +4757,9 @@ def ssim_multiscale(img1,
           remainder = tails[0] % divisor_tensor
           need_padding = math_ops.reduce_any(math_ops.not_equal(remainder, 0))
           # pylint: disable=cell-var-from-loop
-          padded = control_flow_ops.cond(need_padding,
-                                         lambda: do_pad(flat_imgs, remainder),
-                                         lambda: flat_imgs)
+          padded = tf_cond.cond(need_padding,
+                                lambda: do_pad(flat_imgs, remainder),
+                                lambda: flat_imgs)
           # pylint: enable=cell-var-from-loop
 
           downscaled = [
@@ -4441,7 +4786,7 @@ def ssim_multiscale(img1,
     # Remove the cs score for the last scale. In the MS-SSIM calculation,
     # we use the l(p) at the highest scale. l(p) * cs(p) is ssim(p).
     mcs.pop()  # Remove the cs score for the last scale.
-    mcs_and_ssim = array_ops.stack(
+    mcs_and_ssim = array_ops_stack.stack(
         mcs + [nn_ops.relu(ssim_per_channel)], axis=-1)
     # Take weighted geometric mean across the scale axis.
     ms_ssim = math_ops.reduce_prod(
@@ -4503,21 +4848,22 @@ def image_gradients(image):
   Raises:
     ValueError: If `image` is not a 4D tensor.
   """
+  image = ops.convert_to_tensor(image, name='image')
   if image.get_shape().ndims != 4:
     raise ValueError('image_gradients expects a 4D tensor '
                      '[batch_size, h, w, d], not {}.'.format(image.get_shape()))
   image_shape = array_ops.shape(image)
-  batch_size, height, width, depth = array_ops.unstack(image_shape)
+  batch_size, height, width, depth = array_ops_stack.unstack(image_shape)
   dy = image[:, 1:, :, :] - image[:, :-1, :, :]
   dx = image[:, :, 1:, :] - image[:, :, :-1, :]
 
   # Return tensors with same size as original image by concatenating
   # zeros. Place the gradient [I(x+1,y) - I(x,y)] on the base pixel (x, y).
-  shape = array_ops.stack([batch_size, 1, width, depth])
+  shape = array_ops_stack.stack([batch_size, 1, width, depth])
   dy = array_ops.concat([dy, array_ops.zeros(shape, image.dtype)], 1)
   dy = array_ops.reshape(dy, image_shape)
 
-  shape = array_ops.stack([batch_size, height, 1, depth])
+  shape = array_ops_stack.stack([batch_size, height, 1, depth])
   dx = array_ops.concat([dx, array_ops.zeros(shape, image.dtype)], 2)
   dx = array_ops.reshape(dx, image_shape)
 
@@ -4566,12 +4912,13 @@ def sobel_edges(image):
     [dy[1], dx[1]], ..., [dy[d-1], dx[d-1]]] calculated using the Sobel filter.
   """
   # Define vertical and horizontal Sobel filters.
+  image = ops.convert_to_tensor(image, name='image')
   static_image_shape = image.get_shape()
   image_shape = array_ops.shape(image)
   kernels = [[[-1, -2, -1], [0, 0, 0], [1, 2, 1]],
              [[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]]]
   num_kernels = len(kernels)
-  kernels = np.transpose(np.asarray(kernels), (1, 2, 0))
+  kernels = np.transpose(numpy_compat.np_asarray(kernels), (1, 2, 0))
   kernels = np.expand_dims(kernels, -2)
   kernels_tf = constant_op.constant(kernels, dtype=image.dtype)
 
@@ -4584,7 +4931,7 @@ def sobel_edges(image):
 
   # Output tensor has shape [batch_size, h, w, d * num_kernels].
   strides = [1, 1, 1, 1]
-  output = nn.depthwise_conv2d(padded, kernels_tf, strides, 'VALID')
+  output = nn_impl.depthwise_conv2d(padded, kernels_tf, strides, 'VALID')
 
   # Reshape to [batch_size, h, w, d, num_kernels].
   shape = array_ops.concat([image_shape, [num_kernels]], 0)
@@ -4593,6 +4940,14 @@ def sobel_edges(image):
   return output
 
 
+@tf_export(v1=['image.resize_bicubic'])
+@dispatch.add_dispatch_support
+@deprecation.deprecated(
+    date=None,
+    instructions=(
+        'Use `tf.image.resize(...method=ResizeMethod.BICUBIC...)` instead.'
+    ),
+)
 def resize_bicubic(images,
                    size,
                    align_corners=False,
@@ -4606,6 +4961,14 @@ def resize_bicubic(images,
       name=name)
 
 
+@tf_export(v1=['image.resize_bilinear'])
+@dispatch.add_dispatch_support
+@deprecation.deprecated(
+    date=None,
+    instructions=(
+        'Use `tf.image.resize(...method=ResizeMethod.BILINEAR...)` instead.'
+    ),
+)
 def resize_bilinear(images,
                     size,
                     align_corners=False,
@@ -4619,6 +4982,15 @@ def resize_bilinear(images,
       name=name)
 
 
+@tf_export(v1=['image.resize_nearest_neighbor'])
+@dispatch.add_dispatch_support
+@deprecation.deprecated(
+    date=None,
+    instructions=(
+        'Use `tf.image.resize(...method=ResizeMethod.NEAREST_NEIGHBOR...)` '
+        'instead.'
+    ),
+)
 def resize_nearest_neighbor(images,
                             size,
                             align_corners=False,
@@ -4636,32 +5008,11 @@ resize_area_deprecation = deprecation.deprecated(
     date=None,
     instructions=(
         'Use `tf.image.resize(...method=ResizeMethod.AREA...)` instead.'))
-tf_export(v1=['image.resize_area'])(
+resize_area = tf_export(v1=['image.resize_area'])(
     resize_area_deprecation(
-        dispatch.add_dispatch_support(gen_image_ops.resize_area)))
-
-resize_bicubic_deprecation = deprecation.deprecated(
-    date=None,
-    instructions=(
-        'Use `tf.image.resize(...method=ResizeMethod.BICUBIC...)` instead.'))
-tf_export(v1=['image.resize_bicubic'])(
-    dispatch.add_dispatch_support(resize_bicubic_deprecation(resize_bicubic)))
-
-resize_bilinear_deprecation = deprecation.deprecated(
-    date=None,
-    instructions=(
-        'Use `tf.image.resize(...method=ResizeMethod.BILINEAR...)` instead.'))
-tf_export(v1=['image.resize_bilinear'])(
-    dispatch.add_dispatch_support(resize_bilinear_deprecation(resize_bilinear)))
-
-resize_nearest_neighbor_deprecation = deprecation.deprecated(
-    date=None,
-    instructions=(
-        'Use `tf.image.resize(...method=ResizeMethod.NEAREST_NEIGHBOR...)` '
-        'instead.'))
-tf_export(v1=['image.resize_nearest_neighbor'])(
-    dispatch.add_dispatch_support(
-        resize_nearest_neighbor_deprecation(resize_nearest_neighbor)))
+        dispatch.add_dispatch_support(gen_image_ops.resize_area)
+    )
+)
 
 
 @tf_export('image.crop_and_resize', v1=[])
@@ -4679,7 +5030,8 @@ def crop_and_resize_v2(image,
   sampling or nearest neighbor sampling (possibly with aspect ratio change) to a
   common output size specified by `crop_size`. This is more general than the
   `crop_to_bounding_box` op which extracts a fixed size slice from the input
-  image and does not allow resizing or aspect ratio change.
+  image and does not allow resizing or aspect ratio change. The crops occur
+  first and then the resize.
 
   Returns a tensor with `crops` from the input `image` at positions defined at
   the bounding box locations in `boxes`. The cropped boxes are all resized (with
@@ -4724,25 +5076,49 @@ def crop_and_resize_v2(image,
   Returns:
     A 4-D tensor of shape `[num_boxes, crop_height, crop_width, depth]`.
 
-  Example:
+  Usage example:
 
-  ```python
-  import tensorflow as tf
-  BATCH_SIZE = 1
-  NUM_BOXES = 5
-  IMAGE_HEIGHT = 256
-  IMAGE_WIDTH = 256
-  CHANNELS = 3
-  CROP_SIZE = (24, 24)
+  >>> BATCH_SIZE = 1
+  >>> NUM_BOXES = 5
+  >>> IMAGE_HEIGHT = 256
+  >>> IMAGE_WIDTH = 256
+  >>> CHANNELS = 3
+  >>> CROP_SIZE = (24, 24)
 
-  image = tf.random.normal(shape=(BATCH_SIZE, IMAGE_HEIGHT, IMAGE_WIDTH,
-  CHANNELS) )
-  boxes = tf.random.uniform(shape=(NUM_BOXES, 4))
-  box_indices = tf.random.uniform(shape=(NUM_BOXES,), minval=0,
-  maxval=BATCH_SIZE, dtype=tf.int32)
-  output = tf.image.crop_and_resize(image, boxes, box_indices, CROP_SIZE)
-  output.shape  #=> (5, 24, 24, 3)
-  ```
+  >>> image = tf.random.normal(shape=(
+  ...   BATCH_SIZE, IMAGE_HEIGHT, IMAGE_WIDTH, CHANNELS) )
+  >>> boxes = tf.random.uniform(shape=(NUM_BOXES, 4))
+  >>> box_indices = tf.random.uniform(shape=(NUM_BOXES,), minval=0,
+  ...   maxval=BATCH_SIZE, dtype=tf.int32)
+  >>> output = tf.image.crop_and_resize(image, boxes, box_indices, CROP_SIZE)
+  >>> output.shape
+  TensorShape([5, 24, 24, 3])
+
+  Example with linear interpolation:
+
+  >>> image = np.arange(0, 18, 2).astype('float32').reshape(3, 3)
+  >>> result = tf.image.crop_and_resize(
+  ...   image[None, :, :, None],
+  ...   np.asarray([[0.5,0.5,1,1]]), [0], [3, 3], method='bilinear')
+  >>> result[0][:, :, 0]
+  <tf.Tensor: shape=(3, 3), dtype=float32, numpy=
+    array([[ 8.,  9., 10.],
+           [11., 12., 13.],
+           [14., 15., 16.]], dtype=float32)>
+
+  Example with nearest interpolation:
+
+  >>> image = np.arange(0, 18, 2).astype('float32').reshape(3, 3)
+  >>> result = tf.image.crop_and_resize(
+  ...   image[None, :, :, None],
+  ...   np.asarray([[0.5,0.5,1,1]]), [0], [3, 3], method='nearest')
+  >>> result[0][:, :, 0]
+  <tf.Tensor: shape=(3, 3), dtype=float32, numpy=
+    array([[ 8., 10., 10.],
+           [14., 16., 16.],
+           [14., 16., 16.]], dtype=float32)>
+
+
   """
   return gen_image_ops.crop_and_resize(image, boxes, box_indices, crop_size,
                                        method, extrapolation_value, name)
@@ -5083,13 +5459,13 @@ def _self_suppression(iou, _, iou_sum, iou_threshold):
 
   Args:
     iou: a tensor of shape [batch_size, num_boxes_with_padding] representing
-    intersection over union.
+      intersection over union.
     iou_sum: a scalar tensor.
     iou_threshold: a scalar tensor.
 
   Returns:
     iou_suppressed: a tensor of shape [batch_size, num_boxes_with_padding].
-    iou_diff: a scalar tensor representing whether any box is supressed in
+    iou_diff: a scalar tensor representing whether any box is suppressed in
       this step.
     iou_sum_new: a scalar tensor of shape [batch_size] that represents
       the iou sum after suppression.
@@ -5120,8 +5496,8 @@ def _cross_suppression(boxes, box_slice, iou_threshold, inner_idx, tile_size):
     boxes: a tensor of shape [batch_size, num_boxes_with_padding, 4]
     box_slice: a tensor of shape [batch_size, tile_size, 4]
     iou_threshold: a scalar tensor
-    inner_idx: a scalar tensor representing the tile index of the tile
-      that is used to supress box_slice
+    inner_idx: a scalar tensor representing the tile index of the tile that is
+      used to suppress box_slice
     tile_size: an integer representing the number of boxes in a tile
 
   Returns:
@@ -5170,10 +5546,11 @@ def _suppression_loop_body(boxes, iou_threshold, output_size, idx, tile_size):
     # Iterates over tiles that can possibly suppress the current tile.
     box_slice = array_ops.slice(boxes, [0, idx * tile_size, 0],
                                 [batch_size, tile_size, 4])
-    _, box_slice, _, _ = control_flow_ops.while_loop(
+    _, box_slice, _, _ = while_loop.while_loop(
         lambda _boxes, _box_slice, _threshold, inner_idx: inner_idx < idx,
         cross_suppression_func,
-        [boxes, box_slice, iou_threshold, constant_op.constant(0)])
+        [boxes, box_slice, iou_threshold,
+         constant_op.constant(0)])
 
     # Iterates over the current tile to compute self-suppression.
     iou = _bbox_overlap(box_slice, box_slice)
@@ -5183,11 +5560,13 @@ def _suppression_loop_body(boxes, iou_threshold, output_size, idx, tile_size):
                 math_ops.range(tile_size), [-1, 1]), 0)
     iou *= math_ops.cast(
         math_ops.logical_and(mask, iou >= iou_threshold), iou.dtype)
-    suppressed_iou, _, _, _ = control_flow_ops.while_loop(
+    suppressed_iou, _, _, _ = while_loop.while_loop(
         lambda _iou, loop_condition, _iou_sum, _: loop_condition,
-        _self_suppression,
-        [iou, constant_op.constant(True), math_ops.reduce_sum(iou, [1, 2]),
-         iou_threshold])
+        _self_suppression, [
+            iou,
+            constant_op.constant(True),
+            math_ops.reduce_sum(iou, [1, 2]), iou_threshold
+        ])
     suppressed_box = math_ops.reduce_sum(suppressed_iou, 1) > 0
     box_slice *= array_ops.expand_dims(
         1.0 - math_ops.cast(suppressed_box, box_slice.dtype), 2)
@@ -5323,7 +5702,7 @@ def non_max_suppression_padded_v2(boxes,
   (i.e., lying in the interval `[0, 1]`) or absolute. The bounding box
   coordinates are cannonicalized to `[y_min, x_min, y_max, x_max]`,
   where `(y_min, x_min)` and `(y_max, x_mas)` are the coordinates of the lower
-  left and upper right corner. User may indiciate the input box coordinates are
+  left and upper right corner. User may indicate the input box coordinates are
   already canonicalized to eliminate redundant work by setting
   canonicalized_coordinates to `True`. Note that this algorithm is agnostic to
   where the origin is in the coordinate system. Note that this algorithm is
@@ -5384,9 +5763,8 @@ def non_max_suppression_padded_v2(boxes,
     boxes: a tensor of rank 2 or higher with a shape of [..., num_boxes, 4].
       Dimensions except the last two are batch dimensions. The last dimension
       represents box coordinates, given as [y_1, x_1, y_2, x_2]. The coordinates
-      on each dimension can be given in any order
-      (see also `canonicalized_coordinates`) but must describe a box with
-      a positive area.
+      on each dimension can be given in any order (see also
+      `canonicalized_coordinates`) but must describe a box with a positive area.
     scores: a tensor of rank 1 or higher with a shape of [..., num_boxes].
     max_output_size: a scalar integer `Tensor` representing the maximum number
       of boxes to be selected by non max suppression.
@@ -5394,15 +5772,16 @@ def non_max_suppression_padded_v2(boxes,
       overlap too much with respect to IoU (intersection over union).
     score_threshold: a float representing the threshold for box scores. Boxes
       with a score that is not larger than this threshold will be suppressed.
-    sorted_input: a boolean indicating whether the input boxes and scores
-      are sorted in descending order by the score.
-    canonicalized_coordinates: if box coordinates are given as
-    `[y_min, x_min, y_max, x_max]`, setting to True eliminate redundant
-     computation to canonicalize box coordinates.
-    tile_size: an integer representing the number of boxes in a tile, i.e.,
-      the maximum number of boxes per image that can be used to suppress other
-      boxes in parallel; larger tile_size means larger parallelism and
-      potentially more redundant work.
+    sorted_input: a boolean indicating whether the input boxes and scores are
+      sorted in descending order by the score.
+    canonicalized_coordinates: if box coordinates are given as `[y_min, x_min,
+      y_max, x_max]`, setting to True eliminate redundant computation to
+      canonicalize box coordinates.
+    tile_size: an integer representing the number of boxes in a tile, i.e., the
+      maximum number of boxes per image that can be used to suppress other boxes
+      in parallel; larger tile_size means larger parallelism and potentially
+      more redundant work.
+
   Returns:
     idx: a tensor with a shape of [..., num_boxes] representing the
       indices selected by non-max suppression. The leading dimensions
@@ -5431,19 +5810,14 @@ def non_max_suppression_padded_v2(boxes,
         representing the index of the scores in a sorted descending order.
     """
     with ops.name_scope('sort_scores_and_boxes'):
-      batch_size = array_ops.shape(boxes)[0]
-      num_boxes = array_ops.shape(boxes)[1]
       sorted_scores_indices = sort_ops.argsort(
           scores, axis=1, direction='DESCENDING')
-      index_offsets = math_ops.range(batch_size) * num_boxes
-      indices = array_ops.reshape(
-          sorted_scores_indices + array_ops.expand_dims(index_offsets, 1), [-1])
-      sorted_scores = array_ops.reshape(
-          array_ops.gather(array_ops.reshape(scores, [-1]), indices),
-          [batch_size, -1])
-      sorted_boxes = array_ops.reshape(
-          array_ops.gather(array_ops.reshape(boxes, [-1, 4]), indices),
-          [batch_size, -1, 4])
+      sorted_scores = array_ops.gather(
+          scores, sorted_scores_indices, axis=1, batch_dims=1
+      )
+      sorted_boxes = array_ops.gather(
+          boxes, sorted_scores_indices, axis=1, batch_dims=1
+      )
     return sorted_scores, sorted_boxes, sorted_scores_indices
 
   batch_dims = array_ops.shape(boxes)[:-2]
@@ -5465,13 +5839,18 @@ def non_max_suppression_padded_v2(boxes,
           value=boxes, num_or_size_splits=4, axis=2)
       y_1_is_min = math_ops.reduce_all(
           math_ops.less_equal(y_1[0, 0, 0], y_2[0, 0, 0]))
-      y_min, y_max = control_flow_ops.cond(
+      y_min, y_max = tf_cond.cond(
           y_1_is_min, lambda: (y_1, y_2), lambda: (y_2, y_1))
       x_1_is_min = math_ops.reduce_all(
           math_ops.less_equal(x_1[0, 0, 0], x_2[0, 0, 0]))
-      x_min, x_max = control_flow_ops.cond(
+      x_min, x_max = tf_cond.cond(
           x_1_is_min, lambda: (x_1, x_2), lambda: (x_2, x_1))
       boxes = array_ops.concat([y_min, x_min, y_max, x_max], axis=2)
+  # TODO(@bhack): https://github.com/tensorflow/tensorflow/issues/56089
+  # this will be required after deprecation
+  # else:
+  #  y_1, x_1, y_2, x_2 = array_ops.split(
+  #      value=boxes, num_or_size_splits=4, axis=2)
 
   if not sorted_input:
     scores, boxes, sorted_indices = _sort_scores_and_boxes(scores, boxes)
@@ -5500,7 +5879,7 @@ def non_max_suppression_padded_v2(boxes,
     return _suppression_loop_body(
         boxes, iou_threshold, output_size, idx, tile_size)
 
-  selected_boxes, _, output_size, _ = control_flow_ops.while_loop(
+  selected_boxes, _, output_size, _ = while_loop.while_loop(
       _loop_cond,
       suppression_loop_body,
       [

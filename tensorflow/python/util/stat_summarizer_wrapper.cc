@@ -13,18 +13,18 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include <memory>
+#include <string>
 
-#include "absl/memory/memory.h"
-#include "pybind11/pybind11.h"
-#include "pybind11/pytypes.h"
+#include "pybind11/pybind11.h"  // from @pybind11
+#include "pybind11/pytypes.h"  // from @pybind11
+#include "xla/tsl/util/stat_summarizer_options.h"
 #include "tensorflow/core/framework/graph.pb.h"
 #include "tensorflow/core/framework/step_stats.pb.h"
 #include "tensorflow/core/util/stat_summarizer.h"
 
 namespace py = pybind11;
 
-PYBIND11_MODULE(_pywrap_stat_summarizer, m) {
+PYBIND11_MODULE(_pywrap_stat_summarizer, m, pybind11::mod_gil_not_used()) {
   py::class_<tensorflow::StatSummarizer> stat_summ_class(m, "StatSummarizer",
                                                          py::dynamic_attr());
   stat_summ_class
@@ -34,8 +34,7 @@ PYBIND11_MODULE(_pywrap_stat_summarizer, m) {
         return new tensorflow::StatSummarizer(proto);
       }))
       .def(py::init([]() {
-        return new tensorflow::StatSummarizer(
-            tensorflow::StatSummarizerOptions());
+        return new tensorflow::StatSummarizer(tsl::StatSummarizerOptions());
       }))
       .def("ProcessStepStats", &tensorflow::StatSummarizer::ProcessStepStats)
       .def("GetOutputString", &tensorflow::StatSummarizer::GetOutputString)

@@ -15,6 +15,10 @@ limitations under the License.
 
 #include "tensorflow/core/kernels/lookup_util.h"
 
+#include <cstdint>
+#include <limits>
+
+#include "absl/status/status.h"
 #include "tensorflow/core/framework/function_handle_cache.h"
 #include "tensorflow/core/framework/lookup_interface.h"
 #include "tensorflow/core/framework/op_requires.h"
@@ -36,24 +40,24 @@ static const int kInputBufferSize = 1 * 1024 * 1024; /* bytes */
 static const int kLineNumber = -1;
 static const int kWholeLine = -2;
 
-Status GetNumLinesInTextFile(Env* env, const string& vocab_file,
-                             int64_t* num_lines) {
+absl::Status GetNumLinesInTextFile(Env* env, const std::string& vocab_file,
+                                   int64_t* num_lines) {
   std::unique_ptr<RandomAccessFile> file;
   TF_RETURN_IF_ERROR(env->NewRandomAccessFile(vocab_file, &file));
 
   io::InputBuffer input_buffer(file.get(), kInputBufferSize);
-  string line;
-  Status s = input_buffer.ReadLine(&line);
+  std::string line;
+  absl::Status s = input_buffer.ReadLine(&line);
   int64_t next_id = 0;
   while (s.ok()) {
     next_id++;
     s = input_buffer.ReadLine(&line);
   }
-  if (!errors::IsOutOfRange(s)) {
+  if (!absl::IsOutOfRange(s)) {
     return s;
   }
   *num_lines = next_id;
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 // Iterator that reads a text file. Each iteration process one line, it parses
@@ -68,7 +72,7 @@ class TextFileLineIterator
   TextFileLineIterator()
       : valid_(false),
         vocab_size_(-1),
-        status_(errors::FailedPrecondition("Not initialized")) {}
+        status_(absl::FailedPreconditionError("Not initialized")) {}
 
   // Initialize iterator.
   //
@@ -80,9 +84,10 @@ class TextFileLineIterator
   // - Index -1 means the line number stored in int64.
   // - Index >= 0 represent index (starting at zero) of the split line based on
   //   delimiter.
-  Status Init(const string& filename, int64_t vocab_size, char delimiter,
-              DataType key_dtype, int64_t key_index, DataType value_dtype,
-              int64_t value_index, int64_t offset, Env* env) {
+  absl::Status Init(const std::string& filename, int64_t vocab_size,
+                    char delimiter, DataType key_dtype, int64_t key_index,
+                    DataType value_dtype, int64_t value_index, int64_t offset,
+                    Env* env) {
     filename_ = filename;
     vocab_size_ = vocab_size;
     delimiter_ = delimiter;
@@ -107,14 +112,14 @@ class TextFileLineIterator
   void Next() override {
     if (!valid_) return;
 
-    string line;
+    std::string line;
     status_ = input_buffer_->ReadLine(&line);
     if (!status_.ok()) {
-      if (errors::IsOutOfRange(status_) && vocab_size_ != -1 &&
+      if (absl::IsOutOfRange(status_) && vocab_size_ != -1 &&
           next_id_ != vocab_size_) {
-        status_ = errors::InvalidArgument("Invalid vocab_size in ", filename_,
-                                          ": expected ", vocab_size_,
-                                          " but got ", next_id_);
+        status_ = absl::InvalidArgumentError(
+            absl::StrCat("Invalid vocab_size in ", filename_, ": expected ",
+                         vocab_size_, " but got ", next_id_));
       }
       valid_ = false;
       return;
@@ -123,29 +128,29 @@ class TextFileLineIterator
       LOG(WARNING) << "Truncated " << filename_ << " before its end at "
                    << vocab_size_ << " records.";
       LOG(WARNING) << "next_id_  : " << next_id_;
-      status_ = errors::OutOfRange("Finished reading ", vocab_size_,
-                                   " of lines from ", filename_);
+      status_ = absl::OutOfRangeError(absl::StrCat(
+          "Finished reading ", vocab_size_, " of lines from ", filename_));
       valid_ = false;
       return;
     }
     if (line.empty()) {
-      status_ = errors::InvalidArgument("Invalid content in ", filename_,
-                                        ": empty line found at position ",
-                                        input_buffer_->Tell(), ".");
+      status_ = absl::InvalidArgumentError(absl::StrCat(
+          "Invalid content in ", filename_, ": empty line found at position ",
+          input_buffer_->Tell(), "."));
       valid_ = false;
       return;
     }
 
-    std::vector<string> tokens;
+    std::vector<std::string> tokens;
     if (!ignore_split_) {
       tokens = str_util::Split(line, delimiter_);
-      const auto expected_size =
-          static_cast<size_t>(std::max(key_index_, value_index_) + 1);
+      const uint64_t expected_size =
+          static_cast<uint64_t>(std::max(key_index_, value_index_)) + 1;
       if (tokens.size() < expected_size) {
-        status_ = errors::InvalidArgument(
-            "Invalid number of columns in ", filename_, " line ", next_id_,
-            " (", line, ") : expected at least ", expected_size, " got ",
-            tokens.size());
+        status_ = absl::InvalidArgumentError(
+            absl::StrCat("Invalid number of columns in ", filename_, " line ",
+                         next_id_, " (", line, ") : expected at least ",
+                         expected_size, " got ", tokens.size()));
         valid_ = false;
         return;
       }
@@ -171,12 +176,12 @@ class TextFileLineIterator
 
   const Tensor& values() const override { return value_; }
 
-  Status status() const override { return status_; }
+  absl::Status status() const override { return status_; }
 
   int64_t total_size() const override {
     if (vocab_size_ == -1) {
       int64_t new_size = -1;
-      Status status = GetNumLinesInTextFile(env_, filename_, &new_size);
+      absl::Status status = GetNumLinesInTextFile(env_, filename_, &new_size);
       if (!status.ok()) {
         LOG(WARNING) << "Unable to get line count: " << status;
         new_size = -1;
@@ -196,57 +201,80 @@ class TextFileLineIterator
   int64_t next_id_;
   int64_t offset_;
   int64_t vocab_size_;
-  string filename_;
+  std::string filename_;
   char delimiter_;
-  Status status_;
+  absl::Status status_;
   bool ignore_split_;
   std::unique_ptr<RandomAccessFile> file_;  // must outlive input_buffer_
   std::unique_ptr<io::InputBuffer> input_buffer_;
 
   // Set the corresponding value from line or tokens based on 'index' into the
   // tensor 't'. The value is transformed to the given data type 'dtype'.
-  Status SetValue(const string& line, const std::vector<string>& tokens,
-                  int64_t index, Tensor* tensor) {
+  absl::Status SetValue(const std::string& line,
+                        const std::vector<std::string>& tokens, int64_t index,
+                        Tensor* tensor) {
     if (index == kLineNumber) {
+      if (offset_ > 0 &&
+          next_id_ > std::numeric_limits<int64_t>::max() - offset_) {
+        valid_ = false;
+        return absl::InvalidArgumentError(absl::StrCat("Line number ", next_id_,
+                                                       " with offset ", offset_,
+                                                       " overflows int64."));
+      }
       tensor->flat<int64_t>()(0) = next_id_ + offset_;
-      return Status::OK();
+      return absl::OkStatus();
     }
-    const string& token = (index == kWholeLine) ? line : tokens[index];
+    const std::string& token = (index == kWholeLine) ? line : tokens[index];
     const DataType& dtype = tensor->dtype();
     switch (dtype) {
       case DT_INT32: {
         int32_t value;
-        if (!strings::safe_strto32(token.c_str(), &value)) {
+        if (!absl::SimpleAtoi(token.c_str(), &value)) {
           valid_ = false;
-          return errors::InvalidArgument("Field ", token, " in line ", next_id_,
-                                         " is not a valid int32.");
+          return absl::InvalidArgumentError(
+              absl::StrCat("Field ", token, " in line ", next_id_,
+                           " is not a valid int32."));
         }
-        tensor->flat<int32>()(0) = value + offset_;
+        // Compare before adding: offset_ can be any int64, so even the int64
+        // sum could overflow.
+        if ((offset_ > 0 &&
+             value > std::numeric_limits<int32_t>::max() - offset_) ||
+            (offset_ < 0 &&
+             value < std::numeric_limits<int32_t>::min() - offset_)) {
+          valid_ = false;
+          return absl::InvalidArgumentError(
+              absl::StrCat("Field ", token, " in line ", next_id_,
+                           " with offset ", offset_, " overflows int32."));
+        }
+        tensor->flat<int32_t>()(0) = static_cast<int32_t>(value + offset_);
       } break;
       case DT_INT64: {
         int64_t value;
-        if (!strings::safe_strto64(token.c_str(), &value)) {
+        if (!absl::SimpleAtoi(token.c_str(), &value)) {
           valid_ = false;
-          return errors::InvalidArgument("Field ", token, " in line ", next_id_,
-                                         " is not a valid int64.");
+          return absl::InvalidArgumentError(
+              absl::StrCat("Field ", token, " in line ", next_id_,
+                           " is not a valid int64."));
         }
         tensor->flat<int64_t>()(0) = value;
       } break;
       case DT_FLOAT: {
         float value;
-        if (!strings::safe_strtof(token.c_str(), &value)) {
+        if (!absl::SimpleAtof(token.c_str(), &value)) {
           valid_ = false;
-          return errors::InvalidArgument("Field ", token, " in line ", next_id_,
-                                         " is not a valid float.");
+          return absl::InvalidArgumentError(
+              absl::StrCat("Field ", token, " in line ", next_id_,
+                           " is not a valid float."));
         }
         tensor->flat<float>()(0) = value;
       } break;
       case DT_DOUBLE: {
         double value;
-        if (!strings::safe_strtod(token.c_str(), &value)) {
+        if (!absl::SimpleAtod(token.c_str(), &value)) {
           valid_ = false;
-          return errors::InvalidArgument("Field ", token, " in line ", next_id_,
-                                         " is not a valid double.");
+          return absl::InvalidArgumentError(
+              absl::StrCat("Field ", token, " in line ", next_id_,
+                           " is not a valid double."));
         }
         tensor->flat<double>()(0) = value;
       } break;
@@ -255,17 +283,18 @@ class TextFileLineIterator
         break;
       default:
         valid_ = false;
-        return errors::InvalidArgument("Data type ", DataTypeString(dtype),
-                                       " not supported.");
+        return absl::InvalidArgumentError(absl::StrCat(
+            "Data type ", DataTypeString(dtype), " not supported."));
     }
-    return Status::OK();
+    return absl::OkStatus();
   }
 
-  TF_DISALLOW_COPY_AND_ASSIGN(TextFileLineIterator);
+  TextFileLineIterator(const TextFileLineIterator&) = delete;
+  void operator=(const TextFileLineIterator&) = delete;
 };
 
-Status GetTableHandle(StringPiece input_name, OpKernelContext* ctx,
-                      string* container, string* table_handle) {
+absl::Status GetTableHandle(absl::string_view input_name, OpKernelContext* ctx,
+                            std::string* container, std::string* table_handle) {
   {
     mutex* mu;
     TF_RETURN_IF_ERROR(ctx->input_ref_mutex(input_name, &mu));
@@ -273,38 +302,40 @@ Status GetTableHandle(StringPiece input_name, OpKernelContext* ctx,
     Tensor tensor;
     TF_RETURN_IF_ERROR(ctx->mutable_input(input_name, &tensor, true));
     if (tensor.NumElements() != 2) {
-      return errors::InvalidArgument(
-          "Lookup table handle must be scalar, but had shape: ",
-          tensor.shape().DebugString());
+      return absl::InvalidArgumentError(
+          absl::StrCat("Lookup table handle must be scalar, but had shape: ",
+                       tensor.shape().DebugString()));
     }
     auto h = tensor.flat<tstring>();
     *container = h(0);
     *table_handle = h(1);
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 }  // namespace
 
-Status GetResourceLookupTable(StringPiece input_name, OpKernelContext* ctx,
-                              LookupInterface** table) {
+absl::Status GetResourceLookupTable(absl::string_view input_name,
+                                    OpKernelContext* ctx,
+                                    LookupInterface** table) {
   const Tensor* handle_tensor;
   TF_RETURN_IF_ERROR(ctx->input(input_name, &handle_tensor));
   const ResourceHandle& handle = handle_tensor->scalar<ResourceHandle>()();
   return LookupResource(ctx, handle, table);
 }
 
-Status GetReferenceLookupTable(StringPiece input_name, OpKernelContext* ctx,
-                               LookupInterface** table) {
-  string container;
-  string table_handle;
+absl::Status GetReferenceLookupTable(absl::string_view input_name,
+                                     OpKernelContext* ctx,
+                                     LookupInterface** table) {
+  std::string container;
+  std::string table_handle;
   TF_RETURN_IF_ERROR(
       GetTableHandle(input_name, ctx, &container, &table_handle));
   return ctx->resource_manager()->Lookup(container, table_handle, table);
 }
 
-Status GetLookupTable(StringPiece input_name, OpKernelContext* ctx,
-                      LookupInterface** table) {
+absl::Status GetLookupTable(absl::string_view input_name, OpKernelContext* ctx,
+                            LookupInterface** table) {
   DataType handle_dtype;
   TF_RETURN_IF_ERROR(ctx->input_dtype(input_name, &handle_dtype));
   if (handle_dtype == DT_RESOURCE) {
@@ -314,8 +345,9 @@ Status GetLookupTable(StringPiece input_name, OpKernelContext* ctx,
   }
 }
 
-Status GetInitializableLookupTable(StringPiece input_name, OpKernelContext* ctx,
-                                   InitializableLookupTable** table) {
+absl::Status GetInitializableLookupTable(absl::string_view input_name,
+                                         OpKernelContext* ctx,
+                                         InitializableLookupTable** table) {
   LookupInterface* lookup_table;
   DataType handle_dtype;
   TF_RETURN_IF_ERROR(ctx->input_dtype(input_name, &handle_dtype));
@@ -326,12 +358,13 @@ Status GetInitializableLookupTable(StringPiece input_name, OpKernelContext* ctx,
     *table = lookup_table->GetInitializableLookupTable();
     if (*table == nullptr) {
       lookup_table->Unref();
-      return errors::InvalidArgument("Table ", handle.container(), " ",
-                                     handle.name(), " is not initializable");
+      return absl::InvalidArgumentError(
+          absl::StrCat("Table ", handle.container(), " ", handle.name(),
+                       " is not initializable"));
     }
   } else {
-    string container;
-    string table_handle;
+    std::string container;
+    std::string table_handle;
     TF_RETURN_IF_ERROR(
         GetTableHandle(input_name, ctx, &container, &table_handle));
     TF_RETURN_IF_ERROR(ctx->resource_manager()->Lookup(container, table_handle,
@@ -339,64 +372,71 @@ Status GetInitializableLookupTable(StringPiece input_name, OpKernelContext* ctx,
     *table = lookup_table->GetInitializableLookupTable();
     if (*table == nullptr) {
       lookup_table->Unref();
-      return errors::InvalidArgument("Table ", container, " ", table_handle,
-                                     " is not initializable");
+      return absl::InvalidArgumentError(absl::StrCat(
+          "Table ", container, " ", table_handle, " is not initializable"));
     }
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-Status CheckTableDataTypes(const LookupInterface& table, DataType key_dtype,
-                           DataType value_dtype, const string& table_name) {
+absl::Status CheckTableDataTypes(const LookupInterface& table,
+                                 DataType key_dtype, DataType value_dtype,
+                                 const std::string& table_name) {
   if (table.key_dtype() != key_dtype || table.value_dtype() != value_dtype) {
-    return errors::InvalidArgument(
+    return absl::InvalidArgumentError(absl::StrCat(
         "Conflicting key/value dtypes ", DataTypeString(key_dtype), "->",
         DataTypeString(value_dtype), " with ",
         DataTypeString(table.key_dtype()), "-",
-        DataTypeString(table.value_dtype()), " for table ", table_name);
+        DataTypeString(table.value_dtype()), " for table ", table_name));
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 // Helper function to initialize an InitializableLookupTable from a text file.
-Status InitializeTableFromTextFile(const string& filename, int64_t vocab_size,
-                                   char delimiter, int32_t key_index,
-                                   int32_t value_index, int64_t offset,
-                                   Env* env, InitializableLookupTable* table) {
+absl::Status InitializeTableFromTextFile(const std::string& filename,
+                                         int64_t vocab_size, char delimiter,
+                                         int64_t key_index, int64_t value_index,
+                                         int64_t offset, Env* env,
+                                         InitializableLookupTable* table) {
   return InitializeTableFromTextFile(filename, vocab_size, delimiter, key_index,
                                      value_index, offset, env,
                                      /*serializer=*/nullptr, table);
 }
 
-Status InitializeTableFromTextFile(
-    const string& filename, int64_t vocab_size, char delimiter,
-    int32_t key_index, int32_t value_index, int64_t offset, Env* env,
+absl::Status InitializeTableFromTextFile(
+    const std::string& filename, int64_t vocab_size, char delimiter,
+    int64_t key_index, int64_t value_index, int64_t offset, Env* env,
     std::unique_ptr<InitializableLookupTable::InitializerSerializer> serializer,
     InitializableLookupTable* table) {
+  if (key_index < kWholeLine || value_index < kWholeLine) {
+    return absl::InvalidArgumentError(absl::StrCat(
+        "Key and value indices must be >= -2, got key_index=", key_index,
+        ", value_index=", value_index));
+  }
   if (key_index == kLineNumber && table->key_dtype() != DT_INT64) {
-    return errors::InvalidArgument(
+    return absl::InvalidArgumentError(absl::StrCat(
         "Key index for line number requires table key dtype of int64, got ",
-        DataTypeString(table->key_dtype()));
+        DataTypeString(table->key_dtype())));
   }
   const DataType& key_dtype = table->key_dtype();
   const DataType& value_dtype = table->value_dtype();
   if (key_index == kWholeLine && !DataTypeIsInteger(key_dtype) &&
       key_dtype != DT_STRING) {
-    return errors::InvalidArgument(
+    return absl::InvalidArgumentError(absl::StrCat(
         "Key index for whole line requires string or integer table key, got ",
-        DataTypeString(table->key_dtype()));
+        DataTypeString(table->key_dtype())));
   }
   if (value_index == kLineNumber && value_dtype != DT_INT64) {
-    return errors::InvalidArgument(
+    return absl::InvalidArgumentError(absl::StrCat(
         "Value index for line number requires table value dtype of int64, got ",
-        DataTypeString(table->value_dtype()));
+        DataTypeString(table->value_dtype())));
   }
   if (value_index == kWholeLine && !DataTypeIsInteger(value_dtype) &&
       value_dtype != DT_STRING) {
-    return errors::InvalidArgument(
+    return absl::InvalidArgumentError(absl::StrCat(
         "Value index for whole line requires table value dtype of integer or "
         "string, got ",
-        DataTypeString(table->value_dtype()));
+        DataTypeString(table->value_dtype())));
   }
 
   TextFileLineIterator iter;
@@ -407,11 +447,11 @@ Status InitializeTableFromTextFile(
   // initialized. The table shared name should contain the filename to
   // avoid trying to initialize the same table from the same file at the same
   // time.
-  Status s = table->Initialize(iter, std::move(serializer));
-  if (errors::IsFailedPrecondition(s) && table->is_initialized()) {
+  absl::Status s = table->Initialize(iter, std::move(serializer));
+  if (absl::IsFailedPrecondition(s) && table->is_initialized()) {
     LOG(INFO) << "Table trying to initialize from file " << filename
               << " is already initialized.";
-    return Status::OK();
+    return absl::OkStatus();
   }
   return s;
 }

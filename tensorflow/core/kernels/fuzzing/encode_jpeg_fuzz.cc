@@ -13,8 +13,12 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "tensorflow/cc/ops/standard_ops.h"
+#include "tensorflow/cc/ops/image_ops.h"
+#include "tensorflow/core/framework/tensor.h"
+#include "tensorflow/core/framework/tensor_shape.h"
+#include "tensorflow/core/framework/types.pb.h"
 #include "tensorflow/core/kernels/fuzzing/fuzz_session.h"
+#include "tensorflow/core/platform/types.h"
 
 namespace tensorflow {
 namespace fuzzing {
@@ -48,7 +52,7 @@ class FuzzEncodeJpeg : public FuzzSession {
     // from tf testing, once we have a few more fuzzers written.
     Tensor input_tensor(tensorflow::DT_UINT8,
                         TensorShape({height, width, channels}));
-    auto flat_tensor = input_tensor.flat<uint8>();
+    auto flat_tensor = input_tensor.flat<uint8_t>();
     for (size_t i = 0; i < actual_pixels; i++) {
       flat_tensor(i) = data[i];
     }

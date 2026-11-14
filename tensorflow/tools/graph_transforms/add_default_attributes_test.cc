@@ -29,9 +29,9 @@ namespace tensorflow {
 namespace graph_transforms {
 
 // Declare here, so we don't need a public header.
-Status AddDefaultAttributes(const GraphDef& input_graph_def,
-                            const TransformFuncContext& context,
-                            GraphDef* output_graph_def);
+absl::Status AddDefaultAttributes(const GraphDef& input_graph_def,
+                                  const TransformFuncContext& context,
+                                  GraphDef* output_graph_def);
 
 class AddDefaultAttributesTest : public ::testing::Test {
  protected:
@@ -53,7 +53,7 @@ class AddDefaultAttributesTest : public ::testing::Test {
     GraphDef result;
     TF_ASSERT_OK(AddDefaultAttributes(graph_def, {}, &result));
 
-    std::map<string, const NodeDef*> nodes;
+    std::map<std::string, const NodeDef*> nodes;
     MapNamesToNodes(result, &nodes);
     EXPECT_EQ(5, nodes.at("lrn_node1")->attr().at("depth_radius").i());
     EXPECT_NEAR(1.0f, nodes.at("lrn_node1")->attr().at("bias").f(), 1e-5f);

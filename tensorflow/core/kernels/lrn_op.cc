@@ -18,7 +18,7 @@ limitations under the License.
 
 #define EIGEN_USE_THREADS
 
-#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
+#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
 #include "tensorflow/core/framework/bounds_check.h"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/register_types.h"
@@ -27,7 +27,7 @@ limitations under the License.
 #include "tensorflow/core/lib/core/errors.h"
 
 #if defined(TENSORFLOW_USE_CUSTOM_CONTRACTION_KERNEL)
-#include "tensorflow/core/kernels/eigen_contraction_kernel.h"
+#include "xla/tsl/framework/contraction/eigen_contraction_kernel.h"
 #endif
 
 #if !defined(IS_MOBILE_PLATFORM)
@@ -95,13 +95,13 @@ struct LaunchLRN<CPUDevice, T> {
 #if defined(IS_MOBILE_PLATFORM)
     SingleThreadedLRN(in, batch, rows, cols, depth, output);
 #else
-    const int nodes = cols * rows;
     if (depth > kSingleThreadedLRNDepthCutoff &&
         (beta_ == T(0.5) || beta_ == T(1))) {
       SingleThreadedLRN(in, batch, rows, cols, depth, output);
       return;
     }
 
+    const int nodes = cols * rows;
     auto in_shaped = in.shaped<T, 2>({nodes * batch, depth});
 
     // Multiplying the input with the band matrix has the effect of reducing the
@@ -188,8 +188,8 @@ struct LaunchLRN<GPUDevice, T> {
 
     OP_REQUIRES(
         context, depth_radius_ > 0 && depth_radius_ <= 7,
-        errors::InvalidArgument("cuDNN requires depth_radius in [1, 7], got: ",
-                                depth_radius_));
+        absl::InvalidArgumentError(absl::StrCat(
+            "cuDNN requires depth_radius in [1, 7], got: ", depth_radius_)));
     OP_REQUIRES(
         context, bias_ >= 1e-5,
         errors::InvalidArgument("cuDNN requires bias >= 1e-5, got: ", bias_));
@@ -217,15 +217,16 @@ struct LaunchLRN<GPUDevice, T> {
     auto output_data = StreamExecutorUtil::AsDeviceMemory<T>(*output);
 
     auto* stream = context->op_device_context()->stream();
-    OP_REQUIRES(context, stream, errors::Internal("No GPU stream available."));
+    OP_REQUIRES(context, stream,
+                absl::InternalError("No GPU stream available."));
 
-    bool status =
-        stream
-            ->ThenNormalizeWithDimensions(normalize_desc, dimensions_desc,
-                                          input_data, &output_data)
-            .ok();
+    auto dnn = stream->parent()->AsDnn();
+    OP_REQUIRES(context, dnn != nullptr,
+                absl::InternalError("No DNN support for stream."));
+    bool status = dnn->DoNormalizeWithDimensions(
+        stream, normalize_desc, dimensions_desc, input_data, &output_data);
     OP_REQUIRES(context, status,
-                errors::Internal("NormalizeWithDimensions launch failed"));
+                absl::InternalError("NormalizeWithDimensions launch failed"));
 #elif TENSORFLOW_USE_ROCM
     // For NHWC input/output tensors, convert to NCHW because it's the only
     // supported format in MIOpen for now.
@@ -237,30 +238,34 @@ struct LaunchLRN<GPUDevice, T> {
     const int depth = static_cast<int>(in.dim_size(3));
 
     Tensor transformed_input;
-    OP_REQUIRES_OK(context,
-                   context->allocate_temp(
-                       DataTypeToEnum<T>::value,
-                       ShapeFromFormat(FORMAT_NCHW, in.shape(), FORMAT_NHWC),
-                       &transformed_input));
+    TensorShape transformed_input_shape;
+    OP_REQUIRES_OK(
+        context, ShapeFromFormatWithStatus(FORMAT_NCHW, in.shape(), FORMAT_NHWC,
+                                           &transformed_input_shape));
+    OP_REQUIRES_OK(context, context->allocate_temp(DataTypeToEnum<T>::value,
+                                                   transformed_input_shape,
+                                                   &transformed_input));
     functor::NHWCToNCHW<GPUDevice, T, 4>()(context->eigen_device<GPUDevice>(),
                                            in.tensor<T, 4>(),
                                            transformed_input.tensor<T, 4>());
 
     Tensor transformed_output;
-    OP_REQUIRES_OK(
-        context, context->allocate_temp(
-                     DataTypeToEnum<T>::value,
-                     ShapeFromFormat(FORMAT_NCHW, output->shape(), FORMAT_NHWC),
-                     &transformed_output));
+    TensorShape transformed_output_shape;
+    OP_REQUIRES_OK(context, ShapeFromFormatWithStatus(
+                                FORMAT_NCHW, output->shape(), FORMAT_NHWC,
+                                &transformed_output_shape));
+    OP_REQUIRES_OK(context, context->allocate_temp(DataTypeToEnum<T>::value,
+                                                   transformed_output_shape,
+                                                   &transformed_output));
 
-    perftools::gputools::dnn::BatchDescriptor dimensions_desc;
+    stream_executor::dnn::BatchDescriptor dimensions_desc;
     dimensions_desc.set_count(batch)
         .set_height(rows)
         .set_width(cols)
         .set_feature_map_count(depth)
-        .set_layout(perftools::gputools::dnn::DataLayout::kBatchDepthYX);
+        .set_layout(stream_executor::dnn::DataLayout::kBatchDepthYX);
 
-    perftools::gputools::dnn::NormalizeDescriptor normalize_desc;
+    stream_executor::dnn::NormalizeDescriptor normalize_desc;
     normalize_desc.set_bias(bias_)
         .set_range(depth_radius_)
         .set_alpha(alpha_)
@@ -275,12 +280,12 @@ struct LaunchLRN<GPUDevice, T> {
 
     auto* stream = context->op_device_context()->stream();
     OP_REQUIRES(context, stream, errors::Internal("No GPU stream available."));
+    auto dnn = stream->parent()->AsDnn();
+    OP_REQUIRES(context, dnn != nullptr,
+                absl::InternalError("No DNN support for stream."));
 
-    bool status =
-        stream
-            ->ThenNormalizeWithDimensions(normalize_desc, dimensions_desc,
-                                          input_data, &output_data)
-            .ok();
+    bool status = dnn->DoNormalizeWithDimensions(
+        stream, normalize_desc, dimensions_desc, input_data, &output_data);
     OP_REQUIRES(context, status,
                 errors::Internal("NormalizeWithDimensions launch failed"));
 
@@ -310,8 +315,8 @@ class LRNOp : public OpKernel {
     OP_REQUIRES(
         context,
         FastBoundsCheck(depth_radius64, std::numeric_limits<int>::max()),
-        errors::InvalidArgument("depth_radius = ", depth_radius64,
-                                " larger than int max"));
+        absl::InvalidArgumentError(absl::StrCat(
+            "depth_radius = ", depth_radius64, " larger than int max")));
     depth_radius_ = static_cast<int>(depth_radius64);
     float tmp;
     OP_REQUIRES_OK(context, context->GetAttr("bias", &tmp));
@@ -325,11 +330,11 @@ class LRNOp : public OpKernel {
   void Compute(OpKernelContext* context) override {
     const Tensor& in = context->input(0);
     OP_REQUIRES(context, in.dims() == 4,
-                errors::InvalidArgument("in must be 4-dimensional"));
+                absl::InvalidArgumentError("in must be 4-dimensional"));
     OP_REQUIRES(
         context,
         FastBoundsCheck(in.NumElements(), std::numeric_limits<int>::max()),
-        errors::InvalidArgument("argument to LRN too large"));
+        absl::InvalidArgumentError("argument to LRN too large"));
     // Cast to platform-specific int to avoid conversion warnings.
     const int batch = static_cast<int>(in.dim_size(0));
     const int rows = static_cast<int>(in.dim_size(1));
@@ -338,13 +343,20 @@ class LRNOp : public OpKernel {
 
     OP_REQUIRES(context,
                 (depth + depth_radius_) <= std::numeric_limits<int>::max(),
-                errors::InvalidArgument("depth ", depth, " + depth_radius ",
-                                        depth_radius_, " exceeds int max."));
+                absl::InvalidArgumentError(
+                    absl::StrCat("depth ", depth, " + depth_radius ",
+                                 depth_radius_, " exceeds int max.")));
 
     Tensor* output = nullptr;
     OP_REQUIRES_OK(context,
                    context->allocate_output(
                        0, TensorShape({batch, rows, cols, depth}), &output));
+
+    // NOMUTANTS(LCR): Early return is a no-op guard on CPU but prevents fatal
+    // cuDNN crashes on GPU.
+    if (in.NumElements() == 0) {
+      return;
+    }
 
     LaunchLRN<Device, T> launcher(depth_radius_, bias_, alpha_, beta_);
     launcher.launch(context, this, in, output);
@@ -430,8 +442,8 @@ struct LaunchLRNGrad<CPUDevice, T> {
           T gs = grads_shaped(i, j);
           if (gs == T(0)) continue;
 
-          int64_t depth_begin = std::max<int64>(0, j - depth_radius_);
-          int64_t depth_end = std::min<int64>(depth, j + depth_radius_ + 1);
+          int64_t depth_begin = std::max<int64_t>(0, j - depth_radius_);
+          int64_t depth_end = std::min<int64_t>(depth, j + depth_radius_ + 1);
 
           T norm(0);
           for (int64_t k = depth_begin; k < depth_end; ++k) {
@@ -481,8 +493,8 @@ struct LaunchLRNGrad<GPUDevice, T> {
 
     OP_REQUIRES(
         context, depth_radius_ > 0 && depth_radius_ <= 7,
-        errors::InvalidArgument("cuDNN requires depth_radius in [1, 7], got: ",
-                                depth_radius_));
+        absl::InvalidArgumentError(absl::StrCat(
+            "cuDNN requires depth_radius in [1, 7], got: ", depth_radius_)));
     OP_REQUIRES(
         context, bias_ >= 1e-5,
         errors::InvalidArgument("cuDNN requires bias >= 1e-5, got: ", bias_));
@@ -511,17 +523,19 @@ struct LaunchLRNGrad<GPUDevice, T> {
     auto output_grads_data = StreamExecutorUtil::AsDeviceMemory<T>(*output);
 
     auto* stream = context->op_device_context()->stream();
-    OP_REQUIRES(context, stream, errors::Internal("No GPU stream available."));
+    OP_REQUIRES(context, stream,
+                absl::InternalError("No GPU stream available."));
 
-    bool status =
-        stream
-            ->ThenNormalizeBackwardWithDimensions(
-                normalize_desc, dimensions_desc, input_image_data,
-                output_image_data, input_grads_data, &output_grads_data)
-            .ok();
+    auto dnn = stream->parent()->AsDnn();
+    OP_REQUIRES(context, dnn != nullptr,
+                absl::InternalError("No DNN support for stream."));
+    bool status = dnn->DoNormalizeBackwardWithDimensions(
+        stream, normalize_desc, dimensions_desc, input_image_data,
+        output_image_data, input_grads_data, &output_grads_data,
+        /*workspace_allocator=*/nullptr);
     OP_REQUIRES(
         context, status,
-        errors::Internal("NormalizeBackwardWithDimensions launch failed"));
+        absl::InternalError("NormalizeBackwardWithDimensions launch failed"));
 #elif TENSORFLOW_USE_ROCM
     // For NHWC input/output tensors, convert to NCHW because it's the only
     // supported format in MIOpen for now.
@@ -531,50 +545,58 @@ struct LaunchLRNGrad<GPUDevice, T> {
     const int64 depth = in_grads.dim_size(3);
 
     Tensor transformed_in_grads;
-    OP_REQUIRES_OK(context, context->allocate_temp(
-                                DataTypeToEnum<T>::value,
-                                ShapeFromFormat(FORMAT_NCHW, in_grads.shape(),
-                                                FORMAT_NHWC),
-                                &transformed_in_grads));
+    TensorShape transformed_in_grads_shape;
+    OP_REQUIRES_OK(context, ShapeFromFormatWithStatus(
+                                FORMAT_NCHW, in_grads.shape(), FORMAT_NHWC,
+                                &transformed_in_grads_shape));
+    OP_REQUIRES_OK(context, context->allocate_temp(DataTypeToEnum<T>::value,
+                                                   transformed_in_grads_shape,
+                                                   &transformed_in_grads));
     functor::NHWCToNCHW<GPUDevice, T, 4>()(context->eigen_device<GPUDevice>(),
                                            in_grads.tensor<T, 4>(),
                                            transformed_in_grads.tensor<T, 4>());
 
     Tensor transformed_in_image;
-    OP_REQUIRES_OK(context, context->allocate_temp(
-                                DataTypeToEnum<T>::value,
-                                ShapeFromFormat(FORMAT_NCHW, in_image.shape(),
-                                                FORMAT_NHWC),
-                                &transformed_in_image));
+    TensorShape transformed_in_image_shape;
+    OP_REQUIRES_OK(context, ShapeFromFormatWithStatus(
+                                FORMAT_NCHW, in_image.shape(), FORMAT_NHWC,
+                                &transformed_in_image_shape));
+    OP_REQUIRES_OK(context, context->allocate_temp(DataTypeToEnum<T>::value,
+                                                   transformed_in_image_shape,
+                                                   &transformed_in_image));
     functor::NHWCToNCHW<GPUDevice, T, 4>()(context->eigen_device<GPUDevice>(),
                                            in_image.tensor<T, 4>(),
                                            transformed_in_image.tensor<T, 4>());
 
     Tensor transformed_out_image;
-    OP_REQUIRES_OK(context, context->allocate_temp(
-                                DataTypeToEnum<T>::value,
-                                ShapeFromFormat(FORMAT_NCHW, out_image.shape(),
-                                                FORMAT_NHWC),
-                                &transformed_out_image));
+    TensorShape transformed_out_image_shape;
+    OP_REQUIRES_OK(context, ShapeFromFormatWithStatus(
+                                FORMAT_NCHW, out_image.shape(), FORMAT_NHWC,
+                                &transformed_out_image_shape));
+    OP_REQUIRES_OK(context, context->allocate_temp(DataTypeToEnum<T>::value,
+                                                   transformed_out_image_shape,
+                                                   &transformed_out_image));
     functor::NHWCToNCHW<GPUDevice, T, 4>()(
         context->eigen_device<GPUDevice>(), out_image.tensor<T, 4>(),
         transformed_out_image.tensor<T, 4>());
 
     Tensor transformed_output;
-    OP_REQUIRES_OK(
-        context, context->allocate_temp(
-                     DataTypeToEnum<T>::value,
-                     ShapeFromFormat(FORMAT_NCHW, output->shape(), FORMAT_NHWC),
-                     &transformed_output));
+    TensorShape transformed_output_shape;
+    OP_REQUIRES_OK(context, ShapeFromFormatWithStatus(
+                                FORMAT_NCHW, output->shape(), FORMAT_NHWC,
+                                &transformed_output_shape));
+    OP_REQUIRES_OK(context, context->allocate_temp(DataTypeToEnum<T>::value,
+                                                   transformed_output_shape,
+                                                   &transformed_output));
 
-    perftools::gputools::dnn::BatchDescriptor dimensions_desc;
+    stream_executor::dnn::BatchDescriptor dimensions_desc;
     dimensions_desc.set_count(batch)
         .set_height(rows)
         .set_width(cols)
         .set_feature_map_count(depth)
-        .set_layout(perftools::gputools::dnn::DataLayout::kBatchDepthYX);
+        .set_layout(stream_executor::dnn::DataLayout::kBatchDepthYX);
 
-    perftools::gputools::dnn::NormalizeDescriptor normalize_desc;
+    stream_executor::dnn::NormalizeDescriptor normalize_desc;
     normalize_desc.set_bias(bias_)
         .set_range(depth_radius_)
         .set_alpha(alpha_)
@@ -604,12 +626,13 @@ struct LaunchLRNGrad<GPUDevice, T> {
 
     DnnScratchAllocator scratch_allocator(NormalizeBackwardScratchSize,
                                           context);
-    bool status = stream
-                      ->ThenNormalizeBackwardWithDimensions(
-                          normalize_desc, dimensions_desc, input_image_data,
-                          output_image_data, input_grads_data,
-                          &output_grads_data, &scratch_allocator)
-                      .ok();
+    auto dnn = stream->parent()->AsDnn();
+    OP_REQUIRES(context, dnn != nullptr,
+                absl::InternalError("No DNN support for stream."));
+    bool status = dnn->DoNormalizeBackwardWithDimensions(
+        stream, normalize_desc, dimensions_desc, input_image_data,
+        output_image_data, input_grads_data, &output_grads_data,
+        /*workspace_allocator=*/nullptr, &scratch_allocator);
     OP_REQUIRES(
         context, status,
         errors::Internal("NormalizeBackwardWithDimensions launch failed"));
@@ -640,8 +663,8 @@ class LRNGradOp : public OpKernel {
     OP_REQUIRES(
         context,
         FastBoundsCheck(depth_radius64, std::numeric_limits<int>::max()),
-        errors::InvalidArgument("depth_radius = ", depth_radius64,
-                                " larger than int max"));
+        absl::InvalidArgumentError(absl::StrCat(
+            "depth_radius = ", depth_radius64, " larger than int max")));
     depth_radius_ = static_cast<int>(depth_radius64);
     float tmp;
     OP_REQUIRES_OK(context, context->GetAttr("bias", &tmp));
@@ -658,7 +681,7 @@ class LRNGradOp : public OpKernel {
     const Tensor& out_image = context->input(2);
 
     OP_REQUIRES(context, in_grads.dims() == 4 && in_image.dims() == 4,
-                errors::InvalidArgument("inputs must be 4-dimensional"));
+                absl::InvalidArgumentError("inputs must be 4-dimensional"));
     const int64_t batch = in_grads.dim_size(0);
     const int64_t rows = in_grads.dim_size(1);
     const int64_t cols = in_grads.dim_size(2);
@@ -668,8 +691,9 @@ class LRNGradOp : public OpKernel {
         in_image.dim_size(0) == batch && in_image.dim_size(1) == rows &&
             in_image.dim_size(2) == cols && in_image.dim_size(3) == depth &&
             out_image.dim_size(0) == batch && out_image.dim_size(1) == rows &&
-            out_image.dim_size(2) == cols && out_image.dim_size(3) == depth,
-        errors::InvalidArgument(
+            out_image.dim_size(2) == cols && out_image.dim_size(3) == depth &&
+            out_image.dims() == 4,
+        absl::InvalidArgumentError(
             "input_grads, input_image, and out_image should have the same "
             "shape"));
 
@@ -677,6 +701,12 @@ class LRNGradOp : public OpKernel {
     OP_REQUIRES_OK(context,
                    context->allocate_output(
                        0, TensorShape({batch, rows, cols, depth}), &output));
+
+    // NOMUTANTS(LCR): Early return is a no-op guard on CPU but prevents fatal
+    // cuDNN crashes on GPU.
+    if (in_grads.NumElements() == 0) {
+      return;
+    }
 
     LaunchLRNGrad<Device, T> launcher(depth_radius_, bias_, alpha_, beta_);
     launcher.launch(context, this, in_grads, in_image, out_image, output);

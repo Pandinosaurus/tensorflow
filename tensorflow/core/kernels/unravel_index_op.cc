@@ -13,13 +13,20 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include <cstdint>
+#include <limits>
+
+#include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
+#include "tensorflow/core/framework/types.pb.h"
+#include "tensorflow/core/platform/types.h"
 #define EIGEN_USE_THREADS
 
+#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/register_types.h"
 #include "tensorflow/core/framework/tensor.h"
 #include "tensorflow/core/framework/types.h"
-#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
 
 namespace tensorflow {
 
@@ -35,31 +42,54 @@ typedef Eigen::ThreadPoolDevice CPUDevice;
 template <typename Tidx>
 class UnravelIndexOp : public OpKernel {
  public:
-  explicit UnravelIndexOp(OpKernelConstruction* ctx) : OpKernel(ctx) {}
+  explicit UnravelIndexOp(OpKernelConstruction* ctx)
+      : OpKernel(ctx), dtidx_(DataTypeToEnum<Tidx>::v()) {}
 
   void Compute(OpKernelContext* ctx) override {
     const Tensor& indices_tensor = ctx->input(0);
     OP_REQUIRES(ctx,
                 TensorShapeUtils::IsVector(indices_tensor.shape()) ||
                     TensorShapeUtils::IsScalar(indices_tensor.shape()),
-                errors::InvalidArgument(
+                absl::InvalidArgumentError(absl::StrCat(
                     "The indices can only be scalar or vector, got \"",
-                    indices_tensor.shape().DebugString(), "\""));
-
-    const Tensor& dims_tensor = ctx->input(1);
+                    indices_tensor.shape().DebugString(), "\"")));
     OP_REQUIRES(
-        ctx, TensorShapeUtils::IsVector(dims_tensor.shape()),
-        errors::InvalidArgument("The indices can only be 1-D, got \"",
-                                dims_tensor.shape().DebugString(), "\""));
+        ctx, indices_tensor.NumElements() > 0,
+        absl::InvalidArgumentError(absl::StrCat(
+            "received empty tensor indices: ", indices_tensor.DebugString())));
+    const Tensor& dims_tensor = ctx->input(1);
+    OP_REQUIRES(ctx, TensorShapeUtils::IsVector(dims_tensor.shape()),
+                absl::InvalidArgumentError(
+                    absl::StrCat("The indices can only be 1-D, got \"",
+                                 dims_tensor.shape().DebugString(), "\"")));
 
     auto dims = dims_tensor.vec<Tidx>();
     // Make sure dims does not contain a zero
+    double prod = 1;
+    uint64_t limit;
+    if (dtidx_ == DataType::DT_INT64) {
+      limit = std::numeric_limits<int64_t>::max();
+    } else {
+      limit = std::numeric_limits<int32_t>::max();
+    }
+
     for (int i = 0; i < dims.size(); i++) {
+      OP_REQUIRES(ctx, dims(i) != 0,
+                  absl::InvalidArgumentError(
+                      absl::StrCat("Input dims cannot contain a dim of zero, "
+                                   "but dims contains zero at index ",
+                                   i)));
+      OP_REQUIRES(ctx, dims(i) > 0,
+                  errors::InvalidArgument(
+                      "Input dims cannot be negative. Got dim = ", dims(i),
+                      " at index ", i));
+      // Check interger overflow
       OP_REQUIRES(
-          ctx, dims(i) != 0,
-          errors::InvalidArgument("Input dims cannot contain a dim of zero, "
-                                  "but dims contains zero at index ",
-                                  i));
+          ctx, prod <= limit / dims(i),
+          errors::InvalidArgument("Input dims product is causing integer "
+                                  "overflow: (",
+                                  dims, ")"));
+      prod = (prod * dims(i));
     }
 
     // Check to make sure indices is not out of boundary
@@ -67,12 +97,14 @@ class UnravelIndexOp : public OpKernel {
     Tidx dims_prod = dims_prod_eigen();
     const Tidx* indices = indices_tensor.flat<Tidx>().data();
     int64_t size = indices_tensor.NumElements();
-    bool check = std::all_of(indices, indices + size,
-                             [&](Tidx index) { return index < dims_prod; });
-    OP_REQUIRES(ctx, check,
-                errors::InvalidArgument("index is out of bound as with dims"));
+    bool check = std::all_of(indices, indices + size, [&](Tidx index) {
+      return index >= 0 && index < dims_prod;
+    });
+    OP_REQUIRES(
+        ctx, check,
+        absl::InvalidArgumentError("index is out of bound as with dims"));
 
-    Eigen::array<bool, 1> reverse({true});
+    Eigen::array<bool, 1> reverse{true};
 
     Tensor strides_tensor;
     OP_REQUIRES_OK(ctx,
@@ -132,6 +164,7 @@ class UnravelIndexOp : public OpKernel {
                strides_shifted.reshape(reshape).broadcast(bcast);
     }
   }
+  const DataType dtidx_;
 };
 
 #define REGISTER_KERNEL(type)                                               \

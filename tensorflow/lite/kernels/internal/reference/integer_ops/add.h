@@ -15,9 +15,12 @@ limitations under the License.
 #ifndef TENSORFLOW_LITE_KERNELS_INTERNAL_REFERENCE_INTEGER_OPS_ADD_H_
 #define TENSORFLOW_LITE_KERNELS_INTERNAL_REFERENCE_INTEGER_OPS_ADD_H_
 
+#include <algorithm>
+#include <cstddef>
 #include <limits>
 
 #include "tensorflow/lite/kernels/internal/common.h"
+#include "tensorflow/lite/kernels/internal/reference/broadcast_loop.h"
 #include "tensorflow/lite/kernels/internal/types.h"
 
 namespace tflite {
@@ -34,53 +37,68 @@ inline void CheckArithmeticParams(const ArithmeticParams& params) {
   TFLITE_DCHECK_LE(-params.input2_offset, std::numeric_limits<int8_t>::max());
 }
 
-inline void ElementWise(
-    int size, const ArithmeticParams& params, const int8_t* input1_data,
-    const int8_t* input2_data, int8_t* output_data,
-    void (*check_arithmetic_params)(const ArithmeticParams&),
-    int8_t (*binary_func)(int8_t, int8_t, const ArithmeticParams&)) {
+// TODO: b/270589088 - move to a more appropriate file (b/270589088#comment2)
+template <typename T>
+void BroadcastInput1(int size, const ArithmeticParams& params,
+                     const T* input1_data, const T* input2_data, T* output_data,
+                     void (*check_arithmetic_params)(const ArithmeticParams&),
+                     T (*binary_func)(T, T, const ArithmeticParams&)) {
+  CheckArithmeticParams(params);
+  for (int i = 0; i < size; ++i) {
+    output_data[i] = binary_func(input1_data[0], input2_data[i], params);
+  }
+}
+
+template <typename T>
+void BroadcastInput2(int size, const ArithmeticParams& params,
+                     const T* input1_data, const T* input2_data, T* output_data,
+                     void (*check_arithmetic_params)(const ArithmeticParams&),
+                     T (*binary_func)(T, T, const ArithmeticParams&)) {
+  CheckArithmeticParams(params);
+  for (int i = 0; i < size; ++i) {
+    output_data[i] = binary_func(input1_data[i], input2_data[0], params);
+  }
+}
+
+// TODO: b/270589088 - move to a more appropriate file (b/270589088#comment2)
+template <typename T>
+void ElementWise(int size, const ArithmeticParams& params, const T* input1_data,
+                 const T* input2_data, T* output_data,
+                 void (*check_arithmetic_params)(const ArithmeticParams&),
+                 T (*binary_func)(T, T, const ArithmeticParams&)) {
   CheckArithmeticParams(params);
   for (int i = 0; i < size; ++i) {
     output_data[i] = binary_func(input1_data[i], input2_data[i], params);
   }
 }
 
-inline void BroadcastBinaryFunction4DSlow(
+// TODO: b/270589088 - move to a more appropriate file. (b/270589088#comment2)
+template <typename T>
+void BroadcastBinaryFunction6DSlow(
     const ArithmeticParams& params, const RuntimeShape& input1_shape,
-    const int8_t* input1_data, const RuntimeShape& input2_shape,
-    const int8_t* input2_data, const RuntimeShape& output_shape,
-    int8_t* output_data,
+    const T* input1_data, const RuntimeShape& input2_shape,
+    const T* input2_data, const RuntimeShape& output_shape, T* output_data,
     void (*check_arithmetic_params)(const ArithmeticParams&),
-    int8_t (*binary_func)(int8_t, int8_t, const ArithmeticParams&)) {
-  NdArrayDesc<4> desc1;
-  NdArrayDesc<4> desc2;
-  NdArrayDescsForElementwiseBroadcast(input1_shape, input2_shape, &desc1,
-                                      &desc2);
-  const RuntimeShape extended_output_shape =
-      RuntimeShape::ExtendedShape(4, output_shape);
+    T (*binary_func)(T, T, const ArithmeticParams&)) {
+  check_arithmetic_params(params);
+  auto op = [&params, binary_func](T a, T b) {
+    return binary_func(a, b, params);
+  };
+  reference_ops::BroadcastBinaryOpSimple(input1_shape, input1_data,
+                                         input2_shape, input2_data,
+                                         output_shape, output_data, op);
+}
 
-  // In Tensorflow, the dimensions are canonically named (batch_number, row,
-  // col, channel), with extents (batches, height, width, depth), with the
-  // trailing dimension changing most rapidly (channels has the smallest stride,
-  // typically 1 element).
-  //
-  // In generated C code, we store arrays with the dimensions reversed. The
-  // first dimension has smallest stride.
-  //
-  // We name our variables by their Tensorflow convention, but generate C code
-  // nesting loops such that the innermost loop has the smallest stride for the
-  // best cache behavior.
-  for (int b = 0; b < extended_output_shape.Dims(0); ++b) {
-    for (int y = 0; y < extended_output_shape.Dims(1); ++y) {
-      for (int x = 0; x < extended_output_shape.Dims(2); ++x) {
-        for (int c = 0; c < extended_output_shape.Dims(3); ++c) {
-          output_data[Offset(extended_output_shape, b, y, x, c)] = binary_func(
-              input1_data[SubscriptToIndex(desc1, b, y, x, c)],
-              input2_data[SubscriptToIndex(desc2, b, y, x, c)], params);
-        }
-      }
-    }
-  }
+template <typename T>
+void BroadcastBinaryFunction4DSlow(
+    const ArithmeticParams& params, const RuntimeShape& input1_shape,
+    const T* input1_data, const RuntimeShape& input2_shape,
+    const T* input2_data, const RuntimeShape& output_shape, T* output_data,
+    void (*check_arithmetic_params)(const ArithmeticParams&),
+    T (*binary_func)(T, T, const ArithmeticParams&)) {
+  BroadcastBinaryFunction6DSlow(params, input1_shape, input1_data, input2_shape,
+                                input2_data, output_shape, output_data,
+                                check_arithmetic_params, binary_func);
 }
 
 inline int8_t AddFunc(int8_t x, int8_t y, const ArithmeticParams& params) {
@@ -126,6 +144,18 @@ inline void Add(const ArithmeticParams& params,
   AddElementwise(flat_size, params, input1_data, input2_data, output_data);
 }
 
+inline void BroadcastAdd6DSlow(const ArithmeticParams& params,
+                               const RuntimeShape& input1_shape,
+                               const int8_t* input1_data,
+                               const RuntimeShape& input2_shape,
+                               const int8_t* input2_data,
+                               const RuntimeShape& output_shape,
+                               int8_t* output_data) {
+  BroadcastBinaryFunction6DSlow(params, input1_shape, input1_data, input2_shape,
+                                input2_data, output_shape, output_data,
+                                CheckArithmeticParams, AddFunc);
+}
+
 inline void BroadcastAdd4DSlow(const ArithmeticParams& params,
                                const RuntimeShape& input1_shape,
                                const int8_t* input1_data,
@@ -133,7 +163,7 @@ inline void BroadcastAdd4DSlow(const ArithmeticParams& params,
                                const int8_t* input2_data,
                                const RuntimeShape& output_shape,
                                int8_t* output_data) {
-  BroadcastBinaryFunction4DSlow(params, input1_shape, input1_data, input2_shape,
+  BroadcastBinaryFunction6DSlow(params, input1_shape, input1_data, input2_shape,
                                 input2_data, output_shape, output_data,
                                 CheckArithmeticParams, AddFunc);
 }

@@ -32,7 +32,7 @@ limitations under the License.
 
 #include <array>
 
-#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
+#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
 #define GEMMLOWP_ALLOW_SLOW_SCALAR_FALLBACK
 #include "public/gemmlowp.h"
 #include "tensorflow/core/framework/tensor.h"
@@ -71,7 +71,7 @@ inline int64_t FloatToQuantizedUnclamped<float>(float input, float range_min,
 // any over or underflows.
 template <class T>
 T FloatToQuantized(float input, float range_min, float range_max) {
-  if (std::is_same<T, float>::value) {
+  if (std::is_same_v<T, float>) {
     // Specialization for float. This is used in reference implementation
     // for float which is useful to compare performance between float
     // and quantized type.
@@ -84,12 +84,12 @@ T FloatToQuantized(float input, float range_min, float range_max) {
       static_cast<int64_t>(Eigen::NumTraits<T>::highest());
   quantized = std::max(quantized, lowest_quantized);
   quantized = std::min(quantized, highest_quantized);
-  return static_cast<T>(static_cast<int32>(quantized));
+  return static_cast<T>(static_cast<int32_t>(quantized));
 }
 
 template <class T>
 float QuantizedToFloat(T input, float range_min, float range_max) {
-  if (std::is_same<T, float>::value) {
+  if (std::is_same_v<T, float>) {
     // Specialization for float. This is used in reference implementation
     // for float which is useful to compare performance between float
     // and quantized type.
@@ -268,8 +268,7 @@ inline void RequantizeManyInNewRangeReference(const qint32* input,
   const int64_t output_offset_fp =
       output_range == 0.0
           ? 0
-          : static_cast<int64_t>((1 << fp_shift) * (min_output * 255.0) /
-                                 output_range);
+          : std::lround((1 << fp_shift) * (min_output * 255.0) / output_range);
   const int64_t rounding_delta = 1 << (fp_shift - 1);
 
   // Inside this loop we just do minimal adds, multiplies, and shifts, in a way
@@ -285,7 +284,7 @@ inline void RequantizeManyInNewRangeReference(const qint32* input,
     int64_t quantized_int64 = round_intermediate >> fp_shift;
     quantized_int64 = std::max(quantized_int64, int64_t{0});
     quantized_int64 = std::min(quantized_int64, int64_t{255});
-    output[index] = static_cast<quint8>(static_cast<int32>(quantized_int64));
+    output[index] = static_cast<quint8>(static_cast<int32_t>(quantized_int64));
   }
 }
 
@@ -311,7 +310,7 @@ inline void RequantizeManyInNewRange8To32BitReference(
     int64_t output_value = code_0_int64 + (input_value * mult_int32);
     output_value = std::max(output_value, lowest_quantized);
     output_value = std::min(output_value, highest_quantized);
-    output[i] = static_cast<int32>(output_value);
+    output[i] = static_cast<int32_t>(output_value);
   }
 }
 
@@ -630,12 +629,12 @@ inline void RequantizeManyInNewRange<quint8, qint32>(
 
   // Requantize remaining elements in array without SIMD.
   const int64 lowest_quantized =
-      static_cast<int64>(Eigen::NumTraits<qint32>::lowest());
+      static_cast<int64_t>(Eigen::NumTraits<qint32>::lowest());
   const int64 highest_quantized =
-      static_cast<int64>(Eigen::NumTraits<qint32>::highest());
+      static_cast<int64_t>(Eigen::NumTraits<qint32>::highest());
 
   for (; i < count; ++i) {
-    const int64 input_value = static_cast<int64>(input[i]);
+    const int64 input_value = static_cast<int64_t>(input[i]);
     int64 output_value = code_0_int64 + (input_value * mult_int32);
     output_value = std::max(output_value, lowest_quantized);
     output_value = std::min(output_value, highest_quantized);
@@ -667,7 +666,6 @@ inline void RequantizeManyInNewRange<quint8, qint32>(
 
 template <int shift>
 struct int64_right_shift_op {
-  EIGEN_EMPTY_STRUCT_CTOR(int64_right_shift_op)
   EIGEN_DEVICE_FUNC
   EIGEN_STRONG_INLINE const int64_t operator()(const int64_t a) const {
     return a >> shift;
@@ -714,8 +712,7 @@ inline void RequantizeManyInNewRangeUsingEigen<qint32, quint8>(
   const int64_t output_offset_fp =
       output_range == 0.0
           ? 0
-          : static_cast<int64_t>((1 << fp_shift) * (min_output * 255.0) /
-                                 output_range);
+          : std::lround((1 << fp_shift) * (min_output * 255.0) / output_range);
   const int64_t rounding_delta = 1 << (fp_shift - 1);
 
   // Inside this eigen expression we just do minimal adds, multiplies, and
@@ -728,7 +725,7 @@ inline void RequantizeManyInNewRangeUsingEigen<qint32, quint8>(
   auto intermediate = fp_value.unaryExpr(int64_right_shift_op<fp_shift>());
   auto input_requantized = intermediate.cwiseMax(int64_t{0})
                                .cwiseMin(int64_t{255})
-                               .template cast<int32>()
+                               .template cast<int32_t>()
                                .template cast<quint8>();
   output->flat<quint8>().device(device) = input_requantized;
 }
@@ -946,7 +943,8 @@ class TensorflowGemmlowpWorkersPool {
   // The BlockingCounter used to wait for the workers.
   gemmlowp::BlockingCounter counter_to_decrement_when_ready_;
 
-  TF_DISALLOW_COPY_AND_ASSIGN(TensorflowGemmlowpWorkersPool);
+  TensorflowGemmlowpWorkersPool(const TensorflowGemmlowpWorkersPool&) = delete;
+  void operator=(const TensorflowGemmlowpWorkersPool&) = delete;
 };
 
 class TensorflowGemmContext : public gemmlowp::MultiThreadGemmContextBase {
@@ -961,7 +959,8 @@ class TensorflowGemmContext : public gemmlowp::MultiThreadGemmContextBase {
  private:
   TensorflowGemmlowpWorkersPool workers_pool_;
 
-  TF_DISALLOW_COPY_AND_ASSIGN(TensorflowGemmContext);
+  TensorflowGemmContext(const TensorflowGemmContext&) = delete;
+  void operator=(const TensorflowGemmContext&) = delete;
 };
 
 }  // namespace tensorflow

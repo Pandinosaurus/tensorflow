@@ -15,9 +15,17 @@ limitations under the License.
 #include "tensorflow/python/client/session_ref.h"
 
 #include <stdlib.h>
-#include <memory>
-#include <utility>
 
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <unordered_map>
+#include <utility>
+#include <vector>
+
+#include "absl/log/log.h"
+#include "absl/status/status.h"
+#include "absl/strings/str_format.h"
 #include "tensorflow/core/lib/io/path.h"
 #include "tensorflow/core/lib/io/record_writer.h"
 #include "tensorflow/core/lib/strings/stringprintf.h"
@@ -33,27 +41,32 @@ namespace {
 // SessionRef blocks closing until all active calls complete or are cancelled.
 struct RunCounter {
   std::shared_ptr<Session> session;
-  uint64* value;
+  uint64_t* value;
   mutex* m;
   condition_variable* cv;
 
-  explicit RunCounter(std::shared_ptr<Session> s, uint64* v, mutex* m,
+  explicit RunCounter(const std::shared_ptr<Session>& s, uint64_t* v, mutex* m,
                       condition_variable* cv)
-      : session(std::move(s)), value(v), m(m), cv(cv) {
+      : value(v), m(m), cv(cv) {
     mutex_lock l(*m);
-    ++*value;
+    if (s != nullptr) {
+      session = s;
+      ++*value;
+    }
   }
 
   ~RunCounter() {
-    mutex_lock l(*m);
-    if (--*value == 0) {
-      cv->notify_all();
+    if (session != nullptr) {
+      mutex_lock l(*m);
+      if (--*value == 0) {
+        cv->notify_all();
+      }
     }
   }
 };
 
 std::string SessionToHandle(Session* session) {
-  return strings::Printf("%llu", static_cast<unsigned long long>(
+  return absl::StrFormat("%llu", static_cast<unsigned long long>(
                                      reinterpret_cast<uintptr_t>(session)));
 }
 
@@ -93,14 +106,15 @@ RunOptions* kEmptyRunOptions() {
 class SessionLogger {
  public:
   SessionLogger() {
-    std::string log_name = getenv("TF_REPLAY_LOG_FILE");
+    const char* log_file_env = getenv("TF_REPLAY_LOG_FILE");
+    std::string log_name = log_file_env ? std::string(log_file_env) : ".";
     LOG(INFO) << "Constructing new session logger for " << log_name;
-    TF_CHECK_OK(
-        Env::Default()->RecursivelyCreateDir(string(io::Dirname(log_name))));
+    TF_CHECK_OK(Env::Default()->RecursivelyCreateDir(
+        std::string(io::Dirname(log_name))));
     Env::Default()->DeleteFile(log_name).IgnoreError();
 
     TF_CHECK_OK(Env::Default()->NewWritableFile(log_name, &log_file_));
-    log_writer_ = absl::make_unique<io::RecordWriter>(log_file_.get());
+    log_writer_ = std::make_unique<io::RecordWriter>(log_file_.get());
   }
 
   ~SessionLogger() {
@@ -109,27 +123,29 @@ class SessionLogger {
     log_file_->Close().IgnoreError();
   }
 
-  Status RecordNewSession(Session* session) {
+  absl::Status RecordNewSession(Session* session) {
     ReplayOp op;
     NewReplaySession* req = op.mutable_new_replay_session();
     req->set_session_handle(SessionToHandle(session));
     return Flush(op);
   }
 
-  Status RecordRun(Session* session,
-                   const std::vector<std::pair<string, Tensor> >& inputs,
-                   const std::vector<string>& output_tensor_names,
-                   const std::vector<string>& target_node_names,
-                   std::vector<Tensor>* outputs) {
+  absl::Status RecordRun(
+      Session* session,
+      const std::vector<std::pair<std::string, Tensor> >& inputs,
+      const std::vector<std::string>& output_tensor_names,
+      const std::vector<std::string>& target_node_names,
+      std::vector<Tensor>* outputs) {
     return RecordRun(session, *kEmptyRunOptions(), inputs, output_tensor_names,
                      target_node_names, outputs, nullptr);
   }
 
-  Status RecordRun(Session* session, const RunOptions& run_options,
-                   const std::vector<std::pair<string, Tensor> >& inputs,
-                   const std::vector<string>& output_tensor_names,
-                   const std::vector<string>& target_node_names,
-                   std::vector<Tensor>* outputs, RunMetadata* run_metadata) {
+  absl::Status RecordRun(
+      Session* session, const RunOptions& run_options,
+      const std::vector<std::pair<std::string, Tensor> >& inputs,
+      const std::vector<std::string>& output_tensor_names,
+      const std::vector<std::string>& target_node_names,
+      std::vector<Tensor>* outputs, RunMetadata* run_metadata) {
     ReplayOp op;
     RunStepRequest* req = op.mutable_run_step();
     RunStepResponse* resp = op.mutable_run_step_response();
@@ -145,14 +161,14 @@ class SessionLogger {
 
     // Build an index from fetch tensor name to first index in
     // output_tensor_names.
-    std::unordered_map<string, int> output_name_to_offset;
+    std::unordered_map<std::string, int> output_name_to_offset;
     for (int i = 0, end = output_tensor_names.size(); i < end; ++i) {
-      const string& name = output_tensor_names[i];
+      const std::string& name = output_tensor_names[i];
       if (output_name_to_offset.insert(std::make_pair(name, i)).second) {
         req->add_fetch(name);
       }
     }
-    for (const string& target : target_node_names) {
+    for (const std::string& target : target_node_names) {
       req->add_target(target);
     }
 
@@ -178,13 +194,13 @@ class SessionLogger {
     return Flush(op);
   }
 
-  Status RecordCreate(Session* session, const GraphDef& graph) {
+  absl::Status RecordCreate(Session* session, const GraphDef& graph) {
     return RecordCreate(session, *kEmptyRunOptions(), graph);
   }
 
   // N.B. RunOptions is not stored (it has no entry in CreateRequest)
-  Status RecordCreate(Session* session, const RunOptions& run_options,
-                      const GraphDef& graph) {
+  absl::Status RecordCreate(Session* session, const RunOptions& run_options,
+                            const GraphDef& graph) {
     ReplayOp op;
     CreateSessionRequest* req = op.mutable_create_session();
     *req->mutable_graph_def() = graph;
@@ -199,13 +215,13 @@ class SessionLogger {
     return Flush(op);
   }
 
-  Status RecordExtend(Session* session, const GraphDef& graph) {
+  absl::Status RecordExtend(Session* session, const GraphDef& graph) {
     return RecordExtend(session, *kEmptyRunOptions(), graph);
   }
 
   // N.B. RunOptions is not stored (it has no entry in ExtendRequest)
-  Status RecordExtend(Session* session, const RunOptions& run_options,
-                      const GraphDef& graph) {
+  absl::Status RecordExtend(Session* session, const RunOptions& run_options,
+                            const GraphDef& graph) {
     ReplayOp op;
     ExtendSessionRequest* req = op.mutable_extend_session();
     op.mutable_extend_session_response();
@@ -220,12 +236,12 @@ class SessionLogger {
     return Flush(op);
   }
 
-  Status RecordClose(Session* session) {
+  absl::Status RecordClose(Session* session) {
     return RecordClose(session, *kEmptyRunOptions());
   }
 
   // N.B. RunOptions is not stored (it has no entry in CloseRequest)
-  Status RecordClose(Session* session, const RunOptions& run_options) {
+  absl::Status RecordClose(Session* session, const RunOptions& run_options) {
     ReplayOp op;
     CloseSessionRequest* req = op.mutable_close_session();
     req->set_session_handle(SessionToHandle(session));
@@ -238,8 +254,8 @@ class SessionLogger {
     return Flush(op);
   }
 
-  Status RecordListDevices(Session* session,
-                           std::vector<DeviceAttributes>* response) {
+  absl::Status RecordListDevices(Session* session,
+                                 std::vector<DeviceAttributes>* response) {
     ReplayOp op;
     ListDevicesRequest* req = op.mutable_list_devices();
     ListDevicesResponse* resp = op.mutable_list_devices_response();
@@ -251,11 +267,11 @@ class SessionLogger {
     return Flush(op);
   }
 
-  Status RecordPRunSetup(Session* session,
-                         const std::vector<string>& input_names,
-                         const std::vector<string>& output_names,
-                         const std::vector<string>& target_nodes,
-                         string* handle) {
+  absl::Status RecordPRunSetup(Session* session,
+                               const std::vector<std::string>& input_names,
+                               const std::vector<std::string>& output_names,
+                               const std::vector<std::string>& target_nodes,
+                               std::string* handle) {
     ReplayOp op;
     PartialRunSetupRequest* req = op.mutable_partial_run_setup();
     req->set_session_handle(SessionToHandle(session));
@@ -274,10 +290,11 @@ class SessionLogger {
     return Flush(op);
   }
 
-  Status RecordPRun(Session* session, const string& handle,
-                    const std::vector<std::pair<string, Tensor> >& inputs,
-                    const std::vector<string>& output_names,
-                    std::vector<Tensor>* outputs) {
+  absl::Status RecordPRun(
+      Session* session, const std::string& handle,
+      const std::vector<std::pair<std::string, Tensor> >& inputs,
+      const std::vector<std::string>& output_names,
+      std::vector<Tensor>* outputs) {
     ReplayOp op;
     RunStepRequest* req = op.mutable_run_step();
     RunStepResponse* resp = op.mutable_run_step_response();
@@ -307,9 +324,9 @@ class SessionLogger {
     return Flush(op);
   }
 
-  Status RecordMakeCallable(Session* session,
-                            const CallableOptions& callable_options,
-                            Session::CallableHandle* handle) {
+  absl::Status RecordMakeCallable(Session* session,
+                                  const CallableOptions& callable_options,
+                                  Session::CallableHandle* handle) {
     ReplayOp op;
     MakeCallableRequest* req = op.mutable_make_callable();
     req->set_session_handle(SessionToHandle(session));
@@ -323,10 +340,11 @@ class SessionLogger {
     return Flush(op);
   }
 
-  Status RecordRunCallable(Session* session, Session::CallableHandle handle,
-                           const std::vector<Tensor>& feed_tensors,
-                           std::vector<Tensor>* fetch_tensors,
-                           RunMetadata* run_metadata) {
+  absl::Status RecordRunCallable(Session* session,
+                                 Session::CallableHandle handle,
+                                 const std::vector<Tensor>& feed_tensors,
+                                 std::vector<Tensor>* fetch_tensors,
+                                 RunMetadata* run_metadata) {
     ReplayOp op;
     RunCallableRequest* req = op.mutable_run_callable();
     req->set_session_handle(SessionToHandle(session));
@@ -347,8 +365,8 @@ class SessionLogger {
     return Flush(op);
   }
 
-  Status RecordReleaseCallable(Session* session,
-                               Session::CallableHandle handle) {
+  absl::Status RecordReleaseCallable(Session* session,
+                                     Session::CallableHandle handle) {
     ReplayOp op;
     ReleaseCallableRequest* req = op.mutable_release_callable();
     req->set_session_handle(SessionToHandle(session));
@@ -358,10 +376,10 @@ class SessionLogger {
   }
 
  private:
-  Status Flush(const ReplayOp& op) {
+  absl::Status Flush(const ReplayOp& op) {
     mutex_lock l(log_mutex_);
 
-    string buf;
+    std::string buf;
     op.SerializeToString(&buf);
     TF_RETURN_IF_ERROR(log_writer_->WriteRecord(buf));
 
@@ -390,105 +408,105 @@ SessionRef::SessionRef(Session* session) : session_(session) {
 
 SessionRef::~SessionRef() = default;
 
-Status SessionRef::CheckNotClosed() {
-  mutex_lock l(run_lock_);
-  if (session_ == nullptr) return errors::Cancelled("Session has been closed.");
-  return ::tensorflow::Status::OK();
-}
-
 // If logging is active, log the start and end time of the operation along with
 // the request and response.
 #define LOG_AND_RUN_OPERATION(OpName, ...)                          \
-  TF_RETURN_IF_ERROR(CheckNotClosed());                             \
   RunCounter rc(session_, &run_count_, &run_lock_, &run_finished_); \
+  if (rc.session == nullptr) {                                      \
+    return absl::CancelledError("Session has been closed.");        \
+  }                                                                 \
   if (!logger_) {                                                   \
     return rc.session->OpName(__VA_ARGS__);                         \
   }                                                                 \
   return logger_->Record##OpName(rc.session.get(), __VA_ARGS__);
 
-Status SessionRef::Run(const RunOptions& run_options,
-                       const std::vector<std::pair<string, Tensor> >& inputs,
-                       const std::vector<string>& output_tensor_names,
-                       const std::vector<string>& target_node_names,
-                       std::vector<Tensor>* outputs,
-                       RunMetadata* run_metadata) {
+absl::Status SessionRef::Run(
+    const RunOptions& run_options,
+    const std::vector<std::pair<std::string, Tensor> >& inputs,
+    const std::vector<std::string>& output_tensor_names,
+    const std::vector<std::string>& target_node_names,
+    std::vector<Tensor>* outputs, RunMetadata* run_metadata) {
   LOG_AND_RUN_OPERATION(Run, run_options, inputs, output_tensor_names,
                         target_node_names, outputs, run_metadata);
 }
 
-Status SessionRef::Run(const std::vector<std::pair<string, Tensor> >& inputs,
-                       const std::vector<string>& output_tensor_names,
-                       const std::vector<string>& target_node_names,
-                       std::vector<Tensor>* outputs) {
+absl::Status SessionRef::Run(
+    const std::vector<std::pair<std::string, Tensor> >& inputs,
+    const std::vector<std::string>& output_tensor_names,
+    const std::vector<std::string>& target_node_names,
+    std::vector<Tensor>* outputs) {
   LOG_AND_RUN_OPERATION(Run, inputs, output_tensor_names, target_node_names,
                         outputs);
 }
 
-Status SessionRef::Create(const GraphDef& graph) {
+absl::Status SessionRef::Create(const GraphDef& graph) {
   LOG_AND_RUN_OPERATION(Create, graph);
 }
 
-Status SessionRef::Create(const RunOptions& run_options,
-                          const GraphDef& graph) {
+absl::Status SessionRef::Create(const RunOptions& run_options,
+                                const GraphDef& graph) {
   LOG_AND_RUN_OPERATION(Create, run_options, graph);
 }
 
-Status SessionRef::Extend(const RunOptions& run_options,
-                          const GraphDef& graph) {
+absl::Status SessionRef::Extend(const RunOptions& run_options,
+                                const GraphDef& graph) {
   LOG_AND_RUN_OPERATION(Extend, run_options, graph);
 }
 
-Status SessionRef::Extend(const GraphDef& graph) {
+absl::Status SessionRef::Extend(const GraphDef& graph) {
   LOG_AND_RUN_OPERATION(Extend, graph);
 }
 
-Status SessionRef::ListDevices(std::vector<DeviceAttributes>* response) {
+absl::Status SessionRef::ListDevices(std::vector<DeviceAttributes>* response) {
   LOG_AND_RUN_OPERATION(ListDevices, response);
 }
 
-Status SessionRef::PRunSetup(const std::vector<string>& input_names,
-                             const std::vector<string>& output_names,
-                             const std::vector<string>& target_nodes,
-                             string* handle) {
+absl::Status SessionRef::PRunSetup(const std::vector<std::string>& input_names,
+                                   const std::vector<std::string>& output_names,
+                                   const std::vector<std::string>& target_nodes,
+                                   std::string* handle) {
   LOG_AND_RUN_OPERATION(PRunSetup, input_names, output_names, target_nodes,
                         handle);
 }
 
-Status SessionRef::PRun(const string& handle,
-                        const std::vector<std::pair<string, Tensor> >& inputs,
-                        const std::vector<string>& output_names,
-                        std::vector<Tensor>* outputs) {
+absl::Status SessionRef::PRun(
+    const std::string& handle,
+    const std::vector<std::pair<std::string, Tensor> >& inputs,
+    const std::vector<std::string>& output_names,
+    std::vector<Tensor>* outputs) {
   LOG_AND_RUN_OPERATION(PRun, handle, inputs, output_names, outputs);
 }
 
-Status SessionRef::MakeCallable(const CallableOptions& callable_options,
-                                CallableHandle* out_handle) {
+absl::Status SessionRef::MakeCallable(const CallableOptions& callable_options,
+                                      CallableHandle* out_handle) {
   LOG_AND_RUN_OPERATION(MakeCallable, callable_options, out_handle);
 }
 
-Status SessionRef::RunCallable(CallableHandle handle,
-                               const std::vector<Tensor>& feed_tensors,
-                               std::vector<Tensor>* fetch_tensors,
-                               RunMetadata* run_metadata) {
+absl::Status SessionRef::RunCallable(CallableHandle handle,
+                                     const std::vector<Tensor>& feed_tensors,
+                                     std::vector<Tensor>* fetch_tensors,
+                                     RunMetadata* run_metadata) {
   LOG_AND_RUN_OPERATION(RunCallable, handle, feed_tensors, fetch_tensors,
                         run_metadata);
 }
 
-Status SessionRef::ReleaseCallable(CallableHandle handle) {
+absl::Status SessionRef::ReleaseCallable(CallableHandle handle) {
   {
     mutex_lock l(run_lock_);
     if (session_ == nullptr) {
       // Session already closed. Do nothing.
-      return Status::OK();
+      return absl::OkStatus();
     }
   }
   LOG_AND_RUN_OPERATION(ReleaseCallable, handle);
 }
 
-Status SessionRef::Close(const RunOptions& run_options) {
-  TF_RETURN_IF_ERROR(CheckNotClosed());
+absl::Status SessionRef::Close(const RunOptions& run_options) {
   mutex_lock l(run_lock_);
-  Status status;
+  if (session_ == nullptr) {
+    return absl::CancelledError("Session has been closed.");
+  }
+  absl::Status status;
   if (logger_) {
     status = logger_->RecordClose(session_.get(), run_options);
   } else {
@@ -501,10 +519,12 @@ Status SessionRef::Close(const RunOptions& run_options) {
   return status;
 }
 
-Status SessionRef::Close() {
-  TF_RETURN_IF_ERROR(CheckNotClosed());
+absl::Status SessionRef::Close() {
   mutex_lock l(run_lock_);
-  Status status;
+  if (session_ == nullptr) {
+    return absl::CancelledError("Session has been closed.");
+  }
+  absl::Status status;
   if (logger_) {
     status = logger_->RecordClose(session_.get());
   } else {

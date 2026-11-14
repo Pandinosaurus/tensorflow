@@ -10,10 +10,13 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include <cstdint>
+#include <memory>
 #include <sstream>
 #include <string>
 
-#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
+#include "absl/log/check.h"
+#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
 #include "tensorflow/c/kernels.h"
 #include "tensorflow/c/tf_status.h"
 #include "tensorflow/c/tf_tensor.h"
@@ -64,8 +67,8 @@ void HistogramSummaryOp_Delete(void* kernel) {
 template <typename T>
 void HistogramSummaryOp_Compute(void* kernel, TF_OpKernelContext* ctx) {
   HistogramSummaryOp* k = static_cast<HistogramSummaryOp*>(kernel);
-  TF_Tensor* tags;
-  TF_Tensor* values;
+  TF_Tensor* tags = nullptr;
+  TF_Tensor* values = nullptr;
   Safe_TF_StatusPtr status(TF_NewStatus());
   TF_GetInput(ctx, 0, &tags, status.get());
   Safe_TF_TensorPtr safe_tags_ptr(tags);
@@ -148,13 +151,13 @@ void RegisterHistogramSummaryOpKernel() {
 TF_ATTRIBUTE_UNUSED static bool IsHistogramSummaryOpKernelRegistered = []() {
   if (SHOULD_REGISTER_OP_KERNEL("HistogramSummary")) {
     RegisterHistogramSummaryOpKernel<int64_t>();
-    RegisterHistogramSummaryOpKernel<tensorflow::uint64>();
-    RegisterHistogramSummaryOpKernel<tensorflow::int32>();
-    RegisterHistogramSummaryOpKernel<tensorflow::uint32>();
-    RegisterHistogramSummaryOpKernel<tensorflow::uint16>();
-    RegisterHistogramSummaryOpKernel<tensorflow::int16>();
-    RegisterHistogramSummaryOpKernel<tensorflow::int8>();
-    RegisterHistogramSummaryOpKernel<tensorflow::uint8>();
+    RegisterHistogramSummaryOpKernel<uint64_t>();
+    RegisterHistogramSummaryOpKernel<int32_t>();
+    RegisterHistogramSummaryOpKernel<uint32_t>();
+    RegisterHistogramSummaryOpKernel<uint16_t>();
+    RegisterHistogramSummaryOpKernel<int16_t>();
+    RegisterHistogramSummaryOpKernel<int8_t>();
+    RegisterHistogramSummaryOpKernel<uint8_t>();
     RegisterHistogramSummaryOpKernel<Eigen::half>();
     RegisterHistogramSummaryOpKernel<tensorflow::bfloat16>();
     RegisterHistogramSummaryOpKernel<float>();

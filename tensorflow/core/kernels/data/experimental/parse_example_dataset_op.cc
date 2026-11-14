@@ -12,8 +12,17 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
+#include <cstddef>
+#include <cstdint>
 #include <deque>
+#include <functional>
+#include <map>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
 
+#include "absl/synchronization/notification.h"
 #include "tensorflow/core/common_runtime/device.h"
 #include "tensorflow/core/data/dataset_utils.h"
 #include "tensorflow/core/data/name_utils.h"
@@ -22,11 +31,13 @@ limitations under the License.
 #include "tensorflow/core/framework/stats_aggregator.h"
 #include "tensorflow/core/kernels/data/parallel_map_dataset_op.h"
 #include "tensorflow/core/kernels/ragged_tensor_variant.h"
+#include "tensorflow/core/platform/env.h"
 #include "tensorflow/core/platform/errors.h"
 #include "tensorflow/core/platform/stringprintf.h"
 #include "tensorflow/core/profiler/lib/traceme.h"
 #include "tensorflow/core/profiler/lib/traceme_encode.h"
 #include "tensorflow/core/util/example_proto_fast_parsing.h"
+#include "tsl/platform/context.h"
 
 namespace tensorflow {
 namespace data {
@@ -95,10 +106,10 @@ class ParseExampleDatasetOp : public UnaryDatasetOpKernel {
         }
       }
       OP_REQUIRES(ctx, shape_ok,
-                  errors::InvalidArgument(
+                  absl::InvalidArgumentError(absl::StrCat(
                       "dense_shapes[", i,
                       "] has unknown rank or unknown inner dimensions: ",
-                      dense_shapes_[i].DebugString()));
+                      dense_shapes_[i].DebugString())));
       TensorShape dense_shape;
       if (dense_shapes_[i].dims() > 0 && dense_shapes_[i].dim_size(0) == -1) {
         variable_length_.push_back(true);
@@ -123,17 +134,18 @@ class ParseExampleDatasetOp : public UnaryDatasetOpKernel {
                                             &num_parallel_calls));
     OP_REQUIRES(
         ctx, num_parallel_calls > 0 || num_parallel_calls == model::kAutotune,
-        errors::InvalidArgument(
+        absl::InvalidArgumentError(
             "num_parallel_calls must be greater than zero."));
 
     OpInputList dense_default_tensors;
     OP_REQUIRES_OK(ctx,
                    ctx->input_list("dense_defaults", &dense_default_tensors));
 
-    OP_REQUIRES(ctx, dense_default_tensors.size() == dense_keys_.size(),
-                errors::InvalidArgument(
-                    "Expected len(dense_defaults) == len(dense_keys) but got: ",
-                    dense_default_tensors.size(), " vs. ", dense_keys_.size()));
+    OP_REQUIRES(
+        ctx, dense_default_tensors.size() == dense_keys_.size(),
+        absl::InvalidArgumentError(absl::StrCat(
+            "Expected len(dense_defaults) == len(dense_keys) but got: ",
+            dense_default_tensors.size(), " vs. ", dense_keys_.size())));
 
     std::vector<Tensor> dense_defaults(dense_default_tensors.begin(),
                                        dense_default_tensors.end());
@@ -142,7 +154,7 @@ class ParseExampleDatasetOp : public UnaryDatasetOpKernel {
       const Tensor& def_value = dense_defaults[d];
       if (variable_length_[d]) {
         OP_REQUIRES(ctx, def_value.NumElements() == 1,
-                    errors::InvalidArgument(
+                    absl::InvalidArgumentError(absl::StrCat(
                         "dense_shape[", d, "] is a variable length shape: ",
                         dense_shapes_[d].DebugString(),
                         ", therefore "
@@ -150,47 +162,47 @@ class ParseExampleDatasetOp : public UnaryDatasetOpKernel {
                         d,
                         "] must contain a single element ("
                         "the padding element).  But its shape is: ",
-                        def_value.shape().DebugString()));
+                        def_value.shape().DebugString())));
       } else if (def_value.NumElements() > 0) {
         OP_REQUIRES(ctx, dense_shapes_[d].IsCompatibleWith(def_value.shape()),
-                    errors::InvalidArgument(
+                    absl::InvalidArgumentError(absl::StrCat(
                         "def_value[", d,
                         "].shape() == ", def_value.shape().DebugString(),
                         " is not compatible with dense_shapes_[", d,
-                        "] == ", dense_shapes_[d].DebugString()));
+                        "] == ", dense_shapes_[d].DebugString())));
       }
       OP_REQUIRES(ctx, def_value.dtype() == dense_types_[d],
-                  errors::InvalidArgument(
+                  absl::InvalidArgumentError(absl::StrCat(
                       "dense_defaults[", d, "].dtype() == ",
                       DataTypeString(def_value.dtype()), " != dense_types_[", d,
-                      "] == ", DataTypeString(dense_types_[d])));
+                      "] == ", DataTypeString(dense_types_[d]))));
     }
 
     example::FastParseExampleConfig config;
-    std::map<string, int> key_to_output_index;
+    std::map<std::string, int> key_to_output_index;
     for (int d = 0; d < dense_keys_.size(); ++d) {
       config.dense.push_back({dense_keys_[d], dense_types_[d], dense_shapes_[d],
                               dense_default_tensors[d], variable_length_[d],
                               elements_per_stride_[d]});
       auto result = key_to_output_index.insert({dense_keys_[d], 0});
       OP_REQUIRES(ctx, result.second,
-                  errors::InvalidArgument("Duplicate key not allowed: ",
-                                          dense_keys_[d]));
+                  absl::InvalidArgumentError(absl::StrCat(
+                      "Duplicate key not allowed: ", dense_keys_[d])));
     }
     for (int d = 0; d < sparse_keys_.size(); ++d) {
       config.sparse.push_back({sparse_keys_[d], sparse_types_[d]});
       auto result = key_to_output_index.insert({sparse_keys_[d], 0});
       OP_REQUIRES(ctx, result.second,
-                  errors::InvalidArgument("Duplicate key not allowed: ",
-                                          sparse_keys_[d]));
+                  absl::InvalidArgumentError(absl::StrCat(
+                      "Duplicate key not allowed: ", sparse_keys_[d])));
     }
     for (int d = 0; d < ragged_keys_.size(); ++d) {
       config.ragged.push_back(
           {ragged_keys_[d], ragged_value_types_[d], ragged_split_types_[d]});
       auto result = key_to_output_index.insert({ragged_keys_[d], 0});
       OP_REQUIRES(ctx, result.second,
-                  errors::InvalidArgument("Duplicate key not allowed: ",
-                                          ragged_keys_[d]));
+                  absl::InvalidArgumentError(absl::StrCat(
+                      "Duplicate key not allowed: ", ragged_keys_[d])));
     }
     int i = 0;
     for (auto it = key_to_output_index.begin(); it != key_to_output_index.end();
@@ -210,9 +222,10 @@ class ParseExampleDatasetOp : public UnaryDatasetOpKernel {
   class Dataset : public DatasetBase {
    public:
     Dataset(OpKernelContext* ctx, const DatasetBase* input,
-            std::vector<Tensor> dense_defaults, std::vector<string> sparse_keys,
-            std::vector<string> dense_keys,
-            std::map<string, int> key_to_output_index,
+            std::vector<Tensor> dense_defaults,
+            std::vector<std::string> sparse_keys,
+            std::vector<std::string> dense_keys,
+            std::map<std::string, int> key_to_output_index,
             example::FastParseExampleConfig config, int32_t num_parallel_calls,
             const DataTypeVector& sparse_types,
             const DataTypeVector& dense_types,
@@ -220,7 +233,7 @@ class ParseExampleDatasetOp : public UnaryDatasetOpKernel {
             const DataTypeVector& output_types,
             const std::vector<PartialTensorShape>& output_shapes,
             const DeterminismPolicy& deterministic, bool has_ragged_keys,
-            std::vector<string> ragged_keys,
+            std::vector<std::string> ragged_keys,
             const DataTypeVector& ragged_value_types,
             const DataTypeVector& ragged_split_types, int op_version)
         : DatasetBase(DatasetContext(ctx)),
@@ -248,10 +261,10 @@ class ParseExampleDatasetOp : public UnaryDatasetOpKernel {
     ~Dataset() override { input_->Unref(); }
 
     std::unique_ptr<IteratorBase> MakeIteratorInternal(
-        const string& prefix) const override {
+        const std::string& prefix) const override {
       name_utils::IteratorPrefixParams params;
       params.op_version = op_version_;
-      return absl::make_unique<Iterator>(Iterator::Params{
+      return std::make_unique<Iterator>(Iterator::Params{
           this, name_utils::IteratorPrefix(kDatasetType, prefix, params)});
     }
 
@@ -263,28 +276,30 @@ class ParseExampleDatasetOp : public UnaryDatasetOpKernel {
       return output_shapes_;
     }
 
-    string DebugString() const override {
+    std::string DebugString() const override {
       name_utils::DatasetDebugStringParams params;
       params.op_version = op_version_;
       return name_utils::DatasetDebugString(kDatasetType, params);
     }
 
-    int64_t Cardinality() const override { return input_->Cardinality(); }
-
-    Status InputDatasets(
-        std::vector<const DatasetBase*>* inputs) const override {
-      inputs->push_back(input_);
-      return Status::OK();
+    int64_t CardinalityInternal(CardinalityOptions options) const override {
+      return input_->Cardinality(options);
     }
 
-    Status CheckExternalState() const override {
+    absl::Status InputDatasets(
+        std::vector<const DatasetBase*>* inputs) const override {
+      inputs->push_back(input_);
+      return absl::OkStatus();
+    }
+
+    absl::Status CheckExternalState() const override {
       return input_->CheckExternalState();
     }
 
    protected:
-    Status AsGraphDefInternal(SerializationContext* ctx,
-                              DatasetGraphDefBuilder* b,
-                              Node** output) const override {
+    absl::Status AsGraphDefInternal(SerializationContext* ctx,
+                                    DatasetGraphDefBuilder* b,
+                                    Node** output) const override {
       Node* input_graph_node = nullptr;
       TF_RETURN_IF_ERROR(b->AddInputDataset(ctx, input_, &input_graph_node));
 
@@ -301,7 +316,7 @@ class ParseExampleDatasetOp : public UnaryDatasetOpKernel {
         dense_defaults_nodes.emplace_back(node);
       }
 
-      std::vector<std::pair<StringPiece, AttrValue>> attrs;
+      std::vector<std::pair<absl::string_view, AttrValue>> attrs;
 
       AttrValue sparse_keys_attr;
       b->BuildAttrValue(sparse_keys_, &sparse_keys_attr);
@@ -355,7 +370,7 @@ class ParseExampleDatasetOp : public UnaryDatasetOpKernel {
                                        },
                                        {{2, dense_defaults_nodes}}, attrs,
                                        output));
-      return Status::OK();
+      return absl::OkStatus();
     }
 
    private:
@@ -377,10 +392,10 @@ class ParseExampleDatasetOp : public UnaryDatasetOpKernel {
         if (deregister_fn_) deregister_fn_();
       }
 
-      Status Initialize(IteratorContext* ctx) override {
+      absl::Status Initialize(IteratorContext* ctx) override {
         mutex_lock l(*mu_);
         if (num_parallel_calls_->value == model::kAutotune) {
-          num_parallel_calls_->value = ctx->runner_threadpool_size();
+          num_parallel_calls_->value = GetAutotuneDefaultParallelism(ctx);
         }
         TF_RETURN_IF_ERROR(RegisterCancellationCallback(
             ctx->cancellation_manager(),
@@ -389,9 +404,9 @@ class ParseExampleDatasetOp : public UnaryDatasetOpKernel {
                                                &input_impl_);
       }
 
-      Status GetNextInternal(IteratorContext* ctx,
-                             std::vector<Tensor>* out_tensors,
-                             bool* end_of_sequence) override {
+      absl::Status GetNextInternal(IteratorContext* ctx,
+                                   std::vector<Tensor>* out_tensors,
+                                   bool* end_of_sequence) override {
         std::shared_ptr<InvocationResult> result;
         {
           mutex_lock l(*mu_);
@@ -402,15 +417,15 @@ class ParseExampleDatasetOp : public UnaryDatasetOpKernel {
             RecordStart(ctx);
           }
           if (cancelled_) {
-            return errors::Cancelled("Iterator was cancelled");
+            return absl::CancelledError("Iterator was cancelled");
           }
         }
         RecordStop(ctx);
         result->notification.WaitForNotification();
         RecordStart(ctx);
-        profiler::TraceMe traceme([&] {
-          return profiler::TraceMeEncode("ParseExampleConsume",
-                                         {{"element_id", result->id}});
+        tsl::profiler::TraceMe traceme([&] {
+          return tsl::profiler::TraceMeEncode("ParseExampleConsume",
+                                              {{"element_id", result->id}});
         });
         return ProcessResult(ctx, result, out_tensors, end_of_sequence);
       }
@@ -425,20 +440,20 @@ class ParseExampleDatasetOp : public UnaryDatasetOpKernel {
                                   /*max=*/ctx->runner_threadpool_size())});
       }
 
-      Status SaveInternal(SerializationContext* ctx,
-                          IteratorStateWriter* writer) override {
+      absl::Status SaveInternal(SerializationContext* ctx,
+                                IteratorStateWriter* writer) override {
         mutex_lock l(*mu_);
         // Wait for all in-flight calls to complete.
         while (num_calls_ > 0) {
           cond_var_->wait(l);
         }
         if (num_calls_ != 0) {
-          return errors::FailedPrecondition(
+          return absl::FailedPreconditionError(
               "Unexpected outstanding calls encountered.");
         }
         TF_RETURN_IF_ERROR(SaveInput(ctx, writer, input_impl_));
         TF_RETURN_IF_ERROR(writer->WriteScalar(
-            full_name(strings::StrCat(kInvocationResults, kSizeSuffix)),
+            full_name(absl::StrCat(kInvocationResults, kSizeSuffix)),
             invocation_results_.size()));
         for (size_t i = 0; i < invocation_results_.size(); i++) {
           const auto& result = *(invocation_results_[i]);
@@ -460,16 +475,16 @@ class ParseExampleDatasetOp : public UnaryDatasetOpKernel {
                 ""));
           }
         }
-        return Status::OK();
+        return absl::OkStatus();
       }
 
-      Status RestoreInternal(IteratorContext* ctx,
-                             IteratorStateReader* reader) override {
+      absl::Status RestoreInternal(IteratorContext* ctx,
+                                   IteratorStateReader* reader) override {
         mutex_lock l(*mu_);
         TF_RETURN_IF_ERROR(RestoreInput(ctx, reader, input_impl_));
         int64_t invocation_results_size;
         TF_RETURN_IF_ERROR(reader->ReadScalar(
-            full_name(strings::StrCat(kInvocationResults, kSizeSuffix)),
+            full_name(absl::StrCat(kInvocationResults, kSizeSuffix)),
             &invocation_results_size));
         if (!invocation_results_.empty()) invocation_results_.clear();
         for (size_t i = 0; i < invocation_results_size; i++) {
@@ -485,7 +500,7 @@ class ParseExampleDatasetOp : public UnaryDatasetOpKernel {
                 &size));
             num_return_values = static_cast<size_t>(size);
             if (num_return_values != size) {
-              return errors::InvalidArgument(strings::StrCat(
+              return absl::InvalidArgumentError(absl::StrCat(
                   full_name(strings::StrCat(kInvocationResults, "[", i, "]",
                                             kSizeSuffix)),
                   ": ", size, " is not a valid value of type size_t."));
@@ -505,7 +520,7 @@ class ParseExampleDatasetOp : public UnaryDatasetOpKernel {
           RecordBufferEnqueue(ctx, result.return_values);
           result.notification.Notify();
         }
-        return Status::OK();
+        return absl::OkStatus();
       }
 
       TraceMeMetadata GetTraceMeMetadata() const override {
@@ -524,7 +539,7 @@ class ParseExampleDatasetOp : public UnaryDatasetOpKernel {
         result.push_back(std::make_pair(
             "parallelism", parallelism == -1
                                ? kTraceInfoUnavailable
-                               : strings::Printf("%lld", static_cast<long long>(
+                               : absl::StrFormat("%lld", static_cast<long long>(
                                                              parallelism))));
         return result;
       }
@@ -534,8 +549,8 @@ class ParseExampleDatasetOp : public UnaryDatasetOpKernel {
         InvocationResult() = default;
         explicit InvocationResult(int64_t id) : id(id) {}
 
-        Notification notification;
-        Status status;
+        absl::Notification notification;
+        absl::Status status;
         std::vector<Tensor> return_values;
         bool end_of_input = false;
         int64_t id = -1;
@@ -555,13 +570,15 @@ class ParseExampleDatasetOp : public UnaryDatasetOpKernel {
           TF_EXCLUSIVE_LOCKS_REQUIRED(*mu_) {
         if (!runner_thread_) {
           auto ctx_copy = std::make_shared<IteratorContext>(*ctx);
-          runner_thread_ = ctx->StartThread(
-              "tf_data_parallel_map",
-              std::bind(&Iterator::RunnerThread, this, ctx_copy));
+          runner_thread_.reset(Env::Default()->StartThread(
+              /*thread_options=*/{}, "tf_data_parallel_map",
+              tsl::WithCurrentContext(
+                  std::bind(&Iterator::RunnerThread, this, ctx_copy))));
           if (ctx->stats_aggregator()) {
-            stats_thread_ = ctx->StartThread(
-                "tf_data_parallel_map_stats",
-                std::bind(&Iterator::StatsThread, this, ctx_copy));
+            stats_thread_.reset(Env::Default()->StartThread(
+                /*thread_options=*/{}, "tf_data_parallel_map_stats",
+                tsl::WithCurrentContext(
+                    std::bind(&Iterator::StatsThread, this, ctx_copy))));
           }
         }
       }
@@ -579,9 +596,9 @@ class ParseExampleDatasetOp : public UnaryDatasetOpKernel {
       void CallFunction(const std::shared_ptr<IteratorContext>& ctx,
                         const std::shared_ptr<InvocationResult>& result)
           TF_LOCKS_EXCLUDED(*mu_) {
-        profiler::TraceMe traceme([&] {
-          return profiler::TraceMeEncode("ParseExampleProduce",
-                                         {{"element_id", result->id}});
+        tsl::profiler::TraceMe traceme([&] {
+          return tsl::profiler::TraceMeEncode("ParseExampleProduce",
+                                              {{"element_id", result->id}});
         });
         // Get the next input element.
         std::vector<Tensor> input_element;
@@ -592,7 +609,7 @@ class ParseExampleDatasetOp : public UnaryDatasetOpKernel {
           return;
         }
 
-        auto done = [this, ctx, result](Status status) {
+        auto done = [this, ctx, result](absl::Status status) {
           result->status.Update(status);
           CallCompleted(ctx, result);
         };
@@ -624,35 +641,35 @@ class ParseExampleDatasetOp : public UnaryDatasetOpKernel {
         RecordStart(ctx.get());
       }
 
-      Status CheckOutputTensor(const Tensor& tensor, size_t value_index,
-                               size_t output_index) const {
+      absl::Status CheckOutputTensor(const Tensor& tensor, size_t value_index,
+                                     size_t output_index) const {
         if (tensor.dtype() != dataset()->output_dtypes()[output_index]) {
-          return errors::InvalidArgument(
+          return absl::InvalidArgumentError(absl::StrCat(
               "Got wrong type for FastParseExample return value ", value_index,
               " (expected ",
               DataTypeString(dataset()->output_dtypes()[output_index]),
-              ", got ", DataTypeString(tensor.dtype()), ").");
+              ", got ", DataTypeString(tensor.dtype()), ")."));
         }
         if (!dataset()->output_shapes()[output_index].IsCompatibleWith(
                 tensor.shape())) {
-          return errors::InvalidArgument(
+          return absl::InvalidArgumentError(absl::StrCat(
               "Got wrong shape for FastParseExample return value ", value_index,
               " (expected ",
               dataset()->output_shapes()[output_index].DebugString(), ", got ",
-              tensor.shape().DebugString(), ").");
+              tensor.shape().DebugString(), ")."));
         }
-        return Status::OK();
+        return absl::OkStatus();
       }
 
-      Status ParseExample(IteratorContext* ctx, std::vector<Tensor> input,
-                          std::vector<Tensor>* output) {
+      absl::Status ParseExample(IteratorContext* ctx, std::vector<Tensor> input,
+                                std::vector<Tensor>* output) {
         thread::ThreadPool* device_threadpool =
             ctx->flr()->device()->tensorflow_cpu_worker_threads()->workers;
         std::vector<tstring> slice_vec;
         for (const Tensor& t : input) {
           auto serialized_t = t.flat<tstring>();
-          gtl::ArraySlice<tstring> slice(serialized_t.data(),
-                                         serialized_t.size());
+          absl::Span<const tstring> slice(serialized_t.data(),
+                                          serialized_t.size());
           for (auto it = slice.begin(); it != slice.end(); it++)
             slice_vec.push_back(*it);
         }
@@ -720,26 +737,26 @@ class ParseExampleDatasetOp : public UnaryDatasetOpKernel {
                 steps);
           }
         }
-        return Status::OK();
+        return absl::OkStatus();
       }
 
-      Status ProcessResult(IteratorContext* ctx,
-                           const std::shared_ptr<InvocationResult>& result,
-                           std::vector<Tensor>* out_tensors,
-                           bool* end_of_sequence) TF_LOCKS_EXCLUDED(*mu_) {
+      absl::Status ProcessResult(
+          IteratorContext* ctx, const std::shared_ptr<InvocationResult>& result,
+          std::vector<Tensor>* out_tensors, bool* end_of_sequence)
+          TF_LOCKS_EXCLUDED(*mu_) {
         if (!result->end_of_input && result->status.ok()) {
           *out_tensors = std::move(result->return_values);
           RecordBufferDequeue(ctx, *out_tensors);
           *end_of_sequence = false;
-          return Status::OK();
+          return absl::OkStatus();
         }
-        if (errors::IsOutOfRange(result->status)) {
+        if (absl::IsOutOfRange(result->status)) {
           // To guarantee that the transformation preserves the cardinality of
           // the dataset, we convert `OutOfRange` to `InvalidArgument` as the
           // former may be interpreted by a caller as the end of sequence.
-          return errors::InvalidArgument(
-              "Function invocation produced OutOfRangeError: ",
-              result->status.error_message());
+          return absl::InvalidArgumentError(
+              absl::StrCat("Function invocation produced OutOfRangeError: ",
+                           result->status.message()));
         }
         *end_of_sequence = result->end_of_input;
         return result->status;
@@ -847,42 +864,42 @@ class ParseExampleDatasetOp : public UnaryDatasetOpKernel {
         }
       }
 
-      Status WriteStatusLocked(IteratorStateWriter* writer, size_t index,
-                               const Status& status)
+      absl::Status WriteStatusLocked(IteratorStateWriter* writer, size_t index,
+                                     const absl::Status& status)
           TF_EXCLUSIVE_LOCKS_REQUIRED(*mu_) {
         TF_RETURN_IF_ERROR(writer->WriteScalar(
             CodeKey(index), static_cast<int64_t>(status.code())));
         if (!status.ok()) {
-          TF_RETURN_IF_ERROR(writer->WriteScalar(ErrorMessageKey(index),
-                                                 status.error_message()));
+          TF_RETURN_IF_ERROR(writer->WriteScalar(
+              ErrorMessageKey(index), std::string(status.message())));
         }
-        return Status::OK();
+        return absl::OkStatus();
       }
 
-      Status ReadStatusLocked(IteratorStateReader* reader, size_t index,
-                              Status* status)
+      absl::Status ReadStatusLocked(IteratorStateReader* reader, size_t index,
+                                    absl::Status* status)
           TF_EXCLUSIVE_LOCKS_REQUIRED(*mu_) {
         int64_t code_int;
         TF_RETURN_IF_ERROR(reader->ReadScalar(CodeKey(index), &code_int));
-        error::Code code = static_cast<error::Code>(code_int);
+        absl::StatusCode code = static_cast<absl::StatusCode>(code_int);
 
-        if (code != error::Code::OK) {
+        if (code != absl::StatusCode::kOk) {
           tstring error_message;
           TF_RETURN_IF_ERROR(
               reader->ReadScalar(ErrorMessageKey(index), &error_message));
-          *status = Status(code, error_message);
+          *status = absl::Status(code, error_message);
         } else {
-          *status = Status::OK();
+          *status = absl::OkStatus();
         }
-        return Status::OK();
+        return absl::OkStatus();
       }
 
-      string CodeKey(size_t index) {
+      std::string CodeKey(size_t index) {
         return full_name(
             strings::StrCat(kInvocationResults, "[", index, "]", kCodeSuffix));
       }
 
-      string ErrorMessageKey(size_t index) {
+      std::string ErrorMessageKey(size_t index) {
         return full_name(strings::StrCat(kInvocationResults, "[", index, "]",
                                          kErrorMessage));
       }
@@ -905,10 +922,10 @@ class ParseExampleDatasetOp : public UnaryDatasetOpKernel {
       // Buffer for storing the invocation results.
       std::deque<std::shared_ptr<InvocationResult>> invocation_results_
           TF_GUARDED_BY(*mu_);
+      bool cancelled_ TF_GUARDED_BY(*mu_) = false;
 
       std::unique_ptr<Thread> runner_thread_ TF_GUARDED_BY(*mu_);
       std::unique_ptr<Thread> stats_thread_ TF_GUARDED_BY(*mu_);
-      bool cancelled_ TF_GUARDED_BY(*mu_) = false;
 
       // Method for deregistering the cancellation callback.
       std::function<void()> deregister_fn_;
@@ -916,10 +933,10 @@ class ParseExampleDatasetOp : public UnaryDatasetOpKernel {
 
     const DatasetBase* const input_;
     const std::vector<Tensor> dense_defaults_;
-    const std::vector<string> sparse_keys_;
-    const std::vector<string> dense_keys_;
-    const std::vector<string> ragged_keys_;
-    const std::map<string, int> key_to_output_index_;
+    const std::vector<std::string> sparse_keys_;
+    const std::vector<std::string> dense_keys_;
+    const std::vector<std::string> ragged_keys_;
+    const std::map<std::string, int> key_to_output_index_;
     const example::FastParseExampleConfig config_;
     const int64_t num_parallel_calls_;
     const DataTypeVector sparse_types_;
@@ -938,9 +955,9 @@ class ParseExampleDatasetOp : public UnaryDatasetOpKernel {
   DataTypeVector output_types_;
   std::vector<PartialTensorShape> output_shapes_;
   DeterminismPolicy deterministic_;
-  std::vector<string> sparse_keys_;
-  std::vector<string> dense_keys_;
-  std::vector<string> ragged_keys_;
+  std::vector<std::string> sparse_keys_;
+  std::vector<std::string> dense_keys_;
+  std::vector<std::string> ragged_keys_;
   DataTypeVector sparse_types_;
   DataTypeVector dense_types_;
   DataTypeVector ragged_value_types_;

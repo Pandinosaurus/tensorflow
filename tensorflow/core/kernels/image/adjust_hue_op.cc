@@ -11,23 +11,24 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
+#include <cstdint>
+
+#include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
 #define EIGEN_USE_THREADS
 
 #if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 #define EIGEN_USE_GPU
 #endif
 
-#include "tensorflow/core/kernels/image/adjust_hue_op.h"
-
-#include <memory>
-
-#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
+#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/register_types.h"
 #include "tensorflow/core/framework/tensor.h"
 #include "tensorflow/core/framework/tensor_shape.h"
 #include "tensorflow/core/framework/tensor_types.h"
 #include "tensorflow/core/framework/types.h"
+#include "tensorflow/core/kernels/image/adjust_hue_op.h"
 #include "tensorflow/core/lib/core/status.h"
 #include "tensorflow/core/platform/logging.h"
 #include "tensorflow/core/util/work_sharder.h"
@@ -55,16 +56,17 @@ class AdjustHueOpBase : public OpKernel {
     const Tensor& input = context->input(0);
     const Tensor& delta = context->input(1);
     OP_REQUIRES(context, input.dims() >= 3,
-                errors::InvalidArgument("input must be at least 3-D, got shape",
-                                        input.shape().DebugString()));
+                absl::InvalidArgumentError(
+                    absl::StrCat("input must be at least 3-D, got shape",
+                                 input.shape().DebugString())));
     OP_REQUIRES(context, TensorShapeUtils::IsScalar(delta.shape()),
-                errors::InvalidArgument("delta must be scalar: ",
-                                        delta.shape().DebugString()));
+                absl::InvalidArgumentError(absl::StrCat(
+                    "delta must be scalar: ", delta.shape().DebugString())));
     auto channels = input.dim_size(input.dims() - 1);
-    OP_REQUIRES(
-        context, channels == 3,
-        errors::InvalidArgument("input must have 3 channels but instead has ",
-                                channels, " channels."));
+    OP_REQUIRES(context, channels == 3,
+                absl::InvalidArgumentError(
+                    absl::StrCat("input must have 3 channels but instead has ",
+                                 channels, " channels.")));
 
     Tensor* output = nullptr;
     OP_REQUIRES_OK(context, context->forward_input_or_allocate_output(
@@ -264,7 +266,8 @@ class AdjustHueOp<GPUDevice, T> : public AdjustHueOpBase {
     const int64_t number_of_elements = input->NumElements();
     GPUDevice device = context->eigen_gpu_device();
     const auto stream = device.stream();
-    OP_REQUIRES(context, stream, errors::Internal("No GPU stream available."));
+    OP_REQUIRES(context, stream,
+                absl::InternalError("No GPU stream available."));
     if (number_of_elements > 0) {
       const T* input_data = input->flat<T>().data();
       const float* delta_h = delta->flat<float>().data();

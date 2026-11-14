@@ -1,3 +1,17 @@
+// Copyright 2026 Google Inc. All Rights Reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+// ==============================================================================
 // RUN: tf-opt %s -split-input-file -verify-diagnostics -tf-saved-model-dedup-bound-input-binding-pass | FileCheck %s
 
 module attributes {tf_saved_model.semantics, tf_saved_model.under_construction} {
@@ -11,7 +25,7 @@ module attributes {tf_saved_model.semantics, tf_saved_model.under_construction} 
   // CHECK: %arg2: tensor<!tf_type.resource<tensor<f32>>> {tf_saved_model.bound_input = @x}
   // CHECK-NOT: %arg3
   // CHECK-NOT: %arg4
-  func @f(
+  func.func @f(
     %arg0: tensor<!tf_type.resource<tensor<f32>>> {tf_saved_model.bound_input = @v},
     %arg1: tensor<!tf_type.resource<tensor<f32>>> {tf_saved_model.bound_input = @w},
     %arg2: tensor<!tf_type.resource<tensor<f32>>> {tf_saved_model.bound_input = @v},
@@ -28,6 +42,6 @@ module attributes {tf_saved_model.semantics, tf_saved_model.under_construction} 
     %val2 = "tf.ReadVariableOp"(%arg2) : (tensor<!tf_type.resource<tensor<f32>>>) -> tensor<f32>
     %val3 = "tf.ReadVariableOp"(%arg3) : (tensor<!tf_type.resource<tensor<f32>>>) -> tensor<f32>
     %val4 = "tf.ReadVariableOp"(%arg4) : (tensor<!tf_type.resource<tensor<f32>>>) -> tensor<f32>
-    return
+    func.return
   }
 }

@@ -13,10 +13,6 @@
 # limitations under the License.
 # ===================================================================
 """TPU Feature Column Library."""
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import math
 
 from tensorflow.python.feature_column import feature_column as fc
@@ -27,6 +23,7 @@ from tensorflow.python.ops import init_ops
 from tensorflow.python.ops import variable_scope
 from tensorflow.python.tpu import tpu
 from tensorflow.python.tpu import tpu_function
+from tensorflow.python.tpu import tpu_replication
 # pylint: disable=protected-access
 
 
@@ -67,20 +64,20 @@ def embedding_column(categorical_column,
 
   Args:
     categorical_column: A categorical_column returned from
-        categorical_column_with_identity, weighted_categorical_column,
-        categorical_column_with_vocabulary_file,
-        categorical_column_with_vocabulary_list,
-        sequence_categorical_column_with_identity,
-        sequence_categorical_column_with_vocabulary_file,
-        sequence_categorical_column_with_vocabulary_list
+      categorical_column_with_identity, weighted_categorical_column,
+      categorical_column_with_vocabulary_file,
+      categorical_column_with_vocabulary_list,
+      sequence_categorical_column_with_identity,
+      sequence_categorical_column_with_vocabulary_file,
+      sequence_categorical_column_with_vocabulary_list
     dimension: An integer specifying dimension of the embedding, must be > 0.
-    combiner: A string specifying how to reduce if there are multiple entries
-      in a single row for a non-sequence column. For more information, see
+    combiner: A string specifying how to reduce if there are multiple entries in
+      a single row for a non-sequence column. For more information, see
       `tf.feature_column.embedding_column`.
     initializer: A variable initializer function to be used in embedding
       variable initialization. If not specified, defaults to
-      `tf.compat.v1.truncated_normal_initializer` with mean `0.0` and
-      standard deviation `1/sqrt(dimension)`.
+      `tf.compat.v1.truncated_normal_initializer` with mean `0.0` and standard
+      deviation `1/sqrt(dimension)`.
     max_sequence_length: An non-negative integer specifying the max sequence
       length. Any sequence shorter then this will be padded with 0 embeddings
       and any sequence longer will be truncated. This must be positive for
@@ -88,7 +85,7 @@ def embedding_column(categorical_column,
     learning_rate_fn: A function that takes global step and returns learning
       rate for the embedding table. If you intend to use the same learning rate
       for multiple embedding tables, please ensure that you pass the exact same
-      python function to all calls of embedding_column, otherwise performence
+      python function to all calls of embedding_column, otherwise performance
       may suffer.
     use_safe_embedding_lookup: If true, uses safe_embedding_lookup_sparse
       instead of embedding_lookup_sparse. safe_embedding_lookup_sparse ensures
@@ -108,12 +105,12 @@ def embedding_column(categorical_column,
   """
   if isinstance(categorical_column, _DENYLISTED_CATEGORICAL_COLUMNS_V2):
     raise TypeError('categorical_column for tpu '
-                    ' embedding_column was denylisted type %s' %
-                    type(categorical_column))
+                    ' embedding_column was '
+                    f'denylisted type {type(categorical_column)}')
   if not isinstance(categorical_column, _SUPPORTED_CATEGORICAL_COLUMNS):
     raise TypeError(
         'categorical_column for tpu '
-        ' embedding_column must be type %s, got %s.' % (' or '.join([
+        ' embedding_column must be type {}, got {}.'.format(' or '.join([
             cc.__name__ for cc in _SUPPORTED_CATEGORICAL_COLUMNS
         ]), type(categorical_column)))
   if (dimension is None) or (dimension < 1):
@@ -174,15 +171,15 @@ def shared_embedding_columns(categorical_columns,
 
   Args:
     categorical_columns: A list of categorical_columns returned from
-        categorical_column_with_identity, weighted_categorical_column,
-        categorical_column_with_vocabulary_file,
-        categorical_column_with_vocabulary_list,
-        sequence_categorical_column_with_identity,
-        sequence_categorical_column_with_vocabulary_file,
-        sequence_categorical_column_with_vocabulary_list
+      categorical_column_with_identity, weighted_categorical_column,
+      categorical_column_with_vocabulary_file,
+      categorical_column_with_vocabulary_list,
+      sequence_categorical_column_with_identity,
+      sequence_categorical_column_with_vocabulary_file,
+      sequence_categorical_column_with_vocabulary_list
     dimension: An integer specifying dimension of the embedding, must be > 0.
-    combiner: A string specifying how to reduce if there are multiple entries
-      in a single row for a non-sequence column. For more information, see
+    combiner: A string specifying how to reduce if there are multiple entries in
+      a single row for a non-sequence column. For more information, see
       `tf.feature_column.embedding_column`.
     initializer: A variable initializer function to be used in embedding
       variable initialization. If not specified, defaults to
@@ -192,8 +189,8 @@ def shared_embedding_columns(categorical_columns,
       shared embedding weights are added. If not given, a reasonable name will
       be chosen based on the names of `categorical_columns`. This is also used
       in `variable_scope` when creating shared embedding weights.
-    max_sequence_lengths: An list of non-negative integers, either None or
-      empty or the same length as the argument categorical_columns. Entries
+    max_sequence_lengths: An list of non-negative integers, either None or empty
+      or the same length as the argument categorical_columns. Entries
       corresponding to non-sequence columns must be 0 and entries corresponding
       to sequence columns specify the max sequence length for the column. Any
       sequence shorter then this will be padded with 0 embeddings and any
@@ -202,7 +199,7 @@ def shared_embedding_columns(categorical_columns,
       rate for the embedding table. If you intend to use the same learning rate
       for multiple embedding tables, please ensure that you pass the exact same
       python function to all calls of shared_embedding_columns, otherwise
-      performence may suffer.
+      performance may suffer.
     use_safe_embedding_lookup: If true, uses safe_embedding_lookup_sparse
       instead of embedding_lookup_sparse. safe_embedding_lookup_sparse ensures
       there are no empty rows and all weights and ids are positive at the
@@ -225,14 +222,15 @@ def shared_embedding_columns(categorical_columns,
   for categorical_column in categorical_columns:
     if isinstance(categorical_column, _DENYLISTED_CATEGORICAL_COLUMNS_V2):
       raise TypeError('categorical_column for tpu '
-                      ' embedding_column was denylisted type %s' %
-                      type(categorical_column))
+                      ' embedding_column was denylisted type '
+                      f'{type(categorical_column)}')
     if not isinstance(categorical_column, _SUPPORTED_CATEGORICAL_COLUMNS):
       raise TypeError(
           'categorical_column for tpu '
-          ' shared_embedding_columns must be type %s, got %s.' % (' or '.join([
-              cc.__name__ for cc in _SUPPORTED_CATEGORICAL_COLUMNS
-          ]), type(categorical_column)))
+          ' shared_embedding_columns must be type {}, got {}.'.format(
+              ' or '.join(
+                  [cc.__name__ for cc in _SUPPORTED_CATEGORICAL_COLUMNS]),
+              type(categorical_column)))
 
   if not max_sequence_lengths:
     max_sequence_lengths = [0] * len(categorical_columns)
@@ -456,7 +454,8 @@ class _TPUEmbeddingColumn(_TPUBaseEmbeddingColumn, fc._EmbeddingColumn):
       def host_computation():
         return fc._EmbeddingColumn._get_dense_tensor(
             self, inputs, weight_collections, trainable)
-      return tpu.outside_compilation(host_computation)
+
+      return tpu_replication.outside_compilation(host_computation)
 
     if _is_running_on_cpu():
       return fc._EmbeddingColumn._get_dense_tensor(
@@ -480,7 +479,8 @@ class _TPUEmbeddingColumn(_TPUBaseEmbeddingColumn, fc._EmbeddingColumn):
       def host_computation():
         return fc._EmbeddingColumn._get_sequence_dense_tensor(
             self, inputs, weight_collections, trainable)
-      return tpu.outside_compilation(host_computation)
+
+      return tpu_replication.outside_compilation(host_computation)
 
     if _is_running_on_cpu():
       return fc._EmbeddingColumn._get_sequence_dense_tensor(
@@ -595,7 +595,8 @@ class _TPUSharedEmbeddingColumn(_TPUBaseEmbeddingColumn,
       def host_computation():
         return fc._SharedEmbeddingColumn._get_dense_tensor(
             self, inputs, weight_collections, trainable)
-      return tpu.outside_compilation(host_computation)
+
+      return tpu_replication.outside_compilation(host_computation)
 
     if _is_running_on_cpu():
       return fc._SharedEmbeddingColumn._get_dense_tensor(
@@ -618,7 +619,8 @@ class _TPUSharedEmbeddingColumn(_TPUBaseEmbeddingColumn,
       def host_computation():
         return fc._SharedEmbeddingColumn._get_sequence_dense_tensor(
             self, inputs, weight_collections, trainable)
-      return tpu.outside_compilation(host_computation)
+
+      return tpu_replication.outside_compilation(host_computation)
 
     if _is_running_on_cpu():
       return fc._SharedEmbeddingColumn._get_sequence_dense_tensor(
@@ -686,38 +688,3 @@ def get_sequence_length_feature_key_name_from_feature_key_name(feature_name):
     A string which is the feature key for the associated feature length column.
   """
   return feature_name + _SEQUENCE_FEATURE_LENGTH_POSTFIX
-
-
-def split_sequence_columns(feature_columns):
-  """Split a list of _TPUEmbeddingColumn into sequence and non-sequence columns.
-
-  For use in a TPUEstimator model_fn function. E.g.
-
-  def model_fn(features):
-    sequence_columns, feature_columns = (
-        tf.tpu.feature_column.split_sequence_columns(feature_columns))
-    input = tf.feature_column.input_layer(
-        features=features, feature_columns=feature_columns)
-    sequence_features, sequence_lengths = (
-        tf.contrib.feature_column.sequence_input_layer(
-            features=features, feature_columns=sequence_columns))
-
-  Args:
-    feature_columns: A list of _TPUEmbeddingColumns to split.
-
-  Returns:
-    Two lists of _TPUEmbeddingColumns, the first is the sequence columns and the
-    second is the non-sequence columns.
-  """
-  sequence_columns = []
-  non_sequence_columns = []
-  for column in feature_columns:
-    if not isinstance(column, (_TPUEmbeddingColumn, _TPUSharedEmbeddingColumn)):
-      raise TypeError(
-          'column must be a _TPUEmbeddingColumn or  _TPUSharedEmbeddingColumn '
-          'but got %s instead.' % (type(column)))
-    if column.is_sequence_column():
-      sequence_columns.append(column)
-    else:
-      non_sequence_columns.append(column)
-  return sequence_columns, non_sequence_columns

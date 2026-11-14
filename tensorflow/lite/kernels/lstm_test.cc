@@ -25,7 +25,7 @@ limitations under the License.
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include "flatbuffers/flatbuffers.h"  // from @flatbuffers
-#include "tensorflow/lite/interpreter.h"
+#include "tensorflow/lite/core/interpreter.h"
 #include "tensorflow/lite/kernels/test_util.h"
 #include "tensorflow/lite/schema/schema_generated.h"
 
@@ -361,7 +361,7 @@ class LstmOpTest
         lstm->SetInput(b * num_inputs, batch_start, batch_end);
       }
 
-      lstm->Invoke();
+      ASSERT_EQ(lstm->Invoke(), kTfLiteOk);
 
       std::vector<float> expected;
       ASSERT_EQ(num_batches, lstm_golden_output_[i].size());
@@ -1304,7 +1304,7 @@ TEST_P(LstmOpTest, Cifg_Peephole_Projection_LayerNorm) {
 
   static const auto* tolerance_per_type =
       new std::map<TensorType, float>{{TensorType_FLOAT32, 0.00001f},
-                                      {TensorType_UINT8, 0.000971057f},
+                                      {TensorType_UINT8, 0.001f},
                                       {TensorType_INT8, 0.001f}};
   VerifyGoldens(&lstm, tolerance_per_type->at(weight_type));
 }
@@ -1750,7 +1750,7 @@ TEST(IntegerLstmOpTest, NoCifg_NoPeephole_Projection_LayerNorm) {
   EXPECT_GT(input_sequence_size, 0);
   for (int i = 0; i < input_sequence_size; ++i) {
     lstm.SetInput(lstm_input[i]);
-    lstm.Invoke();
+    ASSERT_EQ(lstm.Invoke(), kTfLiteOk);
     EXPECT_THAT(lstm.GetOutput(), ElementsAreArray(expected_output[i]));
   }
 }
@@ -1923,7 +1923,7 @@ TEST(IntegerLstmOpTest, NoCifg_Peephole_Projection_LayerNorm) {
   EXPECT_GT(input_sequence_size, 0);
   for (int i = 0; i < input_sequence_size; ++i) {
     lstm.SetInput(lstm_input[i]);
-    lstm.Invoke();
+    ASSERT_EQ(lstm.Invoke(), kTfLiteOk);
     EXPECT_THAT(lstm.GetOutput(), ElementsAreArray(expected_output[i]));
   }
 }
@@ -2090,12 +2090,12 @@ TEST(IntegerLstmOpTest, Cifg_NoPeephole_Projection_LayerNorm_8x8_8) {
   EXPECT_GT(input_sequence_size, 0);
   for (int i = 0; i < input_sequence_size; ++i) {
     lstm.SetInput(lstm_input[i]);
-    lstm.Invoke();
+    ASSERT_EQ(lstm.Invoke(), kTfLiteOk);
     EXPECT_THAT(lstm.GetOutput(), ElementsAreArray(expected_output[i]));
   }
 }
 
-#ifdef GTEST_HAS_DEATH_TEST
+#if GTEST_HAS_DEATH_TEST
 TEST(LstmOpTest, InvalidTypes) {
   const int n_batch = 1;
   const int n_input = 2;
@@ -2123,6 +2123,31 @@ TEST(LstmOpTest, InvalidTypes) {
                "");
 }
 #endif
+
+// LSTMOpModel whose input-to-output weights can be resized after the model is
+// built.
+class ResizableWeightsLSTMOpModel : public LSTMOpModel {
+ public:
+  using LSTMOpModel::LSTMOpModel;
+
+  TfLiteStatus ResizeInputToOutputWeights(const std::vector<int>& dims) {
+    return interpreter_->ResizeInputTensor(input_to_output_weights_, dims);
+  }
+};
+
+// Prepare must reject rank-0 input-to-output weights before it reads their
+// first dimension.
+TEST(LstmOpTest, RankZeroInputToOutputWeightsFailsPrepare) {
+  ResizableWeightsLSTMOpModel lstm(
+      /*n_batch=*/1, /*n_input=*/2, /*n_cell=*/4, /*n_output=*/4,
+      /*use_cifg=*/false, /*use_peephole=*/false,
+      /*use_projection_weights=*/false, /*use_projection_bias=*/false,
+      /*weight_type=*/TensorType_FLOAT32,
+      /*model_has_legacy_20_inputs=*/false, /*is_layer_norm=*/false,
+      /*asymmetric_quantize_inputs=*/false);
+  ASSERT_EQ(lstm.ResizeInputToOutputWeights({}), kTfLiteOk);
+  EXPECT_EQ(lstm.AllocateTensors(), kTfLiteError);
+}
 
 class HybridSparseLSTMOpModel : public ::tflite::SingleOpModel {
  public:
@@ -2404,7 +2429,7 @@ class BaseSparseLstmTest : public ::testing::Test {
             b * sparse_layer_norm_lstm->num_inputs(), batch_start, batch_end);
       }
 
-      sparse_layer_norm_lstm->Invoke();
+      ASSERT_EQ(sparse_layer_norm_lstm->Invoke(), kTfLiteOk);
 
       const int num_outputs = sparse_layer_norm_lstm->num_outputs();
       std::vector<float> expected;

@@ -1,16 +1,28 @@
-# Regression tests for bridge.
-load(":roundtrip.bzl", "glob_roundtrip_tests")
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("//tensorflow:tensorflow.bzl", "tf_cc_binary")
 
-package(
-    default_visibility = [":friends"],
-    licenses = ["notice"],  # Apache 2.0
-)
+# Regression tests for bridge.
+load(":roundtrip.bzl", "glob_roundtrip_tests")
 
-package_group(
-    name = "friends",
-    packages = [
-    ],
+package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
+    default_visibility = ["//tensorflow/core/ir/importexport:__subpackages__"],
+    licenses = ["notice"],  # Apache 2.0
 )
 
 cc_library(
@@ -22,15 +34,8 @@ cc_library(
     deps = [
         "//tensorflow/core:core_cpu_base",
         "//tensorflow/core:framework",
-        "//tensorflow/core:framework_lite",
         "//tensorflow/core:protos_all_cc",
-        "//tensorflow/core/ir/importexport:export",
-        "//tensorflow/core/ir/importexport:import",
-        "//tensorflow/core/platform:errors",
-        "//tensorflow/stream_executor/lib",
-        "@com_google_absl//absl/strings",
         "@llvm-project//llvm:Support",
-        "@llvm-project//mlir:IR",
     ],
 )
 
@@ -49,17 +54,17 @@ tf_cc_binary(
         "//tensorflow/compiler/mlir:init_mlir",
         "//tensorflow/core:core_cpu_base",
         "//tensorflow/core:framework",
-        "//tensorflow/core:framework_lite",
         "//tensorflow/core:ops",  # Ops need to be registered for import.
-        "//tensorflow/core/ir:Dialect",
-        "//tensorflow/core/ir/importexport:export",
-        "//tensorflow/core/ir/importexport:import",
+        "//tensorflow/core/ir/importexport:graphdef_export",
+        "//tensorflow/core/ir/importexport:graphdef_import",
         "//tensorflow/core/ir/importexport:load_proto",
+        "//tensorflow/core/transforms/consolidate_attrs:Pass",
         "@com_google_googletest//:gtest",
         "@llvm-project//llvm:Support",
         "@llvm-project//mlir:IR",
         "@llvm-project//mlir:Parser",
+        "@llvm-project//mlir:Pass",
         "@llvm-project//mlir:Support",
-        "@llvm-project//mlir:Translation",
+        "@llvm-project//mlir:TranslateLib",
     ],
 )

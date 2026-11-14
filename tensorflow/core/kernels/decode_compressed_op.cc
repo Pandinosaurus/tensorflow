@@ -15,14 +15,26 @@ limitations under the License.
 
 // See docs in ../ops/parse_ops.cc.
 
-#include <algorithm>
+#include <climits>
+#include <cstddef>
+#include <cstdint>
+#include <string>
+
+#include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
 #include "tensorflow/core/framework/op_kernel.h"
+#include "tensorflow/core/framework/op_requires.h"
 #include "tensorflow/core/framework/tensor.h"
 #include "tensorflow/core/framework/tensor_shape.h"
 #include "tensorflow/core/framework/types.h"
-#include "tensorflow/core/lib/core/errors.h"
+#include "tensorflow/core/lib/io/inputstream_interface.h"
 #include "tensorflow/core/lib/io/zlib_compression_options.h"
 #include "tensorflow/core/lib/io/zlib_inputstream.h"
+#include "tensorflow/core/platform/tstring.h"
+
+// NOTE: The way zstd is packaged in TF, we cannot include it as <zstd.h>.
+#define ZSTD_STATIC_LINKING_ONLY
+#include "zstd.h"  // NOLINT(build/include)
 
 namespace tensorflow {
 namespace {
@@ -32,23 +44,22 @@ class MemoryInputStream : public io::InputStreamInterface {
   explicit MemoryInputStream(const char* buffer, size_t length)
       : buf_(buffer), len_(length), pos_(0) {}
 
-  ~MemoryInputStream() override {}
+  ~MemoryInputStream() override = default;
 
-  Status ReadNBytes(int64_t bytes_to_read, tstring* result) override {
+  absl::Status ReadNBytes(int64_t bytes_to_read, tstring* result) override {
     result->clear();
     if (bytes_to_read < 0) {
-      return errors::InvalidArgument("Can't read a negative number of bytes: ",
-                                     bytes_to_read);
+      return absl::InvalidArgumentError(absl::StrCat(
+          "Can't read a negative number of bytes: ", bytes_to_read));
     }
     int64_t bytes = bytes_to_read;
-    Status s = Status::OK();
+    absl::Status s = absl::OkStatus();
     if (pos_ + bytes_to_read > len_) {
       bytes = len_ - pos_;
-      s = errors::OutOfRange("reached end of file");
+      s = absl::OutOfRangeError("reached end of file");
     }
     if (bytes > 0) {
-      result->resize(bytes);
-      memcpy(&(*result)[0], &buf_[pos_], bytes);
+      result->assign_as_view(&buf_[pos_], bytes);
       pos_ += bytes;
     }
     return s;
@@ -56,9 +67,9 @@ class MemoryInputStream : public io::InputStreamInterface {
 
   int64_t Tell() const override { return pos_; }
 
-  Status Reset() override {
+  absl::Status Reset() override {
     pos_ = 0;
-    return Status::OK();
+    return absl::OkStatus();
   }
 
  private:
@@ -66,7 +77,11 @@ class MemoryInputStream : public io::InputStreamInterface {
   int64_t len_;
   int64_t pos_ = 0;  // Tracks where we are in the file.
 };
+
 }  // namespace
+
+constexpr const char kSupportedArgs[] =
+    "Only ZLIB, ZSTD, GZIP or NONE are supported compressions";
 
 class DecodeCompressedOp : public OpKernel {
  public:
@@ -76,14 +91,118 @@ class DecodeCompressedOp : public OpKernel {
                    context->GetAttr("compression_type", &compression_type_));
     OP_REQUIRES(context,
                 (compression_type_.empty() || compression_type_ == "ZLIB" ||
-                 compression_type_ == "GZIP"),
-                errors::InvalidArgument(
-                    "Only ZLIB, GZIP or NONE are supported compressions"));
+                 compression_type_ == "GZIP" || compression_type_ == "ZSTD"),
+                absl::InvalidArgumentError(kSupportedArgs));
+  }
+
+  // Do a single decompression of `input` into `output`, using the algorithm
+  // specified in `compression_type_`. Return absl::OkStatus() on success, and
+  // anything else on failure.
+  absl::Status DecompressOne(const tstring& input, tstring& output) {
+    if (compression_type_ == "ZLIB" || compression_type_ == "GZIP") {
+      // TODO: Don't use ZlibInputStream, since we're just going to read the
+      // entire thing into memory.
+      MemoryInputStream input_stream(input.data(), input.size());
+
+      const io::ZlibCompressionOptions zlib_options =
+          compression_type_ == "ZLIB" ? io::ZlibCompressionOptions::DEFAULT()
+                                      : io::ZlibCompressionOptions::GZIP();
+      io::ZlibInputStream zlib_stream(
+          &input_stream,
+          /*input_buffer_bytes=*/static_cast<size_t>(kBufferSize),
+          /*output_buffer_bytes=*/static_cast<size_t>(kBufferSize),
+          zlib_options);
+
+      // Cap the decompressed output size, mirroring the 1GB limit enforced
+      // on the ZSTD branch below. Without this cap, ReadNBytes(INT_MAX, ...)
+      // would decompress an attacker-controlled, highly-compressible input
+      // (a "decompression bomb") up to ~2GiB with no compression-ratio or
+      // absolute-size check, causing unbounded memory growth / OOM.
+      //
+      // Read kMaxDecompressedBytes + 1 bytes rather than exactly the cap,
+      // so a stream that is exactly kMaxDecompressedBytes long is correctly
+      // accepted and one that is even one byte longer is correctly
+      // rejected - reading exactly the cap would make these two cases
+      // indistinguishable.
+      absl::Status result =
+          zlib_stream.ReadNBytes(kMaxDecompressedBytes + 1, &output);
+
+      if (absl::IsOutOfRange(result)) {
+        // Stream ended before or exactly at the limit. ReadNBytes swallows
+        // EOF only if it read up to the requested amount; here it failed to
+        // read limit + 1, so the true size is <= 1GB.
+        return absl::OkStatus();
+      }
+
+      if (result.ok()) {
+        // Read exactly limit + 1 bytes, meaning the stream is larger than
+        // 1GB. Free the oversized buffer before propagating the error.
+        output.clear();
+        return absl::InvalidArgumentError(
+            "Decompressed size exceeds 1GB limit");
+      }
+
+      return result;
+    }
+
+    if (compression_type_ == "ZSTD") {
+      ZSTD_DCtx* decompress_ctx = ZSTD_createDCtx();
+      if (decompress_ctx == nullptr) {
+        return absl::InternalError("Failed to create zstd context");
+      }
+
+      const char* data = input.data();
+      size_t len = input.size();
+
+      // NOTE: Using auto here to avoid an explicit unsigned long long and
+      // linter complaints.
+      auto max_decompressed_size = ZSTD_getFrameContentSize(data, len);
+
+      if (max_decompressed_size == ZSTD_CONTENTSIZE_UNKNOWN ||
+          max_decompressed_size == ZSTD_CONTENTSIZE_ERROR) {
+        ZSTD_freeDCtx(decompress_ctx);
+        return absl::InvalidArgumentError(
+            "Failed to determine decompressed size");
+      }
+
+      if (max_decompressed_size > kMaxDecompressedBytes) {
+        ZSTD_freeDCtx(decompress_ctx);
+        return absl::InvalidArgumentError(
+            "Decompressed size exceeds 1GB limit");
+      }
+
+      // Allocate enough to maximally decompress into.
+      output.resize_uninitialized(max_decompressed_size);
+
+      // Do the decompression, and find out how large the result was after all.
+      size_t actual_size = ZSTD_decompressDCtx(decompress_ctx, output.mdata(),
+                                               output.size(), data, len);
+
+      if (ZSTD_isError(actual_size)) {
+        ZSTD_freeDCtx(decompress_ctx);
+        return absl::InvalidArgumentError(
+            absl::StrCat("Failed to decompress zstd input: ",
+                         ZSTD_getErrorName(actual_size)));
+      }
+
+      // Trim the output string before we're done.
+      output.resize(actual_size);
+      ZSTD_freeDCtx(decompress_ctx);
+      return absl::OkStatus();
+    }
+
+    // We shouldn't get here, but let's just repeat our complaint about which
+    // compression algorithms are allowed.
+    return absl::InvalidArgumentError(kSupportedArgs);
   }
 
   void Compute(OpKernelContext* context) override {
     const Tensor* bytes_tensor;
     OP_REQUIRES_OK(context, context->input("bytes", &bytes_tensor));
+    if (compression_type_.empty()) {
+      OP_REQUIRES_OK(context, context->set_output("output", *bytes_tensor));
+      return;
+    }
     const auto& bytes_flat = bytes_tensor->flat<tstring>();
 
     Tensor* output_tensor = nullptr;
@@ -91,32 +210,16 @@ class DecodeCompressedOp : public OpKernel {
                    context->allocate_output("output", bytes_tensor->shape(),
                                             &output_tensor));
     auto output_flat = output_tensor->flat<tstring>();
-    if (compression_type_.empty()) {
-      for (int64_t i = 0; i < bytes_flat.size(); i++) {
-        output_flat(i) = bytes_flat(i);
-      }
-    } else {
-      const io::ZlibCompressionOptions zlib_options =
-          compression_type_ == "ZLIB" ? io::ZlibCompressionOptions::DEFAULT()
-                                      : io::ZlibCompressionOptions::GZIP();
-      for (int64_t i = 0; i < bytes_flat.size(); i++) {
-        std::unique_ptr<MemoryInputStream> input_stream(
-            new MemoryInputStream(bytes_flat(i).data(), bytes_flat(i).size()));
-        std::unique_ptr<io::ZlibInputStream> zlib_stream(
-            new io::ZlibInputStream(
-                input_stream.get(), static_cast<size_t>(kBufferSize),
-                static_cast<size_t>(kBufferSize), zlib_options));
-        tstring output_string;
-        Status s = zlib_stream->ReadNBytes(INT_MAX, &output_string);
-        OP_REQUIRES(context, (s.ok() || errors::IsOutOfRange(s)), s);
-        output_flat(i) = std::move(output_string);
-      }
+    for (int64_t i = 0; i < bytes_flat.size(); i++) {
+      OP_REQUIRES_OK(context, DecompressOne(bytes_flat(i), output_flat(i)));
     }
   }
 
  private:
   enum { kBufferSize = 256 << 10 /* 256 kB */ };
-  string compression_type_;
+  // Maximum decompressed size accepted for every compression type.
+  static constexpr int64_t kMaxDecompressedBytes = 1024LL * 1024 * 1024;  // 1GB
+  std::string compression_type_;
 };
 
 REGISTER_KERNEL_BUILDER(Name("DecodeCompressed").Device(DEVICE_CPU),

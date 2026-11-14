@@ -28,16 +28,16 @@ class DirectedInterleaveDatasetParams : public DatasetParams {
                                   bool stop_on_empty_dataset,
                                   DataTypeVector output_dtypes,
                                   std::vector<PartialTensorShape> output_shapes,
-                                  int num_input_datasets, string node_name)
+                                  int num_input_datasets, std::string node_name)
       : DatasetParams(std::move(output_dtypes), std::move(output_shapes),
                       std::move(node_name)),
         stop_on_empty_dataset_(stop_on_empty_dataset),
         num_input_datasets_(input_dataset_params_vec.size()) {
     input_dataset_params_.push_back(
-        absl::make_unique<S>(selector_input_dataset_params));
+        std::make_unique<S>(selector_input_dataset_params));
     for (auto input_dataset_params : input_dataset_params_vec) {
       input_dataset_params_.push_back(
-          absl::make_unique<T>(input_dataset_params));
+          std::make_unique<T>(input_dataset_params));
     }
 
     if (!input_dataset_params_vec.empty()) {
@@ -49,7 +49,8 @@ class DirectedInterleaveDatasetParams : public DatasetParams {
 
   std::vector<Tensor> GetInputTensors() const override { return {}; }
 
-  Status GetInputNames(std::vector<string>* input_names) const override {
+  absl::Status GetInputNames(
+      std::vector<std::string>* input_names) const override {
     input_names->clear();
     input_names->emplace_back(
         DirectedInterleaveDatasetOp::kSelectorInputDataset);
@@ -57,10 +58,10 @@ class DirectedInterleaveDatasetParams : public DatasetParams {
       input_names->emplace_back(absl::StrCat(
           DirectedInterleaveDatasetOp::kDataInputDatasets, "_", i));
     }
-    return Status::OK();
+    return absl::OkStatus();
   }
 
-  Status GetAttributes(AttributeVector* attr_vector) const override {
+  absl::Status GetAttributes(AttributeVector* attr_vector) const override {
     attr_vector->clear();
     attr_vector->emplace_back(DirectedInterleaveDatasetOp::kOutputTypes,
                               output_dtypes_);
@@ -70,16 +71,16 @@ class DirectedInterleaveDatasetParams : public DatasetParams {
                               num_input_datasets_);
     attr_vector->emplace_back(DirectedInterleaveDatasetOp::kStopOnEmptyDataset,
                               stop_on_empty_dataset_);
-    return Status::OK();
+    return absl::OkStatus();
   }
 
-  string dataset_type() const override {
+  std::string dataset_type() const override {
     return DirectedInterleaveDatasetOp::kDatasetType;
   }
 
  private:
   bool stop_on_empty_dataset_;
-  int32 num_input_datasets_;
+  int32_t num_input_datasets_;
 };
 
 class DirectedInterleaveDatasetOpTest : public DatasetOpsTestBase {};
@@ -240,7 +241,8 @@ DirectedInterleaveDatasetParams SmallNumInputDatasetsParams() {
 
 DirectedInterleaveDatasetParams InvalidSelectorOuputDataType() {
   auto selector_input_dataset_params = TensorSliceDatasetParams(
-      /*components=*/{CreateTensor<int32>(TensorShape{6}, {0, 1, 0, 1, 0, 1})},
+      /*components=*/{CreateTensor<int32_t>(TensorShape{6},
+                                            {0, 1, 0, 1, 0, 1})},
       /*node_name=*/"tensor_slice");
   return DirectedInterleaveDatasetParams(
       selector_input_dataset_params,
@@ -439,7 +441,7 @@ TEST_F(DirectedInterleaveDatasetOpTest, InvalidArguments) {
       InvalidInputDatasetsDataType(), ZeroInputDatasetParams()};
   for (auto& dataset_params : invalid_params_vec) {
     EXPECT_EQ(Initialize(dataset_params).code(),
-              tensorflow::error::INVALID_ARGUMENT);
+              absl::StatusCode::kInvalidArgument);
   }
 }
 
@@ -450,7 +452,7 @@ TEST_F(DirectedInterleaveDatasetOpTest, InvalidSelectorValues) {
   std::vector<Tensor> next;
   EXPECT_EQ(
       iterator_->GetNext(iterator_ctx_.get(), &next, &end_of_sequence).code(),
-      tensorflow::error::INVALID_ARGUMENT);
+      absl::StatusCode::kInvalidArgument);
 }
 
 }  // namespace

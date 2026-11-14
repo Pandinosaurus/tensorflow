@@ -14,8 +14,8 @@ limitations under the License.
 ==============================================================================*/
 #include <stdint.h>
 
-#include "tensorflow/lite/c/builtin_op_data.h"
-#include "tensorflow/lite/c/common.h"
+#include "tensorflow/lite/core/c/builtin_op_data.h"
+#include "tensorflow/lite/core/c/common.h"
 #include "tensorflow/lite/kernels/internal/optimized/optimized_ops.h"
 #include "tensorflow/lite/kernels/internal/reference/reference_ops.h"
 #include "tensorflow/lite/kernels/internal/tensor.h"
@@ -58,6 +58,7 @@ TfLiteStatus ResizeOutputTensors(TfLiteContext* context, TfLiteNode* node,
 
   TF_LITE_ENSURE(context, axis_value >= 0);
   TF_LITE_ENSURE(context, axis_value < NumDimensions(input));
+  TF_LITE_ENSURE(context, axis_value <= INT16_MAX);
 
   const int input_size = SizeOfDimension(input, axis_value);
   TF_LITE_ENSURE(context, num_splits != 0);
@@ -84,10 +85,15 @@ TfLiteStatus Prepare(TfLiteContext* context, TfLiteNode* node) {
   TF_LITE_ENSURE_EQ(context, NumOutputs(node), op_context.params->num_splits);
 
   auto input_type = op_context.input->type;
-  TF_LITE_ENSURE(context,
-                 input_type == kTfLiteFloat32 || input_type == kTfLiteUInt8 ||
-                     input_type == kTfLiteInt8 || input_type == kTfLiteInt16 ||
-                     input_type == kTfLiteInt32);
+  bool is_supported_type =
+      input_type == kTfLiteFloat32 || input_type == kTfLiteUInt8 ||
+      input_type == kTfLiteInt8 || input_type == kTfLiteInt16 ||
+      input_type == kTfLiteInt32 || input_type == kTfLiteInt64;
+#if defined(TFLITE_ENABLE_EXTRA_REFERENCE_KERNELS)
+  is_supported_type = is_supported_type || input_type == kTfLiteFloat8E4M3FN ||
+                      input_type == kTfLiteFloat8E5M2;
+#endif
+  TF_LITE_ENSURE(context, is_supported_type);
   for (int i = 0; i < NumOutputs(node); ++i) {
     TfLiteTensor* tensor;
     TF_LITE_ENSURE_OK(context, GetOutputSafe(context, node, i, &tensor));
@@ -96,7 +102,7 @@ TfLiteStatus Prepare(TfLiteContext* context, TfLiteNode* node) {
 
   // If we know the contents of the 'axis' tensor, resize all outputs.
   // Otherwise, wait until Eval().
-  if (IsConstantTensor(op_context.axis)) {
+  if (IsConstantOrPersistentTensor(op_context.axis)) {
     return ResizeOutputTensors(context, node, op_context.axis, op_context.input,
                                op_context.params->num_splits);
   } else {
@@ -123,44 +129,39 @@ TfLiteStatus Eval(TfLiteContext* context, TfLiteNode* node) {
 
   TF_LITE_ENSURE(context, axis_value >= 0);
   TF_LITE_ENSURE(context, axis_value < NumDimensions(op_context.input));
+  TF_LITE_ENSURE(context, axis_value <= INT16_MAX);
 
   // TODO(b/173221795): Our usage of VectorOfTensors could be optimized by
   // calculating it in Prepare, unless we defer shape calculation.
   // We can improve the optimized_ops version to handle other
   // cases too.
-#define TF_LITE_SPLIT(scalar)                                       \
-  VectorOfTensors<scalar> all_outputs(*context, *node->outputs);    \
-  tflite::SplitParams op_params;                                    \
-  op_params.num_split = NumOutputs(node);                           \
-  op_params.axis = axis_value;                                      \
-  reference_ops::Split(op_params, GetTensorShape(op_context.input), \
-                       GetTensorData<scalar>(op_context.input),     \
-                       all_outputs.shapes(), all_outputs.data());
+#define TF_LITE_SPLIT(scalar)                                         \
+  {                                                                   \
+    VectorOfTensors<scalar> all_outputs(*context, *node->outputs);    \
+    tflite::SplitParams op_params;                                    \
+    op_params.num_split = NumOutputs(node);                           \
+    op_params.axis = static_cast<int16_t>(axis_value);                \
+    reference_ops::Split(op_params, GetTensorShape(op_context.input), \
+                         GetTensorData<scalar>(op_context.input),     \
+                         all_outputs.shapes(), all_outputs.data());   \
+  }
 
-  switch (op_context.input->type) {
-    case kTfLiteFloat32: {
-      TF_LITE_SPLIT(float);
-      break;
-    }
-    case kTfLiteUInt8: {
-      TF_LITE_SPLIT(uint8_t);
-      break;
-    }
-    case kTfLiteInt8: {
+  switch (TfLiteTypeGetSizeBits(op_context.input->type)) {
+    case 8:
       TF_LITE_SPLIT(int8_t);
       break;
-    }
-    case kTfLiteInt16: {
+    case 16:
       TF_LITE_SPLIT(int16_t);
       break;
-    }
-    case kTfLiteInt32: {
+    case 32:
       TF_LITE_SPLIT(int32_t);
       break;
-    }
+    case 64:
+      TF_LITE_SPLIT(int64_t);
+      break;
     default:
-      context->ReportError(context, "Type %s currently not supported.",
-                           TfLiteTypeGetName(op_context.input->type));
+      TF_LITE_KERNEL_LOG(context, "Type %s currently not supported.",
+                         TfLiteTypeGetName(op_context.input->type));
       return kTfLiteError;
   }
 #undef TF_LITE_SPLIT

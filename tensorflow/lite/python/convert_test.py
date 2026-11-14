@@ -13,15 +13,18 @@
 # limitations under the License.
 # ==============================================================================
 """TensorFlow Lite Python Interface: Sanity check."""
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
+import os
+import subprocess
+from unittest import mock
 
 import numpy as np
 
+from tensorflow.compiler.mlir.lite import converter_flags_pb2 as _conversion_flags_pb2
+from tensorflow.compiler.mlir.lite.metrics import converter_error_data_pb2
 from tensorflow.lite.python import convert
 from tensorflow.lite.python import op_hint
 from tensorflow.lite.python.interpreter import Interpreter
+from tensorflow.lite.python.metrics.wrapper import metrics_wrapper
 from tensorflow.python.client import session
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import ops
@@ -30,8 +33,34 @@ from tensorflow.python.framework.graph_util_impl import _bfs_for_reachable_nodes
 from tensorflow.python.framework.graph_util_impl import _extract_graph_summary
 from tensorflow.python.framework.graph_util_impl import _node_name
 from tensorflow.python.ops import array_ops
+from tensorflow.python.ops import array_ops_stack
 from tensorflow.python.ops import math_ops
+from tensorflow.python.platform import resource_loader
 from tensorflow.python.platform import test
+
+
+def _mock_wrapped_convert(
+    unused_model_flags_str="",
+    conversion_flags_str="",
+    unused_input_data_str="",
+    unused_debug_info_str="",
+):
+  # Simulate the converter throwing and error when
+  # `guarantee_all_funcs_one_use` is not set.
+  if not _conversion_flags_pb2.ConverterFlags.FromString(
+      conversion_flags_str  # pyrefly: ignore[bad-argument-type]
+  ).guarantee_all_funcs_one_use:
+    raise Exception()
+  else:
+    return bytes("A model", encoding="utf-8")
+
+
+def _mock_retrieve_errors():
+  error_data = converter_error_data_pb2.ConverterErrorData
+  err_data = error_data(
+      error_code=error_data.ERROR_STATEFUL_PARTITIONED_CALL_IN_FINAL_IR
+  )
+  return [err_data]
 
 
 class ConvertTest(test_util.TensorFlowTestCase):
@@ -39,41 +68,79 @@ class ConvertTest(test_util.TensorFlowTestCase):
   def testBasic(self):
     with ops.Graph().as_default():
       in_tensor = array_ops.placeholder(
-          shape=[1, 16, 16, 3], dtype=dtypes.float32)
+          shape=[1, 16, 16, 3], dtype=dtypes.float32
+      )
       out_tensor = in_tensor + in_tensor
       sess = session.Session()
 
     # Try running on valid graph
-    tflite_model = convert.toco_convert(sess.graph_def, [in_tensor],
-                                        [out_tensor])
+    tflite_model = convert.convert_graphdef(
+        sess.graph_def, input_tensors=[in_tensor], output_tensors=[out_tensor]
+    )
     self.assertTrue(tflite_model)
+
+  @mock.patch.object(
+      convert.wrap_converter, "wrapped_convert", new=_mock_wrapped_convert
+  )
+  @mock.patch.object(
+      metrics_wrapper, "retrieve_collected_errors", new=_mock_retrieve_errors
+  )
+  # This test wants to check that in the case of the converter throwing an
+  # `ERROR_STATEFUL_PARTITIONED_CALL_IN_FINAL_IR` error, it will
+  # retry conversion with the `guarantee_all_funcs_one_use` flag.
+  # We can wrap the convert call in order to assert it is called appropriately.
+  @mock.patch.object(convert, "convert", wraps=convert.convert)
+  def testConversionStatefulPartitionRetry(self, mock_convert):
+    with ops.Graph().as_default():
+      in_tensor = array_ops.placeholder(
+          shape=[1, 16, 16, 3], dtype=dtypes.float32
+      )
+      out_tensor = in_tensor + in_tensor
+      sess = session.Session()
+
+    model = convert.convert_graphdef(
+        sess.graph_def,
+        input_tensors=[in_tensor],
+        output_tensors=[out_tensor],
+        guarantee_all_funcs_one_use=False,
+    )
+    self.assertTrue(str(model, encoding="utf-8"), "A model")
+    self.assertEqual(mock_convert.call_count, 2)
 
   def testQuantization(self):
     with ops.Graph().as_default():
       in_tensor = array_ops.placeholder(
-          shape=[1, 16, 16, 3], dtype=dtypes.float32)
+          shape=[1, 16, 16, 3], dtype=dtypes.float32
+      )
       out_tensor = array_ops.fake_quant_with_min_max_args(
-          in_tensor + in_tensor, min=0., max=1.)
+          in_tensor + in_tensor, min=0.0, max=1.0
+      )
       sess = session.Session()
 
-    tflite_model = convert.toco_convert(
-        sess.graph_def, [in_tensor], [out_tensor],
+    tflite_model = convert.convert_graphdef(
+        sess.graph_def,
+        input_tensors=[in_tensor],
+        output_tensors=[out_tensor],
         inference_type=dtypes.uint8,
-        quantized_input_stats=[(0., 1.)])
+        quantized_input_stats=[(0.0, 1.0)],
+    )
     self.assertTrue(tflite_model)
 
   def testGraphDefBasic(self):
     with ops.Graph().as_default():
       in_tensor = array_ops.placeholder(
-          shape=[1, 16, 16, 3], dtype=dtypes.float32, name="input")
+          shape=[1, 16, 16, 3], dtype=dtypes.float32, name="input"
+      )
       _ = in_tensor + in_tensor
       sess = session.Session()
 
-    tflite_model = convert.toco_convert_graph_def(
-        sess.graph_def, [("input", [1, 16, 16, 3])], ["add"],
-        enable_mlir_converter=False,
+    tflite_model = convert.convert_graphdef_with_arrays(
+        sess.graph_def,
+        input_arrays_with_shape=[("input", [1, 16, 16, 3])],
+        output_arrays=["add"],
         control_output_arrays=None,
-        inference_type=dtypes.float32)
+        inference_type=dtypes.float32,
+    )
     self.assertTrue(tflite_model)
 
     # Check values from converted model.
@@ -84,36 +151,40 @@ class ConvertTest(test_util.TensorFlowTestCase):
     self.assertEqual(1, len(input_details))
     self.assertEqual("input", input_details[0]["name"])
     self.assertEqual(np.float32, input_details[0]["dtype"])
-    self.assertTrue(([1, 16, 16, 3] == input_details[0]["shape"]).all())
-    self.assertEqual((0., 0.), input_details[0]["quantization"])
+    self.assertTrue(([1, 16, 16, 3] == input_details[0]["shape"]).all())  # type: ignore
+    self.assertEqual((0.0, 0.0), input_details[0]["quantization"])
 
     output_details = interpreter.get_output_details()
     self.assertEqual(1, len(output_details))
     self.assertEqual("add", output_details[0]["name"])
     self.assertEqual(np.float32, output_details[0]["dtype"])
-    self.assertTrue(([1, 16, 16, 3] == output_details[0]["shape"]).all())
-    self.assertEqual((0., 0.), output_details[0]["quantization"])
+    self.assertTrue(([1, 16, 16, 3] == output_details[0]["shape"]).all())  # type: ignore
+    self.assertEqual((0.0, 0.0), output_details[0]["quantization"])
 
   def testGraphDefQuantization(self):
     with ops.Graph().as_default():
       in_tensor_1 = array_ops.placeholder(
-          shape=[1, 16, 16, 3], dtype=dtypes.float32, name="inputA")
+          shape=[1, 16, 16, 3], dtype=dtypes.float32, name="inputA"
+      )
       in_tensor_2 = array_ops.placeholder(
-          shape=[1, 16, 16, 3], dtype=dtypes.float32, name="inputB")
+          shape=[1, 16, 16, 3], dtype=dtypes.float32, name="inputB"
+      )
       _ = array_ops.fake_quant_with_min_max_args(
-          in_tensor_1 + in_tensor_2, min=0., max=1., name="output")
+          in_tensor_1 + in_tensor_2, min=0.0, max=1.0, name="output"
+      )
       sess = session.Session()
 
-    input_arrays_map = [("inputA", [1, 16, 16, 3]), ("inputB", [1, 16, 16, 3])]
-    output_arrays = ["output"]
-    tflite_model = convert.toco_convert_graph_def(
+    tflite_model = convert.convert_graphdef_with_arrays(
         sess.graph_def,
-        input_arrays_map,
-        output_arrays,
-        enable_mlir_converter=False,
+        input_arrays_with_shape=[
+            ("inputA", [1, 16, 16, 3]),
+            ("inputB", [1, 16, 16, 3]),
+        ],
+        output_arrays=["output"],
         control_output_arrays=None,
         inference_type=dtypes.uint8,
-        quantized_input_stats=[(0., 1.), (0., 1.)])
+        quantized_input_stats=[(0.0, 1.0), (0.0, 1.0)],
+    )
     self.assertTrue(tflite_model)
 
     # Check values from converted model.
@@ -124,47 +195,128 @@ class ConvertTest(test_util.TensorFlowTestCase):
     self.assertEqual(2, len(input_details))
     self.assertEqual("inputA", input_details[0]["name"])
     self.assertEqual(np.uint8, input_details[0]["dtype"])
-    self.assertTrue(([1, 16, 16, 3] == input_details[0]["shape"]).all())
-    self.assertEqual((1., 0.),
-                     input_details[0]["quantization"])  # scale, zero_point
+    self.assertTrue(([1, 16, 16, 3] == input_details[0]["shape"]).all())  # type: ignore
+    self.assertEqual(
+        (1.0, 0.0), input_details[0]["quantization"]
+    )  # scale, zero_point
 
     self.assertEqual("inputB", input_details[1]["name"])
     self.assertEqual(np.uint8, input_details[1]["dtype"])
-    self.assertTrue(([1, 16, 16, 3] == input_details[1]["shape"]).all())
-    self.assertEqual((1., 0.),
-                     input_details[1]["quantization"])  # scale, zero_point
+    self.assertTrue(([1, 16, 16, 3] == input_details[1]["shape"]).all())  # type: ignore
+    self.assertEqual(
+        (1.0, 0.0), input_details[1]["quantization"]
+    )  # scale, zero_point
 
     output_details = interpreter.get_output_details()
     self.assertEqual(1, len(output_details))
     self.assertEqual("output", output_details[0]["name"])
     self.assertEqual(np.uint8, output_details[0]["dtype"])
-    self.assertTrue(([1, 16, 16, 3] == output_details[0]["shape"]).all())
+    self.assertTrue(([1, 16, 16, 3] == output_details[0]["shape"]).all())  # type: ignore
     self.assertGreater(output_details[0]["quantization"][0], 0)  # scale
+
+  def testMlirRoundtripKeepsTensorNames(self):
+    """Flatbuffer -> MLIR -> flatbuffer keeps public tensor names stable.
+
+    The MLIR importer attaches tflite.subgraph/op-id location metadata for
+    debug traceability. This must not leak into the tensor names generated by
+    the exporter: tools such as the quantization debugger look tensors up by
+    their original names.
+    """
+    with ops.Graph().as_default():
+      in_tensor = array_ops.placeholder(
+          shape=[1, 16, 16, 3], dtype=dtypes.float32, name="input"
+      )
+      _ = in_tensor + in_tensor
+      sess = session.Session()
+
+    tflite_model = convert.convert_graphdef_with_arrays(
+        sess.graph_def,
+        input_arrays_with_shape=[("input", [1, 16, 16, 3])],
+        output_arrays=["add"],
+        control_output_arrays=None,
+        inference_type=dtypes.float32,
+    )
+    self.assertTrue(tflite_model)
+
+    def _tensor_names(model_content):
+      interpreter = Interpreter(model_content=model_content)
+      interpreter.allocate_tensors()
+      return [detail["name"] for detail in interpreter.get_tensor_details()]
+
+    # Roundtrip through flatbuffer_translate: importing to MLIR attaches the
+    # location metadata, exporting re-derives tensor names from locations.
+    translate_bin = resource_loader.get_path_to_datafile(
+        "../../compiler/mlir/lite/flatbuffer_translate"
+    )
+    self.assertTrue(
+        os.path.exists(translate_bin),
+        f"flatbuffer_translate not found in runfiles: {translate_bin}",
+    )
+    model_path = os.path.join(self.get_temp_dir(), "model.tflite")
+    mlir_path = os.path.join(self.get_temp_dir(), "model.mlir")
+    roundtrip_path = os.path.join(self.get_temp_dir(), "roundtrip.tflite")
+    with open(model_path, "wb") as f:
+      f.write(tflite_model)
+    subprocess.run(
+        [
+            translate_bin,
+            "--tflite-flatbuffer-to-mlir",
+            "--mlir-print-debuginfo",
+            model_path,
+            "-o",
+            mlir_path,
+        ],
+        check=True,
+    )
+    subprocess.run(
+        [
+            translate_bin,
+            "-mlir-to-tflite-flatbuffer",
+            mlir_path,
+            "-o",
+            roundtrip_path,
+        ],
+        check=True,
+    )
+    with open(roundtrip_path, "rb") as f:
+      roundtripped_model = f.read()
+
+    original_names = _tensor_names(tflite_model)
+    roundtripped_names = _tensor_names(roundtripped_model)
+    self.assertIn("input", original_names)
+    self.assertIn("add", original_names)
+    self.assertEqual(original_names, roundtripped_names)
 
   def testGraphDefQuantizationInvalid(self):
     with ops.Graph().as_default():
       in_tensor_1 = array_ops.placeholder(
-          shape=[1, 16, 16, 3], dtype=dtypes.float32, name="inputA")
+          shape=[1, 16, 16, 3], dtype=dtypes.float32, name="inputA"
+      )
       in_tensor_2 = array_ops.placeholder(
-          shape=[1, 16, 16, 3], dtype=dtypes.float32, name="inputB")
+          shape=[1, 16, 16, 3], dtype=dtypes.float32, name="inputB"
+      )
       _ = array_ops.fake_quant_with_min_max_args(
-          in_tensor_1 + in_tensor_2, min=0., max=1., name="output")
+          in_tensor_1 + in_tensor_2, min=0.0, max=1.0, name="output"
+      )
       sess = session.Session()
 
-    input_arrays_map = [("inputA", [1, 16, 16, 3]), ("inputB", [1, 16, 16, 3])]
-    output_arrays = ["output"]
     with self.assertRaises(ValueError) as error:
-      convert.toco_convert_graph_def(
+      convert.convert_graphdef_with_arrays(
           sess.graph_def,
-          input_arrays_map,
-          output_arrays,
-          enable_mlir_converter=False,
+          input_arrays_with_shape=[
+              ("inputA", [1, 16, 16, 3]),
+              ("inputB", [1, 16, 16, 3]),
+          ],
+          output_arrays=["output"],
           control_output_arrays=None,
-          inference_type=dtypes.uint8)
+          inference_type=dtypes.uint8,
+      )
     self.assertEqual(
         "The `quantized_input_stats` flag must be defined when either "
         "`inference_type` flag or `inference_input_type` flag is set to "
-        "tf.int8 or tf.uint8.", str(error.exception))
+        "tf.int8 or tf.uint8.",
+        str(error.exception),
+    )
 
 
 class ConvertTestOpHint(test_util.TensorFlowTestCase):
@@ -186,8 +338,7 @@ class ConvertTestOpHint(test_util.TensorFlowTestCase):
     Returns:
       A set of node types reachable from `output_nodes`.
     """
-    name_to_input_name, name_to_node, _ = (
-        _extract_graph_summary(graphdef))
+    name_to_input_name, name_to_node, _ = _extract_graph_summary(graphdef)
     # Find all nodes that are needed by the outputs
     used_node_names = _bfs_for_reachable_nodes(output_nodes, name_to_input_name)
     return set([name_to_node[node_name].op for node_name in used_node_names])
@@ -206,18 +357,19 @@ class ConvertTestOpHint(test_util.TensorFlowTestCase):
   def testSwishLiteHint(self):
     """Makes a custom op swish and makes sure it gets converted as a unit."""
     with ops.Graph().as_default():
-      image = array_ops.constant([1., 2., 3., 4.])
+      image = array_ops.constant([1.0, 2.0, 3.0, 4.0])
       swish_scale = array_ops.constant(1.0)
 
       def _swish(input_tensor, scale):
         custom = op_hint.OpHint("cool_activation")
         input_tensor, scale = custom.add_inputs(input_tensor, scale)
         output = math_ops.sigmoid(input_tensor) * input_tensor * scale
-        output, = custom.add_outputs(output)
+        (output,) = custom.add_outputs(output)
         return output
 
       output = array_ops.identity(
-          _swish(image, swish_scale), name="ModelOutput")
+          _swish(image, swish_scale), name="ModelOutput"
+      )
 
       with self.cached_session() as sess:
         # check if identities have been put into the graph (2 input, 1 output,
@@ -225,20 +377,23 @@ class ConvertTestOpHint(test_util.TensorFlowTestCase):
         self.assertEqual(self._countIdentities(sess.graph_def.node), 4)
 
         stubbed_graphdef = op_hint.convert_op_hints_to_stubs(
-            graph_def=sess.graph_def)
+            graph_def=sess.graph_def
+        )
 
         self.assertEqual(
             self._getGraphOpTypes(
                 stubbed_graphdef,
-                output_nodes=[op_hint._tensor_name_base(output.name)]),
-            set(["cool_activation", "Const", "Identity"]))
+                output_nodes=[op_hint._tensor_name_base(output.name)],
+            ),
+            set(["cool_activation", "Const", "Identity"]),
+        )
 
   def testScaleAndBiasAndIdentity(self):
     """This tests a scaled add which has 3 inputs and 2 outputs."""
     with ops.Graph().as_default():
-      a = array_ops.constant(1.)
-      x = array_ops.constant([2., 3.])
-      b = array_ops.constant([4., 5.])
+      a = array_ops.constant(1.0)
+      x = array_ops.constant([2.0, 3.0])
+      b = array_ops.constant([4.0, 5.0])
 
       def _scaled_and_bias_and_identity(a, x, b):
         custom = op_hint.OpHint("scale_and_bias_and_identity")
@@ -246,7 +401,8 @@ class ConvertTestOpHint(test_util.TensorFlowTestCase):
         return custom.add_outputs(a * x + b, x)
 
       output = array_ops.identity(
-          _scaled_and_bias_and_identity(a, x, b), name="ModelOutput")
+          _scaled_and_bias_and_identity(a, x, b), name="ModelOutput"
+      )
 
       with self.cached_session() as sess:
         # make sure one identity for each input (3) and output (2) => 3 + 2 = 5
@@ -254,42 +410,48 @@ class ConvertTestOpHint(test_util.TensorFlowTestCase):
         self.assertEqual(self._countIdentities(sess.graph_def.node), 6)
 
         stubbed_graphdef = op_hint.convert_op_hints_to_stubs(
-            graph_def=sess.graph_def)
+            graph_def=sess.graph_def
+        )
 
         self.assertEqual(
             self._getGraphOpTypes(
                 stubbed_graphdef,
-                output_nodes=[op_hint._tensor_name_base(output.name)]),
-            set(["scale_and_bias_and_identity", "Const", "Identity", "Pack"]))
+                output_nodes=[op_hint._tensor_name_base(output.name)],
+            ),
+            set(["scale_and_bias_and_identity", "Const", "Identity", "Pack"]),
+        )
 
   def testTwoFunctions(self):
     """Tests if two functions are converted correctly."""
     with ops.Graph().as_default():
-      a = array_ops.constant([1.])
-      b = array_ops.constant([1.])
+      a = array_ops.constant([1.0])
+      b = array_ops.constant([1.0])
 
       def _double_values(x):
         custom = op_hint.OpHint("add_test")
-        x, = custom.add_inputs(x)
+        (x,) = custom.add_inputs(x)
         output = math_ops.multiply(x, x)
-        output, = custom.add_outputs(output)
+        (output,) = custom.add_outputs(output)
         return output
 
       output = array_ops.identity(
-          math_ops.add(_double_values(a), _double_values(b)),
-          name="ModelOutput")
+          math_ops.add(_double_values(a), _double_values(b)), name="ModelOutput"
+      )
 
       with self.cached_session() as sess:
         # make sure one identity for each input (2) and output (2) => 2 + 2
         # +1 for the final output
         self.assertEqual(self._countIdentities(sess.graph_def.node), 5)
         stubbed_graphdef = op_hint.convert_op_hints_to_stubs(
-            graph_def=sess.graph_def)
+            graph_def=sess.graph_def
+        )
         self.assertEqual(
             self._getGraphOpTypes(
                 stubbed_graphdef,
-                output_nodes=[op_hint._tensor_name_base(output.name)]),
-            set(["add_test", "Const", "Identity", "AddV2"]))
+                output_nodes=[op_hint._tensor_name_base(output.name)],
+            ),
+            set(["add_test", "Const", "Identity", "AddV2"]),
+        )
 
   def _get_input_index(self, x):
     return x.op.node_def.attr[op_hint.OpHint.FUNCTION_INPUT_INDEX_ATTR].i
@@ -303,18 +465,21 @@ class ConvertTestOpHint(test_util.TensorFlowTestCase):
   def testTags(self):
     """Test if multiple args with the same tag are grouped."""
     with ops.Graph().as_default():
-      a = array_ops.constant([1.])
-      b = array_ops.constant([2.])
-      c = array_ops.constant([3.])
-      d = array_ops.constant([4.])
+      a = array_ops.constant([1.0])
+      b = array_ops.constant([2.0])
+      c = array_ops.constant([3.0])
+      d = array_ops.constant([4.0])
       custom = op_hint.OpHint("test_tag")
       a = custom.add_input(
-          a, tag="mytag", aggregate=op_hint.OpHint.AGGREGATE_STACK)
-      b, = custom.add_inputs(b)
+          a, tag="mytag", aggregate=op_hint.OpHint.AGGREGATE_STACK
+      )
+      (b,) = custom.add_inputs(b)
       c = custom.add_input(
-          c, tag="mytag", aggregate=op_hint.OpHint.AGGREGATE_STACK)
+          c, tag="mytag", aggregate=op_hint.OpHint.AGGREGATE_STACK
+      )
       d = custom.add_input(
-          d, tag="mytag2", aggregate=op_hint.OpHint.AGGREGATE_STACK)
+          d, tag="mytag2", aggregate=op_hint.OpHint.AGGREGATE_STACK
+      )
       res = math_ops.add(math_ops.mul(a, b), math_ops.mul(c, b))
       custom.add_outputs([res])
       with self.cached_session():
@@ -327,9 +492,9 @@ class ConvertTestOpHint(test_util.TensorFlowTestCase):
 
   def testOverrideIndex(self):
     with ops.Graph().as_default():
-      a = array_ops.constant([1.])
-      b = array_ops.constant([2.])
-      c = array_ops.constant([3.])
+      a = array_ops.constant([1.0])
+      b = array_ops.constant([2.0])
+      c = array_ops.constant([3.0])
       custom = op_hint.OpHint("test_override")
       b = custom.add_input(b)  # should auto assign 0
       a = custom.add_input(a, index_override=1)
@@ -341,11 +506,11 @@ class ConvertTestOpHint(test_util.TensorFlowTestCase):
 
   def testAggregate(self):
     with ops.Graph().as_default():
-      a = array_ops.constant([3., 4.])
-      b = array_ops.constant([5., 6.])
+      a = array_ops.constant([3.0, 4.0])
+      b = array_ops.constant([5.0, 6.0])
       hint = op_hint.OpHint("agg")
-      a0, a1 = array_ops.unstack(a)
-      b0, b1 = array_ops.unstack(b)
+      a0, a1 = array_ops_stack.unstack(a)
+      b0, b1 = array_ops_stack.unstack(b)
 
       a0 = hint.add_input(a0, tag="c", aggregate=op_hint.OpHint.AGGREGATE_STACK)
       b0 = hint.add_input(b0, tag="n", aggregate=op_hint.OpHint.AGGREGATE_STACK)
@@ -355,20 +520,25 @@ class ConvertTestOpHint(test_util.TensorFlowTestCase):
       c0 = math_ops.add(a0, b0, name="addleft")
       c1 = math_ops.add(a1, b1, name="addright")
       c0 = hint.add_output(
-          c0, tag="out", aggregate=op_hint.OpHint.AGGREGATE_STACK)
+          c0, tag="out", aggregate=op_hint.OpHint.AGGREGATE_STACK
+      )
       c1 = hint.add_output(
-          c1, tag="out", aggregate=op_hint.OpHint.AGGREGATE_STACK)
+          c1, tag="out", aggregate=op_hint.OpHint.AGGREGATE_STACK
+      )
 
-      curr = array_ops.stack([c0, c1])
+      curr = array_ops_stack.stack([c0, c1])
       output = array_ops.identity(curr, name="FINAL_OUTPUT")
       with self.cached_session() as sess:
         stubbed_graphdef = op_hint.convert_op_hints_to_stubs(
-            graph_def=sess.graph_def)
+            graph_def=sess.graph_def
+        )
         self.assertEqual(
             self._getGraphOpTypes(
                 stubbed_graphdef,
-                output_nodes=[op_hint._tensor_name_base(output.name)]),
-            set(["agg", "Const", "Identity"]))
+                output_nodes=[op_hint._tensor_name_base(output.name)],
+            ),
+            set(["agg", "Const", "Identity"]),
+        )
 
   def testFindHintedOutputNodes(self):
     """Test if all hinted output nodes are correctly found."""
@@ -381,18 +551,21 @@ class ConvertTestOpHint(test_util.TensorFlowTestCase):
         output = math_ops.mul(input1, input2)
         return custom_op.add_output(output)
 
-      output_1 = _build_ophinted_op("custom_op_1", array_ops.constant([1.]),
-                                    array_ops.constant([2.]))
-      output_2 = _build_ophinted_op("custom_op_2", array_ops.constant([3.]),
-                                    array_ops.constant([4.]))
+      output_1 = _build_ophinted_op(
+          "custom_op_1", array_ops.constant([1.0]), array_ops.constant([2.0])
+      )
+      output_2 = _build_ophinted_op(
+          "custom_op_2", array_ops.constant([3.0]), array_ops.constant([4.0])
+      )
       with self.cached_session() as sess:
         hinted_outputs_nodes = op_hint.find_all_hinted_output_nodes(sess)
         expected_hinted_output_nodes = [
             _node_name(output_1.name),
-            _node_name(output_2.name)
+            _node_name(output_2.name),
         ]
         self.assertEqual(
-            len(hinted_outputs_nodes), len(expected_hinted_output_nodes))
+            len(hinted_outputs_nodes), len(expected_hinted_output_nodes)
+        )
 
 
 if __name__ == "__main__":

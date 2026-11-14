@@ -14,10 +14,6 @@
 # ==============================================================================
 """Tests for ParameterServerStrategy."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import copy
 import threading
 
@@ -29,23 +25,22 @@ from tensorflow.python.distribute import combinations
 from tensorflow.python.distribute import device_util
 from tensorflow.python.distribute import distribute_lib
 from tensorflow.python.distribute import distribute_utils
-from tensorflow.python.distribute import distribution_strategy_context as ds_context
-from tensorflow.python.distribute import input_lib
 from tensorflow.python.distribute import multi_worker_test_base
 from tensorflow.python.distribute import multi_worker_util
 from tensorflow.python.distribute import parameter_server_strategy
 from tensorflow.python.distribute import ps_values
 from tensorflow.python.distribute import reduce_util
 from tensorflow.python.distribute import strategy_test_lib
-from tensorflow.python.distribute.cluster_resolver import SimpleClusterResolver
+from tensorflow.python.distribute.cluster_resolver import cluster_resolver as cluster_resolver_lib
+from tensorflow.python.distribute.v1 import input_lib as input_lib_v1
 from tensorflow.python.eager import backprop
 from tensorflow.python.eager import context
-from tensorflow.python.estimator import run_config
 from tensorflow.python.framework import constant_op
 from tensorflow.python.framework import device as tf_device
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import errors
 from tensorflow.python.framework import ops
+from tensorflow.python.framework import tensor
 from tensorflow.python.framework import tensor_util
 from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import control_flow_ops
@@ -58,14 +53,14 @@ from tensorflow.python.ops import variables
 from tensorflow.python.platform import test
 from tensorflow.python.training import training_util
 
-CHIEF = run_config.TaskType.CHIEF
-WORKER = run_config.TaskType.WORKER
-PS = run_config.TaskType.PS
+CHIEF = 'chief'
+WORKER = 'worker'
+PS = 'ps'
 
 
 def _get_replica_id_integer():
-  replica_id = ds_context.get_replica_context().replica_id_in_sync_group
-  if isinstance(replica_id, ops.Tensor):
+  replica_id = distribute_lib.get_replica_context().replica_id_in_sync_group
+  if isinstance(replica_id, tensor.Tensor):
     replica_id = tensor_util.constant_value(replica_id)
   return replica_id
 
@@ -79,7 +74,7 @@ def create_test_objects(cluster_spec=None,
   if num_gpus is None:
     num_gpus = context.num_gpus()
   if cluster_spec and task_type and task_id is not None:
-    cluster_resolver = SimpleClusterResolver(
+    cluster_resolver = cluster_resolver_lib.SimpleClusterResolver(
         cluster_spec=multi_worker_util.normalize_cluster_spec(cluster_spec),
         task_type=task_type,
         task_id=task_id,
@@ -191,8 +186,8 @@ class ParameterServerStrategyTestBase(
           g = e + 1.0
         self.assertEqual(g.device, worker_device + '/device:CPU:1')
 
-        # This ops.colocate_with will be ignored when defining a variable but not
-        # for a normal tensor.
+        # This ops.colocate_with will be ignored when defining a variable
+        # but not for a normal tensor.
         with ops.colocate_with(x):
           u = variable_scope.get_variable('u', initializer=30.0)
           v = variable_scope.get_variable('v', initializer=30.0)
@@ -345,8 +340,8 @@ class ParameterServerStrategyTestBase(
           g = e + 1.0
         self.assertEqual(g.device, device_util.canonicalize('/device:CPU:1'))
 
-        # This ops.colocate_with will be ignored when defining a variable but not
-        # for a normal tensor.
+        # This ops.colocate_with will be ignored when defining a variable
+        # but not for a normal tensor.
         with ops.colocate_with(x):
           u = variable_scope.get_variable('u', initializer=30.0)
           h = f + 1.0
@@ -743,7 +738,7 @@ class ParameterServerStrategyTest(
   def testEagerCustomTrainingUnimplementedError(self):
     cluster_spec = multi_worker_test_base.create_in_process_cluster(
         num_workers=3, num_ps=2)
-    cluster_resolver = SimpleClusterResolver(
+    cluster_resolver = cluster_resolver_lib.SimpleClusterResolver(
         cluster_spec=multi_worker_util.normalize_cluster_spec(cluster_spec),
         task_type='worker',
         task_id=1,
@@ -788,7 +783,7 @@ class ParameterServerStrategyTest(
     dataset = distribution.experimental_distribute_dataset(  # pylint: disable=assignment-from-no-return
         dataset,
         options=input_options)
-    if isinstance(dataset, input_lib.DistributedDatasetV1):
+    if isinstance(dataset, input_lib_v1.DistributedDatasetV1):
       item = dataset.make_initializable_iterator().get_next()
     else:
       self.skipTest('unsupported test combination')
@@ -811,7 +806,7 @@ class ParameterServerStrategyTest(
     dataset = distribution.experimental_distribute_dataset(  # pylint: disable=assignment-from-no-return
         dataset,
         options=input_options)
-    if isinstance(dataset, input_lib.DistributedDatasetV1):
+    if isinstance(dataset, input_lib_v1.DistributedDatasetV1):
       item = dataset.make_initializable_iterator().get_next()
     else:
       self.skipTest('unsupported test combination')
@@ -902,6 +897,31 @@ class CentralStorageStrategyTest(strategy_test_lib.DistributionTestBase,
   def testInMultiWorkerMode(self):
     strategy, _, _ = create_test_objects(num_gpus=0)
     self.assertFalse(strategy.extended._in_multi_worker_mode())
+
+  @combinations.generate(combinations.combine(mode=['graph', 'eager']))
+  def test_central_storage_strategy_input_options(self):
+    strategy = central_storage_strategy.CentralStorageStrategy._from_num_gpus(0)
+    dataset = dataset_ops.Dataset.range(10).batch(2)
+
+    # PER_REPLICA mode raises NotImplementedError.
+    options = distribute_lib.InputOptions(
+        experimental_replication_mode=distribute_lib.InputReplicationMode.PER_REPLICA
+    )
+    with self.assertRaisesRegex(
+        NotImplementedError,
+        r'InputReplicationMode\.PER_REPLICA is only supported in '
+        r'`experimental_distribute_datasets_from_function`\.',
+    ):
+      strategy.experimental_distribute_dataset(dataset, options=options)
+
+    # Valid options propagate without raising AttributeError.
+    options = distribute_lib.InputOptions(
+        experimental_replication_mode=distribute_lib.InputReplicationMode.PER_WORKER
+    )
+    dist_dataset = strategy.experimental_distribute_dataset(
+        dataset, options=options
+    )
+    self.assertIsNotNone(dist_dataset)
 
 
 if __name__ == '__main__':

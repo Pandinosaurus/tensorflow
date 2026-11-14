@@ -74,6 +74,7 @@ bool IsDequeueOp(const NodeDef& node);
 bool IsDiv(const NodeDef& node);
 bool IsDivNoNan(const NodeDef& node);
 bool IsElementWiseMonotonic(const NodeDef& node, bool* is_non_decreasing);
+bool IsElementWiseStrictlyInjective(const NodeDef& node);
 bool IsElu(const NodeDef& node);
 bool IsEluGrad(const NodeDef& node);
 bool IsQuantizationEmulation(const NodeDef& node);
@@ -121,6 +122,7 @@ bool IsMin(const NodeDef& node);
 bool IsMinimum(const NodeDef& node);
 bool IsMirrorPad(const NodeDef& node);
 bool IsMirrorPadGrad(const NodeDef& node);
+bool IsMklFusedMish(const NodeDef& node);
 bool IsMod(const NodeDef& node);
 bool IsMul(const NodeDef& node);
 bool IsMulNoNan(const NodeDef& node);
@@ -227,8 +229,8 @@ bool IsDataset(const NodeDef& node);
 
 // Returns true if the node op is marked as stateful, or if it was not found in
 // op_registry.
-bool IsStateful(const NodeDef node, const OpRegistryInterface* op_registry);
-bool IsStateful(const NodeDef node);  // use OpRegistry::Global()
+bool IsStateful(const NodeDef& node, const OpRegistryInterface* op_registry);
+bool IsStateful(const NodeDef& node);  // use OpRegistry::Global()
 
 bool IsFreeOfSideEffect(const NodeDef& node,
                         const OpRegistryInterface* op_registry);

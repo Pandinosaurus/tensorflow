@@ -1,7 +1,23 @@
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
 load("//tensorflow:tensorflow.bzl", "if_google", "tf_cc_test")
 load("//tensorflow/core/platform:rules_cc.bzl", "cc_library")
 
 package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
     default_visibility = [":friends"],
     licenses = ["notice"],
 )
@@ -10,10 +26,14 @@ package_group(
     name = "friends",
     packages = [
         # Authorized users go here.
+        # copybara:uncomment "//learning/infra/mira/...",
         # copybara:uncomment "//learning/serving/...",
         # copybara:uncomment "//learning/brain/experimental/tfrt/...",
+        # copybara:uncomment "//learning/brain/tfrt/cpp_tests/tpu_model/...",
+        # copybara:uncomment "//learning/brain/tfrt/...",
         "//tensorflow/core/tfrt/...",
         "//tensorflow/core/runtime_fallback/runtime/...",
+        "//tensorflow_serving/...",
     ],
 )
 
@@ -21,7 +41,11 @@ cc_library(
     name = "run_handler_util",
     srcs = ["run_handler_util.cc"],
     hdrs = ["run_handler_util.h"],
-    deps = ["//tensorflow/core:lib"],
+    deps = [
+        "//tensorflow/core:lib",
+        "@com_google_absl//absl/log",
+        "@com_google_absl//absl/strings",
+    ],
 )
 
 tf_cc_test(
@@ -34,7 +58,6 @@ tf_cc_test(
         "//tensorflow/core:lib",
         "//tensorflow/core:test",
         "//tensorflow/core:test_main",
-        "@com_google_googletest//:gtest_main",
     ],
 )
 
@@ -44,7 +67,6 @@ cc_library(
     hdrs = ["run_handler.h"],
     deps = [
         ":run_handler_util",
-        "//tensorflow/core:framework",
         "//tensorflow/core:framework_internal",
         "//tensorflow/core:lib",
         "//tensorflow/core:lib_internal",
@@ -52,7 +74,12 @@ cc_library(
         "//tensorflow/core/profiler/lib:traceme",
         "//tensorflow/core/profiler/lib:traceme_encode",
         "//tensorflow/core/protobuf:for_core_protos_cc",
-        "//third_party/eigen3",
+        "//tensorflow/core/tfrt/runtime:work_queue_interface",
+        "@com_google_absl//absl/log",
+        "@com_google_absl//absl/log:check",
+        "@com_google_absl//absl/log:vlog_is_on",
+        "@com_google_absl//absl/strings",
+        "@eigen_archive//:eigen3",
         "@tf_runtime//:hostcontext",
     ],
 )
@@ -71,10 +98,11 @@ tf_cc_test(
         "//tensorflow/core/common_runtime:direct_session_internal",
         "//tensorflow/core/kernels:cwise_op",
         "//tensorflow/core/kernels:matmul_op",
-        "//third_party/eigen3",
-        "@com_google_absl//absl/memory",
+        "@com_google_absl//absl/strings",
         "@com_google_absl//absl/synchronization",
-        "@com_google_googletest//:gtest_main",
+        "@com_google_absl//absl/time",
+        "@com_google_googletest//:gtest",
+        "@eigen_archive//:eigen3",
         "@tf_runtime//:hostcontext",
     ],
 )
@@ -92,6 +120,10 @@ cc_library(
         ":run_handler",
         "//tensorflow/core/platform:strcat",
         "//tensorflow/core/tfrt/runtime:work_queue_interface",
+        "@com_google_absl//absl/log:check",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings",
         "@llvm-project//llvm:Support",
         "@tf_runtime//:hostcontext",
         "@tf_runtime//:support",
@@ -109,10 +141,12 @@ tf_cc_test(
         "//tensorflow/core:test_main",
         "//tensorflow/core/platform:errors",
         "//tensorflow/core/platform:status_matchers",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:status_matchers",
         "@com_google_absl//absl/strings",
-        "@com_google_absl//absl/time",
         "@com_google_googletest//:gtest_main",
         "@tf_runtime//:hostcontext",
         "@tf_runtime//:support",
+        "@xla//xla/tsl/protobuf:error_codes_proto_impl_cc",
     ],
 )

@@ -48,10 +48,10 @@ class GpuDeviceArrayOnHost {
     data_.size = size;
   }
 
-  Status Init() {
+  absl::Status Init() {
     if (inlined()) {
       values_ = data_.inline_values;
-      return Status::OK();
+      return absl::OkStatus();
     }
 
     // Out-of-line: allocate data that will be memcopied.
@@ -62,8 +62,8 @@ class GpuDeviceArrayOnHost {
         context_->allocate_temp(DT_INT8, TensorShape{total_bytes_},
                                 &out_of_line_values_on_host_, attr));
     values_ = reinterpret_cast<ValueType*>(
-        out_of_line_values_on_host_.flat<int8>().data());
-    return Status::OK();
+        out_of_line_values_on_host_.flat<int8_t>().data());
+    return absl::OkStatus();
   }
 
   void Set(int index, ValueType val) {
@@ -72,9 +72,9 @@ class GpuDeviceArrayOnHost {
     *(values_ + index) = val;
   }
 
-  Status Finalize() {
+  absl::Status Finalize() {
     if (inlined()) {
-      return Status::OK();
+      return absl::OkStatus();
     }
 
     // Out-of-line - copy pointers to device.
@@ -82,17 +82,19 @@ class GpuDeviceArrayOnHost {
     TensorReference tensor_ref(out_of_line_values_on_host_);
     TF_RETURN_IF_ERROR(context_->allocate_temp(
         DT_INT8, TensorShape{total_bytes_}, &out_of_line_values_on_gpu_));
-    se::DeviceMemoryBase output_values_base{
-        out_of_line_values_on_gpu_.flat<int8>().data(),
-        static_cast<uint64>(total_bytes_)};
-    stream->ThenMemcpy(&output_values_base,
-                       out_of_line_values_on_host_.flat<int8>().data(),
-                       total_bytes_);
-    context_->device()->tensorflow_gpu_device_info()->event_mgr->ThenExecute(
-        stream, [tensor_ref]() { tensor_ref.Unref(); });
+    stream_executor::DeviceAddressBase output_values_base{
+        out_of_line_values_on_gpu_.flat<int8_t>().data(),
+        static_cast<uint64_t>(total_bytes_)};
+    TF_RETURN_IF_ERROR(stream->Memcpy(
+        &output_values_base, out_of_line_values_on_host_.flat<int8_t>().data(),
+        total_bytes_));
+    context_->device()
+        ->tensorflow_accelerator_device_info()
+        ->event_mgr->ThenExecute(stream,
+                                 [tensor_ref]() { tensor_ref.Unref(); });
     data_.out_of_line_values = reinterpret_cast<ValueType*>(
-        out_of_line_values_on_gpu_.flat<int8>().data());
-    return Status::OK();
+        out_of_line_values_on_gpu_.flat<int8_t>().data());
+    return absl::OkStatus();
   }
 
   const GpuDeviceArrayStruct<ValueType, MaxInlineValues>& data() const {
@@ -112,7 +114,8 @@ class GpuDeviceArrayOnHost {
   Tensor out_of_line_values_on_host_;
   Tensor out_of_line_values_on_gpu_;
 
-  TF_DISALLOW_COPY_AND_ASSIGN(GpuDeviceArrayOnHost);
+  GpuDeviceArrayOnHost(const GpuDeviceArrayOnHost&) = delete;
+  void operator=(const GpuDeviceArrayOnHost&) = delete;
 };
 
 }  // namespace tensorflow

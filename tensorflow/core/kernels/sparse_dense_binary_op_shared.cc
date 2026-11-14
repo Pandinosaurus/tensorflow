@@ -35,7 +35,7 @@ limitations under the License.
 
 #define EIGEN_USE_THREADS
 
-#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
+#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/register_types.h"
 #include "tensorflow/core/framework/tensor.h"
@@ -67,32 +67,48 @@ class SparseDenseBinaryOpShared : public OpKernel {
 
     // Validations.
     OP_REQUIRES(ctx, TensorShapeUtils::IsMatrix(indices_t->shape()),
-                errors::InvalidArgument(
+                absl::InvalidArgumentError(absl::StrCat(
                     "Input sp_indices should be a matrix but received shape: ",
-                    indices_t->shape().DebugString()));
+                    indices_t->shape().DebugString())));
     OP_REQUIRES(ctx,
                 TensorShapeUtils::IsVector(values_t->shape()) &&
                     TensorShapeUtils::IsVector(shape_t->shape()),
-                errors::InvalidArgument(
+                absl::InvalidArgumentError(absl::StrCat(
                     "Inputs sp_values and sp_shape should be vectors "
                     "but received shapes: ",
                     values_t->shape().DebugString(), " and ",
-                    shape_t->shape().DebugString()));
+                    shape_t->shape().DebugString())));
+    OP_REQUIRES(ctx, TensorShapeUtils::IsVector(shape_t->shape()),
+                absl::InvalidArgumentError(
+                    absl::StrCat("Input sp_shape must be a vector. Got: ",
+                                 shape_t->shape().DebugString())));
     OP_REQUIRES(
         ctx, values_t->dim_size(0) == indices_t->dim_size(0),
-        errors::InvalidArgument(
+        absl::InvalidArgumentError(absl::StrCat(
             "The first dimension of values and indices should match. (",
-            values_t->dim_size(0), " vs. ", indices_t->dim_size(0), ")"));
+            values_t->dim_size(0), " vs. ", indices_t->dim_size(0), ")")));
+    OP_REQUIRES(
+        ctx, shape_t->shape().dim_size(0) == indices_t->shape().dim_size(1),
+        absl::InvalidArgumentError(absl::StrCat(
+            "Number of dimensions must match second dimension of indices. ",
+            "Got ", shape_t->shape().dim_size(0),
+            " dimensions, indices shape: ", indices_t->shape().DebugString())));
+    OP_REQUIRES(ctx, shape_t->NumElements() > 0,
+                absl::InvalidArgumentError(
+                    "The shape argument requires at least one element."));
 
     const auto indices_mat = indices_t->matrix<int64_t>();
     const auto shape_vec = shape_t->vec<int64_t>();
-    const auto lhs_dims = BCast::FromShape(TensorShape(shape_vec));
+    TensorShape lhs_shape;
+    OP_REQUIRES_OK(ctx, TensorShape::BuildTensorShape(shape_vec, &lhs_shape));
+    const auto lhs_dims = BCast::FromShape(lhs_shape);
     const auto rhs_dims = BCast::FromShape(dense_t->shape());
     BCast b(lhs_dims, rhs_dims, false);  // false for keeping the same num dims.
 
     // True iff (size(lhs) >= size(rhs)) and all dims in lhs is greater or equal
     // to dims in rhs (from right to left).
-    auto VecGreaterEq = [](ArraySlice<int64> lhs, ArraySlice<int64> rhs) {
+    auto VecGreaterEq = [](absl::Span<const int64_t> lhs,
+                           absl::Span<const int64_t> rhs) {
       if (lhs.size() < rhs.size()) return false;
       for (size_t i = 0; i < rhs.size(); ++i) {
         if (lhs[lhs.size() - 1 - i] < rhs[rhs.size() - 1 - i]) return false;
@@ -100,11 +116,11 @@ class SparseDenseBinaryOpShared : public OpKernel {
       return true;
     };
     OP_REQUIRES(ctx, VecGreaterEq(lhs_dims, rhs_dims) && b.IsValid(),
-                errors::InvalidArgument(
+                absl::InvalidArgumentError(absl::StrCat(
                     "SparseDenseBinaryOpShared broadcasts dense to sparse "
                     "only; got incompatible shapes: [",
                     absl::StrJoin(lhs_dims, ","), "] vs. [",
-                    absl::StrJoin(rhs_dims, ","), "]"));
+                    absl::StrJoin(rhs_dims, ","), "]")));
 
     Tensor *output_values = nullptr;
     Tensor dense_gathered;
@@ -129,7 +145,7 @@ class SparseDenseBinaryOpShared : public OpKernel {
     switch (ndims) {
 #define CASE(NDIM)                                                             \
   case NDIM: {                                                                 \
-    TensorRef<Eigen::Tensor<const T, NDIM, Eigen::RowMajor>> rhs_ref =         \
+    TensorRef<const Eigen::Tensor<const T, NDIM, Eigen::RowMajor>> rhs_ref =   \
         dense_t->shaped<T, NDIM>(b.y_reshape())                                \
             .broadcast(BCast::ToIndexArray<NDIM>(b.y_bcast()));                \
     Eigen::array<Eigen::DenseIndex, NDIM> idx;                                 \
@@ -147,7 +163,7 @@ class SparseDenseBinaryOpShared : public OpKernel {
                                   "dense side with broadcasted shape"));       \
       dense_gathered_flat(i) = rhs_ref.coeff(idx);                             \
       if (op_is_div) {                                                         \
-        OP_REQUIRES(ctx, dense_gathered_flat(i) != 0,                          \
+        OP_REQUIRES(ctx, dense_gathered_flat(i) != T{0},                       \
                     errors::InvalidArgument(                                   \
                         "SparseDenseCwiseDiv cannot divide by zero,"           \
                         "but input dense tensor contains zero "));             \
@@ -162,11 +178,11 @@ class SparseDenseBinaryOpShared : public OpKernel {
       CASE(4);
       CASE(5);
       default:
-        OP_REQUIRES(
-            ctx, false,
-            errors::InvalidArgument("Only tensors with ranks between 1 and 5 "
-                                    "are currently supported.  Tensor rank: ",
-                                    ndims));
+        OP_REQUIRES(ctx, false,
+                    absl::InvalidArgumentError(
+                        absl::StrCat("Only tensors with ranks between 1 and 5 "
+                                     "are currently supported.  Tensor rank: ",
+                                     ndims)));
 #undef CASE
     }
 

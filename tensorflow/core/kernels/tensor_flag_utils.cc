@@ -21,26 +21,27 @@ limitations under the License.
 namespace tensorflow {
 namespace tensor_flag_utils {
 
-Status ValidateSparseMatrixShardingConfig(const Tensor& config) {
+absl::Status ValidateSparseMatrixShardingConfig(const Tensor& config) {
   if (TensorShapeUtils::IsScalar(config.shape())) {
     const float scalar_config = config.template scalar<float>()();
     if (0 < scalar_config && scalar_config <= 1.0) {
-      return Status::OK();
+      return absl::OkStatus();
     }
-    return Status(
-        error::INVALID_ARGUMENT,
+    return absl::Status(
+        absl::StatusCode::kInvalidArgument,
         absl::StrCat("Expected config to be in range (0, 1] but instead found ",
                      scalar_config));
   }
   if (!TensorShapeUtils::IsMatrix(config.shape())) {
-    return Status(error::INVALID_ARGUMENT,
-                  absl::StrCat("Expected config to be either scalar or matrix "
-                               "but instead found tensor of rank ",
-                               config.dims()));
+    return absl::Status(
+        absl::StatusCode::kInvalidArgument,
+        absl::StrCat("Expected config to be either scalar or matrix "
+                     "but instead found tensor of rank ",
+                     config.dims()));
   }
   if (config.dim_size(1) != 3) {
-    return Status(
-        error::INVALID_ARGUMENT,
+    return absl::Status(
+        absl::StatusCode::kInvalidArgument,
         absl::StrCat(
             "Expected config matrix to have dim(1) = 3 but instead found ",
             config.dim_size(1)));
@@ -49,27 +50,27 @@ Status ValidateSparseMatrixShardingConfig(const Tensor& config) {
   auto config_matrix = config.matrix<float>();
   for (int i = 0; i < config.dim_size(0); ++i) {
     if (0 > config_matrix(i, 0)) {
-      return errors::InvalidArgument(
-          "First column of fraction_rows_per_thread_config "
-          "should "
-          "have non-negative values but found ",
-          config_matrix(i, 0), " in row ", i);
+      return absl::InvalidArgumentError(
+          absl::StrCat("First column of fraction_rows_per_thread_config "
+                       "should "
+                       "have non-negative values but found ",
+                       config_matrix(i, 0), " in row ", i));
     }
     if (0 > config_matrix(i, 1)) {
-      return errors::InvalidArgument(
-          "Second column of fraction_rows_per_thread_config "
-          "should "
-          "have non-negative values but found ",
-          config_matrix(i, 1), " in row ", i);
+      return absl::InvalidArgumentError(
+          absl::StrCat("Second column of fraction_rows_per_thread_config "
+                       "should "
+                       "have non-negative values but found ",
+                       config_matrix(i, 1), " in row ", i));
     }
     if (!(0 < config_matrix(i, 2) && config_matrix(i, 2) <= 1)) {
-      return errors::InvalidArgument(
-          "Last column of fraction_rows_per_thread_config should "
-          "have values in the range (0, 1] but found ",
-          config_matrix(i, 2), " in row ", i);
+      return absl::InvalidArgumentError(
+          absl::StrCat("Last column of fraction_rows_per_thread_config should "
+                       "have values in the range (0, 1] but found ",
+                       config_matrix(i, 2), " in row ", i));
     }
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 template <typename MatrixType, typename K>
@@ -85,26 +86,27 @@ MatrixType FindConfigValueForKey(
   return config_mat(last_row_index, 2);
 }
 
-Status ValidateScalarQuantityShardingConfig(const Tensor& config) {
+absl::Status ValidateScalarQuantityShardingConfig(const Tensor& config) {
   if (TensorShapeUtils::IsScalar(config.shape())) {
     const float scalar_config = config.template scalar<float>()();
     if (0 < scalar_config && scalar_config <= 1.0) {
-      return Status::OK();
+      return absl::OkStatus();
     }
-    return Status(
-        error::INVALID_ARGUMENT,
+    return absl::Status(
+        absl::StatusCode::kInvalidArgument,
         absl::StrCat("Expected config to be in range (0, 1] but instead found ",
                      scalar_config));
   }
   if (!TensorShapeUtils::IsMatrix(config.shape())) {
-    return Status(error::INVALID_ARGUMENT,
-                  absl::StrCat("Expected config to be either scalar or matrix "
-                               "but instead found tensor of rank ",
-                               config.dims()));
+    return absl::Status(
+        absl::StatusCode::kInvalidArgument,
+        absl::StrCat("Expected config to be either scalar or matrix "
+                     "but instead found tensor of rank ",
+                     config.dims()));
   }
   if (config.dim_size(1) != 2) {
-    return Status(
-        error::INVALID_ARGUMENT,
+    return absl::Status(
+        absl::StatusCode::kInvalidArgument,
         absl::StrCat(
             "Expected config matrix to have dim(1) = 2 but instead found ",
             config.dim_size(1)));
@@ -113,20 +115,20 @@ Status ValidateScalarQuantityShardingConfig(const Tensor& config) {
   auto config_matrix = config.matrix<float>();
   for (int i = 0; i < config.dim_size(0); ++i) {
     if (0 > config_matrix(i, 0)) {
-      return errors::InvalidArgument(
-          "First column of fraction_rows_per_thread_config "
-          "should "
-          "have non-negative values but found ",
-          config_matrix(i, 0), " in row ", i);
+      return absl::InvalidArgumentError(
+          absl::StrCat("First column of fraction_rows_per_thread_config "
+                       "should "
+                       "have non-negative values but found ",
+                       config_matrix(i, 0), " in row ", i));
     }
     if (!(0 < config_matrix(i, 1) && config_matrix(i, 1) <= 1)) {
-      return errors::InvalidArgument(
-          "Last column of fraction_rows_per_thread_config should "
-          "have values in the range (0, 1] but found ",
-          config_matrix(i, 1), " in row ", i);
+      return absl::InvalidArgumentError(
+          absl::StrCat("Last column of fraction_rows_per_thread_config should "
+                       "have values in the range (0, 1] but found ",
+                       config_matrix(i, 1), " in row ", i));
     }
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 template <typename MatrixType, typename K>
@@ -159,29 +161,31 @@ Tindices GetPowerBucket(const Tindices value, const Tindices bucket_size) {
          1;
 }
 
-#define REGISTER_SPARSE_UTIL_FUNCTIONS(TypeIndex)                           \
-  template float FindConfigValueForKey<float, TypeIndex>(                   \
-      const TTypes<float>::ConstMatrix& config_mat,                         \
-      const std::pair<TypeIndex, TypeIndex>& key);                          \
-  template float FindConfigValueForKey<float, TypeIndex>(                   \
-      const TTypes<float>::ConstMatrix& config_mat, const TypeIndex key);   \
-  template int64 FindConfigValueForKey<int64, TypeIndex>(                   \
-      const TTypes<int64>::ConstMatrix& config_mat, const TypeIndex key);
+#define REGISTER_SPARSE_UTIL_FUNCTIONS(TypeIndex)                         \
+  template float FindConfigValueForKey<float, TypeIndex>(                 \
+      const TTypes<float>::ConstMatrix& config_mat,                       \
+      const std::pair<TypeIndex, TypeIndex>& key);                        \
+  template float FindConfigValueForKey<float, TypeIndex>(                 \
+      const TTypes<float>::ConstMatrix& config_mat, const TypeIndex key); \
+  template int64 FindConfigValueForKey<int64, TypeIndex>(                 \
+      const TTypes<int64_t>::ConstMatrix& config_mat, const TypeIndex key);
 
-REGISTER_SPARSE_UTIL_FUNCTIONS(int32);
-REGISTER_SPARSE_UTIL_FUNCTIONS(int64);
-REGISTER_SPARSE_UTIL_FUNCTIONS(uint8);
-REGISTER_SPARSE_UTIL_FUNCTIONS(uint16);
-REGISTER_SPARSE_UTIL_FUNCTIONS(uint32);
-REGISTER_SPARSE_UTIL_FUNCTIONS(uint64);
+REGISTER_SPARSE_UTIL_FUNCTIONS(int32_t);
+REGISTER_SPARSE_UTIL_FUNCTIONS(int64_t);
+REGISTER_SPARSE_UTIL_FUNCTIONS(uint8_t);
+REGISTER_SPARSE_UTIL_FUNCTIONS(uint16_t);
+REGISTER_SPARSE_UTIL_FUNCTIONS(uint32_t);
+REGISTER_SPARSE_UTIL_FUNCTIONS(uint64_t);
 
-template int32 GetLinearBucket(const int32 value, const int32 bucket_size);
+template int32_t GetLinearBucket(const int32_t value,
+                                 const int32_t bucket_size);
 
-template int64 GetLinearBucket(const int64 value, const int64 bucket_size);
+template int64_t GetLinearBucket(const int64_t value,
+                                 const int64_t bucket_size);
 
-template int32 GetPowerBucket(const int32 value, const int32 bucket_size);
+template int32_t GetPowerBucket(const int32_t value, const int32_t bucket_size);
 
-template int64 GetPowerBucket(const int64 value, const int64 bucket_size);
+template int64_t GetPowerBucket(const int64_t value, const int64_t bucket_size);
 
 }  // namespace tensor_flag_utils
 }  // namespace tensorflow

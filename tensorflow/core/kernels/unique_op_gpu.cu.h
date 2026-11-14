@@ -20,7 +20,7 @@ limitations under the License.
 
 #define EIGEN_USE_GPU
 
-#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
+#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
 #include "tensorflow/core/common_runtime/gpu/gpu_event_mgr.h"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/tensor.h"
@@ -31,9 +31,7 @@ limitations under the License.
 #include "tensorflow/core/util/gpu_kernel_helper.h"
 #include "tensorflow/core/util/gpu_solvers.h"  // For ScratchSpace
 
-#if GOOGLE_CUDA
-#include "tensorflow/stream_executor/cuda/cuda_activation.h"
-#elif TENSORFLOW_USE_ROCM
+#if TENSORFLOW_USE_ROCM
 #include "tensorflow/core/platform/rocm.h"
 #endif
 
@@ -83,12 +81,10 @@ __global__ void ExtractFirstOccurrenceIndicesKernel(
 // unique value's range in the sorted input (the last element is always set
 // to input_size).
 template <typename TIndex>
-Status ExtractFirstOccurrenceIndices(const GPUDevice& d, int64_t input_size,
-                                     int64_t uniq_size,
-                                     const TIndex* sorted_input_inds,
-                                     const TIndex* sorted_input_unique_ids,
-                                     TIndex* unique_input_inds,
-                                     TIndex* segment_ends) {
+absl::Status ExtractFirstOccurrenceIndices(
+    const GPUDevice& d, int64_t input_size, int64_t uniq_size,
+    const TIndex* sorted_input_inds, const TIndex* sorted_input_unique_ids,
+    TIndex* unique_input_inds, TIndex* segment_ends) {
   CHECK_GT(input_size, 0);  // Crash OK
   GpuLaunchConfig config = GetGpuLaunchConfig(
       input_size, d, &ExtractFirstOccurrenceIndicesKernel<TIndex>,
@@ -122,14 +118,12 @@ __global__ void GatherOutputsAndInvertPermutationKernel(
 // Gathers input values using sorted_unique_input_inds, and inverts the
 // permutation specified by sorted_unique_perm.
 template <typename T, typename TIndex>
-Status GatherOutputsAndInvertPermutation(const GPUDevice& d, int64_t uniq_size,
-                                         const T* input,
-                                         const TIndex* sorted_unique_input_inds,
-                                         const TIndex* sorted_unique_perm,
-                                         const TIndex* segment_ends, T* output,
-                                         TIndex* inv_sorted_unique_perm,
-                                         TIndex* count) {
-  if (uniq_size == 0) return Status::OK();
+absl::Status GatherOutputsAndInvertPermutation(
+    const GPUDevice& d, int64_t uniq_size, const T* input,
+    const TIndex* sorted_unique_input_inds, const TIndex* sorted_unique_perm,
+    const TIndex* segment_ends, T* output, TIndex* inv_sorted_unique_perm,
+    TIndex* count) {
+  if (uniq_size == 0) return absl::OkStatus();
   GpuLaunchConfig config = GetGpuLaunchConfig(
       uniq_size, d, &GatherOutputsAndInvertPermutationKernel<T, TIndex>,
       /*dynamic_shared_memory_size=*/0, /*block_size_limit=*/0);
@@ -155,11 +149,11 @@ __global__ void LookupAndScatterUniqueIdsKernel(
 // Maps the values of sorted_input_unique_ids and scatters them to idx using
 // sorted_input_inds.
 template <typename TIndex>
-Status LookupAndScatterUniqueIds(const GPUDevice& d, int64_t input_size,
-                                 const TIndex* sorted_input_inds,
-                                 const TIndex* sorted_input_unique_ids,
-                                 const TIndex* inv_sorted_unique_perm,
-                                 TIndex* idx) {
+absl::Status LookupAndScatterUniqueIds(const GPUDevice& d, int64_t input_size,
+                                       const TIndex* sorted_input_inds,
+                                       const TIndex* sorted_input_unique_ids,
+                                       const TIndex* inv_sorted_unique_perm,
+                                       TIndex* idx) {
   CHECK_GT(input_size, 0);  // Crash OK
   GpuLaunchConfig config = GetGpuLaunchConfig(
       input_size, d, &LookupAndScatterUniqueIdsKernel<TIndex>,
@@ -193,20 +187,20 @@ class UniqueOpGPU : public AsyncOpKernel {
     const Tensor& input = context->input(0);
     // TODO(dga):  Make unique polymorphic for returning int32 and int64
     // vectors to support large tensors.
-    OP_REQUIRES_ASYNC(context,
-                      input.NumElements() <= std::numeric_limits<int32>::max(),
-                      errors::InvalidArgument(
-                          "unique does not support input tensors larger than ",
-                          std::numeric_limits<int32>::max(), " elements"),
-                      done);
+    OP_REQUIRES_ASYNC(
+        context, input.NumElements() <= std::numeric_limits<int32_t>::max(),
+        absl::InvalidArgumentError(
+            absl::StrCat("unique does not support input tensors larger than ",
+                         std::numeric_limits<int32_t>::max(), " elements")),
+        done);
 
     OP_REQUIRES_ASYNC(context, TensorShapeUtils::IsVector(input.shape()),
-                      errors::InvalidArgument("unique expects a 1D vector."),
+                      absl::InvalidArgumentError("unique expects a 1D vector."),
                       done);
 
     se::Stream* stream = context->op_device_context()->stream();
     OP_REQUIRES_ASYNC(context, stream,
-                      errors::Internal("No GPU stream available."), done);
+                      absl::InternalError("No GPU stream available."), done);
 
     int64_t input_size = input.NumElements();
     bool has_count_output = num_outputs() > 2;
@@ -292,9 +286,10 @@ class UniqueOpGPU : public AsyncOpKernel {
     using namespace unique_op_gpu;
 
     // Create a fancy input iterator to indicate segment boundaries.
+    gpuprim::CountingInputIterator<TIndex> counting_iter(0);
     gpuprim::TransformInputIterator<TIndex, SegmentIndicatorFunctor<T, TIndex>,
                                     gpuprim::CountingInputIterator<TIndex>>
-        segment_indicator_iter(0, {sorted_input_ptr});
+        segment_indicator_iter(counting_iter, {sorted_input_ptr});
 
     Tensor sorted_input_unique_ids;
     TIndex* sorted_input_unique_ids_ptr = nullptr;
@@ -311,17 +306,15 @@ class UniqueOpGPU : public AsyncOpKernel {
     // Copy the last element of sorted_input_unique_ids back to the host to
     // obtain uniq_size.
     ScratchSpace<TIndex> last_idx_host(context, 1, /*on_host=*/true);
-    OP_REQUIRES_ASYNC(
+    OP_REQUIRES_OK_ASYNC(
         context,
-        stream
-            ->ThenMemcpy(last_idx_host.mutable_data(),
-                         se::DeviceMemoryBase(
-                             const_cast<TIndex*>(sorted_input_unique_ids_ptr) +
-                                 (input_size - 1),
-                             sizeof(*last_idx_host.data())),
-                         sizeof(*last_idx_host.data()))
-            .ok(),
-        errors::Internal("Failed to copy last_idx to host"), done);
+        stream->Memcpy(last_idx_host.mutable_data(),
+                       stream_executor::DeviceAddressBase(
+                           const_cast<TIndex*>(sorted_input_unique_ids_ptr) +
+                               (input_size - 1),
+                           sizeof(*last_idx_host.data())),
+                       sizeof(*last_idx_host.data())),
+        done);
 
     auto async_finish_computation = [this, context, input_size, input_ptr,
                                      sorted_input_inds, sorted_input_inds_ptr,
@@ -329,10 +322,10 @@ class UniqueOpGPU : public AsyncOpKernel {
                                      sorted_input_unique_ids_ptr, last_idx_host,
                                      has_count_output, done]() -> void {
       const GPUDevice& device = context->eigen_gpu_device();
-      int64 uniq_size = (*last_idx_host.data()) + 1;
+      int64_t uniq_size = (*last_idx_host.data()) + 1;
 
-      se::cuda::ScopedActivateExecutorContext scoped_activation{
-          context->op_device_context()->stream()->parent()};
+      std::unique_ptr<se::ActivateContext> scoped_activation =
+          context->op_device_context()->stream()->parent()->Activate();
 
       Tensor unique_input_inds;
       TIndex* unique_input_inds_ptr = nullptr;
@@ -439,8 +432,9 @@ class UniqueOpGPU : public AsyncOpKernel {
       done();
     };
 
-    context->device()->tensorflow_gpu_device_info()->event_mgr->ThenExecute(
-        stream, async_finish_computation);
+    context->device()
+        ->tensorflow_accelerator_device_info()
+        ->event_mgr->ThenExecute(stream, async_finish_computation);
   }
 };
 

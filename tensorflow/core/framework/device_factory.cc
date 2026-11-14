@@ -20,13 +20,16 @@ limitations under the License.
 #include <unordered_map>
 #include <vector>
 
+#include "absl/container/flat_hash_set.h"
 #include "tensorflow/core/framework/device.h"
 #include "tensorflow/core/lib/core/errors.h"
 #include "tensorflow/core/lib/strings/strcat.h"
+#include "tensorflow/core/platform/errors.h"
 #include "tensorflow/core/platform/logging.h"
 #include "tensorflow/core/platform/mutex.h"
 #include "tensorflow/core/platform/types.h"
 #include "tensorflow/core/public/session_options.h"
+#include "tensorflow/core/util/device_name_utils.h"
 #include "tensorflow/core/util/env_var.h"
 
 namespace tensorflow {
@@ -44,14 +47,14 @@ struct FactoryItem {
   bool is_pluggable_device;
 };
 
-std::unordered_map<string, FactoryItem>& device_factories() {
-  static std::unordered_map<string, FactoryItem>* factories =
-      new std::unordered_map<string, FactoryItem>;
+std::unordered_map<std::string, FactoryItem>& device_factories() {
+  static std::unordered_map<std::string, FactoryItem>* factories =
+      new std::unordered_map<std::string, FactoryItem>;
   return *factories;
 }
 
-bool IsDeviceFactoryEnabled(const string& device_type) {
-  std::vector<string> enabled_devices;
+bool IsDeviceFactoryEnabled(const std::string& device_type) {
+  std::vector<std::string> enabled_devices;
   TF_CHECK_OK(tensorflow::ReadStringsFromEnvVar(
       /*env_var_name=*/"TF_ENABLED_DEVICE_TYPES", /*default_val=*/"",
       &enabled_devices));
@@ -64,9 +67,9 @@ bool IsDeviceFactoryEnabled(const string& device_type) {
 }  // namespace
 
 // static
-int32 DeviceFactory::DevicePriority(const string& device_type) {
+int32_t DeviceFactory::DevicePriority(const std::string& device_type) {
   tf_shared_lock l(*get_device_factory_lock());
-  std::unordered_map<string, FactoryItem>& factories = device_factories();
+  std::unordered_map<std::string, FactoryItem>& factories = device_factories();
   auto iter = factories.find(device_type);
   if (iter != factories.end()) {
     return iter->second.priority;
@@ -75,9 +78,9 @@ int32 DeviceFactory::DevicePriority(const string& device_type) {
   return -1;
 }
 
-bool DeviceFactory::IsPluggableDevice(const string& device_type) {
+bool DeviceFactory::IsPluggableDevice(const std::string& device_type) {
   tf_shared_lock l(*get_device_factory_lock());
-  std::unordered_map<string, FactoryItem>& factories = device_factories();
+  std::unordered_map<std::string, FactoryItem>& factories = device_factories();
   auto iter = factories.find(device_type);
   if (iter != factories.end()) {
     return iter->second.is_pluggable_device;
@@ -86,7 +89,8 @@ bool DeviceFactory::IsPluggableDevice(const string& device_type) {
 }
 
 // static
-void DeviceFactory::Register(const string& device_type, DeviceFactory* factory,
+void DeviceFactory::Register(const std::string& device_type,
+                             std::unique_ptr<DeviceFactory> factory,
                              int priority, bool is_pluggable_device) {
   if (!IsDeviceFactoryEnabled(device_type)) {
     LOG(INFO) << "Device factory '" << device_type << "' disabled by "
@@ -94,15 +98,14 @@ void DeviceFactory::Register(const string& device_type, DeviceFactory* factory,
     return;
   }
   mutex_lock l(*get_device_factory_lock());
-  std::unique_ptr<DeviceFactory> factory_ptr(factory);
-  std::unordered_map<string, FactoryItem>& factories = device_factories();
+  std::unordered_map<std::string, FactoryItem>& factories = device_factories();
   auto iter = factories.find(device_type);
   if (iter == factories.end()) {
-    factories[device_type] = {std::move(factory_ptr), priority,
+    factories[device_type] = {std::move(factory), priority,
                               is_pluggable_device};
   } else {
     if (iter->second.priority < priority) {
-      iter->second = {std::move(factory_ptr), priority, is_pluggable_device};
+      iter->second = {std::move(factory), priority, is_pluggable_device};
     } else if (iter->second.priority == priority) {
       LOG(FATAL) << "Duplicate registration of device factory for type "
                  << device_type << " with the same priority " << priority;
@@ -110,7 +113,7 @@ void DeviceFactory::Register(const string& device_type, DeviceFactory* factory,
   }
 }
 
-DeviceFactory* DeviceFactory::GetFactory(const string& device_type) {
+DeviceFactory* DeviceFactory::GetFactory(const std::string& device_type) {
   tf_shared_lock l(*get_device_factory_lock());
   auto it = device_factories().find(device_type);
   if (it == device_factories().end()) {
@@ -124,19 +127,20 @@ DeviceFactory* DeviceFactory::GetFactory(const string& device_type) {
   return it->second.factory.get();
 }
 
-Status DeviceFactory::ListAllPhysicalDevices(std::vector<string>* devices) {
+absl::Status DeviceFactory::ListAllPhysicalDevices(
+    std::vector<std::string>* devices) {
   // CPU first. A CPU device is required.
   // TODO(b/183974121): Consider merge the logic into the loop below.
   auto cpu_factory = GetFactory("CPU");
   if (!cpu_factory) {
-    return errors::NotFound(
+    return absl::NotFoundError(
         "CPU Factory not registered. Did you link in threadpool_device?");
   }
 
   size_t init_size = devices->size();
   TF_RETURN_IF_ERROR(cpu_factory->ListPhysicalDevices(devices));
   if (devices->size() == init_size) {
-    return errors::NotFound("No CPU devices are available in this process");
+    return absl::NotFoundError("No CPU devices are available in this process");
   }
 
   // Then the rest (including GPU).
@@ -148,11 +152,11 @@ Status DeviceFactory::ListAllPhysicalDevices(std::vector<string>* devices) {
     }
   }
 
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-Status DeviceFactory::ListPluggablePhysicalDevices(
-    std::vector<string>* devices) {
+absl::Status DeviceFactory::ListPluggablePhysicalDevices(
+    std::vector<std::string>* devices) {
   tf_shared_lock l(*get_device_factory_lock());
   for (auto& p : device_factories()) {
     if (p.second.is_pluggable_device) {
@@ -160,26 +164,26 @@ Status DeviceFactory::ListPluggablePhysicalDevices(
       TF_RETURN_IF_ERROR(factory->ListPhysicalDevices(devices));
     }
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-Status DeviceFactory::GetAnyDeviceDetails(
-    int device_index, std::unordered_map<string, string>* details) {
+absl::Status DeviceFactory::GetAnyDeviceDetails(
+    int device_index, std::unordered_map<std::string, std::string>* details) {
   if (device_index < 0) {
-    return errors::InvalidArgument("Device index out of bounds: ",
-                                   device_index);
+    return absl::InvalidArgumentError(
+        absl::StrCat("Device index out of bounds: ", device_index));
   }
   const int orig_device_index = device_index;
 
   // Iterate over devices in the same way as in ListAllPhysicalDevices.
   auto cpu_factory = GetFactory("CPU");
   if (!cpu_factory) {
-    return errors::NotFound(
+    return absl::NotFoundError(
         "CPU Factory not registered. Did you link in threadpool_device?");
   }
 
   // TODO(b/183974121): Consider merge the logic into the loop below.
-  std::vector<string> devices;
+  std::vector<std::string> devices;
   TF_RETURN_IF_ERROR(cpu_factory->ListPhysicalDevices(&devices));
   if (device_index < devices.size()) {
     return cpu_factory->GetDeviceDetails(device_index, details);
@@ -202,50 +206,66 @@ Status DeviceFactory::GetAnyDeviceDetails(
     }
   }
 
-  return errors::InvalidArgument("Device index out of bounds: ",
-                                 orig_device_index);
+  return absl::InvalidArgumentError(
+      absl::StrCat("Device index out of bounds: ", orig_device_index));
 }
 
-Status DeviceFactory::AddCpuDevices(
-    const SessionOptions& options, const string& name_prefix,
+absl::Status DeviceFactory::AddCpuDevices(
+    const SessionOptions& options, const std::string& name_prefix,
     std::vector<std::unique_ptr<Device>>* devices) {
   auto cpu_factory = GetFactory("CPU");
   if (!cpu_factory) {
-    return errors::NotFound(
+    return absl::NotFoundError(
         "CPU Factory not registered. Did you link in threadpool_device?");
   }
   size_t init_size = devices->size();
   TF_RETURN_IF_ERROR(cpu_factory->CreateDevices(options, name_prefix, devices));
   if (devices->size() == init_size) {
-    return errors::NotFound("No CPU devices are available in this process");
+    return absl::NotFoundError("No CPU devices are available in this process");
   }
 
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-Status DeviceFactory::AddDevices(
-    const SessionOptions& options, const string& name_prefix,
+absl::Status DeviceFactory::AddDevices(
+    const SessionOptions& options, const std::string& name_prefix,
     std::vector<std::unique_ptr<Device>>* devices) {
   // CPU first. A CPU device is required.
   // TODO(b/183974121): Consider merge the logic into the loop below.
   TF_RETURN_IF_ERROR(AddCpuDevices(options, name_prefix, devices));
 
+  absl::flat_hash_set<std::string> allowed_device_types;
+  for (const auto& device_filter : options.config.device_filters()) {
+    DeviceNameUtils::ParsedName parsed;
+    if (!DeviceNameUtils::ParseFullOrLocalName(device_filter, &parsed)) {
+      return absl::InvalidArgumentError(
+          absl::StrCat("Invalid device filter: ", device_filter));
+    }
+    if (parsed.has_type) {
+      allowed_device_types.insert(parsed.type);
+    }
+  }
+
   auto cpu_factory = GetFactory("CPU");
   // Then the rest (including GPU).
   mutex_lock l(*get_device_factory_lock());
   for (auto& p : device_factories()) {
+    if (!allowed_device_types.empty() &&
+        !allowed_device_types.contains(p.first)) {
+      continue;  // Skip if the device type is not found from the device filter.
+    }
     auto factory = p.second.factory.get();
     if (factory != cpu_factory) {
       TF_RETURN_IF_ERROR(factory->CreateDevices(options, name_prefix, devices));
     }
   }
 
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-std::unique_ptr<Device> DeviceFactory::NewDevice(const string& type,
-                                                 const SessionOptions& options,
-                                                 const string& name_prefix) {
+std::unique_ptr<Device> DeviceFactory::NewDevice(
+    const std::string& type, const SessionOptions& options,
+    const std::string& name_prefix) {
   auto device_factory = GetFactory(type);
   if (!device_factory) {
     return nullptr;

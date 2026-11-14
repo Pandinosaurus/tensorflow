@@ -16,10 +16,8 @@ limitations under the License.
 
 #include <stdint.h>
 
-#include <limits>
-
-#include "tensorflow/lite/c/builtin_op_data.h"
-#include "tensorflow/lite/c/common.h"
+#include "tensorflow/lite/core/c/builtin_op_data.h"
+#include "tensorflow/lite/core/c/common.h"
 #include "tensorflow/lite/delegates/hexagon/hexagon_nn/hexagon_nn.h"
 #include "tensorflow/lite/kernels/kernel_util.h"
 
@@ -65,7 +63,7 @@ TfLiteStatus ActivationOpBuilder::RegisterOutputs(const TfLiteIntArray* outputs,
   return kTfLiteOk;
 }
 
-ActivationOpBuilder::~ActivationOpBuilder() {}
+ActivationOpBuilder::~ActivationOpBuilder() = default;
 
 OpBuilder* CreateActivationBuilder(GraphBuilder* graph_builder, int op_type) {
   return new ActivationOpBuilder(graph_builder, op_type);

@@ -66,8 +66,9 @@ constexpr char kOpTranspose[] = "Transpose";
 class TransposerImpl : public Transposer {
  public:
   explicit TransposerImpl() : Transposer() {}
-  Status TransposeNode(TransposeContext*, utils::MutableNodeView*) override {
-    return Status::OK();
+  absl::Status TransposeNode(TransposeContext*,
+                             utils::MutableNodeView*) override {
+    return absl::OkStatus();
   }
 };
 
@@ -115,8 +116,8 @@ Output SimpleConv2D(const Scope* scope, const DataType& data_type = DT_FLOAT) {
   return conv2d;
 }
 
-Status CreateSimpleConv2DGraph(GraphDef* graph,
-                               const DataType& data_type = DT_FLOAT) {
+absl::Status CreateSimpleConv2DGraph(GraphDef* graph,
+                                     const DataType& data_type = DT_FLOAT) {
   Scope scope = Scope::NewRootScope();
   auto conv2d = SimpleConv2D(&scope, data_type);
   auto output = ops::Identity(scope.WithOpName("output"), conv2d);
@@ -124,8 +125,8 @@ Status CreateSimpleConv2DGraph(GraphDef* graph,
   return scope.ToGraphDef(graph);
 }
 
-Status CreateSimpleFusedBatchNorm(GraphDef* graph,
-                                  const DataType& data_type = DT_FLOAT) {
+absl::Status CreateSimpleFusedBatchNorm(GraphDef* graph,
+                                        const DataType& data_type = DT_FLOAT) {
   Scope scope = Scope::NewRootScope();
   auto x =
       ops::RandomUniform(scope.WithOpName("x"),
@@ -150,7 +151,7 @@ Status CreateSimpleFusedBatchNorm(GraphDef* graph,
   return scope.ToGraphDef(graph);
 }
 
-Status CreateSimpleMaxPoolGrad(GraphDef* graph, bool use_grad_grad) {
+absl::Status CreateSimpleMaxPoolGrad(GraphDef* graph, bool use_grad_grad) {
   Scope scope = Scope::NewRootScope();
   auto input =
       ops::RandomUniform(scope.WithOpName("orig_input"),
@@ -181,7 +182,7 @@ Status CreateSimpleMaxPoolGrad(GraphDef* graph, bool use_grad_grad) {
   return scope.ToGraphDef(graph);
 }
 
-Status CreateSimpleBiasAddGrad(GraphDef* graph, const Input& shape) {
+absl::Status CreateSimpleBiasAddGrad(GraphDef* graph, const Input& shape) {
   Scope scope = Scope::NewRootScope();
   auto input = ops::RandomUniform(scope.WithOpName("input"), shape, DT_FLOAT);
   auto bag =
@@ -192,9 +193,9 @@ Status CreateSimpleBiasAddGrad(GraphDef* graph, const Input& shape) {
   return scope.ToGraphDef(graph);
 }
 
-Status CreateSimpleConv2DBackpropFilter(GraphDef* graph,
-                                        const DataType& data_type = DT_FLOAT,
-                                        absl::string_view padding = "SAME") {
+absl::Status CreateSimpleConv2DBackpropFilter(
+    GraphDef* graph, const DataType& data_type = DT_FLOAT,
+    absl::string_view padding = "SAME") {
   Scope scope = Scope::NewRootScope();
   auto input =
       ops::RandomUniform(scope.WithOpName("input"),
@@ -227,8 +228,8 @@ Status CreateSimpleConv2DBackpropFilter(GraphDef* graph,
   return scope.ToGraphDef(graph);
 }
 
-Status CreateSimpleConv2DBackpropInput(GraphDef* graph,
-                                       const DataType& data_type = DT_FLOAT) {
+absl::Status CreateSimpleConv2DBackpropInput(
+    GraphDef* graph, const DataType& data_type = DT_FLOAT) {
   Scope scope = Scope::NewRootScope();
   auto input_sizes = ops::Const(scope.WithOpName("input_sizes"),
                                 {kBatchSize, kHeight, kWidth, kDepthIn});
@@ -250,8 +251,8 @@ Status CreateSimpleConv2DBackpropInput(GraphDef* graph,
   return scope.ToGraphDef(graph);
 }
 
-Status CreateSimpleFusedBatchNormGrad(GraphDef* graph, bool is_training,
-                                      const DataType& data_type = DT_FLOAT) {
+absl::Status CreateSimpleFusedBatchNormGrad(
+    GraphDef* graph, bool is_training, const DataType& data_type = DT_FLOAT) {
   Scope scope = Scope::NewRootScope();
   auto y_backprop =
       ops::RandomUniform(scope.WithOpName("y_backprop"),
@@ -285,7 +286,7 @@ Status CreateSimpleFusedBatchNormGrad(GraphDef* graph, bool is_training,
   return scope.ToGraphDef(graph);
 }
 
-Status CreateSimpleAddN(GraphDef* graph) {
+absl::Status CreateSimpleAddN(GraphDef* graph) {
   Scope scope = Scope::NewRootScope();
   auto input =
       ops::RandomUniform(scope.WithOpName("input"),
@@ -309,7 +310,7 @@ Status CreateSimpleAddN(GraphDef* graph) {
   return scope.ToGraphDef(graph);
 }
 
-Status CreateSimpleIdentityN(GraphDef* graph) {
+absl::Status CreateSimpleIdentityN(GraphDef* graph) {
   Scope scope = Scope::NewRootScope();
   auto conv2d_1_input =
       ops::RandomUniform(scope.WithOpName("conv2d_1_input"),
@@ -357,7 +358,7 @@ class TransposerTest : public ::testing::Test {
 
     if (gpu_available) {
       virtual_cluster_ =
-          absl::make_unique<SingleMachine>(/*timeout_s=*/10, 1, 1);
+          std::make_unique<SingleMachine>(/*timeout_s=*/10, 1, 1);
     } else {
       DeviceProperties gpu_device;
       gpu_device.set_type(kGPU);
@@ -533,8 +534,8 @@ TEST_F(TransposerTest, CreateConstPermNode) {
   Tensor tensor;
   ASSERT_TRUE(tensor.FromProto(value_attr->tensor()));
   Tensor expected(DT_INT32, {4});
-  ::tensorflow::test::FillValues<int32>(&expected, {0, 3, 1, 2});
-  ExpectTensorEqual<int32>(tensor, expected);
+  ::tensorflow::test::FillValues<int32_t>(&expected, {0, 3, 1, 2});
+  ExpectTensorEqual<int32_t>(tensor, expected);
 }
 
 TensorShapeProto MakeTensorShapeFromDimensions(absl::Span<const int> dims) {
@@ -565,7 +566,7 @@ TEST_F(TransposerTest, CreateTransposeNode) {
   TensorShapeProto input_shape = MakeTensorShapeFromDimensions({1, 2, 3, 4});
   TensorShapeProto expected_shape = MakeTensorShapeFromDimensions({1, 4, 2, 3});
   utils::MutationNewNode added_node;
-  string transpose_node_name;
+  std::string transpose_node_name;
   TF_ASSERT_OK(transposer.CreateTransposeNode(
       &context, kNodeNameFormat, DT_DOUBLE, kDevice, input_shape, {0, 3, 1, 2},
       "", &added_node, &transpose_node_name));
@@ -573,7 +574,7 @@ TEST_F(TransposerTest, CreateTransposeNode) {
   EXPECT_EQ(transpose_node_name,
             "transpose_node-0-Transpose-NWCHToNCWH-LayoutOptimizer");
   utils::Mutation* mutation = context.graph_view->GetMutationBuilder();
-  Status status;
+  absl::Status status;
   // Placeholder node with empty name as transpose node is created with it's
   // first input not set.
   mutation->AddNode({}, &status);
@@ -3767,12 +3768,12 @@ TEST_F(TransposerTest, StridedSliceTransposerConstFaninBadRank) {
 }
 
 TEST_F(TransposerTest, ReduceTransposerKeepDims) {
-  ReduceTransposerKeepDims<int32>();
+  ReduceTransposerKeepDims<int32_t>();
   ReduceTransposerKeepDims<int64_t>();
 }
 
 TEST_F(TransposerTest, ReduceTransposerValidAxisNode) {
-  ReduceTransposerValidAxisNode<int32>();
+  ReduceTransposerValidAxisNode<int32_t>();
   ReduceTransposerValidAxisNode<int64_t>();
 }
 
@@ -3817,21 +3818,21 @@ TEST(PermutationTest, PermutesDoubleRepeatedField) {
 }
 
 TEST(PermutationTest, PermutesDataFormat) {
-  string input = "NHWC";
-  string expected = "NCHW";
+  std::string input = "NHWC";
+  std::string expected = "NCHW";
   TF_ASSERT_OK(PermuteSingle("test", {0, 3, 1, 2}, &input));
   EXPECT_EQ(input, expected);
 }
 
 TEST(PermutationTest, PermutesString) {
-  string input = "ABCD";
-  string expected = "ACBD";
+  std::string input = "ABCD";
+  std::string expected = "ACBD";
   TF_ASSERT_OK(PermuteSingle("test", {0, 2, 1, 3}, &input));
   EXPECT_EQ(input, expected);
 }
 
 TEST(PermutationTest, GetNHWCToNCHWPermutation) {
-  string src_format = "NHWC";
+  std::string src_format = "NHWC";
   absl::flat_hash_map<char, int> src_dim_indices =
       GetDimensionIndices(src_format);
   EXPECT_EQ(src_dim_indices.size(), 4);
@@ -3839,7 +3840,7 @@ TEST(PermutationTest, GetNHWCToNCHWPermutation) {
   EXPECT_EQ(src_dim_indices['H'], 1);
   EXPECT_EQ(src_dim_indices['W'], 2);
   EXPECT_EQ(src_dim_indices['C'], 3);
-  string dst_format = "NCHW";
+  std::string dst_format = "NCHW";
   std::vector<int> permutation = GetPermutation(src_dim_indices, dst_format);
   ASSERT_EQ(permutation.size(), 4);
   EXPECT_EQ(permutation[0], 0);
@@ -3849,7 +3850,7 @@ TEST(PermutationTest, GetNHWCToNCHWPermutation) {
 }
 
 TEST(PermutationTest, GetNCHWToNHWCPermutation) {
-  string src_format = "NCHW";
+  std::string src_format = "NCHW";
   absl::flat_hash_map<char, int> src_dim_indices =
       GetDimensionIndices(src_format);
   EXPECT_EQ(src_dim_indices.size(), 4);
@@ -3857,7 +3858,7 @@ TEST(PermutationTest, GetNCHWToNHWCPermutation) {
   EXPECT_EQ(src_dim_indices['C'], 1);
   EXPECT_EQ(src_dim_indices['H'], 2);
   EXPECT_EQ(src_dim_indices['W'], 3);
-  string dst_format = "NHWC";
+  std::string dst_format = "NHWC";
   std::vector<int> permutation = GetPermutation(src_dim_indices, dst_format);
   ASSERT_EQ(permutation.size(), 4);
   EXPECT_EQ(permutation[0], 0);

@@ -18,7 +18,10 @@ limitations under the License.
 #include <stdint.h>
 
 #include <algorithm>
+#include <cmath>
 #include <complex>
+#include <cstring>
+#include <fstream>
 #include <functional>
 #include <map>
 #include <memory>
@@ -30,41 +33,279 @@ limitations under the License.
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
+#include "absl/base/casts.h"
+#include "absl/base/const_init.h"
+#include "absl/base/no_destructor.h"
+#include "absl/base/thread_annotations.h"
+#include "absl/log/check.h"
+#include "absl/log/log.h"
+#include "absl/strings/str_cat.h"
+#include "absl/strings/str_format.h"
+#include "absl/strings/str_replace.h"
+#include "absl/synchronization/mutex.h"
+#include "flatbuffers/buffer.h"  // from @flatbuffers
+#include "flatbuffers/flatbuffer_builder.h"  // from @flatbuffers
 #include "flatbuffers/flatbuffers.h"  // from @flatbuffers
-#include "tensorflow/core/platform/logging.h"
-#include "tensorflow/lite/c/common.h"
+#include "tensorflow/compiler/mlir/lite/allocation.h"
 #include "tensorflow/lite/core/api/op_resolver.h"
+#include "tensorflow/lite/core/c/common.h"
+#include "tensorflow/lite/core/interpreter.h"
+#include "tensorflow/lite/core/kernels/register.h"
+#include "tensorflow/lite/core/model.h"
 #include "tensorflow/lite/core/subgraph.h"
 #include "tensorflow/lite/delegates/nnapi/acceleration_test_util.h"
 #include "tensorflow/lite/delegates/nnapi/nnapi_delegate.h"
-#include "tensorflow/lite/interpreter.h"
 #include "tensorflow/lite/kernels/acceleration_test_util.h"
-#include "tensorflow/lite/kernels/register.h"
+#include "tensorflow/lite/kernels/internal/tensor_ctypes.h"
 #include "tensorflow/lite/kernels/test_delegate_providers.h"
-#include "tensorflow/lite/model.h"
+#include "tensorflow/lite/model_builder.h"
 #include "tensorflow/lite/nnapi/nnapi_implementation.h"
 #include "tensorflow/lite/schema/schema_conversion_utils.h"
 #include "tensorflow/lite/schema/schema_generated.h"
 #include "tensorflow/lite/simple_planner.h"
+#include "tensorflow/lite/stderr_reporter.h"
 #include "tensorflow/lite/string_type.h"
 #include "tensorflow/lite/string_util.h"
 #include "tensorflow/lite/tools/logging.h"
+#ifndef TFLITE_WITHOUT_MODEL_DUMP
+#include "tensorflow/lite/tools/serialization/writer_lib.h"
+#endif  // TFLITE_WITHOUT_MODEL_DUMP
 #include "tensorflow/lite/tools/versioning/op_version.h"
+#include "tensorflow/lite/types/fp16.h"  // IWYU pragma: keep
 #include "tensorflow/lite/version.h"
 
 namespace tflite {
 
+using ::testing::Eq;
+using ::testing::FloatEq;
 using ::testing::FloatNear;
 using ::testing::Matcher;
 
-std::vector<Matcher<float>> ArrayFloatNear(const std::vector<float>& values,
-                                           float max_abs_error) {
-  std::vector<Matcher<float>> matchers;
-  matchers.reserve(values.size());
-  for (const float& v : values) {
-    matchers.emplace_back(FloatNear(v, max_abs_error));
+namespace {
+
+// An Allocation that owns the memory and will delete it when the Allocation is
+// destroyed.
+class OwnedMemoryAllocation : public Allocation {
+ public:
+  OwnedMemoryAllocation(std::unique_ptr<uint8_t[]> data, size_t size)
+      : Allocation(DefaultErrorReporter(), tflite::Allocation::Type::kMemory),
+        data_(std::move(data)),
+        size_(size) {}
+
+  ~OwnedMemoryAllocation() override = default;
+  const void* base() const override { return data_.get(); }
+  size_t bytes() const override { return size_; }
+  bool valid() const override { return true; }
+
+ private:
+  std::unique_ptr<uint8_t[]> data_;
+  size_t size_;
+};
+
+// Converts an integer from the sign-and-magnitude representation to
+// the biased representation.  More precisely, let N be 2 to the
+// power of (kBitCount - 1), an integer x is represented by the
+// unsigned number x + N.
+//
+// For instance,
+//
+//   -N + 1 (the most negative number representable using
+//          sign-and-magnitude) is represented by 1;
+//   0      is represented by N; and
+//   N - 1  (the biggest number representable using
+//          sign-and-magnitude) is represented by 2N - 1.
+//
+// Read https://en.wikipedia.org/wiki/Signed_number_representations
+// for more details on signed number representations.
+uint32_t SignAndMagnitudeToBiased(uint32_t sam) {
+  constexpr uint32_t kSignBitMask = 1u << 31;
+  if (kSignBitMask & sam) {
+    // sam represents a negative number.
+    return ~sam + 1;
+  } else {
+    // sam represents a positive number.
+    return kSignBitMask | sam;
   }
-  return matchers;
+}
+// Given two numbers in the sign-and-magnitude representation,
+// returns the distance between them as an unsigned number.
+uint32_t DistanceBetweenSignAndMagnitudeNumbers(uint32_t sam1, uint32_t sam2) {
+  uint32_t biased1 = SignAndMagnitudeToBiased(sam1);
+  uint32_t biased2 = SignAndMagnitudeToBiased(sam2);
+  return (biased1 >= biased2) ? (biased1 - biased2) : (biased2 - biased1);
+}
+// Returns true if and only if lhs is at most max_ulps ULP's away from rhs.
+// In particular, this function:
+//
+//   - returns true if both numbers are NAN.
+//   - returns false if exact one of numbers is NAN.
+//   - treats really large numbers as almost equal to infinity.
+//   - thinks +0.0 and -0.0 are 0 ULP's apart.
+bool AlmostEquals(float lhs, float rhs, uint32_t max_ulps) {
+  if (std::isnan(lhs) || std::isnan(rhs)) {
+    return std::isnan(lhs) && std::isnan(rhs);
+  }
+
+  return DistanceBetweenSignAndMagnitudeNumbers(
+             absl::bit_cast<uint32_t>(lhs), absl::bit_cast<uint32_t>(rhs)) <=
+         max_ulps;
+}
+
+MATCHER(Fp16Eq, "") {
+  // FP16 only has 10 bits precision while FP32 has 23 bits precision. Thus, to
+  // check if results of FP16 are almost equal, we could check the result is
+  // within 4 * 2^13 ULPs of FP32, which equals to 4 ULPs of FP16.
+  constexpr uint32_t fp16_ulps_in_fp32 = 4 * (1 << 13);
+  float actual = std::get<0>(arg);
+  float expected = std::get<1>(arg);
+  // The minimum exponent of FP16 is 2^-14, which means the minimum ULP of FP16
+  // is 2^-24. Therefore, when expected is less than 2^-14, i.e. a subnormal
+  // FP16 number, the minimum ULP of FP16 should be used instead of ULP of FP32.
+  if (std::abs(expected) < 0x1p-14) {
+    return std::abs(actual - expected) <= 4 * 0x1p-24;
+  }
+  return AlmostEquals(actual, expected, fp16_ulps_in_fp32);
+}
+
+#ifndef TFLITE_WITHOUT_MODEL_DUMP
+// Returns the name of the dumped model. The name is in the format of
+// DTS-<test_suite_name>-<test_name>-<model_serial>.tflite. The model serial
+// number is used to distinguish different models dumped in the same test.
+// Returns empty string when there is no test info.
+std::string GetDumpedModelName() {
+  // The mutex is used to ensure thread safety for mutil-threaded tests. Notice
+  // that it doesn't work for running tests in parallel, which users should
+  // avoid when dumping models.
+  static absl::Mutex mutex(absl::kConstInit);
+  static absl::NoDestructor<std::string> previous_test_name ABSL_GUARDED_BY(
+      mutex);
+  static int model_serial ABSL_GUARDED_BY(mutex) = 0;
+  absl::MutexLock lock(mutex);
+
+  const testing::TestInfo* test_info =
+      ::testing::UnitTest::GetInstance()->current_test_info();
+  if (test_info == nullptr) {
+    return "";
+  }
+  std::string current_test_name =
+      absl::StrFormat("%s-%s", test_info->test_suite_name(), test_info->name());
+  // Reset serial number when running a new test.
+  if (*previous_test_name != current_test_name) {
+    *previous_test_name = current_test_name;
+    model_serial = 0;
+  }
+  model_serial++;
+
+  std::string raw_output_file_name =
+      absl::StrFormat("DTS-%s-%d.tflite", current_test_name, model_serial);
+  // Unix file name should not contain "/".
+  std::string output_file_name =
+      absl::StrReplaceAll(raw_output_file_name, {{"/", "_"}});
+  return output_file_name;
+}
+
+// Modifies the dumped model as the following:
+// 1. Removes optional input tensors in subgraph inputs.
+// 2. Adds a signature def to the model.
+// 3. Copies input tensors from interpreter to model buffers.
+std::unique_ptr<FlatBufferModel> ModifyDumpedModel(
+    std::unique_ptr<FlatBufferModel> fb_model,
+    tflite::Interpreter* interpreter) {
+  std::unique_ptr<ModelT> model(fb_model->GetModel()->UnPack());
+  auto& graph = model->subgraphs[0];
+
+  // Remove optional inputs in subgraph.
+  std::vector<int> fixed_inputs;
+  for (int i : graph->inputs) {
+    if (i < 0 || i >= graph->tensors.size()) {
+      continue;
+    }
+    fixed_inputs.push_back(i);
+  }
+  graph->inputs = std::move(fixed_inputs);
+
+  // Copy inputs from interpreter to model buffers.
+  for (int i = 0; i < graph->inputs.size(); ++i) {
+    int input_idx = graph->inputs[i];
+    TfLiteTensor* t = interpreter->tensor(input_idx);
+    if (t == nullptr) {
+      TFLITE_LOG(INFO) << "input tensor is null";
+      continue;
+    }
+    char* raw_data = GetTensorData<char>(t);
+    if (raw_data == nullptr) {
+      TFLITE_LOG(INFO) << "input tensor data is null";
+      continue;
+    }
+    std::vector<uint8_t> data(t->bytes);
+    memcpy(data.data(), raw_data, t->bytes);
+    auto buffer = std::make_unique<BufferT>();
+    buffer->data = data;
+    model->buffers.push_back(std::move(buffer));
+    graph->tensors[input_idx]->buffer = model->buffers.size() - 1;
+  }
+
+  // Add a signature def to the model.
+  auto def = std::make_unique<SignatureDefT>();
+  def->subgraph_index = 0;
+  def->signature_key = "serving_default";
+  for (int i : graph->inputs) {
+    if (i < 0 || i >= graph->tensors.size()) {
+      continue;
+    }
+    auto map = std::make_unique<TensorMapT>();
+    map->name = graph->tensors[i]->name;
+    if (map->name.empty()) {
+      map->name = absl::StrFormat("input_%d", i);
+    }
+    map->tensor_index = i;
+    def->inputs.push_back(std::move(map));
+  }
+  for (int i : graph->outputs) {
+    if (i < 0 || i >= graph->tensors.size()) {
+      continue;
+    }
+    auto map = std::make_unique<TensorMapT>();
+    map->name = graph->tensors[i]->name;
+    if (map->name.empty()) {
+      map->name = absl::StrFormat("output_%d", i);
+    }
+    map->tensor_index = i;
+    def->outputs.push_back(std::move(map));
+  }
+  model->signature_defs.push_back(std::move(def));
+
+  // Pack and build a new FlatBufferModel from the modified model.
+  flatbuffers::FlatBufferBuilder fbb;
+  flatbuffers::Offset<Model> packed_model = Model::Pack(fbb, model.get());
+  FinishModelBuffer(fbb, packed_model);
+  auto data = std::make_unique<uint8_t[]>(fbb.GetSize());
+  memcpy(data.get(), fbb.GetBufferPointer(), fbb.GetSize());
+  auto allocation =
+      std::make_unique<OwnedMemoryAllocation>(std::move(data), fbb.GetSize());
+  return FlatBufferModel::VerifyAndBuildFromAllocation(std::move(allocation));
+}
+#endif  // TFLITE_WITHOUT_MODEL_DUMP
+
+}  // namespace
+
+bool AllowFp16PrecisionForFp32() {
+  return tflite::KernelTestDelegateProviders::Get()->ConstParams().Get<bool>(
+      tflite::KernelTestDelegateProviders::kAllowFp16PrecisionForFp32);
+}
+
+Matcher<std::tuple<float, float>> FloatingPointEq() {
+  if (AllowFp16PrecisionForFp32()) {
+    return Fp16Eq();
+  }
+  return Eq();
+}
+
+Matcher<std::tuple<float, float>> FloatingPointAlmostEq() {
+  if (AllowFp16PrecisionForFp32()) {
+    return Fp16Eq();
+  }
+  return FloatEq();
 }
 
 std::vector<Matcher<std::complex<float>>> ArrayComplex64Near(
@@ -83,10 +324,14 @@ std::vector<Matcher<std::complex<float>>> ArrayComplex64Near(
 
 int SingleOpModel::AddInput(const TensorData& t) {
   int id = 0;
-  if (t.per_channel_quantization) {
+  if (t.multi_axis_quantization) {
+    id = AddTensorMultiAxisQuant(t);
+  } else if (t.per_block_quantization != 0) {
+    id = AddTensorPerBlockQuant(t);
+  } else if (t.per_channel_quantization) {
     id = AddTensorPerChannelQuant(t);
   } else {
-    id = AddTensor<float>(t, {});
+    id = AddTensor<float>(t, nullptr, 0);
   }
   inputs_.push_back(id);
   return id;
@@ -97,7 +342,7 @@ int SingleOpModel::AddVariableInput(const TensorData& t) {
   if (t.per_channel_quantization) {
     id = AddTensorPerChannelQuant(t);
   } else {
-    id = AddTensor<float>(t, {}, true);
+    id = AddTensor<float>(t, nullptr, 0, true);
   }
   inputs_.push_back(id);
   return id;
@@ -112,7 +357,8 @@ int SingleOpModel::AddIntermediate(TensorType type,
       CreateQuantizationParameters(builder_, /*min=*/0, /*max=*/0,
                                    builder_.CreateVector<float>(scale),
                                    builder_.CreateVector<int64_t>(zero_point));
-  tensors_.push_back(CreateTensor(builder_, builder_.CreateVector<int>({}),
+  std::vector<int> empty;
+  tensors_.push_back(CreateTensor(builder_, builder_.CreateVector<int>(empty),
                                   type,
                                   /*buffer=*/0,
                                   /*name=*/0, q_params, false));
@@ -131,7 +377,7 @@ int SingleOpModel::AddOutput(const TensorData& t) {
   if (t.per_channel_quantization) {
     id = AddTensorPerChannelQuant(t);
   } else {
-    id = AddTensor<float>(t, {});
+    id = AddTensor<float>(t, nullptr, 0);
   }
   outputs_.push_back(id);
   return id;
@@ -149,6 +395,21 @@ void SingleOpModel::SetBuiltinOp(BuiltinOperator type,
       builder_.CreateVector<int32_t>(intermediates_)));
 }
 
+void SingleOpModel::SetBuiltinOp(BuiltinOperator type,
+                                 BuiltinOptions2 builtin_options_2_type,
+                                 flatbuffers::Offset<void> builtin_options_2) {
+  opcodes_.push_back(CreateOperatorCode(builder_, type, 0, 0));
+  operators_.push_back(CreateOperator(
+      builder_, /*opcode_index=*/0, builder_.CreateVector<int32_t>(inputs_),
+      builder_.CreateVector<int32_t>(outputs_), tflite::BuiltinOptions_NONE,
+      /*builtin_options=*/0, /*custom_options=*/0,
+      CustomOptionsFormat_FLEXBUFFERS, /*mutating_variable_inputs=*/0,
+      builder_.CreateVector<int32_t>(intermediates_),
+      /*large_custom_options_offset=*/0,
+      /*large_custom_options_size=*/0, builtin_options_2_type,
+      builtin_options_2));
+}
+
 void SingleOpModel::SetCustomOp(
     const string& name, const std::vector<uint8_t>& custom_option,
     const std::function<TfLiteRegistration*()>& registration) {
@@ -162,15 +423,23 @@ void SingleOpModel::SetCustomOp(
       CustomOptionsFormat_FLEXBUFFERS));
 }
 
-void SingleOpModel::AllocateAndDelegate(bool apply_delegate) {
-  CHECK(interpreter_->AllocateTensors() == kTfLiteOk)
-      << "Cannot allocate tensors";
-  interpreter_->ResetVariableTensors();
+TfLiteStatus SingleOpModel::AllocateTensors() {
+  TfLiteStatus status = interpreter_->AllocateTensors();
+  if (status == kTfLiteOk) {
+    interpreter_->ResetVariableTensors();
+  }
+  return status;
+}
 
+void SingleOpModel::AllocateAndDelegate(bool apply_delegate) {
   // In some rare cases a test may need to postpone modifying the graph with
   // a delegate, e.g. if tensors are not fully specified. In such cases the
   // test has to explicitly call ApplyDelegate() when necessary.
   if (apply_delegate) ApplyDelegate();
+
+  CHECK(interpreter_->AllocateTensors() == kTfLiteOk)
+      << "Cannot allocate tensors";
+  interpreter_->ResetVariableTensors();
 }
 
 void SingleOpModel::BuildInterpreter(std::vector<std::vector<int>> input_shapes,
@@ -178,6 +447,11 @@ void SingleOpModel::BuildInterpreter(std::vector<std::vector<int>> input_shapes,
                                      bool allow_fp32_relax_to_fp16,
                                      bool apply_delegate,
                                      bool allocate_and_delegate) {
+  input_shapes_ = input_shapes;
+  allow_fp32_relax_to_fp16_ = allow_fp32_relax_to_fp16;
+  apply_delegate_ = apply_delegate;
+  allocate_and_delegate_ = allocate_and_delegate;
+
   auto opcodes = builder_.CreateVector(opcodes_);
   auto operators = builder_.CreateVector(operators_);
   auto tensors = builder_.CreateVector(tensors_);
@@ -256,7 +530,10 @@ TfLiteStatus SingleOpModel::ApplyDelegate() {
   if (delegate_) {
     TFLITE_LOG(WARN) << "Having a manually-set TfLite delegate, and bypassing "
                         "KernelTestDelegateProviders";
-    TF_LITE_ENSURE_STATUS(interpreter_->ModifyGraphWithDelegate(delegate_));
+    SetDelegateApplicationStatus(
+        interpreter_->ModifyGraphWithDelegate(delegate_.get()));
+    TF_LITE_ENSURE_STATUS(*GetDelegateApplicationStatus());
+    last_applied_delegate_ = delegate_.get();
     ++num_applied_delegates_;
   } else {
     auto* delegate_providers = tflite::KernelTestDelegateProviders::Get();
@@ -270,19 +547,19 @@ TfLiteStatus SingleOpModel::ApplyDelegate() {
     for (auto& one : delegate_providers->CreateAllDelegates()) {
       // The raw ptr always points to the actual TfLiteDegate object.
       auto* delegate_raw_ptr = one.delegate.get();
-      TF_LITE_ENSURE_STATUS(
+      SetDelegateApplicationStatus(
           interpreter_->ModifyGraphWithDelegate(std::move(one.delegate)));
-      // Note: 'delegate_' is always set to the last successfully applied one.
-      delegate_ = delegate_raw_ptr;
+      TF_LITE_ENSURE_STATUS(*GetDelegateApplicationStatus());
+      // Note: 'last_applied_delegate_' is always set to the last successfully
+      // applied one.
+      last_applied_delegate_ = delegate_raw_ptr;
       ++num_applied_delegates_;
     }
   }
   return kTfLiteOk;
 }
 
-void SingleOpModel::Invoke() { ASSERT_EQ(interpreter_->Invoke(), kTfLiteOk); }
-
-TfLiteStatus SingleOpModel::InvokeUnchecked() { return interpreter_->Invoke(); }
+TfLiteStatus SingleOpModel::Invoke() { return interpreter_->Invoke(); }
 
 void SingleOpModel::BuildInterpreter(
     std::vector<std::vector<int>> input_shapes) {
@@ -372,8 +649,24 @@ int CountPartitionsExecutedByCpuKernel(const Interpreter* interpreter) {
 
 }  // namespace
 
+/*static*/ AccelerationValidator* AccelerationValidator::Get() {
+  static AccelerationValidator* const validator = new AccelerationValidator();
+  return validator;
+}
+
+void AccelerationValidator::AddCallback(Callback callback) {
+  callbacks_.push_back(std::move(callback));
+}
+
+void AccelerationValidator::Validate(const SingleOpModel& model) const {
+  for (const auto& callback : callbacks_) {
+    if (callback == nullptr) continue;
+    callback(model);
+  }
+}
+
 void SingleOpModel::ExpectOpAcceleratedWithNnapi(const std::string& test_id) {
-  absl::optional<NnapiAccelerationTestParams> validation_params =
+  std::optional<NnapiAccelerationTestParams> validation_params =
       GetNnapiAccelerationTestParam(test_id);
   if (!validation_params.has_value()) {
     return;
@@ -392,7 +685,9 @@ void SingleOpModel::ExpectOpAcceleratedWithNnapi(const std::string& test_id) {
   if (nnapi && nnapi->nnapi_exists &&
       nnapi->android_sdk_version >=
           validation_params.value().MinAndroidSdkVersion()) {
-    EXPECT_EQ(CountPartitionsDelegatedTo(interpreter_.get(), delegate_), 1)
+    EXPECT_EQ(
+        CountPartitionsDelegatedTo(interpreter_.get(), last_applied_delegate_),
+        1)
         << "Expecting operation to be accelerated but cannot find a partition "
            "associated to the NNAPI delegate";
     EXPECT_GT(num_applied_delegates_, 0) << "No delegates were applied.";
@@ -403,13 +698,73 @@ void SingleOpModel::ValidateAcceleration() {
   if (GetForceUseNnapi()) {
     ExpectOpAcceleratedWithNnapi(GetCurrentTestId());
   }
+  AccelerationValidator::Get()->Validate(*this);
 }
 
 int SingleOpModel::CountOpsExecutedByCpuKernel() {
   return CountPartitionsExecutedByCpuKernel(interpreter_.get());
 }
 
-SingleOpModel::~SingleOpModel() { ValidateAcceleration(); }
+int SingleOpModel::CountNumberOfDelegatedPartitions() const {
+  return CountPartitionsDelegatedTo(interpreter_.get(), last_applied_delegate_);
+}
+
+void SingleOpModel::MaybeDumpModel() {
+#ifndef TFLITE_WITHOUT_MODEL_DUMP
+  std::string dump_directory(
+      tflite::KernelTestDelegateProviders::Get()
+          ->ConstParams()
+          .Get<std::string>(
+              tflite::KernelTestDelegateProviders::kDumpTFLiteModelDir));
+  // If no path provided, we don't need to dump the model.
+  if (dump_directory.empty()) {
+    return;
+  }
+
+  // If the interpreter is not initialized, there is no model to be dumped.
+  if (interpreter_ == nullptr) {
+    TFLITE_LOG(INFO) << "Interpreter is not initialized, skipping model dump.";
+    return;
+  }
+
+  std::string output_file_name = GetDumpedModelName();
+  if (output_file_name.empty()) {
+    return;
+  }
+
+  // Get the model buffer.
+  std::unique_ptr<uint8_t[]> buffer;
+  size_t size = 0;
+  if (ModelWriter(interpreter_.get()).GetBuffer(&buffer, &size) != kTfLiteOk) {
+    TFLITE_LOG(ERROR) << "Failed to get model buffer";
+    return;
+  }
+  auto model = tflite::FlatBufferModel::BuildFromBuffer(
+      reinterpret_cast<char*>(buffer.get()), size);
+  if (model == nullptr) {
+    TFLITE_LOG(ERROR) << "Failed to build model from buffer";
+    return;
+  }
+  // Modify the model to set the input tensors to the model buffers and add
+  // signature def.
+  auto modified_model = ModifyDumpedModel(std::move(model), interpreter_.get());
+  const Allocation* allocation = modified_model->allocation();
+
+  // Save the model to file
+  std::string output_file_path =
+      absl::StrCat(dump_directory, "/", output_file_name);
+  TFLITE_LOG(INFO) << "Saving model to " << output_file_path;
+  std::ofstream output_file(output_file_path);
+  output_file.write(reinterpret_cast<const char*>(allocation->base()),
+                    allocation->bytes());
+  output_file.close();
+#endif  // TFLITE_WITHOUT_MODEL_DUMP
+}
+
+SingleOpModel::~SingleOpModel() {
+  MaybeDumpModel();
+  ValidateAcceleration();
+}
 
 void MultiOpModel::AddBuiltinOp(
     BuiltinOperator type, BuiltinOptions builtin_options_type,

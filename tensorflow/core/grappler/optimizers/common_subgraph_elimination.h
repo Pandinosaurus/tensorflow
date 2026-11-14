@@ -35,19 +35,19 @@ struct GrapplerItem;
 
 class CommonSubgraphElimination : public GraphOptimizer {
  public:
-  CommonSubgraphElimination() {}
+  CommonSubgraphElimination() = default;
 
   explicit CommonSubgraphElimination(RewriterConfig::Toggle opt_level)
       : opt_level_(opt_level) {}
 
-  ~CommonSubgraphElimination() override {}
+  ~CommonSubgraphElimination() override = default;
 
-  string name() const override { return "common_subgraph_elimination"; };
+  std::string name() const override { return "common_subgraph_elimination"; };
 
   bool UsesFunctionLibrary() const override { return false; }
 
-  Status Optimize(Cluster* cluster, const GrapplerItem& item,
-                  GraphDef* optimized_graph) override;
+  absl::Status Optimize(Cluster* cluster, const GrapplerItem& item,
+                        GraphDef* optimized_graph) override;
 
  private:
   friend class CommonSubgraphEliminationTest;
@@ -56,12 +56,12 @@ class CommonSubgraphElimination : public GraphOptimizer {
   bool CanDedup(const NodeDef& node) const;
 
   // Dedup redundant nodes in the graph.
-  Status DedupComputations(GraphDef* optimized_graph);
+  absl::Status DedupComputations(GraphDef* optimized_graph);
 
   RewriterConfig::Toggle opt_level_;
 
   bool fetch_nodes_known_ = false;
-  std::unordered_set<string> nodes_to_preserve_;
+  std::unordered_set<std::string> nodes_to_preserve_;
 };
 
 }  // end namespace grappler

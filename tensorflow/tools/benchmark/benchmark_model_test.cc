@@ -15,20 +15,32 @@ limitations under the License.
 
 #include "tensorflow/tools/benchmark/benchmark_model.h"
 
-#include "tensorflow/cc/ops/standard_ops.h"
+#include <cstdint>
+#include <memory>
+#include <string>
+
+#include "tensorflow/cc/framework/scope.h"
+#include "tensorflow/cc/ops/array_ops.h"
+#include "tensorflow/cc/ops/math_ops.h"
+#include "xla/tsl/lib/core/status_test_util.h"
+#include "tensorflow/core/framework/graph.pb.h"
+#include "tensorflow/core/framework/tensor.h"
+#include "tensorflow/core/framework/tensor_shape.h"
 #include "tensorflow/core/framework/tensor_testutil.h"
-#include "tensorflow/core/graph/graph_def_builder.h"
-#include "tensorflow/core/lib/core/status_test_util.h"
-#include "tensorflow/core/lib/io/path.h"
+#include "tensorflow/core/framework/types.pb.h"
+#include "tensorflow/core/platform/env.h"
+#include "tensorflow/core/platform/path.h"
 #include "tensorflow/core/platform/test.h"
-#include "tensorflow/core/platform/test_benchmark.h"
+#include "tensorflow/core/platform/types.h"
+#include "tensorflow/core/public/session.h"
+#include "tensorflow/core/util/stat_summarizer.h"
 
 namespace tensorflow {
 namespace {
 
 void CreateTestGraph(const ::tensorflow::Scope& root,
                      benchmark_model::InputLayerInfo* input,
-                     string* output_name, GraphDef* graph_def) {
+                     std::string* output_name, GraphDef* graph_def) {
   // Create a simple graph and write it to filename_pb.
   const int input_width = 400;
   const int input_height = 10;
@@ -48,15 +60,15 @@ void CreateTestGraph(const ::tensorflow::Scope& root,
 }
 
 TEST(BenchmarkModelTest, InitializeAndRun) {
-  const string dir = testing::TmpDir();
-  const string filename_pb = io::JoinPath(dir, "graphdef.pb");
+  const std::string dir = testing::TmpDir();
+  const std::string filename_pb = io::JoinPath(dir, "graphdef.pb");
   auto root = Scope::NewRootScope().ExitOnError();
 
   benchmark_model::InputLayerInfo input;
-  string output_name;
+  std::string output_name;
   GraphDef graph_def;
   CreateTestGraph(root, &input, &output_name, &graph_def);
-  string graph_def_serialized;
+  std::string graph_def_serialized;
   graph_def.SerializeToString(&graph_def_serialized);
   TF_ASSERT_OK(
       WriteStringToFile(Env::Default(), filename_pb, graph_def_serialized));
@@ -66,7 +78,8 @@ TEST(BenchmarkModelTest, InitializeAndRun) {
   TF_ASSERT_OK(benchmark_model::InitializeSession(1, filename_pb, &session,
                                                   &loaded_graph_def));
   std::unique_ptr<StatSummarizer> stats;
-  stats.reset(new tensorflow::StatSummarizer(*(loaded_graph_def.get())));
+  stats =
+      std::make_unique<tensorflow::StatSummarizer>(*(loaded_graph_def.get()));
   int64_t time;
   int64_t num_runs = 0;
   TF_ASSERT_OK(benchmark_model::TimeMultipleRuns(
@@ -76,12 +89,12 @@ TEST(BenchmarkModelTest, InitializeAndRun) {
 }
 
 TEST(BenchmarkModeTest, TextProto) {
-  const string dir = testing::TmpDir();
-  const string filename_txt = io::JoinPath(dir, "graphdef.pb.txt");
+  const std::string dir = testing::TmpDir();
+  const std::string filename_txt = io::JoinPath(dir, "graphdef.pb.txt");
   auto root = Scope::NewRootScope().ExitOnError();
 
   benchmark_model::InputLayerInfo input;
-  string output_name;
+  std::string output_name;
   GraphDef graph_def;
   CreateTestGraph(root, &input, &output_name, &graph_def);
   TF_ASSERT_OK(WriteTextProto(Env::Default(), filename_txt, graph_def));
@@ -91,7 +104,8 @@ TEST(BenchmarkModeTest, TextProto) {
   TF_ASSERT_OK(benchmark_model::InitializeSession(1, filename_txt, &session,
                                                   &loaded_graph_def));
   std::unique_ptr<StatSummarizer> stats;
-  stats.reset(new tensorflow::StatSummarizer(*(loaded_graph_def.get())));
+  stats =
+      std::make_unique<tensorflow::StatSummarizer>(*(loaded_graph_def.get()));
   int64_t time;
   int64_t num_runs = 0;
   TF_ASSERT_OK(benchmark_model::TimeMultipleRuns(

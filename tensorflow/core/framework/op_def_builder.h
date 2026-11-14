@@ -20,6 +20,7 @@ limitations under the License.
 #define TENSORFLOW_CORE_FRAMEWORK_OP_DEF_BUILDER_H_
 
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "tensorflow/core/framework/full_type.pb.h"
@@ -32,18 +33,35 @@ limitations under the License.
 namespace tensorflow {
 
 // TODO(b/62899350): Refactor without proto dependencies.
-typedef std::function<Status(OpDef* c)> OpTypeConstructor;
+typedef std::function<absl::Status(OpDef* c)> OpTypeConstructor;
 
-typedef std::function<StatusOr<FullTypeDef>(
-    const std::vector<std::reference_wrapper<const FullTypeDef>>&)>
-    ForwardTypeInferenceFn;
+typedef std::vector<std::reference_wrapper<const FullTypeDef>> TypeRefVector;
+
+// A callback into the type inference process, allowing type inference functions
+// to request inferring the type of some function (assumed to exist in the
+// runtime). The function is specified by name.
+typedef std::function<absl::StatusOr<FullTypeDef>(const std::string&,
+                                                  const TypeRefVector&)>
+    FunctionTypeInferrer;
+
+// A type inference function, called for each node during type inference
+// (possibly multiple times).
+// The first argument (input_types) will hold the type of each of the node's
+// inputs. The second argument (type_vars) will hold the return type of
+// each function referred from any type variable (e.g. `FuncVar`) present
+// in the node's corresponding op definition.
+//
+// TODO(mdan): Consider a vector-in, vector-out contract.
+typedef std::function<absl::StatusOr<FullTypeDef>(const TypeRefVector&,
+                                                  const FunctionTypeInferrer&)>
+    TypeInferenceFn;
 
 class FunctionDefHelper;
 
 namespace shape_inference {
 class InferenceContext;
 }
-typedef std::function<Status(shape_inference::InferenceContext* c)>
+typedef std::function<absl::Status(shape_inference::InferenceContext* c)>
     OpShapeInferenceFn;
 
 struct OpRegistrationData {
@@ -106,7 +124,18 @@ struct OpRegistrationData {
   //
   // TODO(mdan): Merge with shape inference.
   // TODO(mdan): Replace with a union-based type inference algorithm.
-  ForwardTypeInferenceFn fwd_type_fn;
+  TypeInferenceFn fwd_type_fn;
+
+  // Reverse type inference function. This callable infers some input types
+  // based on the return type.
+  //
+  // TODO(mdan): Replace with a union-based type inference algorithm.
+  TypeInferenceFn rev_type_fn;
+
+  // The input number affected by reverse type inference. Only one input may be
+  // updated in this manner.
+  // TODO(mdan): Encode in a manner more consistent with the forward version.
+  int rev_type_input;
 
   bool is_function_op = false;
 };
@@ -170,11 +199,13 @@ class OpDefBuilder {
 
   // Turns on the indicated boolean flag in this OpDefBuilder (and
   // returns *this).
-  OpDefBuilder& SetIsCommutative();
-  OpDefBuilder& SetIsAggregate();
-  OpDefBuilder& SetIsStateful();
-  OpDefBuilder& SetAllowsUninitializedInput();
-  OpDefBuilder& SetIsDistributedCommunication();
+  OpDefBuilder& SetIsCommutative(bool is_commutative = true);
+  OpDefBuilder& SetIsAggregate(bool is_aggregate = true);
+  OpDefBuilder& SetIsStateful(bool is_stateful = true);
+  OpDefBuilder& SetAllowsUninitializedInput(
+      bool allows_uninitialized_input = true);
+  OpDefBuilder& SetIsDistributedCommunication(
+      bool is_distributed_communication = true);
 
   // Deprecate the op at a certain GraphDef version.
   OpDefBuilder& Deprecated(int version, std::string explanation);
@@ -192,11 +223,7 @@ class OpDefBuilder {
   // may start the description with an "=" (like name:= <description>)
   // to suppress the automatically-generated type documentation in
   // generated output.
-#ifndef TF_LEAN_BINARY
   OpDefBuilder& Doc(std::string text);
-#else
-  OpDefBuilder& Doc(string text) { return *this; }
-#endif
 
   // Sets the function to be used as type constructor.
   // See OpRegistrationData::type_ctor.
@@ -204,7 +231,11 @@ class OpDefBuilder {
 
   // Sets the function to be used for forward type inference.
   // See OpRegistrationData::fwd_type_fn.
-  OpDefBuilder& SetForwardTypeFn(ForwardTypeInferenceFn f);
+  OpDefBuilder& SetForwardTypeFn(TypeInferenceFn f);
+
+  // Sets the function to be used for reverse type inference.
+  // See OpRegistrationData::rew_type_fn.
+  OpDefBuilder& SetReverseTypeFn(int input_number, TypeInferenceFn f);
 
   // Sets the shape function to be used for shape inference.
   //
@@ -224,7 +255,7 @@ class OpDefBuilder {
   //
   // Note that OpDefBuilder only reports parsing errors.  You should also
   // call ValidateOpDef() to detect other problems.
-  Status Finalize(OpRegistrationData* op_reg_data) const;
+  absl::Status Finalize(OpRegistrationData* op_reg_data) const;
 
  private:
   friend class FunctionDefHelper;
@@ -237,12 +268,12 @@ class OpDefBuilder {
   OpDef* op_def() { return &op_reg_data_.op_def; }
 
   OpRegistrationData op_reg_data_;
-  std::vector<string> attrs_;
-  std::vector<string> inputs_;
-  std::vector<string> outputs_;
-  std::vector<string> control_outputs_;
+  std::vector<std::string> attrs_;
+  std::vector<std::string> inputs_;
+  std::vector<std::string> outputs_;
+  std::vector<std::string> control_outputs_;
   std::string doc_;
-  std::vector<string> errors_;
+  std::vector<std::string> errors_;
   bool allow_attr_type_any_ = false;
 };
 

@@ -13,17 +13,23 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include <string>
+
+#include "absl/log/check.h"
+#include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
+#include "absl/strings/string_view.h"
 #include "tensorflow/compiler/jit/tests/auto_clustering_test_helper.h"
-#include "tensorflow/core/lib/core/status_test_util.h"
+#include "xla/tsl/lib/core/status_test_util.h"
+#include "tensorflow/core/platform/test.h"
 
 namespace tensorflow {
 namespace {
 class AutoClusteringTestImpl : public AutoClusteringTest {
  protected:
   // Test auto-clustering with a proto text file ${key}.pbtxt.
-  Status RunAutoClusteringTestWithPbtxt(absl::string_view key) {
-    string file_name_without_extension =
+  absl::Status RunAutoClusteringTestWithPbtxt(absl::string_view key) {
+    std::string file_name_without_extension =
         absl::StrCat(testing::TensorFlowSrcRoot(), "/compiler/jit/tests/", key);
 
     return AutoClusteringTest::RunAutoClusteringTestWithPbtxt(
@@ -32,8 +38,8 @@ class AutoClusteringTestImpl : public AutoClusteringTest {
   }
 
   // Test auto-clustering with a gzipped proto text file ${key}.pbtxt.gz.
-  Status RunAutoClusteringTestWithGzippedPbtxt(absl::string_view key) {
-    string file_name_without_extension =
+  absl::Status RunAutoClusteringTestWithGzippedPbtxt(absl::string_view key) {
+    std::string file_name_without_extension =
         absl::StrCat(testing::TensorFlowSrcRoot(), "/compiler/jit/tests/", key);
 
     return AutoClusteringTest::RunAutoClusteringTestWithGzippedPbtxt(
@@ -45,7 +51,7 @@ class AutoClusteringTestImpl : public AutoClusteringTest {
 TEST_F(AutoClusteringTestImpl, KerasImagenetMain) {
   // Generated from
   //
-  //  TARGET_PATH=tensorflow_models/official/vision/image_classification       \
+  //  TARGET_PATH=tensorflow_models/official/legacy/image_classification       \
   //  bazel run -c opt --config=cuda ${TARGET_PATH}:resnet_imagenet_main       \
   //    -- --skip_eval --num_gpus=1 --dtype=fp16 --batch_size=192              \
   //    --train_steps=210 --enable_xla --enable_eager=true
@@ -57,7 +63,7 @@ TEST_F(AutoClusteringTestImpl, KerasImagenetMain) {
 TEST_F(AutoClusteringTestImpl, KerasImagenetMainGraphMode) {
   // Generated from
   //
-  //  TARGET_PATH=tensorflow_models/official/vision/image_classification       \
+  //  TARGET_PATH=tensorflow_models/official/legacy/image_classification       \
   //  bazel run -c opt --config=cuda ${TARGET_PATH}:resnet_imagenet_main       \
   //   -- --use_synthetic_data --num_gpus=1 --batch_size=117 --train_steps=600 \
   //   --skip_eval=True --logtostderr --enable_xla
@@ -77,7 +83,7 @@ TEST_F(AutoClusteringTestImpl, OpenSeq2SeqGNMT) {
 }
 
 #if defined(PLATFORM_GOOGLE)
-Status BenchmarkHelper(absl::string_view key, benchmark::State& state) {
+absl::Status BenchmarkHelper(absl::string_view key, benchmark::State& state) {
   return BenchmarkMarkForCompilation(
       absl::StrCat(testing::TensorFlowSrcRoot(), "/compiler/jit/tests/", key,
                    ".pbtxt"),
@@ -85,7 +91,7 @@ Status BenchmarkHelper(absl::string_view key, benchmark::State& state) {
 }
 
 void BM_MarkForCompilationPass_KerasImagenetMain(benchmark::State& state) {
-  TF_CHECK_OK(BenchmarkHelper("keras_imagenet_main", state));
+  CHECK_OK(BenchmarkHelper("keras_imagenet_main", state));
 }
 
 BENCHMARK(BM_MarkForCompilationPass_KerasImagenetMain);

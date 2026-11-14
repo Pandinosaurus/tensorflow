@@ -15,10 +15,6 @@
 """decorator_utils tests."""
 
 # pylint: disable=unused-import
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import functools
 
 from tensorflow.python.platform import test
@@ -94,6 +90,12 @@ class AddNoticeToDocstringTest(test.TestCase):
     self._check("\nBrief\nDocstring", expected)
     # 2 space second line indent, first line blank
     self._check("\n  Brief\n  Docstring", expected)
+
+  def test_suffix_not_duplicated_when_already_present(self):
+    expected = "Brief (suffix)\n\nWarning: Go away\nInstructions"
+    self._check("Brief (suffix)", expected)
+    self._check("Brief (suffix)   ", expected)
+    self._check("   ", "Nothing here\n\nWarning: Go away\nInstructions")
 
 
 class ValidateCallableTest(test.TestCase):

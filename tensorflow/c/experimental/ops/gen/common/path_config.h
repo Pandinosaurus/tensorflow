@@ -15,23 +15,26 @@ limitations under the License.
 #ifndef TENSORFLOW_C_EXPERIMENTAL_OPS_GEN_COMMON_PATH_CONFIG_H_
 #define TENSORFLOW_C_EXPERIMENTAL_OPS_GEN_COMMON_PATH_CONFIG_H_
 
+#include <vector>
+
 #include "tensorflow/core/platform/types.h"
 
 namespace tensorflow {
 namespace generator {
 
 struct PathConfig {
-  string output_path;
-  std::vector<string> op_names;
-  std::vector<string> api_dirs;
-  string tf_prefix_dir;
-  string tf_root_dir;
-  string tf_output_dir;
+  std::string output_path;
+  std::vector<std::string> op_names;
+  std::vector<std::string> api_dirs;
+  std::string tf_prefix_dir;
+  std::string tf_root_dir;
+  std::string tf_output_dir;
 
   explicit PathConfig() = default;
-  explicit PathConfig(const string &output_dir, const string &source_dir,
-                      const string &api_dir_list,
-                      const std::vector<string> op_names);
+  explicit PathConfig(const std::string& output_dir,
+                      const std::string& source_dir,
+                      const std::string& api_dir_list,
+                      const std::vector<std::string> op_names);
 };
 
 }  // namespace generator

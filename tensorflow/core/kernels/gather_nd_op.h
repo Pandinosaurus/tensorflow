@@ -17,18 +17,20 @@ limitations under the License.
 #define TENSORFLOW_CORE_KERNELS_GATHER_ND_OP_H_
 // Functor definition for GatherOp, must be compilable by nvcc.
 
-#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
+#include <cstdint>
+#include <limits>
+
+#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
 #include "tensorflow/core/framework/bounds_check.h"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/tensor.h"
 #include "tensorflow/core/lib/core/status.h"
 #include "tensorflow/core/platform/types.h"
+#include "tensorflow/core/util/bad_indices_policy.h"
 #include "tensorflow/core/util/util.h"
 
 namespace tensorflow {
-
 class OpKernelContext;
-class Status;
 class Tensor;
 
 namespace functor {
@@ -38,26 +40,28 @@ struct GatherNdSlice {
   // Performs a slice gather op on (Tparams, Tindices), writing to Tout.
   // Returns an index to Tindices if the value at that index is out of range.
   // Returns -1 if all values of Tindices are in range.
-  Index operator()(const Device& d, const Index slice_size,
-                   typename TTypes<int32>::Scalar Tscratch,
+  Index operator()(const Device& d, Index slice_size,
+                   typename TTypes<int32_t>::Scalar Tscratch,
                    typename TTypes<T, IXDIM + 1>::ConstTensor Tparams,
                    typename TTypes<Index>::ConstMatrix Tindices,
                    typename TTypes<T>::Matrix Tout);
 };
 
 template <typename Device, typename T, typename Index>
-Status DoGatherNd(OpKernelContext* c, const Tensor& params,
-                  const Tensor& indices, Tensor* out) {
+absl::Status DoGatherNd(
+    OpKernelContext* c, const Tensor& params, const Tensor& indices,
+    Tensor* out,
+    BadIndicesPolicy bad_indices_policy = BadIndicesPolicy::kDefault) {
   if (!TensorShapeUtils::IsVectorOrHigher(params.shape())) {
-    return errors::InvalidArgument("params must be at least a vector");
+    return absl::InvalidArgumentError("params must be at least a vector");
   }
   if (!TensorShapeUtils::IsVectorOrHigher(indices.shape())) {
-    return errors::InvalidArgument("indices must be at least a vector");
+    return absl::InvalidArgumentError("indices must be at least a vector");
   }
   if (indices.dim_size(indices.dims() - 1) > params.dims()) {
-    return errors::InvalidArgument(
+    return absl::InvalidArgumentError(absl::StrCat(
         "index innermost dimension length must be <= params rank; saw: ",
-        indices.dim_size(indices.dims() - 1), " vs. ", params.dims());
+        indices.dim_size(indices.dims() - 1), " vs. ", params.dims()));
   }
 
   const TensorShape& indices_shape(indices.shape());
@@ -69,9 +73,15 @@ Status DoGatherNd(OpKernelContext* c, const Tensor& params,
     N_big *= indices_shape.dim_size(i);
   }
   if (N_big > std::numeric_limits<int>::max()) {
-    return errors::InvalidArgument(
-        "indices has too many elements for int indexing: ", N_big, " > ",
-        std::numeric_limits<int>::max());
+    return absl::InvalidArgumentError(
+        absl::StrCat("indices has too many elements for int indexing: ", N_big,
+                     " > ", std::numeric_limits<int>::max()));
+  }
+  if (N_big > std::numeric_limits<Index>::max()) {
+    return absl::InvalidArgumentError(absl::StrCat(
+        "indices has too many elements for ",
+        DataTypeString(DataTypeToEnum<Index>::v()), " indexing: ", N_big, " > ",
+        std::numeric_limits<Index>::max()));
   }
   if (params.NumElements() > std::numeric_limits<Index>::max()) {
     return errors::InvalidArgument("params.NumElements() too large for ",
@@ -82,10 +92,7 @@ Status DoGatherNd(OpKernelContext* c, const Tensor& params,
 
   // The result shape is
   //   indices.shape[:-1] + params.shape[indices.shape[-1]:]
-  Index N_result = 1;
-  for (int i = 0; i < indices_shape.dims() - 1; ++i) {
-    N_result *= indices_shape.dim_size(i);
-  }
+  const Index N_result = static_cast<Index>(N_big);
 
   const TensorShape& params_shape(params.shape());
   Index total_nd = params_shape.dims();
@@ -96,7 +103,7 @@ Status DoGatherNd(OpKernelContext* c, const Tensor& params,
   int64_t slice_size_big = 1;
   for (Index i = indices_nd; i < total_nd; ++i) {
     slice_size_big *= params_shape.dim_size(i);
-    result_shape.AddDim(params_shape.dim_size(i));
+    TF_RETURN_IF_ERROR(result_shape.AddDimWithStatus(params_shape.dim_size(i)));
   }
 
   if (slice_size_big > std::numeric_limits<Index>::max()) {
@@ -112,10 +119,10 @@ Status DoGatherNd(OpKernelContext* c, const Tensor& params,
 
   if (N_result > 0) {
     if (params_shape.num_elements() == 0) {
-      return errors::InvalidArgument(
-          "Requested more than 0 entries, but "
-          "params is empty.  Params shape: ",
-          params_shape.DebugString());
+      return absl::InvalidArgumentError(
+          absl::StrCat("Requested more than 0 entries, but "
+                       "params is empty.  Params shape: ",
+                       params_shape.DebugString()));
     }
 
     auto indices_mat = indices.flat_inner_dims<Index>();
@@ -127,7 +134,7 @@ Status DoGatherNd(OpKernelContext* c, const Tensor& params,
     auto out_mat = out->shaped<T, 2>({N_result, slice_size});
     Tensor scratch;
     TF_RETURN_IF_ERROR(c->allocate_temp(DT_INT32, TensorShape(), &scratch));
-    auto scratch_scalar = scratch.scalar<int32>();
+    auto scratch_scalar = scratch.scalar<int32_t>();
 
     switch (indices_nd) {
 #define PARAMS_CASE(IXDIM)                                              \
@@ -147,14 +154,18 @@ Status DoGatherNd(OpKernelContext* c, const Tensor& params,
       PARAMS_CASE(7);
 #undef PARAMS_CASE
       default:
-        return errors::InvalidArgument(
-            "Only indices.shape[-1] values between 1 and 7 "
-            "are currently supported.  Requested rank: ",
-            indices_nd);
+        return absl::InvalidArgumentError(
+            absl::StrCat("Only indices.shape[-1] values between 1 and 7 "
+                         "are currently supported.  Requested rank: ",
+                         indices_nd));
     }
+    using CPUDevice = Eigen::ThreadPoolDevice;
 
-    // bad_i will only return >= 0 on CPUs right now.
-    if (bad_i >= 0) {
+    const bool check_bad_indices =
+        ((std::is_same_v<Device, CPUDevice> &&
+          bad_indices_policy == BadIndicesPolicy::kDefault) ||
+         bad_indices_policy == BadIndicesPolicy::kError);
+    if (check_bad_indices && bad_i >= 0) {
       auto shape = indices.shape();
       shape.RemoveLastDims(1);
       return errors::InvalidArgument(
@@ -165,7 +176,7 @@ Status DoGatherNd(OpKernelContext* c, const Tensor& params,
           ", node name: ", c->op_kernel().name());
     }
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 }  // namespace functor

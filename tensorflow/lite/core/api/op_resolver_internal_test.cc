@@ -17,15 +17,39 @@ limitations under the License.
 
 #include <gtest/gtest.h>
 #include "tensorflow/lite/core/api/op_resolver.h"
-#include "tensorflow/lite/kernels/builtin_op_kernels.h"
-#include "tensorflow/lite/kernels/register.h"
+#include "tensorflow/lite/core/kernels/builtin_op_kernels.h"
+#include "tensorflow/lite/core/kernels/register.h"
 #include "tensorflow/lite/mutable_op_resolver.h"
+#include "tensorflow/lite/schema/schema_generated.h"
 
 namespace tflite {
 
 using ops::builtin::BuiltinOpResolver;
+using ops::builtin::BuiltinOpResolverWithoutDefaultDelegates;
 
 namespace {
+
+TEST(OpResolverInternal, ObjectSlicing) {
+  BuiltinOpResolver op_resolver1;
+  EXPECT_FALSE(op_resolver1.GetDelegateCreators().empty());
+
+  BuiltinOpResolverWithoutDefaultDelegates op_resolver2;
+  EXPECT_TRUE(op_resolver2.GetDelegateCreators().empty());
+
+  // Here, we assign a BuiltinOpResolverWithoutDefaultDelegates instance to a
+  // BuiltinOpResolver variable where the empty default copy constructor of
+  // BuiltinOpResolver will be invoked. Even though "object slicing"
+  // (https://en.wikipedia.org/wiki/Object_slicing) occurs, we still expect an
+  // empty delegate creator list.
+  BuiltinOpResolver op_resolver3(op_resolver2);
+  EXPECT_TRUE(op_resolver3.GetDelegateCreators().empty());
+
+  MutableOpResolver op_resolver4(op_resolver1);
+  EXPECT_FALSE(op_resolver4.GetDelegateCreators().empty());
+
+  MutableOpResolver op_resolver5(op_resolver2);
+  EXPECT_TRUE(op_resolver5.GetDelegateCreators().empty());
+}
 
 TEST(OpResolverInternal, BuiltinOpResolverContainsOnlyPredefinedOps) {
   BuiltinOpResolver builtin_op_resolver;

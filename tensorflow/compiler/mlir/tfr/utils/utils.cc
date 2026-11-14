@@ -15,9 +15,16 @@ limitations under the License.
 
 #include "tensorflow/compiler/mlir/tfr/utils/utils.h"
 
-#include "llvm/ADT/ArrayRef.h"
+#include <string>
+
+#include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/StringSet.h"
+#include "mlir/IR/Block.h"  // from @llvm-project
+#include "mlir/IR/Operation.h"  // from @llvm-project
+#include "mlir/IR/OperationSupport.h"  // from @llvm-project
+#include "mlir/IR/Region.h"  // from @llvm-project
+#include "mlir/Support/LLVM.h"  // from @llvm-project
 #include "mlir/Support/LogicalResult.h"  // from @llvm-project
 #include "tensorflow/compiler/mlir/tfr/ir/tfr_ops.h"
 
@@ -31,9 +38,17 @@ const llvm::StringSet<>& GetAllowedAttributes() {
   return *ops;
 }
 
+// Some TFL optional attributes may not appear in their corresponding TF op
+// attributes.
+const llvm::StringSet<>& GetOptionalAttributes() {
+  static auto* const ops =
+      new llvm::StringSet<>({"asymmetric_quantize_inputs"});
+  return *ops;
+}
+
 void CollectAllowedAttrs(CallOp src, NamedAttrList* attrs) {
   for (auto& attr : src->getAttrs()) {
-    if (GetAllowedAttributes().contains(attr.first.strref())) {
+    if (GetAllowedAttributes().contains(attr.getName().strref())) {
       attrs->append(attr);
     }
   }
@@ -45,7 +60,7 @@ void AddAttributesInSameBlock(Block::iterator begin, Block::iterator end,
                               const NamedAttrList& attrs) {
   for (Block::iterator it = begin; it != end; ++it) {
     for (auto& attr : attrs) {
-      it->setAttr(attr.first, attr.second);
+      it->setAttr(attr.getName(), attr.getValue());
     }
   }
 }
@@ -78,9 +93,9 @@ std::string GetComposeFuncName(StringRef tf_op_name) {
     }
     if (tf_op_name[i] == '.') {
       compose_func_name.push_back('_');
-    } else if (tf_op_name[i] >= 'A' && tf_op_name[i] <= 'Z') {
+    } else if (llvm::isUpper(tf_op_name[i])) {
       compose_func_name.push_back('_');
-      compose_func_name.push_back(tf_op_name[i] + 'a' - 'A');
+      compose_func_name.push_back(llvm::toLower(tf_op_name[i]));
     } else {
       compose_func_name.push_back(tf_op_name[i]);
     }
@@ -92,13 +107,13 @@ std::string GetTFOpName(StringRef compose_func_name) {
   std::string tf_op_name;
   bool after_underscore = false;
   for (int i = 0; i < compose_func_name.size(); ++i) {
-    if (compose_func_name[i] >= 'A' && compose_func_name[i] <= 'Z') {
+    if (llvm::isUpper(compose_func_name[i])) {
       // The field name must not contain uppercase letters.
       return {};
     }
     if (after_underscore) {
-      if (compose_func_name[i] >= 'a' && compose_func_name[i] <= 'z') {
-        tf_op_name.push_back(compose_func_name[i] + 'A' - 'a');
+      if (llvm::isLower(compose_func_name[i])) {
+        tf_op_name.push_back(llvm::toUpper(compose_func_name[i]));
         after_underscore = false;
       } else {
         // The character after a "_" must be a lowercase letter.
@@ -123,9 +138,11 @@ std::string GetTFOpName(StringRef compose_func_name) {
 
 LogicalResult ValidateAttrs(Operation* src, const StringSet<>& registered) {
   for (auto& attr : src->getAttrs()) {
-    StringRef attr_name = attr.first.strref();
+    StringRef attr_name = attr.getName().strref();
+
     if (!registered.contains(attr_name) &&
-        !GetAllowedAttributes().contains(attr_name)) {
+        !(GetAllowedAttributes().contains(attr_name) ||
+          GetOptionalAttributes().contains(attr_name))) {
       src->emitError("Denied unregistered attribute was found: " + attr_name);
       return failure();
     }
@@ -136,13 +153,15 @@ LogicalResult ValidateAttrs(Operation* src, const StringSet<>& registered) {
 LogicalResult CopyAllowedUnregisteredAttrs(Operation* src, CallOp dst,
                                            const StringSet<>& registered) {
   for (auto& attr : src->getAttrs()) {
-    StringRef attr_name = attr.first.strref();
-    // Skip the registered attribute.
-    if (registered.contains(attr_name)) continue;
+    StringRef attr_name = attr.getName().strref();
+    // Skip the registered or optional attribute.
+    if (registered.contains(attr_name) ||
+        GetOptionalAttributes().contains(attr_name))
+      continue;
 
     // Unregistered attribute.
     if (GetAllowedAttributes().contains(attr_name)) {
-      dst->setAttr(attr.first, attr.second);
+      dst->setAttr(attr.getName(), attr.getValue());
     } else {
       src->emitError("Denied unregistered attribute was found: " + attr_name);
       return failure();
@@ -156,7 +175,7 @@ LogicalResult CopyNonSymbolRefAttrs(CallOp src, Operation* dst) {
   CollectAllowedAttrs(src, &attrs);
 
   for (auto& attr : attrs) {
-    dst->setAttr(attr.first, attr.second);
+    dst->setAttr(attr.getName(), attr.getValue());
   }
 
   return success();

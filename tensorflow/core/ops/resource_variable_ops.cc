@@ -13,6 +13,8 @@
 // limitations under the License.
 // ============================================================================
 
+#include <algorithm>
+
 #include "tensorflow/core/framework/common_shape_fns.h"
 #include "tensorflow/core/framework/function.h"
 #include "tensorflow/core/framework/node_def_util.h"
@@ -29,27 +31,40 @@ namespace tensorflow {
 
 namespace {
 
-Status ReadVariableShapeFn(InferenceContext* c) {
-  std::vector<ShapeAndType> shape_and_type;
-  TF_RETURN_IF_ERROR(
-      shape_inference::ValidateVariableResourceHandle(c, &shape_and_type));
-  c->set_output(0, shape_and_type[0].shape);
-  if (shape_and_type[0].dtype == DT_VARIANT && shape_and_type.size() > 1) {
-    std::vector<ShapeAndType> variant_shape_and_type;
-    std::copy(shape_and_type.begin() + 1, shape_and_type.end(),
-              std::back_inserter(variant_shape_and_type));
-    c->set_output_handle_shapes_and_types(0, variant_shape_and_type);
+absl::Status ReadVariableShapeFn(InferenceContext* c) {
+  // The user can add a "_shape" atribute to ReadVariableOp nodes. It is
+  // useful for inferring shapes in a function, when no shape information
+  // is passed about input resources. The user can annotate the graph using
+  // the variable capture list of the function.
+  // If the "_shape" attribute is found, it is used to set the output shape.
+  PartialTensorShape p;
+  absl::Status annotation_found_status = c->GetAttr("_shape", &p);
+  if (annotation_found_status.ok()) {
+    ShapeHandle s;
+    TF_RETURN_IF_ERROR(c->MakeShapeFromPartialTensorShape(p, &s));
+    c->set_output(0, s);
+  } else {
+    std::vector<ShapeAndType> shape_and_type;
+    TF_RETURN_IF_ERROR(
+        shape_inference::ValidateVariableResourceHandle(c, &shape_and_type));
+    c->set_output(0, shape_and_type[0].shape);
+    if (shape_and_type[0].dtype == DT_VARIANT && shape_and_type.size() > 1) {
+      std::vector<ShapeAndType> variant_shape_and_type;
+      std::copy(shape_and_type.begin() + 1, shape_and_type.end(),
+                std::back_inserter(variant_shape_and_type));
+      c->set_output_handle_shapes_and_types(0, variant_shape_and_type);
+    }
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-Status ReadVariablesShapeFn(InferenceContext* c) {
+absl::Status ReadVariablesShapeFn(InferenceContext* c) {
   int n;
   TF_RETURN_IF_ERROR(c->GetAttr("N", &n));
   DataTypeVector value_dtypes;
   TF_RETURN_IF_ERROR(c->GetAttr("dtypes", &value_dtypes));
   if (n != value_dtypes.size()) {
-    return errors::InvalidArgument(
+    return absl::InvalidArgumentError(
         "Mismatched number of arguments to ReadVariablesOp");
   }
   for (int i = 0; i < n; ++i) {
@@ -61,16 +76,16 @@ Status ReadVariablesShapeFn(InferenceContext* c) {
     } else {
       shape_and_type = (*handle_data)[0];
       if (shape_and_type.dtype != value_dtypes[i]) {
-        return errors::InvalidArgument(
-            "Trying to read variable with wrong dtype. "
-            "Expected ",
-            DataTypeString(shape_and_type.dtype), " got ",
-            DataTypeString(value_dtypes[i]));
+        return absl::InvalidArgumentError(
+            absl::StrCat("Trying to read variable with wrong dtype. "
+                         "Expected ",
+                         DataTypeString(shape_and_type.dtype), " got ",
+                         DataTypeString(value_dtypes[i])));
       }
     }
     c->set_output(i, shape_and_type.shape);
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 }  // namespace
@@ -78,6 +93,7 @@ Status ReadVariablesShapeFn(InferenceContext* c) {
 REGISTER_OP("VarHandleOp")
     .Attr("container: string = ''")
     .Attr("shared_name: string = ''")
+    .Attr("debug_name: string = ''")
     .Attr("dtype: type")
     .Attr("shape: shape")
     .Attr("allowed_devices: list(string) = []")
@@ -94,7 +110,7 @@ REGISTER_OP("VarHandleOp")
       c->set_output_handle_shapes_and_types(0,
                                             std::vector<ShapeAndType>{{s, t}});
 
-      return Status::OK();
+      return absl::OkStatus();
     });
 
 REGISTER_OP("_VarHandlesOp")
@@ -113,12 +129,14 @@ REGISTER_OP("_VarHandlesOp")
       std::vector<PartialTensorShape> shapes;
       TF_RETURN_IF_ERROR(c->GetAttr("shapes", &shapes));
       if (dtypes.size() != n) {
-        return errors::InvalidArgument("Mismatched number of dtypes (n=", n,
-                                       ", num dtypes=", dtypes.size(), ")");
+        return absl::InvalidArgumentError(
+            absl::StrCat("Mismatched number of dtypes (n=", n,
+                         ", num dtypes=", dtypes.size(), ")"));
       }
       if (shapes.size() != n) {
-        return errors::InvalidArgument("Mismatched number of shapes (n=", n,
-                                       ", num shapes=", shapes.size(), ")");
+        return absl::InvalidArgumentError(
+            absl::StrCat("Mismatched number of shapes (n=", n,
+                         ", num shapes=", shapes.size(), ")"));
       }
       for (int i = 0; i < n; ++i) {
         c->set_output(i, c->Scalar());
@@ -128,7 +146,7 @@ REGISTER_OP("_VarHandlesOp")
             i, std::vector<ShapeAndType>{{s, dtypes[i]}});
       }
 
-      return Status::OK();
+      return absl::OkStatus();
     });
 
 REGISTER_OP("ReadVariableOp")
@@ -144,7 +162,7 @@ REGISTER_OP("_ReadVariablesOp")
     .Attr("dtypes: list(type)")
     .SetShapeFn(ReadVariablesShapeFn);
 
-Status ReadGrad(const AttrSlice& attrs, FunctionDef* g) {
+absl::Status ReadGrad(const AttrSlice& attrs, FunctionDef* g) {
   // clang-format off
   *g = FunctionDefHelper::Define(
       // Arg defs
@@ -156,7 +174,7 @@ Status ReadGrad(const AttrSlice& attrs, FunctionDef* g) {
       // Nodes
       {});
   // clang-format on
-  return Status::OK();
+  return absl::OkStatus();
 }
 REGISTER_OP_GRADIENT("ReadVariableOp", ReadGrad);
 
@@ -166,7 +184,7 @@ REGISTER_OP("DestroyResourceOp")
     .SetIsStateful()
     .SetShapeFn(shape_inference::NoOutputs);
 
-Status CreateAssignShapeFn(InferenceContext* c) {
+absl::Status CreateAssignShapeFn(InferenceContext* c) {
   std::vector<ShapeAndType> handle_shape_and_type;
   TF_RETURN_IF_ERROR(shape_inference::ValidateVariableResourceHandle(
       c, &handle_shape_and_type));
@@ -182,20 +200,21 @@ Status CreateAssignShapeFn(InferenceContext* c) {
     auto* value_handle_shape_and_type = c->input_handle_shapes_and_types(1);
     if (value_handle_shape_and_type->size() !=
         handle_shape_and_type.size() - 1) {
-      return errors::InvalidArgument(
+      return absl::InvalidArgumentError(absl::StrCat(
           "Incompatible handle variant shape_and_type size and input "
           "shape_and_type size: ",
           handle_shape_and_type.size() - 1, " vs. ",
-          value_handle_shape_and_type->size());
+          value_handle_shape_and_type->size()));
     }
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 REGISTER_OP("AssignVariableOp")
     .Input("resource: resource")
     .Input("value: dtype")
     .Attr("dtype: type")
+    .Attr("validate_shape: bool = false")
     .SetShapeFn(CreateAssignShapeFn);
 
 REGISTER_OP("AssignAddVariableOp")
@@ -215,17 +234,17 @@ REGISTER_OP("VarIsInitializedOp")
     .Output("is_initialized: bool")
     .SetShapeFn(tensorflow::shape_inference::ScalarShape);
 
-Status VariableShapeShapeFn(InferenceContext* c) {
+absl::Status VariableShapeShapeFn(InferenceContext* c) {
   auto* handle_data = c->input_handle_shapes_and_types(0);
   if (handle_data == nullptr || handle_data->empty()) {
     c->set_output(0, c->Vector(c->UnknownDim()));
-    return Status::OK();
+    return absl::OkStatus();
   }
   ShapeHandle var_shape = (*handle_data)[0].shape;
   int64_t rank = c->RankKnown(var_shape) ? c->Rank(var_shape)
                                          : InferenceContext::kUnknownDim;
   c->set_output(0, c->Vector(rank));
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 REGISTER_OP("VariableShape")
@@ -253,8 +272,8 @@ REGISTER_OP("ResourceGather")
       int32_t batch_dims;
       TF_RETURN_IF_ERROR(c->GetAttr("batch_dims", &batch_dims));
       if (batch_dims < 0)
-        return errors::InvalidArgument("batch_dims is negative (", batch_dims,
-                                       ")");
+        return absl::InvalidArgumentError(
+            absl::StrCat("batch_dims is negative (", batch_dims, ")"));
 
       TF_RETURN_IF_ERROR(c->WithRankAtLeast(handle_shape_and_type[0].shape,
                                             batch_dims + 1, &unused));
@@ -290,7 +309,7 @@ REGISTER_OP("ResourceGather")
                   std::back_inserter(variant_shape_and_type));
         c->set_output_handle_shapes_and_types(0, variant_shape_and_type);
       }
-      return Status::OK();
+      return absl::OkStatus();
     });
 
 REGISTER_OP("ResourceGatherNd")
@@ -303,7 +322,7 @@ REGISTER_OP("ResourceGatherNd")
 
 namespace {
 
-Status ResourceScatterUpdateShape(InferenceContext* c) {
+absl::Status ResourceScatterUpdateShape(InferenceContext* c) {
   std::vector<ShapeAndType> handle_shape_and_type;
   TF_RETURN_IF_ERROR(shape_inference::ValidateVariableResourceHandle(
       c, &handle_shape_and_type));
@@ -317,7 +336,7 @@ Status ResourceScatterUpdateShape(InferenceContext* c) {
   TF_RETURN_IF_ERROR(c->Concatenate(indices_shape, var_subshape, &concat));
   TF_RETURN_IF_ERROR(
       InferenceContext::Rank(c->input(2)) == 0
-          ? Status::OK()
+          ? absl::OkStatus()
           : c->Merge(c->input(2), concat, &unused_updates_shape));
   if (handle_shape_and_type[0].dtype == DT_VARIANT &&
       handle_shape_and_type.size() > 1 &&
@@ -325,14 +344,14 @@ Status ResourceScatterUpdateShape(InferenceContext* c) {
     auto* value_handle_shape_and_type = c->input_handle_shapes_and_types(2);
     if (value_handle_shape_and_type->size() !=
         handle_shape_and_type.size() - 1) {
-      return errors::InvalidArgument(
+      return absl::InvalidArgumentError(absl::StrCat(
           "Incompatible handle variant shape_and_type size and input "
           "shape_and_type size: ",
           handle_shape_and_type.size() - 1, " vs. ",
-          value_handle_shape_and_type->size());
+          value_handle_shape_and_type->size()));
     }
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 }  // namespace
@@ -400,7 +419,7 @@ REGISTER_OP("MutexV2")
     .SetIsStateful()
     .SetShapeFn([](InferenceContext* c) {
       c->set_output(0, c->Scalar());
-      return Status::OK();
+      return absl::OkStatus();
     });
 
 REGISTER_OP("MutexLock")
@@ -410,12 +429,16 @@ REGISTER_OP("MutexLock")
     .SetTypeConstructor(full_type::Nullary(TFT_MUTEX_LOCK))
     .SetShapeFn([](InferenceContext* c) {
       c->set_output(0, c->Scalar());
-      return Status::OK();
+      return absl::OkStatus();
     });
 
 REGISTER_OP("ConsumeMutexLock")
     .Input("mutex_lock: variant")
     .SetIsStateful()
-    .SetShapeFn([](InferenceContext* c) { return Status::OK(); });
+    .SetShapeFn([](InferenceContext* c) { return absl::OkStatus(); });
+
+REGISTER_OP("DisableCopyOnRead")
+    .Input("resource: resource")
+    .SetShapeFn(shape_inference::NoOutputs);
 
 }  // namespace tensorflow

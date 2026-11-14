@@ -16,13 +16,18 @@ limitations under the License.
 #ifndef TENSORFLOW_CORE_KERNELS_POOLING_OPS_COMMON_H_
 #define TENSORFLOW_CORE_KERNELS_POOLING_OPS_COMMON_H_
 
+#include <cstdint>
+#include <limits>
+#include <type_traits>
 #include <vector>
 
 #if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 #define EIGEN_USE_GPU
 #endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 
-#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
+#include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
+#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
 #include "tensorflow/core/framework/bounds_check.h"
 #include "tensorflow/core/framework/numeric_op.h"
 #include "tensorflow/core/framework/op_kernel.h"
@@ -42,18 +47,27 @@ namespace tensorflow {
 
 typedef Eigen::GpuDevice GPUDevice;
 
+inline absl::Status ValidateGpuInputSize(const Tensor& tensor_in) {
+  if (tensor_in.NumElements() > std::numeric_limits<int32_t>::max()) {
+    return absl::InvalidArgumentError(absl::StrCat(
+        "MaxPool on GPU supports at most ", std::numeric_limits<int32_t>::max(),
+        " input elements, got ", tensor_in.NumElements()));
+  }
+  return absl::OkStatus();
+}
+
 // A helper class to manage sizes and shapes for pooling operations.
 struct PoolParameters {
   // Updates context->status if there is an invalid input.
   // explicit_paddings has eight elements if padding==EXPLIICT, and zero
   // elements otherwise.
-  PoolParameters(OpKernelContext* context, const std::vector<int32>& ksize,
-                 const std::vector<int32>& stride, Padding padding,
+  PoolParameters(OpKernelContext* context, const std::vector<int32_t>& ksize,
+                 const std::vector<int32_t>& stride, Padding padding,
                  std::vector<int64_t> explicit_paddings,
                  TensorFormat data_format, const TensorShape& tensor_in_shape);
 
   // Returns the shape of the output for "forward" pooling operations.
-  TensorShape forward_output_shape();
+  absl::Status forward_output_shape(TensorShape* shape);
 
   int depth;
 
@@ -83,11 +97,6 @@ struct PoolParameters {
   TensorFormat data_format;
 };
 
-// Checks if the sizes of the paddings are less than the size of window.
-// This is required for MaxPool because it pads with -inf, so the pooling
-// window cannot fully cover the padded area.
-Status CheckPaddingSize(PoolParameters& params);
-
 // An implementation of MaxPooling (forward).
 // TODO (yongtang): Remove MaxPoolingOp and use MaxPoolingV2Op,
 //     QuantizedMaxPoolingOp depends on MaxPoolingOp so keep intact for now
@@ -95,39 +104,41 @@ template <typename Device, typename T>
 class MaxPoolingOp : public OpKernel {
  public:
   explicit MaxPoolingOp(OpKernelConstruction* context) : OpKernel(context) {
-    string data_format;
+    std::string data_format;
     auto status = context->GetAttr("data_format", &data_format);
     if (status.ok()) {
       OP_REQUIRES(context, FormatFromString(data_format, &data_format_),
-                  errors::InvalidArgument("Invalid data format"));
+                  absl::InvalidArgumentError("Invalid data format"));
       OP_REQUIRES(
           context, data_format_ == FORMAT_NHWC,
-          errors::InvalidArgument("Default MaxPoolingOp only supports NHWC ",
-                                  "on device type ",
-                                  DeviceTypeString(context->device_type())));
+          absl::InvalidArgumentError(absl::StrCat(
+              "Default MaxPoolingOp only supports NHWC ", "on device type ",
+              DeviceTypeString(context->device_type()))));
     } else {
       data_format_ = FORMAT_NHWC;
     }
     OP_REQUIRES_OK(context, context->GetAttr("ksize", &ksize_));
     OP_REQUIRES(context, ksize_.size() == 4,
-                errors::InvalidArgument("Sliding window ksize field must "
-                                        "specify 4 dimensions"));
-    for (int i = 0; i < ksize_.size(); ++i) {
-      OP_REQUIRES(context, ksize_[i] > 0,
-                  errors::InvalidArgument("Sliding window ksize for dimension ",
-                                          i, " was zero."));
-    }
+                absl::InvalidArgumentError("Sliding window ksize field must "
+                                           "specify 4 dimensions"));
+    OP_REQUIRES(
+        context,
+        ksize_[0] > 0 && ksize_[1] > 0 && ksize_[2] > 0 && ksize_[3] > 0,
+        absl::InvalidArgumentError(
+            absl::StrCat("Sliding window ksize must be positive. The "
+                         "specified or inferred ksize is: ",
+                         absl::StrJoin(ksize_, ","))));
     OP_REQUIRES_OK(context, context->GetAttr("strides", &stride_));
     OP_REQUIRES(context, stride_.size() == 4,
-                errors::InvalidArgument("Sliding window stride field must "
-                                        "specify 4 dimensions"));
+                absl::InvalidArgumentError("Sliding window stride field must "
+                                           "specify 4 dimensions"));
     OP_REQUIRES_OK(context, context->GetAttr("padding", &padding_));
     if (padding_ == Padding::EXPLICIT) {
       OP_REQUIRES_OK(
           context, context->GetAttr("explicit_paddings", &explicit_paddings_));
     }
     OP_REQUIRES(context, ksize_[0] == 1 && stride_[0] == 1,
-                errors::Unimplemented(
+                absl::UnimplementedError(
                     "Pooling is not yet supported on the batch dimension."));
   }
 
@@ -141,32 +152,34 @@ class MaxPoolingOp : public OpKernel {
     }
 
     Tensor* output = nullptr;
+    TensorShape params_forward_output_shape;
+    OP_REQUIRES_OK(context,
+                   params.forward_output_shape(&params_forward_output_shape));
     OP_REQUIRES_OK(context, context->allocate_output(
-                                0, params.forward_output_shape(), &output));
+                                0, params_forward_output_shape, &output));
 
     if (params.depth_window > 1) {
       // Validate spec against the current implementation.  A
       // relaxation of these requirements would be ideal.
       OP_REQUIRES(context, params.depth % params.depth_window == 0,
-                  errors::Unimplemented(
+                  absl::UnimplementedError(
                       "Depthwise max pooling requires "
                       "the depth window to evenly divide the input depth."));
-      OP_REQUIRES(
-          context, params.depth_window == params.depth_stride,
-          errors::Unimplemented("Depthwise max pooling requires "
-                                "the depth window to equal the depth stride."));
+      OP_REQUIRES(context, params.depth_window == params.depth_stride,
+                  absl::UnimplementedError(
+                      "Depthwise max pooling requires "
+                      "the depth window to equal the depth stride."));
       OP_REQUIRES(
           context, padding_ != EXPLICIT,
-          errors::Unimplemented("Depthwise max pooling does not support "
-                                "explicit padding."));
+          absl::UnimplementedError("Depthwise max pooling does not support "
+                                   "explicit padding."));
 
       DepthwiseMaxPool(context, output, tensor_in, params);
     } else {
       // MaxPoolingOp is only called on the GPU when the eigen_tensor label
       // is used. In this case, explicit padding is not supported
-      if (std::is_same<Device, GPUDevice>::value &&
-          padding_ == Padding::EXPLICIT) {
-        context->SetStatus(errors::Unimplemented(
+      if (std::is_same_v<Device, GPUDevice> && padding_ == Padding::EXPLICIT) {
+        context->SetStatus(absl::UnimplementedError(
             "MaxPoolingOp does not support explicit padding."));
         return;
       }
@@ -194,12 +207,15 @@ class MaxPoolingOp : public OpKernel {
   void SpatialMaxPool(OpKernelContext* context, Tensor* output,
                       const Tensor& tensor_in, const PoolParameters& params,
                       const Padding& padding) {
+    if (output->NumElements() == 0) {
+      return;
+    }
     // On GPU, use Eigen's Spatial Max Pooling.  On CPU, use an
     // EigenMatrix version that is currently faster than Eigen's
     // Spatial MaxPooling implementation.
     //
     // TODO(vrv): Remove this once we no longer need it.
-    if (std::is_same<Device, GPUDevice>::value) {
+    if (std::is_same_v<Device, GPUDevice>) {
       Eigen::PaddingType pt = BrainPadding2EigenPadding(padding);
       functor::SpatialMaxPooling<Device, T>()(
           context->eigen_device<Device>(), output->tensor<T, 4>(),
@@ -294,8 +310,8 @@ class MaxPoolingOp : public OpKernel {
     }
   }
 
-  std::vector<int32> ksize_;
-  std::vector<int32> stride_;
+  std::vector<int32_t> ksize_;
+  std::vector<int32_t> stride_;
   Padding padding_;
   std::vector<int64_t> explicit_paddings_;
   TensorFormat data_format_;
@@ -310,17 +326,16 @@ struct LaunchMaxPoolingNoMask_NCHW_VECT_C<Eigen::GpuDevice> {
   static void launch(OpKernelContext* context, const PoolParameters& params,
                      const Tensor& input, Tensor* output) {
 #if GOOGLE_CUDA
-    bool status = functor::MaxPoolForwardNoMask_NCHW_VECT_C()(
-        reinterpret_cast<const int32*>(input.flat<qint8>().data()),
+    absl::Status status = functor::MaxPoolForwardNoMask_NCHW_VECT_C()(
+        reinterpret_cast<const int32_t*>(input.flat<qint8>().data()),
         params.tensor_in_batch, params.tensor_in_rows, params.tensor_in_cols,
         params.depth, params.out_height, params.out_width, params.window_rows,
         params.window_cols, params.row_stride, params.col_stride,
         params.pad_top, params.pad_left,
-        reinterpret_cast<int32*>(output->flat<qint8>().data()),
+        reinterpret_cast<int32_t*>(output->flat<qint8>().data()),
         context->eigen_gpu_device());
-    if (!status) {
-      context->SetStatus(errors::Internal(
-          "Failed launching LaunchMaxPoolingNoMask_NCHW_VECT_C"));
+    if (!status.ok()) {
+      context->SetStatus(status);
     }
 #else
     // ROCm TODO: add support __vmaxs4 on ROCm
@@ -335,31 +350,35 @@ template <typename Device, typename T>
 class MaxPoolingV2Op : public OpKernel {
  public:
   explicit MaxPoolingV2Op(OpKernelConstruction* context) : OpKernel(context) {
-    string data_format;
+    std::string data_format;
     auto status = context->GetAttr("data_format", &data_format);
     if (status.ok()) {
       OP_REQUIRES(context, FormatFromString(data_format, &data_format_),
-                  errors::InvalidArgument("Invalid data format"));
+                  absl::InvalidArgumentError("Invalid data format"));
       OP_REQUIRES(
           context,
           data_format_ == FORMAT_NHWC || data_format_ == FORMAT_NCHW_VECT_C,
-          errors::InvalidArgument(
+          absl::InvalidArgumentError(absl::StrCat(
               "MaxPoolingV2Op only supports NHWC or NCHW_VECT_C. Got: ",
-              data_format));
+              data_format)));
     } else {
       data_format_ = FORMAT_NHWC;
     }
     if (context->num_inputs() == 1) {
       OP_REQUIRES_OK(context, context->GetAttr("ksize", &ksize_));
       OP_REQUIRES(context, ksize_.size() == 4,
-                  errors::InvalidArgument("Sliding window ksize field must "
-                                          "specify 4 dimensions"));
+                  absl::InvalidArgumentError("Sliding window ksize field must "
+                                             "specify 4 dimensions"));
+      OP_REQUIRES(
+          context,
+          ksize_[0] > 0 && ksize_[1] > 0 && ksize_[2] > 0 && ksize_[3] > 0,
+          absl::InvalidArgumentError("Sliding window ksize must be positive."));
       OP_REQUIRES_OK(context, context->GetAttr("strides", &stride_));
       OP_REQUIRES(context, stride_.size() == 4,
-                  errors::InvalidArgument("Sliding window stride field must "
-                                          "specify 4 dimensions"));
+                  absl::InvalidArgumentError("Sliding window stride field must "
+                                             "specify 4 dimensions"));
       OP_REQUIRES(context, ksize_[0] == 1 && stride_[0] == 1,
-                  errors::Unimplemented(
+                  absl::UnimplementedError(
                       "Pooling is not yet supported on the batch dimension."));
     }
     OP_REQUIRES_OK(context, context->GetAttr("padding", &padding_));
@@ -368,30 +387,37 @@ class MaxPoolingV2Op : public OpKernel {
   void Compute(OpKernelContext* context) override {
     const Tensor& tensor_in = context->input(0);
 
-    std::vector<int32> ksize = ksize_;
-    std::vector<int32> stride = stride_;
+    std::vector<int32_t> ksize = ksize_;
+    std::vector<int32_t> stride = stride_;
 
     if (context->num_inputs() != 1) {
       const Tensor& tensor_ksize = context->input(1);
-      auto value_ksize = tensor_ksize.flat<int32>();
+      auto value_ksize = tensor_ksize.flat<int32_t>();
       ksize.resize(tensor_ksize.shape().num_elements());
       std::copy_n(&value_ksize(0), ksize.size(), ksize.begin());
 
       const Tensor& tensor_stride = context->input(2);
-      auto value_stride = tensor_stride.flat<int32>();
+      auto value_stride = tensor_stride.flat<int32_t>();
       stride.resize(tensor_stride.shape().num_elements());
       std::copy_n(&value_stride(0), stride.size(), stride.begin());
     }
 
     OP_REQUIRES(context, ksize.size() == 4,
-                errors::InvalidArgument("Sliding window ksize field must "
-                                        "specify 4 dimensions"));
+                absl::InvalidArgumentError("Sliding window ksize field must "
+                                           "specify 4 dimensions"));
+    OP_REQUIRES(
+        context, ksize[0] > 0 && ksize[1] > 0 && ksize[2] > 0 && ksize[3] > 0,
+        absl::InvalidArgumentError("Sliding window ksize must be positive."));
     OP_REQUIRES(context, stride.size() == 4,
-                errors::InvalidArgument("Sliding window stride field must "
-                                        "specify 4 dimensions"));
+                absl::InvalidArgumentError("Sliding window stride field must "
+                                           "specify 4 dimensions"));
     OP_REQUIRES(context, ksize[0] == 1 && stride[0] == 1,
-                errors::Unimplemented(
+                absl::UnimplementedError(
                     "Pooling is not yet supported on the batch dimension."));
+    if constexpr (std::is_same_v<Device, GPUDevice> &&
+                  std::is_same_v<T, qint8>) {
+      OP_REQUIRES_OK(context, ValidateGpuInputSize(tensor_in));
+    }
 
     PoolParameters params{
         context,
@@ -407,20 +433,23 @@ class MaxPoolingV2Op : public OpKernel {
     }
 
     Tensor* output = nullptr;
+    TensorShape params_forward_output_shape;
+    OP_REQUIRES_OK(context,
+                   params.forward_output_shape(&params_forward_output_shape));
     OP_REQUIRES_OK(context, context->allocate_output(
-                                0, params.forward_output_shape(), &output));
+                                0, params_forward_output_shape, &output));
 
     if (params.depth_window > 1) {
       // Validate spec against the current implementation.  A
       // relaxation of these requirements would be ideal.
       OP_REQUIRES(context, params.depth % params.depth_window == 0,
-                  errors::Unimplemented(
+                  absl::UnimplementedError(
                       "Depthwise max pooling requires "
                       "the depth window to evenly divide the input depth."));
-      OP_REQUIRES(
-          context, params.depth_window == params.depth_stride,
-          errors::Unimplemented("Depthwise max pooling requires "
-                                "the depth window to equal the depth stride."));
+      OP_REQUIRES(context, params.depth_window == params.depth_stride,
+                  absl::UnimplementedError(
+                      "Depthwise max pooling requires "
+                      "the depth window to equal the depth stride."));
 
       DepthwiseMaxPool(context, output, tensor_in, params);
     } else {
@@ -448,15 +477,18 @@ class MaxPoolingV2Op : public OpKernel {
   void SpatialMaxPool(OpKernelContext* context, Tensor* output,
                       const Tensor& tensor_in, const PoolParameters& params,
                       const Padding& padding) {
+    if (output->NumElements() == 0) {
+      return;
+    }
     // On GPU, use Eigen's Spatial Max Pooling.  On CPU, use an
     // EigenMatrix version that is currently faster than Eigen's
     // Spatial MaxPooling implementation.
     //
     // TODO(vrv): Remove this once we no longer need it.
 #if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
-    if (std::is_same<Device, GPUDevice>::value) {
+    if (std::is_same_v<Device, GPUDevice>) {
       Eigen::PaddingType pt = BrainPadding2EigenPadding(padding);
-      if (std::is_same<T, qint8>::value) {
+      if (std::is_same_v<T, qint8>) {
         LaunchMaxPoolingNoMask_NCHW_VECT_C<GPUDevice>::launch(
             context, params, tensor_in, output);
       } else {
@@ -556,8 +588,8 @@ class MaxPoolingV2Op : public OpKernel {
     }
   }
 
-  std::vector<int32> ksize_;
-  std::vector<int32> stride_;
+  std::vector<int32_t> ksize_;
+  std::vector<int32_t> stride_;
   Padding padding_;
   TensorFormat data_format_;
 };
@@ -566,6 +598,9 @@ template <typename Device, typename T>
 void SpatialAvgPool(OpKernelContext* context, Tensor* output,
                     const Tensor& input, const PoolParameters& params,
                     const Padding& padding) {
+  if (output->NumElements() == 0) {
+    return;
+  }
   typedef Eigen::Map<const Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>>
       ConstEigenMatrixMap;
   typedef Eigen::Map<Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>>

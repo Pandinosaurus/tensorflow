@@ -56,7 +56,7 @@ class PermuterTest : public ::testing::Test {
     for (int wi = 0; wi < num_workers; ++wi) {
       for (int di = 0; di < num_devices; ++di) {
         int rank = wi * num_devices + di;
-        instances_.push_back(absl::make_unique<DeviceInstance>(
+        instances_.push_back(std::make_unique<DeviceInstance>(
             rank, permutation, dtype, shape, test_env_.get()));
       }
     }
@@ -124,9 +124,8 @@ class PermuterTest : public ::testing::Test {
     for (int di = 0; di < instances_.size(); ++di) {
       if (!instances_[di]->status_.ok()) {
         ASSERT_GT(fail_after, 0);
-        ASSERT_NE(
-            instances_[di]->status_.error_message().find("Deliberate failure"),
-            string::npos);
+        ASSERT_NE(instances_[di]->status_.message().find("Deliberate failure"),
+                  std::string::npos);
         continue;
       }
       TF_EXPECT_OK(instances_[di]->status_);
@@ -150,7 +149,7 @@ class PermuterTest : public ::testing::Test {
       for (const CollGroupMember& member : col_params_->group.members) {
         col_params_->instance.devices.push_back(member.device.name());
       }
-      string dev_name = col_params_->group.members[rank].device.name();
+      std::string dev_name = col_params_->group.members[rank].device.name();
       TF_CHECK_OK(test_env_->device_mgr->LookupDevice(dev_name, &device_))
           << "Couldn't find device " << dev_name
           << " existing devices: " << test_env_->device_mgr->DebugString();
@@ -168,7 +167,7 @@ class PermuterTest : public ::testing::Test {
     Tensor output_tensor_;
     Device* device_;
     core::RefCountPtr<CollectiveParams> col_params_;
-    Status status_;
+    absl::Status status_;
   };  // class DeviceInstance
 
   std::unique_ptr<CollectiveTestEnv> test_env_;

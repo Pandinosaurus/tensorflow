@@ -13,10 +13,6 @@
 # limitations under the License.
 # ==============================================================================
 """Smoke test for reading records from GCS to TensorFlow."""
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import random
 import sys
 import time
@@ -96,7 +92,7 @@ def create_dir_test():
   print(directory_contents)
   elapsed_ms = int(round(time.time() * 1000)) - starttime_ms
   print("Listed directory %s in %s milliseconds" % (dir_name, elapsed_ms))
-  assert set(directory_contents) == set(files_to_create + ["nested_dir1/"])
+  assert set(directory_contents) == set(files_to_create + ["nested_dir1"])
 
   # Test directory renaming.
   dir_to_rename = "%s/old_dir" % dir_name

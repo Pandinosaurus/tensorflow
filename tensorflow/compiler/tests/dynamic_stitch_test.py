@@ -14,10 +14,6 @@
 # ==============================================================================
 """Tests for tf.dynamic_stitch."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import numpy as np
 
 from tensorflow.compiler.tests import xla_test
@@ -75,6 +71,12 @@ class DynamicStitchTest(xla_test.XLATestCase):
     expected = np.array([0, 10, 20, 30, 40, 50, 60, 70], dtype=np.float32)
     self._AssertDynamicStitchResultIs(
         [val1, val2], [val3, val4], expected=expected)
+
+  def testMissingIndicesZeroFilled(self):
+    idx = np.array([4, 4, 4, 4], dtype=np.int32)
+    data = np.array([1, 2, 3, 4], dtype=np.int32)
+    expected = np.array([0, 0, 0, 0, 4], dtype=np.int32)
+    self._AssertDynamicStitchResultIs([idx], [data], expected=expected)
 
   def testSimple2D(self):
     val1 = np.array([0, 4, 7], dtype=np.int32)

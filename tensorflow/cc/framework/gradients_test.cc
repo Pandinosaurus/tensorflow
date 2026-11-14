@@ -456,10 +456,10 @@ TEST_F(GradientsTest, UnreachableInput) {
   //  / \ / \
   // z   y   x
   std::vector<Output> grad_outputs;
-  Status status =
+  absl::Status status =
       AddSymbolicGradients(scope_test_, {m1}, {z}, {dm1}, &grad_outputs);
   EXPECT_EQ(status.code(), error::INVALID_ARGUMENT);
-  EXPECT_EQ(status.error_message(),
+  EXPECT_EQ(status.message(),
             "Cannot compute the partial derivative"
             " for node 'z' as it's unreachable from the output node(s).");
 }
@@ -520,7 +520,7 @@ TEST_F(GradientsTest, AddSymbolicGradientsTest) {
     // Construct grad inputs.
     OutputList output_grads;
     Tensor ts(DT_INT32, {N, 1});
-    auto v = ts.matrix<int32>();
+    auto v = ts.matrix<int32_t>();
     for (int i = 0; i < N; ++i) {
       v(i, 0) = i;
     }

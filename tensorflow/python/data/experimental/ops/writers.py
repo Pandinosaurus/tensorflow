@@ -13,16 +13,13 @@
 # limitations under the License.
 # ==============================================================================
 """Python wrappers for tf.data writers."""
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 from tensorflow.python.data.ops import dataset_ops
 from tensorflow.python.data.util import convert
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import ops
 from tensorflow.python.framework import tensor_spec
 from tensorflow.python.ops import gen_experimental_dataset_ops
+from tensorflow.python.types import data as data_types
 from tensorflow.python.util import deprecation
 from tensorflow.python.util.tf_export import tf_export
 
@@ -32,7 +29,7 @@ from tensorflow.python.util.tf_export import tf_export
     None, "To write TFRecords to disk, use `tf.io.TFRecordWriter`. To save "
     "and load the contents of a dataset, use `tf.data.experimental.save` "
     "and `tf.data.experimental.load`")
-class TFRecordWriter(object):
+class TFRecordWriter:
   """Writes a dataset to a TFRecord file.
 
   The elements of the dataset must be scalar strings. To serialize dataset
@@ -111,7 +108,7 @@ class TFRecordWriter(object):
       TypeError: if `dataset` is not a `tf.data.Dataset`.
       TypeError: if the elements produced by the dataset are not scalar strings.
     """
-    if not isinstance(dataset, dataset_ops.DatasetV2):
+    if not isinstance(dataset, data_types.DatasetV2):
       raise TypeError(
           f"Invalid `dataset.` Expected a `tf.data.Dataset` object but got "
           f"{type(dataset)}."

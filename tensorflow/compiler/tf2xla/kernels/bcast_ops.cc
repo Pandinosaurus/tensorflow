@@ -16,12 +16,20 @@ limitations under the License.
 // XLA-specific Ops for broadcasting used in gradient
 // code.
 
+#include <cstdint>
+#include <utility>
+#include <vector>
+
+#include "absl/container/inlined_vector.h"
+#include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
 #include "absl/strings/str_join.h"
 #include "tensorflow/compiler/tf2xla/xla_helpers.h"
 #include "tensorflow/compiler/tf2xla/xla_op_kernel.h"
 #include "tensorflow/compiler/tf2xla/xla_op_registry.h"
-#include "tensorflow/compiler/xla/client/value_inference.h"
-#include "tensorflow/compiler/xla/literal.h"
+#include "xla/hlo/builder/value_inference.h"
+#include "xla/literal.h"
+#include "tensorflow/core/framework/types.pb.h"
 #include "tensorflow/core/platform/macros.h"
 #include "tensorflow/core/platform/types.h"
 #include "tensorflow/core/util/bcast.h"
@@ -33,19 +41,19 @@ namespace {
 class BCastArgsOp : public XlaOpKernel {
  public:
   explicit BCastArgsOp(OpKernelConstruction* ctx) : XlaOpKernel(ctx) {
-    OP_REQUIRES_OK(ctx, ctx->MatchSignature({DT_INT32, DT_INT32}, {DT_INT32}));
   }
 
   void Compile(XlaOpKernelContext* ctx) override {
     OP_REQUIRES(
         ctx, ctx->num_inputs() == 2,
-        errors::Unimplemented("Broadcast for n-ary operations (n > 2)"));
+        absl::UnimplementedError("Broadcast for n-ary operations (n > 2)"));
     absl::InlinedVector<BCast::Vec, 2> shapes;
     for (int i = 0; i < ctx->num_inputs(); ++i) {
       const TensorShape in_shape = ctx->InputShape(i);
-      OP_REQUIRES(ctx, TensorShapeUtils::IsVector(in_shape),
-                  errors::InvalidArgument("In[", i, "] must be a vector.",
-                                          in_shape.DebugString()));
+      OP_REQUIRES(
+          ctx, TensorShapeUtils::IsVector(in_shape),
+          absl::InvalidArgumentError(absl::StrCat(
+              "In[", i, "] must be a vector.", in_shape.DebugString())));
       std::vector<int64_t> shape;
       OP_REQUIRES_OK(ctx, ctx->ConstantInputAsIntVector(
                               i, &shape, xla::ValueInferenceMode::kUpperBound));
@@ -53,20 +61,28 @@ class BCastArgsOp : public XlaOpKernel {
     }
     BCast bcast(shapes[0], shapes[1]);
     OP_REQUIRES(ctx, bcast.IsValid(),
-                errors::InvalidArgument(
+                absl::InvalidArgumentError(absl::StrCat(
                     "Incompatible shapes: [", absl::StrJoin(shapes[0], ","),
-                    "] vs. [", absl::StrJoin(shapes[1], ","), "]"));
+                    "] vs. [", absl::StrJoin(shapes[1], ","), "]")));
 
+    DataType val_type = ctx->expected_output_dtype(0);
     const int64_t len = bcast.output_shape().size();
-    Tensor output(DT_INT32, TensorShape({len}));
+    Tensor output(val_type, TensorShape({len}));
     for (int64_t i = 0; i < len; ++i) {
-      output.flat<int32>()(i) = static_cast<int32>(bcast.output_shape()[i]);
+      if (val_type == DT_INT32) {
+        output.flat<int32_t>()(i) =
+            static_cast<int32_t>(bcast.output_shape()[i]);
+      } else {
+        output.flat<int64_t>()(i) =
+            static_cast<int64_t>(bcast.output_shape()[i]);
+      }
     }
     ctx->SetConstantOutput(0, output);
   }
 
  private:
-  TF_DISALLOW_COPY_AND_ASSIGN(BCastArgsOp);
+  BCastArgsOp(const BCastArgsOp&) = delete;
+  void operator=(const BCastArgsOp&) = delete;
 };
 REGISTER_XLA_OP(Name("BroadcastArgs")
                     .CompileTimeConstantInput("s0")
@@ -81,35 +97,68 @@ REGISTER_XLA_OP(Name("BroadcastArgs")
 class BCastGradArgsOp : public XlaOpKernel {
  public:
   explicit BCastGradArgsOp(OpKernelConstruction* ctx) : XlaOpKernel(ctx) {
-    OP_REQUIRES_OK(
-        ctx, ctx->MatchSignature({DT_INT32, DT_INT32}, {DT_INT32, DT_INT32}));
   }
 
   void Compile(XlaOpKernelContext* ctx) override {
     OP_REQUIRES(
         ctx, ctx->num_inputs() == 2,
-        errors::Unimplemented("Broadcast for n-ary operations (n > 2)"));
+        absl::UnimplementedError("Broadcast for n-ary operations (n > 2)"));
 
     absl::InlinedVector<BCast::Vec, 4> shapes;
+    absl::InlinedVector<std::vector<bool>, 2> dynamic_dims;
     for (int i = 0; i < ctx->num_inputs(); ++i) {
       const TensorShape in_shape = ctx->InputShape(i);
-      OP_REQUIRES(ctx, TensorShapeUtils::IsVector(in_shape),
-                  errors::InvalidArgument("In[", i, "] must be a vector.",
-                                          in_shape.DebugString()));
+      OP_REQUIRES(
+          ctx, TensorShapeUtils::IsVector(in_shape),
+          absl::InvalidArgumentError(absl::StrCat(
+              "In[", i, "] must be a vector.", in_shape.DebugString())));
       std::vector<int64_t> vec;
       // Technically we don't need to infer the upper-bound here. However the
       // forward path uses the upperbound as bounded shape so we need backward
       // path to use the same shape to decide the reduction indices.
       OP_REQUIRES_OK(ctx, ctx->ConstantInputAsIntVector(
                               i, &vec, xla::ValueInferenceMode::kUpperBound));
+      std::vector<bool> dynamic;
+      OP_REQUIRES_OK(ctx, ctx->ResolveInputDynamismIntoPredVector(i, &dynamic));
+      OP_REQUIRES(ctx, dynamic.size() == vec.size(),
+                  absl::InternalError(absl::StrCat(
+                      "Size mismatch between input shape vector size (",
+                      vec.size(), ") and dynamism vector size (",
+                      dynamic.size(), ") for input ", i)));
 
       shapes.push_back(BCast::Vec(vec.begin(), vec.end()));
+      dynamic_dims.push_back(std::move(dynamic));
     }
+
+    // A dimension resolved from its upper bound (rather than a true
+    // compile-time constant) can numerically disagree with the other
+    // operand's static dimension even though the two are guaranteed equal at
+    // runtime. The forward broadcasting op already requires this, or it
+    // would have failed itself. Reconcile such axes, aligned from the
+    // trailing dimension per standard broadcasting rules, before the static
+    // compatibility check below, so a dynamic upper bound doesn't cause a
+    // false-positive shape-incompatibility failure.
+    const int64_t rank0 = shapes[0].size();
+    const int64_t rank1 = shapes[1].size();
+    const int64_t common_rank = rank0 < rank1 ? rank0 : rank1;
+    for (int64_t k = 0; k < common_rank; ++k) {
+      const int64_t i0 = rank0 - 1 - k;
+      const int64_t i1 = rank1 - 1 - k;
+      int64_t& d0 = shapes[0][i0];
+      int64_t& d1 = shapes[1][i1];
+      if (d0 == d1 || d0 == 1 || d1 == 1) continue;
+      if (dynamic_dims[0][i0]) {
+        d0 = d1;
+      } else if (dynamic_dims[1][i1]) {
+        d1 = d0;
+      }
+    }
+
     BCast bcast(shapes[0], shapes[1]);
     OP_REQUIRES(ctx, bcast.IsValid(),
-                errors::InvalidArgument(
+                absl::InvalidArgumentError(absl::StrCat(
                     "Incompatible shapes: [", absl::StrJoin(shapes[0], ","),
-                    "] vs. [", absl::StrJoin(shapes[1], ","), "]"));
+                    "] vs. [", absl::StrJoin(shapes[1], ","), "]")));
     Output(ctx, 0, bcast.grad_x_reduce_idx());
     Output(ctx, 1, bcast.grad_y_reduce_idx());
   }
@@ -117,14 +166,20 @@ class BCastGradArgsOp : public XlaOpKernel {
  private:
   void Output(XlaOpKernelContext* ctx, int idx, const BCast::Vec& v) {
     const int64_t len = v.size();
-    Tensor constant(DT_INT32, TensorShape({len}));
+    DataType val_type = ctx->expected_output_dtype(idx);
+    Tensor constant(val_type, TensorShape({len}));
     for (int64_t i = 0; i < len; ++i) {
-      constant.flat<int32>()(i) = static_cast<int32>(v[i]);
+      if (val_type == DT_INT32) {
+        constant.flat<int32_t>()(i) = static_cast<int32_t>(v[i]);
+      } else {
+        constant.flat<int64_t>()(i) = static_cast<int64_t>(v[i]);
+      }
     }
     ctx->SetConstantOutput(idx, constant);
   }
 
-  TF_DISALLOW_COPY_AND_ASSIGN(BCastGradArgsOp);
+  BCastGradArgsOp(const BCastGradArgsOp&) = delete;
+  void operator=(const BCastGradArgsOp&) = delete;
 };
 
 REGISTER_XLA_OP(Name("BroadcastGradientArgs")

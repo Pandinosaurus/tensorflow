@@ -14,6 +14,7 @@ limitations under the License.
 ==============================================================================*/
 
 #include <functional>
+#include <limits>
 #include <memory>
 #include <random>
 #include <vector>
@@ -43,7 +44,7 @@ class DequantizeOpTest : public OpsTestBase {
                                               float min_range, float max_range,
                                               Tensor* output) {
     float half_range =
-        !std::is_signed<T>::value
+        !std::numeric_limits<T>::is_signed
             ? 0.0f
             : (static_cast<float>(std::numeric_limits<T>::max()) -
                std::numeric_limits<T>::min() + 1) /
@@ -63,7 +64,7 @@ class DequantizeOpTest : public OpsTestBase {
   // to not use eigen gives equivalent results to using eigen.
   template <typename T>
   void RunDequantizeMinCombinedTest(float min_range, float max_range,
-                                    const string& op_name) {
+                                    const std::string& op_name) {
     TF_ASSERT_OK(NodeDefBuilder("dequantize_op", op_name)
                      .Input(FakeInput(DataTypeToEnum<T>::v()))
                      .Input(FakeInput(DT_FLOAT))
@@ -128,7 +129,7 @@ class DequantizeOpTest : public OpsTestBase {
   template <typename T>
   std::vector<T> ScalePerSliceAlongAxis(std::vector<int64_t> dims, int axis,
                                         const std::vector<T>& data) {
-    uint32 seed = 123;
+    uint32_t seed = 123;
     std::minstd_rand rng(seed);
     int64_t out_size = 1;
     for (int dim : dims) {
@@ -255,9 +256,10 @@ static void BM_DequantizeMinCombinedCpu(::testing::benchmark::State& state) {
   inputs.reserve(num_values);
   for (int i = 0; i < num_values; ++i) inputs.push_back(i);
 
-  ops::Dequantize(root, test::AsTensor<T>(inputs), test::AsScalar<float>(-1.5f),
-                  test::AsScalar<float>(20.5f),
-                  ops::Dequantize::Attrs().Mode("MIN_COMBINED"));
+  ops::Dequantize give_me_a_name(root, test::AsTensor<T>(inputs),
+                                 test::AsScalar<float>(-1.5f),
+                                 test::AsScalar<float>(20.5f),
+                                 ops::Dequantize::Attrs().Mode("MIN_COMBINED"));
   TF_CHECK_OK(root.status());
   Graph* g = new Graph(OpRegistry::Global());
   TF_CHECK_OK(root.ToGraph(g));
@@ -299,9 +301,10 @@ static void BM_DequantizeBfloat16MinCombinedCpu(
   inputs.reserve(num_values);
   for (int i = 0; i < num_values; ++i) inputs.push_back(i);
 
-  ops::Dequantize(root, test::AsTensor<T>(inputs), test::AsScalar<float>(-1.5f),
-                  test::AsScalar<float>(20.5f),
-                  ops::Dequantize::Attrs().Dtype(DT_BFLOAT16));
+  ops::Dequantize give_me_a_name(root, test::AsTensor<T>(inputs),
+                                 test::AsScalar<float>(-1.5f),
+                                 test::AsScalar<float>(20.5f),
+                                 ops::Dequantize::Attrs().Dtype(DT_BFLOAT16));
   TF_CHECK_OK(root.status());
   Graph* g = new Graph(OpRegistry::Global());
   TF_CHECK_OK(root.ToGraph(g));

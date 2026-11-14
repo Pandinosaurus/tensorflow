@@ -29,16 +29,18 @@ class CollectiveRemoteAccessDistributed : public CollectiveRemoteAccessLocal {
   CollectiveRemoteAccessDistributed(
       const DeviceMgr* dev_mgr, DeviceResolverInterface* dev_resolver,
       std::shared_ptr<UnboundedWorkQueue> work_queue,
-      WorkerCacheInterface* worker_cache, int64_t step_id, string task_name)
+      WorkerCacheInterface* worker_cache, int64_t step_id,
+      std::string task_name)
       : CollectiveRemoteAccessLocal(dev_mgr, dev_resolver, step_id),
         worker_cache_(worker_cache),
         work_queue_(std::move(work_queue)),
         task_name_(std::move(task_name)) {}
 
-  ~CollectiveRemoteAccessDistributed() override {}
+  ~CollectiveRemoteAccessDistributed() override = default;
 
-  void RecvFromPeer(const string& peer_device, const string& peer_task,
-                    bool peer_is_local, const string& key, Device* to_device,
+  void RecvFromPeer(const std::string& peer_device,
+                    const std::string& peer_task, bool peer_is_local,
+                    const std::string& key, Device* to_device,
                     DeviceContext* to_device_ctx,
                     const AllocatorAttributes& to_alloc_attr, Tensor* to_tensor,
                     const DeviceLocality& client_locality,
@@ -46,10 +48,10 @@ class CollectiveRemoteAccessDistributed : public CollectiveRemoteAccessLocal {
                     CancellationManager* cancellation_manager,
                     const StatusCallback& done) override;
 
-  void CheckPeerHealth(const string& peer_task, int64_t timeout_in_ms,
+  void CheckPeerHealth(const std::string& peer_task, int64_t timeout_in_ms,
                        const StatusCallback& done) override;
 
-  void StartAbort(const Status& s) override;
+  void StartAbort(const absl::Status& s) override;
 
  protected:
   WorkerCacheInterface* worker_cache_;  // Not owned
@@ -57,7 +59,7 @@ class CollectiveRemoteAccessDistributed : public CollectiveRemoteAccessLocal {
   // `CollectiveExecutorMgr`.
   std::shared_ptr<UnboundedWorkQueue> work_queue_;
   CancellationManager abortion_cancel_mgr_;
-  string task_name_;
+  std::string task_name_;
 };
 
 }  // namespace tensorflow

@@ -25,7 +25,7 @@ REGISTER_OP("ZeroOut")
     .Output("zeroed: int32")
     .SetShapeFn([](shape_inference::InferenceContext* c) {
       c->set_output(0, c->input(0));
-      return Status::OK();
+      return absl::OkStatus();
     });
 
 class ZeroOutOp : public OpKernel {
@@ -36,24 +36,24 @@ class ZeroOutOp : public OpKernel {
                    context->GetAttr("preserve_index", &preserve_index_));
     // Check that preserve\_index is positive
     OP_REQUIRES(context, preserve_index_ >= 0,
-                errors::InvalidArgument("Need preserve_index >= 0, got ",
-                                        preserve_index_));
+                absl::InvalidArgumentError(absl::StrCat(
+                    "Need preserve_index >= 0, got ", preserve_index_)));
   }
 
   void Compute(OpKernelContext* context) override {
     // Grab the input tensor
     const Tensor& input_tensor = context->input(0);
-    auto input = input_tensor.flat<int32>();
+    auto input = input_tensor.flat<int32_t>();
 
     // Check that preserve_index is in range
     OP_REQUIRES(context, preserve_index_ < input.dimension(0),
-                errors::InvalidArgument("preserve_index out of range"));
+                absl::InvalidArgumentError("preserve_index out of range"));
 
     // Create an output tensor
     Tensor* output_tensor = nullptr;
     OP_REQUIRES_OK(context, context->allocate_output(0, input_tensor.shape(),
                                                      &output_tensor));
-    auto output = output_tensor->template flat<int32>();
+    auto output = output_tensor->template flat<int32_t>();
 
     // Set all the elements of the output tensor to 0
     const int N = input.size();

@@ -13,11 +13,21 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include <cstdint>
+#include <tuple>
+#include <utility>
+
+#include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
 #include "tensorflow/compiler/tf2xla/lib/broadcast.h"
 #include "tensorflow/compiler/tf2xla/xla_op_kernel.h"
 #include "tensorflow/compiler/tf2xla/xla_op_registry.h"
-#include "tensorflow/compiler/xla/client/xla_builder.h"
-#include "tensorflow/compiler/xla/xla_data.pb.h"
+#include "xla/hlo/builder/xla_builder.h"
+#include "xla/xla_data.pb.h"
+#include "tensorflow/core/framework/op_kernel.h"
+#include "tensorflow/core/framework/op_requires.h"
+#include "tensorflow/core/framework/tensor_shape.h"
+#include "tensorflow/core/platform/errors.h"
 #include "tensorflow/core/util/bcast.h"
 #include "tensorflow/core/util/matmul_bcast.h"
 
@@ -44,9 +54,9 @@ class MatrixTriangularSolveOp : public XlaOpKernel {
     // a superset of TensorFlow's valid shapes.
     MatMulBCast bcast(BCast::FromShape(lhs_shape), BCast::FromShape(rhs_shape));
     if (!bcast.IsValid()) {
-      ctx->SetStatus(errors::InvalidArgument(
-          "Incompatible shapes: ", lhs_shape.DebugString(), " vs. ",
-          rhs_shape.DebugString()));
+      ctx->SetStatus(absl::InvalidArgumentError(
+          absl::StrCat("Incompatible shapes: ", lhs_shape.DebugString(),
+                       " vs. ", rhs_shape.DebugString())));
       return;
     }
 
@@ -54,9 +64,10 @@ class MatrixTriangularSolveOp : public XlaOpKernel {
     OP_REQUIRES(
         ctx,
         lhs_shape.dim_size(lhs_size - 1) == lhs_shape.dim_size(lhs_size - 2),
-        errors::InvalidArgument("The coefficient matrix must be square in "
-                                "the inner-most two dimensions: ",
-                                lhs_shape.DebugString()));
+        absl::InvalidArgumentError(
+            absl::StrCat("The coefficient matrix must be square in "
+                         "the inner-most two dimensions: ",
+                         lhs_shape.DebugString())));
 
     xla::XlaOp a = ctx->Input(0);
     xla::XlaOp b = ctx->Input(1);
@@ -103,7 +114,7 @@ MatrixTriangularSolveOp::Broadcast(xla::XlaOp lhs, const TensorShape& lhs_shape,
     xla::XlaOp error = rhs.builder()->ReportError(rhs_output.status());
     return {error, error};
   }
-  return {lhs_output.ValueOrDie(), rhs_output.ValueOrDie()};
+  return {lhs_output.value(), rhs_output.value()};
 }
 
 REGISTER_XLA_OP(Name("MatrixTriangularSolve"), MatrixTriangularSolveOp);

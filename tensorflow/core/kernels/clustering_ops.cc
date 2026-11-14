@@ -13,33 +13,38 @@
 // the License.
 // ==============================================================================
 
+#include <cmath>
+#include <cstdint>
+#include <functional>
+#include <limits>
+#include <utility>
+
+#include "absl/container/flat_hash_set.h"
+#include "absl/log/check.h"
+#include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
+#include "Eigen/Core"  // from @eigen_archive
+#include "tensorflow/core/framework/types.pb.h"
 #define EIGEN_USE_THREADS
 
 #include <algorithm>
 #include <memory>
 #include <numeric>
-#include <tuple>
-#include <unordered_set>
 #include <vector>
 
 #include "tensorflow/core/framework/op_kernel.h"
+#include "tensorflow/core/framework/op_requires.h"
 #include "tensorflow/core/framework/tensor.h"
 #include "tensorflow/core/framework/tensor_shape.h"
 #include "tensorflow/core/framework/types.h"
-#include "tensorflow/core/lib/core/blocking_counter.h"
-#include "tensorflow/core/lib/core/errors.h"
-#include "tensorflow/core/lib/core/threadpool.h"
 #include "tensorflow/core/lib/gtl/top_n.h"
 #include "tensorflow/core/lib/random/philox_random.h"
 #include "tensorflow/core/lib/random/simple_philox.h"
-#include "tensorflow/core/platform/byte_order.h"
+#include "tensorflow/core/platform/blocking_counter.h"
 #include "tensorflow/core/platform/cpu_info.h"
-#include "tensorflow/core/platform/logging.h"
 
 namespace tensorflow {
 namespace {
-using errors::InvalidArgument;
-
 template <typename Scalar>
 using RowMajorMatrix =
     Eigen::Matrix<Scalar, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
@@ -87,34 +92,37 @@ class KmeansPlusPlusInitializationOp : public OpKernel {
     const Tensor& num_retries_per_sample_tensor = context->input(3);
 
     OP_REQUIRES(context, TensorShapeUtils::IsMatrix(points_tensor.shape()),
-                InvalidArgument("Input points should be a matrix."));
-    OP_REQUIRES(context,
-                TensorShapeUtils::IsScalar(num_to_sample_tensor.shape()),
-                InvalidArgument("Input num_to_sample should be a scalar."));
+                absl::InvalidArgumentError("Input points should be a matrix."));
+    OP_REQUIRES(
+        context, TensorShapeUtils::IsScalar(num_to_sample_tensor.shape()),
+        absl::InvalidArgumentError("Input num_to_sample should be a scalar."));
     OP_REQUIRES(context, TensorShapeUtils::IsScalar(seed_tensor.shape()),
-                InvalidArgument("Input seed should be a scalar."));
+                absl::InvalidArgumentError("Input seed should be a scalar."));
     OP_REQUIRES(
         context,
         TensorShapeUtils::IsScalar(num_retries_per_sample_tensor.shape()),
-        InvalidArgument("Input num_retries_per_sample should be a scalar."));
+        absl::InvalidArgumentError(
+            "Input num_retries_per_sample should be a scalar."));
 
     const int64_t num_points = points_tensor.dim_size(0);
     const int64_t point_dimensions = points_tensor.dim_size(1);
     const int64_t num_to_sample = num_to_sample_tensor.scalar<int64_t>()();
     const int64_t seed = seed_tensor.scalar<int64_t>()();
-    const int64_t num_retries_per_sample = [&]() {
-      const int64_t value = num_retries_per_sample_tensor.scalar<int64>()();
-      return value >= 0 ? value
-                        : 2 + static_cast<int64>(std::log(num_to_sample));
-    }();
 
     OP_REQUIRES(context, num_points > 0,
-                InvalidArgument("Expected points.rows() > 0."));
+                absl::InvalidArgumentError("Expected points.rows() > 0."));
     OP_REQUIRES(context, num_to_sample > 0,
-                InvalidArgument("Expected num_to_sample > 0."));
+                absl::InvalidArgumentError("Expected num_to_sample > 0."));
     OP_REQUIRES(context, num_to_sample <= num_points,
-                InvalidArgument("Expected num_to_sample <= points.rows(). ",
-                                num_to_sample, " vs ", num_points, "."));
+                absl::InvalidArgumentError(
+                    absl::StrCat("Expected num_to_sample <= points.rows(). ",
+                                 num_to_sample, " vs ", num_points, ".")));
+
+    const int64_t num_retries_per_sample = [&]() {
+      const int64_t value = num_retries_per_sample_tensor.scalar<int64_t>()();
+      return value >= 0 ? value
+                        : 2 + static_cast<int64_t>(std::log(num_to_sample));
+    }();
 
     Tensor* output_sampled_points_tensor;
     OP_REQUIRES_OK(context,
@@ -130,7 +138,7 @@ class KmeansPlusPlusInitializationOp : public OpKernel {
     Eigen::Map<MatrixXfRowMajor> sampled_points(
         output_sampled_points_tensor->matrix<float>().data(), num_to_sample,
         point_dimensions);
-    std::unordered_set<int64_t> sampled_indices;
+    absl::flat_hash_set<int64_t> sampled_indices;
 
     random::PhiloxRandom random(seed);
     random::SimplePhilox rng(&random);
@@ -147,18 +155,29 @@ class KmeansPlusPlusInitializationOp : public OpKernel {
     min_distances.fill(std::numeric_limits<float>::infinity());
     Eigen::VectorXf min_distances_cumsum(num_points);
 
-    auto draw_one_sample = [&]() -> int64 {
+    auto draw_one_sample = [&]() -> int64_t {
       if (sampled_indices.empty()) return rng.Uniform64(num_points);
+      const float total = min_distances_cumsum(num_points - 1);
       int64_t index = 0;
       do {
-        // If v is drawn from Uniform[0, distances.sum()), then
-        // Prob[cumsum(distances)(i - 1) <= v < cumsum(distances)(i)] is
-        // proportional to distances(i).
-        index = std::upper_bound(
-                    min_distances_cumsum.data(),
-                    min_distances_cumsum.data() + num_points,
-                    rng.RandFloat() * min_distances_cumsum(num_points - 1)) -
-                min_distances_cumsum.data();
+        if (!(total > 0.0f) || std::isinf(total)) {
+          // total is zero, negative, NaN, or infinity (e.g. all points
+          // identical, NaN distances, or overflow). Fall back to uniform
+          // sampling to avoid upper_bound returning end-of-range and an
+          // out-of-bounds index.
+          index = rng.Uniform64(num_points);
+        } else {
+          // If v is drawn from Uniform[0, distances.sum()), then
+          // Prob[cumsum(distances)(i - 1) <= v < cumsum(distances)(i)] is
+          // proportional to distances(i).
+          index = std::upper_bound(min_distances_cumsum.data(),
+                                   min_distances_cumsum.data() + num_points,
+                                   rng.RandFloat() * total) -
+                  min_distances_cumsum.data();
+          // upper_bound guarantees index < num_points when total > 0, but
+          // clamp defensively against floating-point rounding edge cases.
+          index = std::min(index, num_points - 1);
+        }
       } while (sampled_indices.find(index) != sampled_indices.end());
       return index;
     };
@@ -168,6 +187,7 @@ class KmeansPlusPlusInitializationOp : public OpKernel {
       min_distances = min_distances.cwiseMin(GetHalfSquaredDistancesToY(
           points, points_half_squared_norm, points.row(sampled_index),
           points_half_squared_norm(sampled_index)));
+      min_distances(sampled_index) = 0.0f;
       return sampled_index;
     };
 
@@ -175,14 +195,15 @@ class KmeansPlusPlusInitializationOp : public OpKernel {
       Eigen::VectorXf best_new_min_distances(num_points);
       float best_potential = std::numeric_limits<float>::infinity();
       int64_t best_sampled_index = 0;
-      for (int i = 1 + num_retries_per_sample; i > 0; --i) {
+      for (int64_t i = 0; i <= num_retries_per_sample; ++i) {
         const int64_t sampled_index = draw_one_sample();
         Eigen::VectorXf new_min_distances =
             min_distances.cwiseMin(GetHalfSquaredDistancesToY(
                 points, points_half_squared_norm, points.row(sampled_index),
                 points_half_squared_norm(sampled_index)));
+        new_min_distances(sampled_index) = 0.0f;
         const float potential = new_min_distances.sum();
-        if (potential < best_potential) {
+        if (i == 0 || potential < best_potential) {
           best_potential = potential;
           best_sampled_index = sampled_index;
           best_new_min_distances.swap(new_min_distances);
@@ -194,6 +215,7 @@ class KmeansPlusPlusInitializationOp : public OpKernel {
 
     for (int64_t i = 0; i < num_to_sample; ++i) {
       if (i > 0) {
+        min_distances = min_distances.cwiseMax(0.0f);
         std::partial_sum(min_distances.data(),
                          min_distances.data() + num_points,
                          min_distances_cumsum.data());
@@ -237,14 +259,16 @@ class KMC2ChainInitializationOp : public OpKernel {
   void Compute(OpKernelContext* context) override {
     const Tensor& distances_tensor = context->input(0);
     const Tensor& seed_tensor = context->input(1);
-    OP_REQUIRES(context, TensorShapeUtils::IsVector(distances_tensor.shape()),
-                InvalidArgument("Input distances should be a vector."));
+    OP_REQUIRES(
+        context, TensorShapeUtils::IsVector(distances_tensor.shape()),
+        absl::InvalidArgumentError("Input distances should be a vector."));
     OP_REQUIRES(context, TensorShapeUtils::IsScalar(seed_tensor.shape()),
-                InvalidArgument("Input seed should be a scalar."));
+                absl::InvalidArgumentError("Input seed should be a scalar."));
     const int64_t num_points = distances_tensor.dim_size(0);
     const int64_t seed = seed_tensor.scalar<int64_t>()();
-    OP_REQUIRES(context, num_points > 0,
-                InvalidArgument("Expected distances_tensor.size() > 0."));
+    OP_REQUIRES(
+        context, num_points > 0,
+        absl::InvalidArgumentError("Expected distances_tensor.size() > 0."));
 
     random::PhiloxRandom random(seed);
     random::SimplePhilox rng(&random);
@@ -293,11 +317,12 @@ class NearestNeighborsOp : public OpKernel {
     const Tensor& k_tensor = context->input(2);
 
     OP_REQUIRES(context, TensorShapeUtils::IsMatrix(points_tensor.shape()),
-                InvalidArgument("Input points should be a matrix."));
-    OP_REQUIRES(context, TensorShapeUtils::IsMatrix(centers_tensor.shape()),
-                InvalidArgument("Input centers should be a matrix."));
+                absl::InvalidArgumentError("Input points should be a matrix."));
+    OP_REQUIRES(
+        context, TensorShapeUtils::IsMatrix(centers_tensor.shape()),
+        absl::InvalidArgumentError("Input centers should be a matrix."));
     OP_REQUIRES(context, TensorShapeUtils::IsScalar(k_tensor.shape()),
-                InvalidArgument("Input k should be a scalar."));
+                absl::InvalidArgumentError("Input k should be a scalar."));
 
     const int64_t num_points = points_tensor.dim_size(0);
     const int64_t point_dimensions = points_tensor.dim_size(1);
@@ -305,18 +330,20 @@ class NearestNeighborsOp : public OpKernel {
     const int64_t center_dimensions = centers_tensor.dim_size(1);
 
     OP_REQUIRES(context, num_points > 0,
-                InvalidArgument("Expected points.rows() > 0."));
-    OP_REQUIRES(
-        context, point_dimensions == center_dimensions,
-        InvalidArgument("Expected point_dimensions == center_dimensions: ",
-                        point_dimensions, " vs ", center_dimensions, "."));
+                absl::InvalidArgumentError("Expected points.rows() > 0."));
+    OP_REQUIRES(context, point_dimensions == center_dimensions,
+                absl::InvalidArgumentError(absl::StrCat(
+                    "Expected point_dimensions == center_dimensions: ",
+                    point_dimensions, " vs ", center_dimensions, ".")));
 
     const Eigen::Map<const MatrixXfRowMajor> points(
         points_tensor.matrix<float>().data(), num_points, point_dimensions);
     const Eigen::Map<const MatrixXfRowMajor> centers(
         centers_tensor.matrix<float>().data(), num_centers, center_dimensions);
-    const int64_t k =
-        std::min<int64_t>(num_centers, k_tensor.scalar<int64_t>()());
+    const int64_t k_tensor_val = k_tensor.scalar<int64_t>()();
+    OP_REQUIRES(context, k_tensor_val >= 0,
+                absl::InvalidArgumentError("Expected k >= 0."));
+    const int64_t k = std::min<int64_t>(num_centers, k_tensor_val);
 
     Tensor* output_nearest_center_indices_tensor;
     Tensor* output_nearest_center_distances_tensor;

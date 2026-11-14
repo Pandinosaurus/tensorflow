@@ -14,16 +14,12 @@
 # ==============================================================================
 """Tests for common methods in strategy classes."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 from absl.testing import parameterized
 
 from tensorflow.python.data.ops import dataset_ops
 from tensorflow.python.distribute import central_storage_strategy
 from tensorflow.python.distribute import combinations
-from tensorflow.python.distribute import distribution_strategy_context as ds_context
+from tensorflow.python.distribute import distribute_lib
 from tensorflow.python.distribute import mirrored_strategy
 from tensorflow.python.distribute import strategy_combinations
 from tensorflow.python.distribute import test_util
@@ -33,13 +29,15 @@ from tensorflow.python.eager import def_function
 from tensorflow.python.framework import constant_op
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import errors
-from tensorflow.python.framework import ops
+from tensorflow.python.framework import indexed_slices
+from tensorflow.python.framework import test_util as tf_test_util
 from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import gradients_impl
 from tensorflow.python.platform import test
 from tensorflow.python.util import nest
 
 
+@tf_test_util.with_eager_op_as_function
 @combinations.generate(
     combinations.combine(
         strategy=[
@@ -51,7 +49,7 @@ from tensorflow.python.util import nest
             strategy_combinations.mirrored_strategy_with_one_cpu,
             strategy_combinations.mirrored_strategy_with_one_gpu,
             strategy_combinations.mirrored_strategy_with_two_gpus,
-            strategy_combinations.mirrored_strategy_with_cpu_1_and_2,
+            strategy_combinations.mirrored_strategy_with_two_cpus,
             strategy_combinations.mirrored_strategy_with_gpu_and_cpu,
             strategy_combinations.multi_worker_mirrored_2x2_gpu,
             strategy_combinations.multi_worker_mirrored_2x1_cpu,
@@ -193,15 +191,10 @@ class GatherTest(test.TestCase, parameterized.TestCase):
       with self.assertRaisesRegex(errors.InvalidArgumentError,
                                   r'Shape mismatch'):
         run()
-    elif isinstance(
-        strategy,
-        (mirrored_strategy.MirroredStrategy,
-         central_storage_strategy.CentralStorageStrategy)) and pure_eager:
-      with self.assertRaisesRegex(errors.InvalidArgumentError,
-                                  r'Dimensions of inputs should match'):
-        run()
-    else:
-      with self.assertRaisesRegex(ValueError,
+    elif isinstance(strategy,
+                    (mirrored_strategy.MirroredStrategy,
+                     central_storage_strategy.CentralStorageStrategy)):
+      with self.assertRaisesRegex((errors.InvalidArgumentError, ValueError),
                                   r'Dimension \d in both shapes must be equal'):
         run()
 
@@ -280,7 +273,7 @@ class GatherTest(test.TestCase, parameterized.TestCase):
         lambda _: array_ops.identity(value_on_replica))
 
     def replica_fn(per_replica_value):
-      ctx = ds_context.get_replica_context()
+      ctx = distribute_lib.get_replica_context()
       local_value = array_ops.identity(per_replica_value)
       return ctx.all_gather(local_value, axis=axis)
 
@@ -352,7 +345,7 @@ class GatherTest(test.TestCase, parameterized.TestCase):
 
     @def_function.function
     def replica_fn(per_replica_value):
-      ctx = ds_context.get_replica_context()
+      ctx = distribute_lib.get_replica_context()
       return ctx.all_gather(array_ops.identity(per_replica_value), axis=axis)
 
     result = strategy.experimental_local_results(
@@ -379,7 +372,7 @@ class GatherTest(test.TestCase, parameterized.TestCase):
 
     def run(value):
       value_identity = array_ops.identity(value)
-      ctx = ds_context.get_replica_context()
+      ctx = distribute_lib.get_replica_context()
       return ctx.all_gather(value_identity, axis=0)
 
     if not pure_eager:
@@ -407,7 +400,7 @@ class GatherTest(test.TestCase, parameterized.TestCase):
 
     def run(value):
       value_identity = array_ops.identity(value)
-      ctx = ds_context.get_replica_context()
+      ctx = distribute_lib.get_replica_context()
       return ctx.all_gather(value_identity, axis=1)
 
     if not pure_eager:
@@ -446,7 +439,7 @@ class GatherTest(test.TestCase, parameterized.TestCase):
     def run(value):
       value_1 = array_ops.identity(value)
       value_3 = array_ops.identity(value_2)
-      ctx = ds_context.get_replica_context()
+      ctx = distribute_lib.get_replica_context()
       return ctx.all_gather([value_1, value_3], axis=axis)
 
     if not pure_eager:
@@ -465,7 +458,7 @@ class GatherTest(test.TestCase, parameterized.TestCase):
 
     def run():
       value_identity = array_ops.identity(single_value)
-      ctx = ds_context.get_replica_context()
+      ctx = distribute_lib.get_replica_context()
       return ctx.all_gather([value_identity, value_identity], axis=axis)
 
     if not pure_eager:
@@ -501,7 +494,7 @@ class GatherTest(test.TestCase, parameterized.TestCase):
 
     def run(value):
       value_identity = array_ops.identity(value)
-      ctx = ds_context.get_replica_context()
+      ctx = distribute_lib.get_replica_context()
       return ctx.all_gather(value_identity, axis=0)
 
     if not pure_eager:
@@ -511,15 +504,10 @@ class GatherTest(test.TestCase, parameterized.TestCase):
       with self.assertRaisesRegex(errors.InvalidArgumentError,
                                   r'Shape mismatch'):
         strategy.run(run, args=(per_replica_value,))
-    elif isinstance(
-        strategy,
-        (mirrored_strategy.MirroredStrategy,
-         central_storage_strategy.CentralStorageStrategy)) and pure_eager:
-      with self.assertRaisesRegex(errors.InvalidArgumentError,
-                                  r'Dimensions of inputs should match'):
-        strategy.run(run, args=(per_replica_value,))
-    else:
-      with self.assertRaisesRegex(ValueError,
+    elif isinstance(strategy,
+                    (mirrored_strategy.MirroredStrategy,
+                     central_storage_strategy.CentralStorageStrategy)):
+      with self.assertRaisesRegex((errors.InvalidArgumentError, ValueError),
                                   r'Dimension \d in both shapes must be equal'):
         strategy.run(run, args=(per_replica_value,))
 
@@ -529,7 +517,7 @@ class GatherTest(test.TestCase, parameterized.TestCase):
         values=[[1., 2.]], indices=[2], dense_shape=dense_shape)
 
     def replica_fn(value):
-      ctx = ds_context.get_replica_context()
+      ctx = distribute_lib.get_replica_context()
       return ctx.all_gather(value, axis=0)
 
     with self.assertRaisesRegex(
@@ -558,7 +546,7 @@ class GatherTest(test.TestCase, parameterized.TestCase):
 
     def run(value):
       value_identity = array_ops.identity(value)
-      ctx = ds_context.get_replica_context()
+      ctx = distribute_lib.get_replica_context()
       return ctx.all_gather(value_identity, axis=0)
 
     if not pure_eager:
@@ -596,7 +584,7 @@ class GatherTest(test.TestCase, parameterized.TestCase):
 
     def all_gather_fn(value):
       axis = 1
-      ctx = ds_context.get_replica_context()
+      ctx = distribute_lib.get_replica_context()
       return ctx.all_gather(array_ops.identity(value), axis)
 
     gradient_comp = sum(range(1, strategy.num_replicas_in_sync + 1))
@@ -628,7 +616,7 @@ class GatherTest(test.TestCase, parameterized.TestCase):
 
     def all_gather_fn(value):
       axis = 1
-      ctx = ds_context.get_replica_context()
+      ctx = distribute_lib.get_replica_context()
       return ctx.all_gather(array_ops.identity(value), axis)
 
     gradient_comp = sum(range(1, strategy.num_replicas_in_sync + 1))
@@ -656,7 +644,7 @@ class GatherTest(test.TestCase, parameterized.TestCase):
 
 
 def _make_indexed_slices(values, indices, dense_shape):
-  tensor = ops.IndexedSlices(
+  tensor = indexed_slices.IndexedSlices(
       values=constant_op.constant(values),
       indices=constant_op.constant(indices),
       dense_shape=constant_op.constant(dense_shape))

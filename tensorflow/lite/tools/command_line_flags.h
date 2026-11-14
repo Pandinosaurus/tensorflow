@@ -16,6 +16,8 @@ limitations under the License.
 #ifndef TENSORFLOW_LITE_TOOLS_COMMAND_LINE_FLAGS_H_
 #define TENSORFLOW_LITE_TOOLS_COMMAND_LINE_FLAGS_H_
 
+#include <stdint.h>
+
 #include <functional>
 #include <string>
 #include <vector>
@@ -116,6 +118,8 @@ class Flag {
 #undef CONSTRUCTOR_WITHOUT_ARGV_INDEX
 
   FlagType GetFlagType() const { return flag_type_; }
+
+  std::string GetFlagName() const { return name_; }
 
  private:
   friend class Flags;

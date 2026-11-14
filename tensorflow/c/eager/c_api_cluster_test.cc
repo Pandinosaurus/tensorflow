@@ -33,8 +33,7 @@ using ::tensorflow::string;
 void ReplaceTaskInServerDef(tensorflow::ServerDef* server_def, int task_index) {
   tensorflow::JobDef* job_def = server_def->mutable_cluster()->mutable_job(0);
   int port = tensorflow::testing::PickUnusedPortOrDie();
-  job_def->mutable_tasks()->at(task_index) =
-      tensorflow::strings::StrCat("localhost:", port);
+  job_def->mutable_tasks()->at(task_index) = absl::StrCat("localhost:", port);
 }
 
 void CheckTFE_TensorHandleHasFloats(TFE_TensorHandle* handle,
@@ -148,9 +147,9 @@ void TestRemoteExecuteChangeServerDef(bool async) {
   serialized = updated_server_def.SerializeAsString();
 
   updated_server_def.set_task_index(1);
-  tensorflow::Status s = tensorflow::GrpcServer::Create(
+  absl::Status s = tensorflow::GrpcServer::Create(
       updated_server_def, tensorflow::Env::Default(), &worker_server);
-  ASSERT_TRUE(s.ok()) << s.error_message();
+  ASSERT_TRUE(s.ok()) << s.message();
   ASSERT_TRUE(worker_server->Start().ok());
 
   TFE_ContextSetServerDef(ctx, 0, serialized.data(), serialized.size(), status);
@@ -379,8 +378,7 @@ void TestRemoteExecuteUpdateServerDefWithFailures(bool async) {
   tensorflow::ClusterDef* cluster_def = server_def.mutable_cluster();
   tensorflow::JobDef* job_def = cluster_def->mutable_job(0);
   int port = tensorflow::testing::PickUnusedPortOrDie();
-  job_def->mutable_tasks()->insert(
-      {2, tensorflow::strings::StrCat("localhost:", port)});
+  job_def->mutable_tasks()->insert({2, absl::StrCat("localhost:", port)});
   server_def.set_task_index(0);
   string serialized_update = server_def.SerializeAsString();
   TFE_ContextUpdateServerDef(ctx, 0, serialized_update.data(),
@@ -430,7 +428,7 @@ void TestConnectToCluster(bool keep_localhost_for_first_connect) {
   TFE_TensorHandle* var_handle0 = TestVariable(ctx, 1.0, dev0_name);
   EXPECT_NE(var_handle0, nullptr);
 
-  tensorflow::Status status2;
+  absl::Status status2;
   EXPECT_EQ(tensorflow::unwrap(var_handle0)->DeviceName(&status2), dev0_name);
 
   // Rename local device

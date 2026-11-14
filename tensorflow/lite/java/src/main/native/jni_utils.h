@@ -21,6 +21,7 @@ limitations under the License.
 
 #include <vector>
 
+#include "tensorflow/lite/core/c/common.h"
 #include "tensorflow/lite/error_reporter.h"
 
 namespace tflite {
@@ -31,6 +32,15 @@ extern const char kIllegalStateException[];
 extern const char kNullPointerException[];
 extern const char kUnsupportedOperationException[];
 
+/**
+ * Thin wrapper around env->ThrowNew(...) that constructs the message using
+ * printf-style formatting.
+ *
+ * Beware that if there is an exception already pending, then throwing
+ * another exception may result in program termination, so it is good
+ * practice to ensure that there is no pending exception before calling
+ * this function.
+ */
 void ThrowException(JNIEnv* env, const char* clazz, const char* fmt, ...);
 
 /**

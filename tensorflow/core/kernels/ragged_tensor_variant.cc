@@ -22,9 +22,11 @@ limitations under the License.
 
 namespace tensorflow {
 
-string RaggedTensorVariant::TypeName() const { return "RaggedTensorVariant"; }
+std::string RaggedTensorVariant::TypeName() const {
+  return "RaggedTensorVariant";
+}
 
-string RaggedTensorVariant::DebugString() const {
+std::string RaggedTensorVariant::DebugString() const {
   return absl::StrCat(
       "RaggedTensorVariant(dtype=", DataTypeString(values_.dtype()),
       ", ragged_rank=", nested_splits_.size(), ", splits_dtype=",
@@ -52,13 +54,16 @@ bool RaggedTensorVariant::Decode(const VariantTensorData& data) {
 
 namespace {
 
-Status RaggedTensorVariantDeviceCopy(
+absl::Status RaggedTensorVariantDeviceCopy(
     const RaggedTensorVariant& from, RaggedTensorVariant* to,
     const UnaryVariantOpRegistry::AsyncTensorDeviceCopyFn& copy) {
-  TF_RETURN_IF_ERROR(copy(from.values(), to->mutable_values()));
-  // TODO(b/170415165) Should we use `copy` to move splits from device<->host?
+  // RaggedTensorVariant is only used by kernels that run on the CPU, so we
+  // treat the values and nested splits as always being in host memory, and
+  // shallow-copy the tensors instead of using `copy` to move them between
+  // devices.
+  *to->mutable_values() = from.values();
   *to->mutable_nested_splits() = from.nested_splits();
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 }  // namespace

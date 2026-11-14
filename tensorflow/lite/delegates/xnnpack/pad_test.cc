@@ -19,6 +19,7 @@ limitations under the License.
 #include <random>
 
 #include <gtest/gtest.h>
+#include "tensorflow/lite/c/c_api_types.h"
 #include "tensorflow/lite/delegates/xnnpack/pad_tester.h"
 #include "tensorflow/lite/delegates/xnnpack/xnnpack_delegate.h"
 
@@ -272,6 +273,26 @@ TEST(Pad, MultiThreading) {
       .InputPrePaddings({0, 0, 0, pad_rng()})
       .InputPostPaddings({0, 0, 0, pad_rng()})
       .InputShape({shape_rng(), shape_rng(), shape_rng(), shape_rng()})
+      .Test(xnnpack_delegate.get());
+}
+
+TEST(Pad, Full4D_FP16) {
+  std::unique_ptr<TfLiteDelegate, decltype(&TfLiteXNNPackDelegateDelete)>
+      xnnpack_delegate(TfLiteXNNPackDelegateCreate(nullptr),
+                       TfLiteXNNPackDelegateDelete);
+
+  std::random_device random_device;          // NOLINT(runtime/random_device)
+  auto rng = std::mt19937(random_device());  // NOLINT(runtime/random_device)
+  auto pad_rng =
+      std::bind(std::uniform_int_distribution<int32_t>(1, 3), std::ref(rng));
+  auto shape_rng =
+      std::bind(std::uniform_int_distribution<int32_t>(2, 5), std::ref(rng));
+
+  PadTester()
+      .InputPrePaddings({pad_rng(), pad_rng(), pad_rng(), pad_rng()})
+      .InputPostPaddings({pad_rng(), pad_rng(), pad_rng(), pad_rng()})
+      .InputShape({shape_rng(), shape_rng(), shape_rng(), shape_rng()})
+      .FP16()
       .Test(xnnpack_delegate.get());
 }
 

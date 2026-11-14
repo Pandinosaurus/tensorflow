@@ -37,16 +37,16 @@ namespace grappler {
 //     specification of the backend.
 class GraphVerifier {
  public:
-  GraphVerifier() {}
-  virtual ~GraphVerifier() {}
+  GraphVerifier() = default;
+  virtual ~GraphVerifier() = default;
 
   // A name for the verifier.
-  virtual string name() const = 0;
+  virtual std::string name() const = 0;
 
   // Implement an algorithm to verify the specified graph.
   // The return value is a Status that represents a concatenation of Status of
   // each verification step.
-  virtual Status Verify(const GraphDef& graph) = 0;
+  virtual absl::Status Verify(const GraphDef& graph) = 0;
 };
 
 }  // end namespace grappler

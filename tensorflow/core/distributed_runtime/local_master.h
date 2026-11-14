@@ -38,48 +38,49 @@ class Master;
 // for cancellation.
 class LocalMaster : public MasterInterface {
  public:
-  ~LocalMaster() {}
+  ~LocalMaster() override = default;
 
-  Status CreateSession(CallOptions* call_options,
-                       const CreateSessionRequest* request,
-                       CreateSessionResponse* response) override;
+  absl::Status CreateSession(CallOptions* call_options,
+                             const CreateSessionRequest* request,
+                             CreateSessionResponse* response) override;
 
-  Status ExtendSession(CallOptions* call_options,
-                       const ExtendSessionRequest* request,
-                       ExtendSessionResponse* response) override;
+  absl::Status ExtendSession(CallOptions* call_options,
+                             const ExtendSessionRequest* request,
+                             ExtendSessionResponse* response) override;
 
-  Status PartialRunSetup(CallOptions* call_options,
-                         const PartialRunSetupRequest* request,
-                         PartialRunSetupResponse* response) override;
+  absl::Status PartialRunSetup(CallOptions* call_options,
+                               const PartialRunSetupRequest* request,
+                               PartialRunSetupResponse* response) override;
 
-  Status RunStep(CallOptions* call_options, RunStepRequestWrapper* request,
-                 MutableRunStepResponseWrapper* response) override;
+  absl::Status RunStep(CallOptions* call_options,
+                       RunStepRequestWrapper* request,
+                       MutableRunStepResponseWrapper* response) override;
 
   MutableRunStepRequestWrapper* CreateRunStepRequest() override;
 
   MutableRunStepResponseWrapper* CreateRunStepResponse() override;
 
-  Status CloseSession(CallOptions* call_options,
-                      const CloseSessionRequest* request,
-                      CloseSessionResponse* response) override;
+  absl::Status CloseSession(CallOptions* call_options,
+                            const CloseSessionRequest* request,
+                            CloseSessionResponse* response) override;
 
-  Status ListDevices(CallOptions* call_options,
-                     const ListDevicesRequest* request,
-                     ListDevicesResponse* response) override;
+  absl::Status ListDevices(CallOptions* call_options,
+                           const ListDevicesRequest* request,
+                           ListDevicesResponse* response) override;
 
   // See tensorflow::Reset() and the comment on ResetRequest.
-  Status Reset(CallOptions* call_options, const ResetRequest* request,
-               ResetResponse* response) override;
+  absl::Status Reset(CallOptions* call_options, const ResetRequest* request,
+                     ResetResponse* response) override;
 
-  Status MakeCallable(CallOptions* call_options,
-                      const MakeCallableRequest* request,
-                      MakeCallableResponse* response) override;
-  Status RunCallable(CallOptions* call_options,
-                     const RunCallableRequest* request,
-                     RunCallableResponse* response) override;
-  Status ReleaseCallable(CallOptions* call_options,
-                         const ReleaseCallableRequest* request,
-                         ReleaseCallableResponse* response) override;
+  absl::Status MakeCallable(CallOptions* call_options,
+                            const MakeCallableRequest* request,
+                            MakeCallableResponse* response) override;
+  absl::Status RunCallable(CallOptions* call_options,
+                           const RunCallableRequest* request,
+                           RunCallableResponse* response) override;
+  absl::Status ReleaseCallable(CallOptions* call_options,
+                               const ReleaseCallableRequest* request,
+                               ReleaseCallableResponse* response) override;
 
   // Registers the mapping from the given `target` to the given `master`.
   //
@@ -88,12 +89,12 @@ class LocalMaster : public MasterInterface {
   // any LocalMaster objects that may wrap this master. There is no
   // corresponding deregister method, since clean server shutdown is
   // not currently implemented for any server type.
-  static void Register(const string& target, Master* master,
+  static void Register(const std::string& target, Master* master,
                        int64_t default_timeout_in_ms);
 
   // Returns a pointer to the local master associated with the given
   // `target`, or nullptr if none exists.
-  static std::unique_ptr<LocalMaster> Lookup(const string& target);
+  static std::unique_ptr<LocalMaster> Lookup(const std::string& target);
 
  private:
   Master* master_impl_;  // Not owned.
@@ -103,7 +104,8 @@ class LocalMaster : public MasterInterface {
   // objects of this type.
   LocalMaster(Master* master_impl, const int64_t default_timeout_in_ms);
 
-  TF_DISALLOW_COPY_AND_ASSIGN(LocalMaster);
+  LocalMaster(const LocalMaster&) = delete;
+  void operator=(const LocalMaster&) = delete;
 };
 
 }  // namespace tensorflow

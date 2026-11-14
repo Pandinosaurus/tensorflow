@@ -13,18 +13,19 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include <limits>
-
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
+#include "absl/strings/str_cat.h"
 #include "tensorflow/compiler/tf2xla/lib/broadcast.h"
 #include "tensorflow/compiler/tf2xla/xla_helpers.h"
 #include "tensorflow/compiler/tf2xla/xla_op_kernel.h"
 #include "tensorflow/compiler/tf2xla/xla_op_registry.h"
-#include "tensorflow/compiler/xla/client/lib/arithmetic.h"
-#include "tensorflow/compiler/xla/client/lib/constants.h"
-#include "tensorflow/compiler/xla/client/lib/loops.h"
-#include "tensorflow/compiler/xla/client/lib/math.h"
-#include "tensorflow/compiler/xla/client/xla_builder.h"
-#include "tensorflow/compiler/xla/status_macros.h"
+#include "xla/hlo/builder/lib/arithmetic.h"
+#include "xla/hlo/builder/lib/constants.h"
+#include "xla/hlo/builder/lib/loops.h"
+#include "xla/hlo/builder/lib/math.h"
+#include "xla/hlo/builder/xla_builder.h"
+#include "xla/status_macros.h"
 
 namespace tensorflow {
 namespace {
@@ -39,21 +40,21 @@ class BetaincOp : public XlaOpKernel {
     const TensorShape& x_shape = ctx->InputShape(2);
     if (a_shape.dims() > 0 && b_shape.dims() > 0) {
       OP_REQUIRES(ctx, a_shape == b_shape,
-                  errors::InvalidArgument(
+                  absl::InvalidArgumentError(absl::StrCat(
                       "Shapes of a and b are inconsistent: ",
-                      a_shape.DebugString(), " vs. ", b_shape.DebugString()));
+                      a_shape.DebugString(), " vs. ", b_shape.DebugString())));
     }
     if (a_shape.dims() > 0 && x_shape.dims() > 0) {
       OP_REQUIRES(ctx, a_shape == x_shape,
-                  errors::InvalidArgument(
+                  absl::InvalidArgumentError(absl::StrCat(
                       "Shapes of a and x are inconsistent: ",
-                      a_shape.DebugString(), " vs. ", x_shape.DebugString()));
+                      a_shape.DebugString(), " vs. ", x_shape.DebugString())));
     }
     if (b_shape.dims() > 0 && x_shape.dims() > 0) {
       OP_REQUIRES(ctx, b_shape == x_shape,
-                  errors::InvalidArgument(
+                  absl::InvalidArgumentError(absl::StrCat(
                       "Shapes of b and x are inconsistent: ",
-                      b_shape.DebugString(), " vs. ", x_shape.DebugString()));
+                      b_shape.DebugString(), " vs. ", x_shape.DebugString())));
     }
 
     TensorShape merged_shape(a_shape);
@@ -62,7 +63,7 @@ class BetaincOp : public XlaOpKernel {
 
     auto builder = ctx->builder();
     auto result =
-        builder->ReportErrorOrReturn([&]() -> StatusOr<xla::XlaOp> {
+        builder->ReportErrorOrReturn([&]() -> absl::StatusOr<xla::XlaOp> {
           TF_ASSIGN_OR_RETURN(
               auto a, BroadcastTo(ctx->Input(0), merged_shape.dim_sizes()));
           TF_ASSIGN_OR_RETURN(

@@ -1,3 +1,18 @@
+// Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+// ==============================================================================
+
 syntax = "proto3";
 
 package tensorflow;
@@ -72,6 +87,10 @@ message StructuredValue {
     DictValue dict_value = 53;
     // Represents Python's namedtuple.
     NamedTupleValue named_tuple_value = 54;
+    // Represents a value for tf.Tensor.
+    tensorflow.TensorProto tensor_value = 55;
+    // Represents a value for np.ndarray.
+    tensorflow.TensorProto numpy_value = 56;
   }
 }
 
@@ -149,7 +168,7 @@ message TypeSpecProto {
   //  * If type_spec_class == REGISTERED_TYPE_SPEC, the TypeSpec class is
   //    the one registered under this name. For types registered outside
   //    core TensorFlow by an add-on library, that library must be loaded
-  //    before this value can be deserialized by StructureCoder.
+  //    before this value can be deserialized by nested_structure_coder.
   //  * If type_spec_class specifies a particular TypeSpec class, this field is
   //    redundant with the type_spec_class enum, and is only used for error
   //    reporting in older binaries that do not know the tupe_spec_class enum.

@@ -23,6 +23,7 @@ limitations under the License.
 #include "tensorflow/core/framework/tensor.h"
 #include "tensorflow/core/framework/tensor_shape.h"
 #include "tensorflow/core/framework/types.h"
+#include "tensorflow/core/lib/core/errors.h"
 #include "tensorflow/core/lib/core/status.h"
 #include "tensorflow/core/platform/logging.h"
 #include "tensorflow/core/util/overflow.h"
@@ -43,8 +44,13 @@ class ReshapeOp : public OpKernel {
         (TensorShapeUtils::IsVector(sizes.shape()) ||
          // TODO(rmlarsen): Disallow legacy use of scalars to represent shape.
          TensorShapeUtils::IsScalar(sizes.shape())),
-        errors::InvalidArgument("sizes input must be 1-D, not ",
-                                sizes.shape().DebugString()));
+        absl::InvalidArgumentError(absl::StrCat("sizes input must be 1-D, not ",
+                                                sizes.shape().DebugString())));
+    OP_REQUIRES(
+        context, sizes.NumElements() < TensorShape::MaxDimensions(),
+        absl::InvalidArgumentError(absl::StrCat(
+            "too many dimensions: must be < ", TensorShape::MaxDimensions(),
+            ", but received ", sizes.NumElements())));
 
     // Compute the output shape.  Determine product of specified
     // dimensions, and find the index of the unspecified one.
@@ -55,8 +61,8 @@ class ReshapeOp : public OpKernel {
     switch (sizes.dtype()) {
       case DT_INT32:
         OP_REQUIRES_OK(context,
-                       ValidateSizes<int32>(sizes, &product, &unknown_index,
-                                            &shape, &sizes_has_zero_dim));
+                       ValidateSizes<int32_t>(sizes, &product, &unknown_index,
+                                              &shape, &sizes_has_zero_dim));
         break;
       case DT_INT64:
         OP_REQUIRES_OK(context,
@@ -64,9 +70,9 @@ class ReshapeOp : public OpKernel {
                                               &shape, &sizes_has_zero_dim));
         break;
       default:
-        context->CtxFailure(errors::InvalidArgument(
+        context->CtxFailure(absl::InvalidArgumentError(absl::StrCat(
             "desired shape must be a DT_INT32 or DT_INT64 vector, not a ",
-            DataTypeString(sizes.dtype())));
+            DataTypeString(sizes.dtype()))));
         return;
     }
     if (unknown_index != -1) {
@@ -87,32 +93,32 @@ class ReshapeOp : public OpKernel {
       if (!input_has_zero_dim) {
         OP_REQUIRES(
             context, product * missing == input_num_elements,
-            errors::InvalidArgument(
+            absl::InvalidArgumentError(absl::StrCat(
                 "Input to reshape is a tensor with ", input_num_elements,
                 " values, but the requested shape requires a multiple of ",
-                product));
+                product)));
       }
       shape.set_dim(unknown_index, missing);
     }
-    OP_REQUIRES(context, shape.num_elements() == input.NumElements(),
-                errors::InvalidArgument("Input to reshape is a tensor with ",
-                                        input.NumElements(),
-                                        " values, but the requested shape has ",
-                                        shape.num_elements()));
+    OP_REQUIRES(
+        context, shape.num_elements() == input.NumElements(),
+        absl::InvalidArgumentError(absl::StrCat(
+            "Input to reshape is a tensor with ", input.NumElements(),
+            " values, but the requested shape has ", shape.num_elements())));
 
     // Actually produce the reshaped output.
     Tensor output(input.dtype());
     CHECK(output.CopyFrom(input, shape));
-    context->set_output(0, output);
+    context->set_output(0, std::move(output));
   }
 
   bool IsExpensive() override { return false; }
 
  private:
   template <typename Tshape>
-  Status ValidateSizes(const Tensor& sizes, int64_t* product,
-                       int* unknown_index, TensorShape* shape,
-                       bool* has_zero_dim) {
+  absl::Status ValidateSizes(const Tensor& sizes, int64_t* product,
+                             int* unknown_index, TensorShape* shape,
+                             bool* has_zero_dim) {
     *product = 1;
     *unknown_index = -1;
     *has_zero_dim = false;
@@ -122,12 +128,12 @@ class ReshapeOp : public OpKernel {
       const Tshape size = Svec(d);
       if (size == -1) {
         if (*unknown_index != -1) {
-          return errors::InvalidArgument(
-              "Only one input size may be -1, not both ", *unknown_index,
-              " and ", d);
+          return absl::InvalidArgumentError(
+              absl::StrCat("Only one input size may be -1, not both ",
+                           *unknown_index, " and ", d));
         }
         *unknown_index = d;
-        shape->AddDim(1);
+        TF_RETURN_IF_ERROR(shape->AddDimWithStatus(1));
       } else if (size < 0) {
         return errors::InvalidArgument("Size ", d,
                                        " must be non-negative, not ", size);
@@ -135,25 +141,25 @@ class ReshapeOp : public OpKernel {
         // We don't include zero-sized dimension in product, so that we can
         // still calculate number of elements for non-zero-sized dimensions and
         // therefore infer their shapes.
-        shape->AddDim(size);
+        TF_RETURN_IF_ERROR(shape->AddDimWithStatus(size));
         *has_zero_dim = true;
       } else {
         if (MultiplyWithoutOverflow(shape->num_elements(), size) < 0) {
-          string msg;
+          std::string msg;
           for (int ii = 0; ii < num_dims; ++ii) {
             if (ii != 0) {
-              strings::StrAppend(&msg, ", ");
+              absl::StrAppend(&msg, ", ");
             }
             strings::StrAppend(&msg, Svec(ii));
           }
-          return errors::InvalidArgument("Shape [", msg,
-                                         "] has too many elements");
+          return absl::InvalidArgumentError(
+              absl::StrCat("Shape [", msg, "] has too many elements"));
         }
-        shape->AddDim(size);
+        TF_RETURN_IF_ERROR(shape->AddDimWithStatus(size));
         (*product) *= size;
       }
     }
-    return Status::OK();
+    return absl::OkStatus();
   }
 };
 

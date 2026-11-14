@@ -15,10 +15,11 @@ limitations under the License.
 
 #include "tensorflow/lite/delegates/gpu/gl/kernels/space_to_depth.h"
 
+#include <any>
+#include <memory>
 #include <string>
 #include <utility>
 
-#include "absl/memory/memory.h"
 #include "absl/types/any.h"
 #include "tensorflow/lite/delegates/gpu/common/operations.h"
 #include "tensorflow/lite/delegates/gpu/common/status.h"
@@ -34,10 +35,13 @@ class SpaceToDepth : public NodeShader {
   absl::Status GenerateCode(const GenerationContext& ctx,
                             GeneratedCode* generated_code) const final {
     const auto& attr =
-        absl::any_cast<const SpaceToDepthAttributes&>(ctx.op_attr);
+        std::any_cast<const SpaceToDepthAttributes&>(ctx.op_attr);
     std::string code = R"(
       for (int i = 0; i < 4; ++i) {
         int dst_c = 4 * gid.z + i;
+        if (dst_c >= $output_channels$) {
+          continue;
+        }
         int block_id = dst_c / $input_data_0_c$;
         int src_x = gid.x * $block_size$ + block_id % $block_size$;
         int src_y = gid.y * $block_size$ + block_id / $block_size$;
@@ -50,6 +54,7 @@ class SpaceToDepth : public NodeShader {
         /*parameters=*/{
             {"block_size", attr.block_size},
             {"input_data_0_c", static_cast<int>(ctx.input_shapes[0][3])},
+            {"output_channels", static_cast<int>(ctx.output_shapes[0][3])},
         },
         /*objects=*/{},
         /*shared_variables=*/{},
@@ -68,10 +73,13 @@ class DepthToSpace : public NodeShader {
   absl::Status GenerateCode(const GenerationContext& ctx,
                             GeneratedCode* generated_code) const final {
     const auto& attr =
-        absl::any_cast<const SpaceToDepthAttributes&>(ctx.op_attr);
+        std::any_cast<const SpaceToDepthAttributes&>(ctx.op_attr);
     std::string code = R"(
       for (int i = 0; i < 4; ++i) {
         int dst_c = 4 * gid.z + i;
+        if (dst_c >= $output_channels$) {
+          continue;
+        }
         int block_x = gid.x % $block_size$;
         int src_x = gid.x / $block_size$;
         int block_y = gid.y % $block_size$;
@@ -101,11 +109,11 @@ class DepthToSpace : public NodeShader {
 }  // namespace
 
 std::unique_ptr<NodeShader> NewSpaceToDepthNodeShader() {
-  return absl::make_unique<SpaceToDepth>();
+  return std::make_unique<SpaceToDepth>();
 }
 
 std::unique_ptr<NodeShader> NewDepthToSpaceNodeShader() {
-  return absl::make_unique<DepthToSpace>();
+  return std::make_unique<DepthToSpace>();
 }
 
 }  // namespace gl

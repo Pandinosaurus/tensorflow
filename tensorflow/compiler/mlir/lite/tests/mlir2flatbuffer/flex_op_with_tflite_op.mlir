@@ -1,6 +1,20 @@
+// Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+// ==============================================================================
 // RUN: flatbuffer_translate -mlir-to-tflite-flatbuffer %s -emit-select-tf-ops -o - | flatbuffer_to_string - | FileCheck %s
 
-func @main(tensor<4xf32>) -> tensor<4xf32> {
+func.func @main(tensor<4xf32>) -> tensor<4xf32> {
 ^bb0(%arg0: tensor<4xf32>):
 // CHECK:  {
 // CHECK-NEXT:  version: 3,
@@ -24,35 +38,40 @@ func @main(tensor<4xf32>) -> tensor<4xf32> {
 // CHECK-NEXT:      name: "arg0",
 // CHECK-NEXT:      quantization: {
 // CHECK-EMPTY:
-// CHECK-NEXT:      }
+// CHECK-NEXT:      },
+// CHECK-NEXT:      has_rank: true
 // CHECK-NEXT:    }, {
 // CHECK-NEXT:      shape: [ 4 ],
 // CHECK-NEXT:      buffer: 2,
 // CHECK-NEXT:      name: "Const",
 // CHECK-NEXT:      quantization: {
 // CHECK-EMPTY:
-// CHECK-NEXT:      }
+// CHECK-NEXT:      },
+// CHECK-NEXT:      has_rank: true
 // CHECK-NEXT:    }, {
 // CHECK-NEXT:      shape: [ 4 ],
 // CHECK-NEXT:      buffer: 3,
 // CHECK-NEXT:      name: "mul",
 // CHECK-NEXT:      quantization: {
 // CHECK-EMPTY:
-// CHECK-NEXT:      }
+// CHECK-NEXT:      },
+// CHECK-NEXT:      has_rank: true
 // CHECK-NEXT:    }, {
 // CHECK-NEXT:      shape: [ 4 ],
 // CHECK-NEXT:      buffer: 4,
 // CHECK-NEXT:      name: "div",
 // CHECK-NEXT:      quantization: {
 // CHECK-EMPTY:
-// CHECK-NEXT:      }
+// CHECK-NEXT:      },
+// CHECK-NEXT:      has_rank: true
 // CHECK-NEXT:    }, {
 // CHECK-NEXT:      shape: [ 4 ],
 // CHECK-NEXT:      buffer: 5,
 // CHECK-NEXT:      name: "exp",
 // CHECK-NEXT:      quantization: {
 // CHECK-EMPTY:
-// CHECK-NEXT:      }
+// CHECK-NEXT:      },
+// CHECK-NEXT:      has_rank: true
 // CHECK-NEXT:    } ],
 // CHECK-NEXT:    inputs: [ 0 ],
 // CHECK-NEXT:    outputs: [ 4 ],
@@ -107,5 +126,5 @@ func @main(tensor<4xf32>) -> tensor<4xf32> {
   // tf.div is the result of conversion to a Flex TF op
   %2 = "tf.Div"(%1, %0)  : (tensor<4xf32>, tensor<4xf32>) -> tensor<4xf32> loc("div")
   %3 = "tfl.exp"(%2)  : (tensor<4xf32>) -> tensor<4xf32> loc("exp")
-  return %3 : tensor<4xf32>
+  func.return %3 : tensor<4xf32>
 }

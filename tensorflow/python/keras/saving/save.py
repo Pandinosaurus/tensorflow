@@ -13,7 +13,7 @@
 # limitations under the License.
 # ==============================================================================
 """Keras model saving code."""
-
+import os
 from tensorflow.python import tf2
 from tensorflow.python.keras.saving import hdf5_format
 from tensorflow.python.keras.saving import saving_utils
@@ -22,18 +22,18 @@ from tensorflow.python.keras.saving.saved_model import load_context
 from tensorflow.python.keras.saving.saved_model import save as saved_model_save
 from tensorflow.python.keras.utils import generic_utils
 from tensorflow.python.keras.utils.io_utils import path_to_string
-from tensorflow.python.util import keras_deps
-from tensorflow.python.util.tf_export import keras_export
 
 # pylint: disable=g-import-not-at-top
 try:
+  # Disable loading HDF5 plugins from a default path and prevent ZDI-CAN-25480.
+  # Importing h5py prior to importing tensorflow will restore the old behavior.
+  os.environ.setdefault('HDF5_PLUGIN_PATH', os.devnull)
   import h5py
 except ImportError:
   h5py = None
 # pylint: enable=g-import-not-at-top
 
 
-@keras_export('keras.models.save_model')
 def save_model(model,
                filepath,
                overwrite=True,
@@ -151,7 +151,6 @@ def save_model(model,
                             signatures, options, save_traces)
 
 
-@keras_export('keras.models.load_model')
 def load_model(filepath, custom_objects=None, compile=True, options=None):  # pylint: disable=redefined-builtin
   """Loads a model saved via `model.save()`.
 
@@ -208,7 +207,3 @@ def load_model(filepath, custom_objects=None, compile=True, options=None):  # py
   raise IOError(
       'Unable to load model. Filepath is not an hdf5 file (or h5py is not '
       'available) or SavedModel.')
-
-# Inject the load_model function to keras_deps to remove the dependency
-# from TFLite to Keras.
-keras_deps.register_load_model_function(load_model)

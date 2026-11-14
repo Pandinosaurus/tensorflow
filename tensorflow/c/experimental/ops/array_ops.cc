@@ -17,11 +17,15 @@ limitations under the License.
 
 #include "tensorflow/c/experimental/ops/array_ops.h"
 
+#include "absl/status/status.h"
+#include "absl/types/span.h"
 #include "tensorflow/c/eager/abstract_context.h"
+#include "tensorflow/c/eager/abstract_operation.h"
 #include "tensorflow/c/eager/abstract_tensor_handle.h"
 #include "tensorflow/c/eager/tracing_utils.h"
-#include "tensorflow/core/framework/types.h"
-#include "tensorflow/core/platform/errors.h"
+#include "tensorflow/core/framework/types.h"  // NOLINT
+#include "tensorflow/core/framework/types.pb.h"
+#include "tensorflow/core/platform/errors.h"  // NOLINT
 
 using tensorflow::tracing::MaybeSetOpName;
 
@@ -33,14 +37,19 @@ namespace ops {
 // or value.
 //
 // Description:
-Status Identity(AbstractContext* ctx, AbstractTensorHandle* const input,
-                AbstractTensorHandle** output, const char* name) {
+absl::Status Identity(AbstractContext* ctx, AbstractTensorHandle* const input,
+                      AbstractTensorHandle** output, const char* name,
+                      const char* raw_device_name) {
   AbstractOperationPtr op_ptr(ctx->CreateOperation());
-  TF_RETURN_IF_ERROR(op_ptr->Reset("Identity", /*raw_device_name=*/nullptr));
+  TF_RETURN_IF_ERROR(op_ptr->Reset("Identity", raw_device_name));
   TF_RETURN_IF_ERROR(MaybeSetOpName(op_ptr.get(), name));
   TF_RETURN_IF_ERROR(op_ptr->AddInput(input));
   int num_retvals = 1;
-  return op_ptr->Execute(absl::MakeSpan(output, 1), &num_retvals);
+  TF_RETURN_IF_ERROR(op_ptr->Execute(absl::MakeSpan(output, 1), &num_retvals));
+  if (num_retvals != 1) {
+    return absl::InternalError("Identity: unexpected number of outputs");
+  }
+  return absl::OkStatus();
 }
 
 // Op: IdentityN()
@@ -63,29 +72,39 @@ Status Identity(AbstractContext* ctx, AbstractTensorHandle* const input,
 //   def ApplyG(op, dy, _):
 //     return [None, g(dy)]  # Do not backprop to f(x).
 //   ```
-Status IdentityN(AbstractContext* ctx,
-                 absl::Span<AbstractTensorHandle* const> input,
-                 absl::Span<AbstractTensorHandle*> output, const char* name) {
+absl::Status IdentityN(AbstractContext* ctx,
+                       absl::Span<AbstractTensorHandle* const> input,
+                       absl::Span<AbstractTensorHandle*> output,
+                       const char* name, const char* raw_device_name) {
   AbstractOperationPtr op_ptr(ctx->CreateOperation());
-  TF_RETURN_IF_ERROR(op_ptr->Reset("IdentityN", /*raw_device_name=*/nullptr));
+  TF_RETURN_IF_ERROR(op_ptr->Reset("IdentityN", raw_device_name));
   TF_RETURN_IF_ERROR(MaybeSetOpName(op_ptr.get(), name));
   TF_RETURN_IF_ERROR(op_ptr->AddInputList(input));
   int num_retvals = output.size();
-  return op_ptr->Execute(output, &num_retvals);
+  TF_RETURN_IF_ERROR(op_ptr->Execute(output, &num_retvals));
+  if (num_retvals != output.size()) {
+    return absl::InternalError("IdentityN: unexpected number of outputs");
+  }
+  return absl::OkStatus();
 }
 
 // Op: ZerosLike()
 // Summary: Returns a tensor of zeros with the same shape and type as x.
 //
 // Description:
-Status ZerosLike(AbstractContext* ctx, AbstractTensorHandle* const x,
-                 AbstractTensorHandle** y, const char* name) {
+absl::Status ZerosLike(AbstractContext* ctx, AbstractTensorHandle* const x,
+                       AbstractTensorHandle** y, const char* name,
+                       const char* raw_device_name) {
   AbstractOperationPtr op_ptr(ctx->CreateOperation());
-  TF_RETURN_IF_ERROR(op_ptr->Reset("ZerosLike", /*raw_device_name=*/nullptr));
+  TF_RETURN_IF_ERROR(op_ptr->Reset("ZerosLike", raw_device_name));
   TF_RETURN_IF_ERROR(MaybeSetOpName(op_ptr.get(), name));
   TF_RETURN_IF_ERROR(op_ptr->AddInput(x));
   int num_retvals = 1;
-  return op_ptr->Execute(absl::MakeSpan(y, 1), &num_retvals);
+  TF_RETURN_IF_ERROR(op_ptr->Execute(absl::MakeSpan(y, 1), &num_retvals));
+  if (num_retvals != 1) {
+    return absl::InternalError("ZerosLike: unexpected number of outputs");
+  }
+  return absl::OkStatus();
 }
 
 // Op: Shape()
@@ -101,16 +120,20 @@ Status ZerosLike(AbstractContext* ctx, AbstractTensorHandle* const x,
 //   # 't' is [[[1, 1, 1], [2, 2, 2]], [[3, 3, 3], [4, 4, 4]]]
 //   shape(t) ==> [2, 2, 3]
 //   ```
-Status Shape(AbstractContext* ctx, AbstractTensorHandle* const input,
-             AbstractTensorHandle** output, DataType out_type,
-             const char* name) {
+absl::Status Shape(AbstractContext* ctx, AbstractTensorHandle* const input,
+                   AbstractTensorHandle** output, DataType out_type,
+                   const char* name, const char* raw_device_name) {
   AbstractOperationPtr op_ptr(ctx->CreateOperation());
-  TF_RETURN_IF_ERROR(op_ptr->Reset("Shape", /*raw_device_name=*/nullptr));
+  TF_RETURN_IF_ERROR(op_ptr->Reset("Shape", raw_device_name));
   TF_RETURN_IF_ERROR(MaybeSetOpName(op_ptr.get(), name));
   TF_RETURN_IF_ERROR(op_ptr->AddInput(input));
   TF_RETURN_IF_ERROR(op_ptr->SetAttrType("out_type", out_type));
   int num_retvals = 1;
-  return op_ptr->Execute(absl::MakeSpan(output, 1), &num_retvals);
+  TF_RETURN_IF_ERROR(op_ptr->Execute(absl::MakeSpan(output, 1), &num_retvals));
+  if (num_retvals != 1) {
+    return absl::InternalError("Shape: unexpected number of outputs");
+  }
+  return absl::OkStatus();
 }
 
 // Op: ExpandDims()
@@ -147,30 +170,40 @@ Status Shape(AbstractContext* ctx, AbstractTensorHandle* const input,
 //
 //   This operation is related to `squeeze()`, which removes dimensions of
 //   size 1.
-Status ExpandDims(AbstractContext* ctx, AbstractTensorHandle* const input,
-                  AbstractTensorHandle* const dim,
-                  AbstractTensorHandle** output, const char* name) {
+absl::Status ExpandDims(AbstractContext* ctx, AbstractTensorHandle* const input,
+                        AbstractTensorHandle* const dim,
+                        AbstractTensorHandle** output, const char* name,
+                        const char* raw_device_name) {
   AbstractOperationPtr op_ptr(ctx->CreateOperation());
-  TF_RETURN_IF_ERROR(op_ptr->Reset("ExpandDims", /*raw_device_name=*/nullptr));
+  TF_RETURN_IF_ERROR(op_ptr->Reset("ExpandDims", raw_device_name));
   TF_RETURN_IF_ERROR(MaybeSetOpName(op_ptr.get(), name));
   TF_RETURN_IF_ERROR(op_ptr->AddInput(input));
   TF_RETURN_IF_ERROR(op_ptr->AddInput(dim));
   int num_retvals = 1;
-  return op_ptr->Execute(absl::MakeSpan(output, 1), &num_retvals);
+  TF_RETURN_IF_ERROR(op_ptr->Execute(absl::MakeSpan(output, 1), &num_retvals));
+  if (num_retvals != 1) {
+    return absl::InternalError("ExpandDims: unexpected number of outputs");
+  }
+  return absl::OkStatus();
 }
 
 // Op: OnesLike()
 // Summary: Returns a tensor of ones with the same shape and type as x.
 //
 // Description:
-Status OnesLike(AbstractContext* ctx, AbstractTensorHandle* const x,
-                AbstractTensorHandle** y, const char* name) {
+absl::Status OnesLike(AbstractContext* ctx, AbstractTensorHandle* const x,
+                      AbstractTensorHandle** y, const char* name,
+                      const char* raw_device_name) {
   AbstractOperationPtr op_ptr(ctx->CreateOperation());
-  TF_RETURN_IF_ERROR(op_ptr->Reset("OnesLike", /*raw_device_name=*/nullptr));
+  TF_RETURN_IF_ERROR(op_ptr->Reset("OnesLike", raw_device_name));
   TF_RETURN_IF_ERROR(MaybeSetOpName(op_ptr.get(), name));
   TF_RETURN_IF_ERROR(op_ptr->AddInput(x));
   int num_retvals = 1;
-  return op_ptr->Execute(absl::MakeSpan(y, 1), &num_retvals);
+  TF_RETURN_IF_ERROR(op_ptr->Execute(absl::MakeSpan(y, 1), &num_retvals));
+  if (num_retvals != 1) {
+    return absl::InternalError("OnesLike: unexpected number of outputs");
+  }
+  return absl::OkStatus();
 }
 
 }  // namespace ops

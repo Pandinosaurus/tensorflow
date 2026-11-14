@@ -17,10 +17,15 @@ limitations under the License.
 
 #include <stdint.h>
 
+#include <cstddef>
+#include <initializer_list>
 #include <limits>
+#ifndef TF_LITE_STATIC_MEMORY
+#include <string>
+#endif  // TF_LITE_STATIC_MEMORY
 
-#include "tensorflow/lite/c/builtin_op_data.h"
-#include "tensorflow/lite/c/common.h"
+#include "tensorflow/lite/core/c/builtin_op_data.h"
+#include "tensorflow/lite/core/c/common.h"
 
 namespace tflite {
 
@@ -149,8 +154,12 @@ inline int SizeOfDimension(const TfLiteTensor* t, int dim) {
   return t->dims->data[dim];
 }
 
-inline int NumInputs(const TfLiteNode* node) { return node->inputs->size; }
-inline int NumOutputs(const TfLiteNode* node) { return node->outputs->size; }
+inline int NumInputs(const TfLiteNode* node) {
+  return node->inputs == nullptr ? 0 : node->inputs->size;
+}
+inline int NumOutputs(const TfLiteNode* node) {
+  return node->outputs == nullptr ? 0 : node->outputs->size;
+}
 
 #ifndef TF_LITE_STATIC_MEMORY
 inline int NumIntermediates(const TfLiteNode* node) {
@@ -158,12 +167,16 @@ inline int NumIntermediates(const TfLiteNode* node) {
 }
 #endif  // TF_LITE_STATIC_MEMORY
 
-inline int64_t NumElements(const TfLiteIntArray* dims) {
+inline int64_t NumElements(const int* dims, int num_dims) {
   int64_t count = 1;
-  for (int i = 0; i < dims->size; ++i) {
-    count *= dims->data[i];
+  for (int i = 0; i < num_dims; ++i) {
+    count *= dims[i];
   }
   return count;
+}
+
+inline int64_t NumElements(const TfLiteIntArray* dims) {
+  return NumElements(dims->data, dims->size);
 }
 
 inline int64_t NumElements(const TfLiteTensor* t) {
@@ -189,22 +202,23 @@ inline bool IsConstantOrPersistentTensor(const TfLiteTensor* tensor) {
 inline bool IsDynamicTensor(const TfLiteTensor* tensor) {
   return tensor->allocation_type == kTfLiteDynamic;
 }
-
+#ifndef TF_LITE_STATIC_MEMORY
 // Sets tensor to dynamic.
 inline void SetTensorToDynamic(TfLiteTensor* tensor) {
   if (tensor->allocation_type != kTfLiteDynamic) {
+    TfLiteTensorDataFree(tensor);
     tensor->allocation_type = kTfLiteDynamic;
-    tensor->data.raw = nullptr;
   }
 }
 
 // Sets tensor to persistent and read-only.
 inline void SetTensorToPersistentRo(TfLiteTensor* tensor) {
   if (tensor->allocation_type != kTfLitePersistentRo) {
+    TfLiteTensorDataFree(tensor);
     tensor->allocation_type = kTfLitePersistentRo;
-    tensor->data.raw = nullptr;
   }
 }
+#endif  // TF_LITE_STATIC_MEMORY
 
 // Determines whether it is a hybrid op - one that has float inputs and
 // quantized weights.
@@ -281,6 +295,11 @@ bool HaveSameShapes(const TfLiteTensor* input1, const TfLiteTensor* input2);
 TfLiteStatus GetOutputShapeFromInput(TfLiteContext* context,
                                      const TfLiteTensor* input,
                                      TfLiteIntArray** output_shape);
+
+std::string GetShapeDebugString(const TfLiteIntArray* shape);
+
+std::string GetTensorDebugString(const TfLiteTensor* tensor);
+
 #endif  // !defined(TF_LITE_STATIC_MEMORY)
 
 // Calculates the output_shape that is necessary for element-wise operations
@@ -298,11 +317,55 @@ TfLiteStatus CalculateShapeForBroadcast(TfLiteContext* context,
                                         const TfLiteTensor* input3,
                                         TfLiteIntArray** output_shape);
 
-// Return the size of given type in bytes. Return 0 in in case of string.
+// Return the size of given type in bytes. Return 0 in case of string.
 int TfLiteTypeGetSize(TfLiteType type);
+
+// Return the size of given type in bits. Returns 0 in case of string.
+int TfLiteTypeGetSizeBits(TfLiteType type);
 
 // Whether the current platform is mobile (Android or iOS).
 bool IsMobilePlatform();
+
+// Returns whether there is unspecified dimension in the tensor's dim signature.
+bool HasUnspecifiedDimension(const TfLiteTensor* tensor);
+
+/**
+ * Calculates the product of the given dimensions. Returns an error if any of
+ * the dimensions is negative or if the product overflows.
+ * @param context The context to use for error reporting.
+ * @param dims The dimensions to multiply.
+ * @param error_message The error message to use if an error is encountered.
+ * @param product The output parameter to store the product.
+ */
+TfLiteStatus CheckedShapeProduct(TfLiteContext* context,
+                                 std::initializer_list<int> dims,
+                                 const char* error_message, size_t& product);
+
+/**
+ * Calculates the product of the given dimensions. Returns an error if any of
+ * the dimensions is negative or if the product overflows.
+ * @param context The context to use for error reporting.
+ * @param dims The dimensions to multiply.
+ * @param count The length of the dims array.
+ * @param error_message The error message to use if an error is encountered.
+ * @param product The output parameter to store the product.
+ */
+TfLiteStatus CheckedShapeProduct(TfLiteContext* context, const int* dims,
+                                 int count, const char* error_message,
+                                 size_t& product);
+
+/**
+ * Calculates the product of the given dimensions. Returns an error if any of
+ * the dimensions is negative or if the product overflows. (Same as above
+ * function with dims built on the fly)
+ * @param context The context to use for error reporting.
+ * @param dims The dimensions to multiply.
+ * @param error_message The error message to use if an error is encountered.
+ * @param product The output parameter to store the product.
+ */
+TfLiteStatus CheckedShapeProductToInt(TfLiteContext* context,
+                                      std::initializer_list<int> dims,
+                                      const char* error_message, int& product);
 
 }  // namespace tflite
 

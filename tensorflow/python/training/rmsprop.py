@@ -37,16 +37,12 @@ mom = momentum * mom{t-1} + learning_rate * g_t /
 delta = - mom
 """
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 from tensorflow.python.framework import ops
 from tensorflow.python.ops import array_ops
+from tensorflow.python.ops import gen_training_ops
 from tensorflow.python.ops import init_ops
 from tensorflow.python.ops import math_ops
 from tensorflow.python.training import optimizer
-from tensorflow.python.training import training_ops
 from tensorflow.python.util.tf_export import tf_export
 
 
@@ -215,7 +211,7 @@ class RMSPropOptimizer(optimizer.Optimizer):
     mom = self.get_slot(var, "momentum")
     if self._centered:
       mg = self.get_slot(var, "mg")
-      return training_ops.apply_centered_rms_prop(
+      return gen_training_ops.apply_centered_rms_prop(
           var,
           mg,
           rms,
@@ -227,7 +223,7 @@ class RMSPropOptimizer(optimizer.Optimizer):
           grad,
           use_locking=self._use_locking).op
     else:
-      return training_ops.apply_rms_prop(
+      return gen_training_ops.apply_rms_prop(
           var,
           rms,
           mom,
@@ -243,7 +239,7 @@ class RMSPropOptimizer(optimizer.Optimizer):
     mom = self.get_slot(var, "momentum")
     if self._centered:
       mg = self.get_slot(var, "mg")
-      return training_ops.resource_apply_centered_rms_prop(
+      return gen_training_ops.resource_apply_centered_rms_prop(
           var.handle,
           mg.handle,
           rms.handle,
@@ -255,7 +251,7 @@ class RMSPropOptimizer(optimizer.Optimizer):
           grad,
           use_locking=self._use_locking)
     else:
-      return training_ops.resource_apply_rms_prop(
+      return gen_training_ops.resource_apply_rms_prop(
           var.handle,
           rms.handle,
           mom.handle,
@@ -271,7 +267,7 @@ class RMSPropOptimizer(optimizer.Optimizer):
     mom = self.get_slot(var, "momentum")
     if self._centered:
       mg = self.get_slot(var, "mg")
-      return training_ops.sparse_apply_centered_rms_prop(
+      return gen_training_ops.sparse_apply_centered_rms_prop(
           var,
           mg,
           rms,
@@ -284,7 +280,7 @@ class RMSPropOptimizer(optimizer.Optimizer):
           grad.indices,
           use_locking=self._use_locking)
     else:
-      return training_ops.sparse_apply_rms_prop(
+      return gen_training_ops.sparse_apply_rms_prop(
           var,
           rms,
           mom,
@@ -301,7 +297,7 @@ class RMSPropOptimizer(optimizer.Optimizer):
     mom = self.get_slot(var, "momentum")
     if self._centered:
       mg = self.get_slot(var, "mg")
-      return training_ops.resource_sparse_apply_centered_rms_prop(
+      return gen_training_ops.resource_sparse_apply_centered_rms_prop(
           var.handle,
           mg.handle,
           rms.handle,
@@ -314,7 +310,7 @@ class RMSPropOptimizer(optimizer.Optimizer):
           indices,
           use_locking=self._use_locking)
     else:
-      return training_ops.resource_sparse_apply_rms_prop(
+      return gen_training_ops.resource_sparse_apply_rms_prop(
           var.handle,
           rms.handle,
           mom.handle,

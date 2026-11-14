@@ -68,9 +68,9 @@ class OptimizerCSE {
   Graph* g_;
 };
 
-static void FillInputs(const Node* n,
-                       gtl::InlinedVector<const Node*, 4>* control_edges,
-                       gtl::InlinedVector<std::pair<const Node*, int>, 4>* in) {
+static void FillInputs(
+    const Node* n, absl::InlinedVector<const Node*, 4UL>* control_edges,
+    absl::InlinedVector<std::pair<const Node*, int>, 4UL>* in) {
   DCHECK_EQ(in->size(), n->num_inputs());
   control_edges->clear();
   for (const Edge* e : n->in_edges()) {
@@ -93,9 +93,9 @@ static size_t kIllegalNodeHash = 0;
 
 class Hasher {
  public:
-  uint64 hash() { return h_ == kIllegalNodeHash ? kIllegalNodeHash + 1 : h_; }
+  uint64_t hash() { return h_ == kIllegalNodeHash ? kIllegalNodeHash + 1 : h_; }
 
-  void MixString(const string& s) { h_ = Hash64(s.data(), s.size(), h_); }
+  void MixString(const std::string& s) { h_ = Hash64(s.data(), s.size(), h_); }
 
   void MixInteger(size_t z) { h_ = Hash64Combine(h_, z); }
 
@@ -122,7 +122,7 @@ class Hasher {
     // This kBufSize makes sizeof(HashingOutputStream) == 256.  It's not chosen
     // for any particular reason except it's a nice even number of cache lines.
     static constexpr size_t kBufSize = 228;
-    static constexpr uint64 kDefaultSeed = 2570847921467975139ULL;
+    static constexpr uint64_t kDefaultSeed = 2570847921467975139ULL;
     bool Next(void** data, int* size) override {
       if (i_ == kBufSize) {
         // Mix the chunk in.
@@ -174,7 +174,7 @@ class Hasher {
 
     bool AllowsAliasing() const override { return true; }
 
-    uint64 hash() {
+    uint64_t hash() {
       if (i_ != 0) {
         Mix(buf_, i_);
         i_ = 0;
@@ -190,10 +190,10 @@ class Hasher {
     char buf_[kBufSize];
     int i_ = 0;
     int64_t byte_count_ = 0;
-    uint64 h_ = kDefaultSeed;
+    uint64_t h_ = kDefaultSeed;
   };
 
-  uint64 h_ = HashingOutputStream::kDefaultSeed;
+  uint64_t h_ = HashingOutputStream::kDefaultSeed;
 };
 
 size_t OptimizerCSE::NodeHash(const Node* n) {
@@ -205,8 +205,8 @@ size_t OptimizerCSE::NodeHash(const Node* n) {
   }
 
   hasher.MixInteger(n->num_inputs());
-  gtl::InlinedVector<const Node*, 4> control_edges;
-  gtl::InlinedVector<std::pair<const Node*, int>, 4> in(n->num_inputs());
+  absl::InlinedVector<const Node*, 4UL> control_edges;
+  absl::InlinedVector<std::pair<const Node*, int>, 4UL> in(n->num_inputs());
   FillInputs(n, &control_edges, &in);
   for (const auto& edge : in) {
     hasher.MixInteger(edge.first->id());
@@ -255,10 +255,10 @@ bool OptimizerCSE::Equivalent(const Node* a, const Node* b,
   // Compare input sources
   if (a->num_inputs() != b->num_inputs()) return false;
   const int N_in = a->num_inputs();
-  gtl::InlinedVector<const Node*, 4> a_control_edges;
-  gtl::InlinedVector<const Node*, 4> b_control_edges;
-  gtl::InlinedVector<std::pair<const Node*, int>, 4> a_in(N_in);
-  gtl::InlinedVector<std::pair<const Node*, int>, 4> b_in(N_in);
+  absl::InlinedVector<const Node*, 4UL> a_control_edges;
+  absl::InlinedVector<const Node*, 4UL> b_control_edges;
+  absl::InlinedVector<std::pair<const Node*, int>, 4UL> a_in(N_in);
+  absl::InlinedVector<std::pair<const Node*, int>, 4UL> b_in(N_in);
   FillInputs(a, &a_control_edges, &a_in);
   FillInputs(b, &b_control_edges, &b_in);
   if (a_in != b_in) return false;
@@ -280,7 +280,7 @@ bool OptimizerCSE::Optimize(
   // now, our updates are almost always the most downstream nodes in
   // the graph.
   std::vector<Node*> order;
-  GetReversePostOrder(*g_, &order);
+  GetReversePostOrder(*g_, &order, NodeComparatorID());
 
   // Our value is just a single Node*, meaning we keep just a single
   // candidate for a given node hash value.  This may cause us to

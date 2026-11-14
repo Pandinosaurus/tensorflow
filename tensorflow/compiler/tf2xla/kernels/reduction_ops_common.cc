@@ -15,15 +15,29 @@ limitations under the License.
 
 // XLA-specific reduction Ops.
 
+#include <cstdint>
+#include <string>
+#include <vector>
+
+#include "absl/container/inlined_vector.h"
+#include "absl/log/check.h"
+#include "absl/log/log.h"
+#include "absl/strings/str_cat.h"
 #include "absl/strings/str_join.h"
 #include "tensorflow/compiler/tf2xla/kernels/reduction_ops.h"
 #include "tensorflow/compiler/tf2xla/type_util.h"
 #include "tensorflow/compiler/tf2xla/xla_helpers.h"
 #include "tensorflow/compiler/tf2xla/xla_op_kernel.h"
-#include "tensorflow/compiler/xla/client/xla_builder.h"
-#include "tensorflow/compiler/xla/client/xla_computation.h"
-#include "tensorflow/compiler/xla/literal.h"
-#include "tensorflow/core/framework/kernel_def_builder.h"
+#include "xla/hlo/builder/xla_builder.h"
+#include "xla/hlo/builder/xla_computation.h"
+#include "xla/literal.h"
+#include "xla/shape_util.h"
+#include "xla/xla_data.pb.h"
+#include "tensorflow/core/framework/op_kernel.h"
+#include "tensorflow/core/framework/op_requires.h"
+#include "tensorflow/core/framework/tensor_shape.h"
+#include "tensorflow/core/framework/types.pb.h"
+#include "tensorflow/core/platform/errors.h"
 
 namespace tensorflow {
 
@@ -33,6 +47,12 @@ XlaReductionOp::XlaReductionOp(OpKernelConstruction* ctx,
   OP_REQUIRES_OK(ctx, ctx->GetAttr("keep_dims", &keep_dims_));
   OP_REQUIRES_OK(
       ctx, DataTypeToPrimitiveType(reduction_type_, &xla_reduction_type_));
+}
+
+// The default pre-processor directly returns the data. This can be overridden.
+xla::XlaOp XlaReductionOp::PreprocessInput(xla::XlaBuilder* /*builder*/,
+                                           const xla::XlaOp& data) {
+  return data;
 }
 
 // The default finalizer converts the results back into the input type. This can
@@ -72,7 +92,9 @@ void XlaReductionOp::Compile(XlaOpKernelContext* ctx) {
 
   absl::InlinedVector<bool, 4> bitmap(data_shape.dims(), false);
   std::vector<int64_t> xla_axes;
-  for (int64_t i = 0; i < axes_tensor_shape.num_elements(); ++i) {
+  auto num_elements = axes_tensor_shape.num_elements();
+  xla_axes.reserve(num_elements);
+  for (int64_t i = 0; i < num_elements; ++i) {
     int64_t index = axes[i];
     OP_REQUIRES(ctx,
                 !(index < -data_shape.dims() || index >= data_shape.dims()),
@@ -103,15 +125,16 @@ void XlaReductionOp::Compile(XlaOpKernelContext* ctx) {
     }
   }
 
-  string desc = ctx->op_kernel().name();
+  std::string desc = ctx->op_kernel().name();
 
   xla::XlaBuilder* const b = ctx->builder();
   // Construct the builder for the reduction lambda.
   xla::XlaBuilder r(absl::StrCat(desc, "-reduction"));
   xla::PrimitiveType type;
-  TF_CHECK_OK(DataTypeToPrimitiveType(reduction_type_, &type));
+  CHECK_OK(DataTypeToPrimitiveType(reduction_type_, &type));
 
   auto data = xla::ConvertElementType(ctx->Input(0), type);
+  auto processed_input = PreprocessInput(b, data);
   // Call virtual method to get the initial value.
   auto initial = xla::ConvertElementType(InitialValue(b), type);
   // Make two scalar parameters of the desired type for the lambda.
@@ -119,9 +142,10 @@ void XlaReductionOp::Compile(XlaOpKernelContext* ctx) {
   auto ry = xla::Parameter(&r, 1, xla::ShapeUtil::MakeShape(type, {}), "y");
   // Call virtual method to build the reduction lambda.
   BuildReducer(&r, rx, ry);
-  xla::XlaComputation reduction_computation = r.Build().ConsumeValueOrDie();
+  xla::XlaComputation reduction_computation = r.Build().value();
 
-  auto reduce = xla::Reduce(data, initial, reduction_computation, xla_axes);
+  auto reduce =
+      xla::Reduce(processed_input, initial, reduction_computation, xla_axes);
   auto finalized = BuildFinalizer(b, data, reduce, xla_axes);
   auto result = keep_dims_ ? xla::Reshape(finalized, final_shape) : finalized;
   ctx->SetOutput(0, result);

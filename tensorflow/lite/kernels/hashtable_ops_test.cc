@@ -13,15 +13,19 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 #include <initializer_list>
+#include <memory>
+#include <string>
 #include <vector>
 
 #include "absl/memory/memory.h"
 #include "absl/strings/match.h"
+#include "tensorflow/lite/core/interpreter.h"
+#include "tensorflow/lite/core/model.h"
 #include "tensorflow/lite/experimental/resource/lookup_interfaces.h"
-#include "tensorflow/lite/interpreter.h"
+#include "tensorflow/lite/experimental/resource/mock_resource.h"
+#include "tensorflow/lite/experimental/resource/resource_base.h"
 #include "tensorflow/lite/kernels/internal/tensor_ctypes.h"
 #include "tensorflow/lite/kernels/test_util.h"
-#include "tensorflow/lite/model.h"
 #include "tensorflow/lite/testing/util.h"
 
 namespace tflite {
@@ -107,7 +111,7 @@ class HashtableGraph {
  public:
   HashtableGraph(TfLiteType key_type, TfLiteType value_type)
       : key_type_(key_type), value_type_(value_type) {
-    interpreter_ = absl::make_unique<Interpreter>(&error_reporter_);
+    interpreter_ = std::make_unique<Interpreter>(&error_reporter_);
     InitOpRegistrations();
   }
   ~HashtableGraph() {}
@@ -506,8 +510,8 @@ class HashtableDefaultGraphTest {
                             std::initializer_list<KeyType> queries,
                             ValueType default_value, int table_size,
                             std::initializer_list<ValueType> lookup_result) {
-    graph_ = absl::make_unique<HashtableGraph<KeyType, ValueType>>(key_type,
-                                                                   value_type);
+    graph_ = std::make_unique<HashtableGraph<KeyType, ValueType>>(key_type,
+                                                                  value_type);
     graph_->SetTable(keys, values);
     graph_->SetQuery(queries, default_value);
     graph_->AddTensors();
@@ -654,7 +658,7 @@ class HashtableOpModel : public SingleOpModel {
 TEST(HashtableOpsTest, TestHashtable) {
   HashtableOpModel m(/*table_id=*/1, TensorType_INT64, TensorType_STRING);
   EXPECT_EQ(m.GetResources().size(), 0);
-  m.Invoke();
+  ASSERT_EQ(m.Invoke(), kTfLiteOk);
   auto& resources = m.GetResources();
   EXPECT_EQ(resources.size(), 1);
   int resource_id = m.GetOutput();
@@ -714,8 +718,9 @@ void InitHashtableResource(resource::ResourceMap* resources, int resource_id,
                            TfLiteType key_type, TfLiteType value_type,
                            std::initializer_list<KeyType> keys,
                            std::initializer_list<ValueType> values) {
-  resource::CreateHashtableResourceIfNotAvailable(resources, resource_id,
-                                                  key_type, value_type);
+  EXPECT_EQ(resource::CreateHashtableResourceIfNotAvailable(
+                resources, resource_id, key_type, value_type),
+            kTfLiteOk);
   auto lookup = resource::GetHashtableResource(resources, resource_id);
 
   TfLiteContext context;
@@ -753,8 +758,10 @@ class BaseHashtableOpModel : public SingleOpModel {
     auto value_tensor = interpreter_->tensor(values_);
 
     auto& resources = GetResources();
-    resource::CreateHashtableResourceIfNotAvailable(
-        &resources, resource_id, key_tensor->type, value_tensor->type);
+    EXPECT_EQ(
+        resource::CreateHashtableResourceIfNotAvailable(
+            &resources, resource_id, key_tensor->type, value_tensor->type),
+        kTfLiteOk);
   }
 
   template <typename ValueType>
@@ -833,7 +840,7 @@ TEST(HashtableOpsTest, TestHashtableLookupStringToInt64) {
   InitHashtableResource<std::string, std::int64_t>(
       &m.GetResources(), kResourceId, kTfLiteString, kTfLiteInt64,
       {"4", "5", "6"}, {1, 2, 3});
-  m.Invoke();
+  ASSERT_EQ(m.Invoke(), kTfLiteOk);
 
   EXPECT_THAT(m.GetOutput<std::int64_t>(), ElementsAreArray({2, 3, 4}));
   EXPECT_THAT(m.GetOutputShape(), ElementsAreArray({3}));
@@ -851,7 +858,7 @@ TEST(HashtableOpsTest, TestHashtableLookupInt64ToString) {
   InitHashtableResource<std::int64_t, std::string>(
       &m.GetResources(), kResourceId, kTfLiteInt64, kTfLiteString, {4, 5, 6},
       {"1", "2", "3"});
-  m.Invoke();
+  ASSERT_EQ(m.Invoke(), kTfLiteOk);
 
   EXPECT_THAT(m.GetOutput<std::string>(), ElementsAreArray({"2", "3", "4"}));
   EXPECT_THAT(m.GetOutputShape(), ElementsAreArray({3}));
@@ -903,7 +910,7 @@ TEST(HashtableOpsTest, TestHashtableImport) {
   m.SetKeys({1, 2, 3});
   m.SetStringValues({"1", "2", "3"});
   m.CreateHashtableResource(kResourceId);
-  m.Invoke();
+  ASSERT_EQ(m.Invoke(), kTfLiteOk);
 
   auto& resources = m.GetResources();
   EXPECT_EQ(resources.size(), 1);
@@ -924,8 +931,8 @@ TEST(HashtableOpsTest, TestHashtableImportTwice) {
   m.SetKeys({1, 2, 3});
   m.SetStringValues({"1", "2", "3"});
   m.CreateHashtableResource(kResourceId);
-  m.Invoke();
-  m.Invoke();
+  ASSERT_EQ(m.Invoke(), kTfLiteOk);
+  ASSERT_EQ(m.Invoke(), kTfLiteOk);
 
   auto& resources = m.GetResources();
   EXPECT_EQ(resources.size(), 1);
@@ -965,7 +972,7 @@ TEST(HashtableOpsTest, TestHashtableSize) {
   InitHashtableResource<std::string, std::int64_t>(
       &m.GetResources(), kResourceId, kTfLiteString, kTfLiteInt64,
       {"4", "5", "6"}, {1, 2, 3});
-  m.Invoke();
+  ASSERT_EQ(m.Invoke(), kTfLiteOk);
 
   EXPECT_THAT(m.GetOutput<std::int64_t>(), ElementsAreArray({3}));
   EXPECT_THAT(m.GetOutputShape(), ElementsAreArray({1}));
@@ -978,7 +985,81 @@ TEST(HashtableOpsTest, TestHashtableSizeNonInitialized) {
   m.SetResourceId(kResourceId);
 
   // Invoke without hash table initialization.
-  EXPECT_NE(m.InvokeUnchecked(), kTfLiteOk);
+  EXPECT_NE(m.Invoke(), kTfLiteOk);
+}
+
+TEST(HashtableOpsTest, CreateHashtableResourceWhenTypeCollidesReturnsError) {
+  resource::ResourceMap resources;
+  const int kResourceId = 42;
+  resources.emplace(kResourceId,
+                    std::make_unique<resource::MockVariableResource>());
+  EXPECT_EQ(resource::CreateHashtableResourceIfNotAvailable(
+                &resources, kResourceId, kTfLiteInt64, kTfLiteString),
+            kTfLiteError);
+}
+
+TEST(HashtableOpsTest,
+     CreateHashtableResourceWhenTypesUnsupportedReturnsError) {
+  resource::ResourceMap resources;
+  const int kResourceId = 42;
+  EXPECT_EQ(resource::CreateHashtableResourceIfNotAvailable(
+                &resources, kResourceId, kTfLiteFloat32, kTfLiteFloat32),
+            kTfLiteError);
+  EXPECT_EQ(resources.find(kResourceId), resources.end());
+}
+
+TEST(HashtableOpsTest, CreateHashtableResourceWhenEntryIsNullReturnsError) {
+  resource::ResourceMap resources;
+  const int kResourceId = 42;
+  resources.emplace(kResourceId, nullptr);
+  EXPECT_EQ(resource::CreateHashtableResourceIfNotAvailable(
+                &resources, kResourceId, kTfLiteInt64, kTfLiteString),
+            kTfLiteError);
+  EXPECT_EQ(resource::GetHashtableResource(&resources, kResourceId), nullptr);
+}
+
+TEST(HashtableOpsTest, GetHashtableResourceWhenTypeMismatchesReturnsNull) {
+  resource::ResourceMap resources;
+  const int kResourceId = 42;
+  resources.emplace(kResourceId,
+                    std::make_unique<resource::MockVariableResource>());
+  EXPECT_EQ(resource::GetHashtableResource(&resources, kResourceId), nullptr);
+}
+
+TEST(HashtableOpsTest,
+     CreateHashtableResourceWhenResourcesMapIsNullReturnsError) {
+  EXPECT_EQ(resource::CreateHashtableResourceIfNotAvailable(
+                nullptr, 42, kTfLiteInt64, kTfLiteString),
+            kTfLiteError);
+}
+
+TEST(HashtableOpsTest, CreateHashtableResourceWhenMatchingTypeExistsSucceeds) {
+  resource::ResourceMap resources;
+  const int kResourceId = 42;
+  EXPECT_EQ(resource::CreateHashtableResourceIfNotAvailable(
+                &resources, kResourceId, kTfLiteInt64, kTfLiteString),
+            kTfLiteOk);
+  EXPECT_EQ(resource::CreateHashtableResourceIfNotAvailable(
+                &resources, kResourceId, kTfLiteInt64, kTfLiteString),
+            kTfLiteOk);
+  EXPECT_EQ(resources.size(), 1);
+}
+
+TEST(HashtableOpsTest, GetHashtableResourceWhenResourcesMapIsNullReturnsNull) {
+  EXPECT_EQ(resource::GetHashtableResource(nullptr, 42), nullptr);
+}
+
+TEST(HashtableOpsTest, GetHashtableResourceWhenNotFoundReturnsNull) {
+  resource::ResourceMap resources;
+  EXPECT_EQ(resource::GetHashtableResource(&resources, 42), nullptr);
+}
+
+TEST(HashtableOpsTest, TestHashtableTypeCollisionDuringOpEval) {
+  HashtableOpModel m(/*table_id=*/1, TensorType_INT64, TensorType_STRING);
+  // Pre-populate resources with a colliding ResourceVariable before op eval.
+  m.GetResources().emplace(1,
+                           std::make_unique<resource::MockVariableResource>());
+  EXPECT_EQ(m.Invoke(), kTfLiteError);
 }
 
 }  // namespace

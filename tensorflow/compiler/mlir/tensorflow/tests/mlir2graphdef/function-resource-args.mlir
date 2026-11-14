@@ -1,18 +1,32 @@
+// Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+// ==============================================================================
 // RUN: tf-mlir-translate -mlir-to-graphdef %s -o - | FileCheck %s
 
-func @main() -> tensor<*x!tf_type.resource> attributes {tf.entry_function = {inputs = "", outputs = "func_call"}} {
+func.func @main() -> tensor<*x!tf_type.resource> attributes {tf.entry_function = {inputs = "", outputs = "func_call"}} {
   %0 = tf_executor.graph {
     %outputs, %control = tf_executor.island wraps "tf.VarHandleOp"() {container = "a", device = "/CPU:0", dtype = i64, shape = "tfshape$", shared_name = "x"} : () -> tensor<!tf_type.resource<tensor<i64>>> loc("x")
     %outputs_0, %control_1 = tf_executor.island wraps "tf.LegacyCall"(%outputs, %outputs) {_disable_call_shape_inference = true, f = @test_func_name0} : (tensor<!tf_type.resource<tensor<i64>>>, tensor<!tf_type.resource<tensor<i64>>>) -> tensor<*x!tf_type.resource> loc("called")
     tf_executor.fetch %outputs_0 : tensor<*x!tf_type.resource>
   }
-  return %0 : tensor<*x!tf_type.resource>
+  func.return %0 : tensor<*x!tf_type.resource>
 }
-func @test_func_name0(%arg0: tensor<*x!tf_type.resource> {tf._resource_arg_unique_id = 0 : i64}, %arg1: tensor<*x!tf_type.resource> {tf._resource_arg_unique_id = 0 : i64}) -> tensor<*x!tf_type.resource> attributes {tf._disable_call_shape_inference = true} {
+func.func @test_func_name0(%arg0: tensor<*x!tf_type.resource> {tf._resource_arg_unique_id = 0 : i64}, %arg1: tensor<*x!tf_type.resource> {tf._resource_arg_unique_id = 0 : i64}) -> tensor<*x!tf_type.resource> attributes {tf._disable_call_shape_inference = true} {
   %0 = tf_executor.graph {
     tf_executor.fetch %arg0 : tensor<*x!tf_type.resource>
   }
-  return %0 : tensor<*x!tf_type.resource>
+  func.return %0 : tensor<*x!tf_type.resource>
 }
 
 // Check that the `tf._resource_arg_unique_id` argument attributes of

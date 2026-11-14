@@ -22,8 +22,8 @@ limitations under the License.
 #include <cstddef>
 #include <cstdint>
 
-#include "tensorflow/lite/c/builtin_op_data.h"
-#include "tensorflow/lite/c/common.h"
+#include "tensorflow/lite/core/c/builtin_op_data.h"
+#include "tensorflow/lite/core/c/common.h"
 #include "tensorflow/lite/kernels/internal/compatibility.h"
 #include "tensorflow/lite/kernels/internal/quantization_util.h"
 #include "tensorflow/lite/kernels/internal/tensor_ctypes.h"
@@ -203,6 +203,7 @@ TfLiteStatus Prepare(TfLiteContext* context, TfLiteNode* node) {
     TF_LITE_ENSURE_OK(context, GetTemporarySafe(context, node, /*index=*/3,
                                                 &float_weights_time));
     float_weights_time->type = kTfLiteFloat32;
+    float_weights_time->name = "Svdf_float_weights_time";
     // Persistent so that we can compute the dequantized weights only once.
     float_weights_time->allocation_type = kTfLiteArenaRwPersistent;
     if (!TfLiteIntArrayEqual(float_weights_time->dims, weights_time->dims)) {
@@ -232,6 +233,7 @@ TfLiteStatus Prepare(TfLiteContext* context, TfLiteNode* node) {
     TF_LITE_ENSURE_OK(context,
                       GetTemporarySafe(context, node, /*index=*/5, &row_sums));
     row_sums->type = kTfLiteFloat32;
+    float_weights_time->name = "Svdf_row_sums";
     row_sums->allocation_type = kTfLiteArenaRwPersistent;
     int row_sums_dims[1] = {num_filters};
     if (!TfLiteIntArrayEqualsArray(row_sums->dims, 1, row_sums_dims)) {
@@ -273,12 +275,14 @@ TfLiteStatus Prepare(TfLiteContext* context, TfLiteNode* node) {
     TF_LITE_ENSURE(context, output->quantization.type != kTfLiteNoQuantization);
     auto* output_params = reinterpret_cast<TfLiteAffineQuantization*>(
         output->quantization.params);
-    const double effective_scale_1 = input_params->scale->data[0] *
-                                     weights_feature_params->scale->data[0] /
-                                     state_params->scale->data[0];
-    const double effective_scale_2 = state_params->scale->data[0] *
-                                     weight_time_params->scale->data[0] /
-                                     output_params->scale->data[0];
+    const double effective_scale_1 =
+        static_cast<double>(input_params->scale->data[0]) *
+        static_cast<double>(weights_feature_params->scale->data[0]) /
+        static_cast<double>(state_params->scale->data[0]);
+    const double effective_scale_2 =
+        static_cast<double>(state_params->scale->data[0]) *
+        static_cast<double>(weight_time_params->scale->data[0]) /
+        static_cast<double>(output_params->scale->data[0]);
     QuantizeMultiplier(effective_scale_1, &op_data->effective_scale_1_a,
                        &op_data->effective_scale_1_b);
     QuantizeMultiplier(effective_scale_2, &op_data->effective_scale_2_a,
@@ -406,8 +410,8 @@ TfLiteStatus Eval(TfLiteContext* context, TfLiteNode* node) {
       return kTfLiteOk;
     }
     default:
-      context->ReportError(context, "Type %s not currently supported.",
-                           TfLiteTypeGetName(weights_feature->type));
+      TF_LITE_KERNEL_LOG(context, "Type %s not currently supported.",
+                         TfLiteTypeGetName(weights_feature->type));
       return kTfLiteError;
   }
 }

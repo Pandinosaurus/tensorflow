@@ -14,12 +14,8 @@
 # =============================================================================
 
 """Contains layer utilities for input validation and format conversion."""
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 from tensorflow.python.framework import smart_cond as smart_module
-from tensorflow.python.ops import control_flow_ops
+from tensorflow.python.ops import cond
 from tensorflow.python.ops import variables
 
 
@@ -197,7 +193,7 @@ def smart_cond(pred, true_fn=None, false_fn=None, name=None):
     TypeError: If `true_fn` or `false_fn` is not callable.
   """
   if isinstance(pred, variables.Variable):
-    return control_flow_ops.cond(
+    return cond.cond(
         pred, true_fn=true_fn, false_fn=false_fn, name=name)
   return smart_module.smart_cond(
       pred, true_fn=true_fn, false_fn=false_fn, name=name)

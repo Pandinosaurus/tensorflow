@@ -34,15 +34,14 @@ namespace function {
 class Attrs {
  public:
   Attrs(const std::initializer_list<  // NOLINT(runtime/explicit)
-        std::pair<string, FunctionDefHelper::AttrValueWrapper>>& attrs) {
+        std::pair<std::string, FunctionDefHelper::AttrValueWrapper>>& attrs) {
     for (const auto& aval : attrs) {
       map_.insert({aval.first, aval.second.proto});
     }
   }
 
-  Attrs(
-      const std::vector<std::pair<string, FunctionDefHelper::AttrValueWrapper>>&
-          attrs) {
+  Attrs(const std::vector<
+        std::pair<std::string, FunctionDefHelper::AttrValueWrapper>>& attrs) {
     for (const auto& aval : attrs) {
       map_.insert({aval.first, aval.second.proto});
     }
@@ -55,21 +54,28 @@ class Attrs {
 };
 
 // Helper to construct a NodeDef.
-NodeDef NDef(
-    StringPiece name, StringPiece op, gtl::ArraySlice<string> inputs,
-    gtl::ArraySlice<std::pair<string, FunctionDefHelper::AttrValueWrapper>>
-        attrs = {},
-    const string& device = "");
+NodeDef NDef(absl::string_view name, absl::string_view op,
+             absl::Span<const std::string> inputs,
+             absl::Span<const std::pair<std::string,
+                                        FunctionDefHelper::AttrValueWrapper>>
+                 attrs = {},
+             const std::string& device = "");
 
 // Helper to construct a GraphDef proto.
-GraphDef GDef(gtl::ArraySlice<NodeDef> nodes,
-              gtl::ArraySlice<FunctionDef> funcs = {});
+GraphDef GDef(absl::Span<const NodeDef> nodes,
+              absl::Span<const FunctionDef> funcs = {});
 
 // For testing convenience, we provide a few simple functions that can
 // be easily executed and tested.
 
 // x: T -> x * 2.
 FunctionDef XTimesTwo();
+// Same as `XTimesTwo` above, but with the `x` input as a control dependency.
+FunctionDef XTimesTwoWithControlInput();
+// Same as `XTimesTwo` above, but with a `dummy` control output node.
+FunctionDef XTimesTwoWithControlOutput();
+// Same as `XTimesTwo` above, but with a dangling `FloorDiv` node.
+FunctionDef XTimesTwoWithDanglingFloorDivNode();
 
 // x: T -> cpu(x * 2) + cpu(x * 3).
 FunctionDef TwoDeviceTimesFive();
@@ -97,6 +103,9 @@ FunctionDef XTimesTwoInt32();
 
 // x: T -> (x * 2) * 2.
 FunctionDef XTimesFour();
+
+// x: T -> (x * 2) * 2, where x is int32
+FunctionDef XTimesFourInt32();
 
 // x: T -> ((x * 2) * 2) * 2.
 FunctionDef XTimes16();
@@ -127,6 +136,9 @@ FunctionDef ResourceIdentity();
 
 // x: resource -> y: float.
 FunctionDef ReadResourceVariable();
+
+// Contains simple control flow returning the input via an Enter op.
+FunctionDef ControlFlow();
 
 // Contains malformed control flow which can't be run by the executor.
 FunctionDef InvalidControlFlow();

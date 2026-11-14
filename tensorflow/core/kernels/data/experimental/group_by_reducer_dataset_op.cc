@@ -97,9 +97,9 @@ class GroupByReducerDatasetOp : public UnaryDatasetOpKernel {
     ~Dataset() override { input_->Unref(); }
 
     std::unique_ptr<IteratorBase> MakeIteratorInternal(
-        const string& prefix) const override {
-      return absl::make_unique<Iterator>(
-          Iterator::Params{this, strings::StrCat(prefix, "::GroupByReducer")});
+        const std::string& prefix) const override {
+      return std::make_unique<Iterator>(
+          Iterator::Params{this, absl::StrCat(prefix, "::GroupByReducer")});
     }
 
     const DataTypeVector& output_dtypes() const override {
@@ -109,11 +109,11 @@ class GroupByReducerDatasetOp : public UnaryDatasetOpKernel {
       return output_shapes_;
     }
 
-    string DebugString() const override {
+    std::string DebugString() const override {
       return "GroupByReducerDatasetOp::Dataset";
     }
 
-    Status CheckExternalState() const override {
+    absl::Status CheckExternalState() const override {
       TF_RETURN_IF_ERROR(captured_key_func_->CheckExternalState());
       TF_RETURN_IF_ERROR(captured_init_func_->CheckExternalState());
       TF_RETURN_IF_ERROR(captured_reduce_func_->CheckExternalState());
@@ -122,9 +122,9 @@ class GroupByReducerDatasetOp : public UnaryDatasetOpKernel {
     }
 
    protected:
-    Status AsGraphDefInternal(SerializationContext* ctx,
-                              DatasetGraphDefBuilder* b,
-                              Node** output) const override {
+    absl::Status AsGraphDefInternal(SerializationContext* ctx,
+                                    DatasetGraphDefBuilder* b,
+                                    Node** output) const override {
       Node* input_graph_node = nullptr;
       TF_RETURN_IF_ERROR(b->AddInputDataset(ctx, input_, &input_graph_node));
 
@@ -191,7 +191,7 @@ class GroupByReducerDatasetOp : public UnaryDatasetOpKernel {
            {"Tfinalize_func_other_arguments",
             finalize_func_other_arguments_types_attr}},
           output));
-      return Status::OK();
+      return absl::OkStatus();
     }
 
    private:
@@ -200,7 +200,7 @@ class GroupByReducerDatasetOp : public UnaryDatasetOpKernel {
       explicit Iterator(const Params& params)
           : DatasetIterator<Dataset>(params) {}
 
-      Status Initialize(IteratorContext* ctx) override {
+      absl::Status Initialize(IteratorContext* ctx) override {
         TF_RETURN_IF_ERROR(
             dataset()->input_->MakeIterator(ctx, this, prefix(), &input_impl_));
         TF_RETURN_IF_ERROR(dataset()->captured_key_func_->Instantiate(
@@ -211,12 +211,12 @@ class GroupByReducerDatasetOp : public UnaryDatasetOpKernel {
             ctx, &instantiated_reduce_func_));
         TF_RETURN_IF_ERROR(dataset()->captured_finalize_func_->Instantiate(
             ctx, &instantiated_finalize_func_));
-        return Status::OK();
+        return absl::OkStatus();
       }
 
-      Status GetNextInternal(IteratorContext* ctx,
-                             std::vector<Tensor>* out_tensors,
-                             bool* end_of_sequence) override {
+      absl::Status GetNextInternal(IteratorContext* ctx,
+                                   std::vector<Tensor>* out_tensors,
+                                   bool* end_of_sequence) override {
         mutex_lock l(mu_);
 
         // Iterate through the input dataset, keying input elements to reducers.
@@ -235,7 +235,7 @@ class GroupByReducerDatasetOp : public UnaryDatasetOpKernel {
                 key_func_output[0].dtype() != DT_INT64 ||
                 key_func_output[0].NumElements() != 1) {
               // TODO(b/78665031): Support non-int64 keys.
-              return errors::InvalidArgument(
+              return absl::InvalidArgumentError(
                   "`key_func` must return a scalar int64.");
             }
             const int64_t key = key_func_output[0].scalar<int64_t>()();
@@ -270,14 +270,14 @@ class GroupByReducerDatasetOp : public UnaryDatasetOpKernel {
           }
         }
 
-        if (keys_index_ == keys_.size()) {
+        if (keys_index_ >= keys_.size()) {
           *end_of_sequence = true;
-          return Status::OK();
+          return absl::OkStatus();
         }
         TF_RETURN_IF_ERROR(instantiated_finalize_func_->RunWithBorrowedArgs(
             ctx, states_[keys_[keys_index_++]], out_tensors, model_node()));
         *end_of_sequence = false;
-        return Status::OK();
+        return absl::OkStatus();
       }
 
      protected:
@@ -286,8 +286,8 @@ class GroupByReducerDatasetOp : public UnaryDatasetOpKernel {
         return model::MakeUnknownRatioNode(std::move(args));
       }
 
-      Status SaveInternal(SerializationContext* ctx,
-                          IteratorStateWriter* writer) override {
+      absl::Status SaveInternal(SerializationContext* ctx,
+                                IteratorStateWriter* writer) override {
         TF_RETURN_IF_ERROR(ctx->HandleCheckExternalStateStatus(
             dataset()->captured_key_func_->CheckExternalState()));
         TF_RETURN_IF_ERROR(ctx->HandleCheckExternalStateStatus(
@@ -312,10 +312,10 @@ class GroupByReducerDatasetOp : public UnaryDatasetOpKernel {
           for (auto it = states_.begin(); it != states_.end(); ++idx, ++it) {
             int64_t key = it->first;
             TF_RETURN_IF_ERROR(writer->WriteScalar(
-                full_name(strings::StrCat("states[", idx, "]->key")), key));
+                full_name(absl::StrCat("states[", idx, "]->key")), key));
             if (!it->second.empty()) {
               TF_RETURN_IF_ERROR(writer->WriteScalar(
-                  full_name(strings::StrCat("states[", idx, "]->state_size")),
+                  full_name(absl::StrCat("states[", idx, "]->state_size")),
                   it->second.size()));
               for (int j = 0; j < it->second.size(); ++j) {
                 TF_RETURN_IF_ERROR(writer->WriteTensor(
@@ -336,16 +336,16 @@ class GroupByReducerDatasetOp : public UnaryDatasetOpKernel {
                 writer->WriteScalar(full_name("keys_size"), keys_.size()));
             for (int idx = 0; idx < keys_.size(); ++idx) {
               TF_RETURN_IF_ERROR(writer->WriteScalar(
-                  full_name(strings::StrCat("keys[", idx, "]")), keys_[idx]));
+                  full_name(absl::StrCat("keys[", idx, "]")), keys_[idx]));
             }
           }
         }
 
-        return Status::OK();
+        return absl::OkStatus();
       }
 
-      Status RestoreInternal(IteratorContext* ctx,
-                             IteratorStateReader* reader) override {
+      absl::Status RestoreInternal(IteratorContext* ctx,
+                                   IteratorStateReader* reader) override {
         mutex_lock l(mu_);
         TF_RETURN_IF_ERROR(RestoreInput(ctx, reader, input_impl_));
 
@@ -359,13 +359,13 @@ class GroupByReducerDatasetOp : public UnaryDatasetOpKernel {
           for (int idx = 0; idx < size; ++idx) {
             int64_t key;
             TF_RETURN_IF_ERROR(reader->ReadScalar(
-                full_name(strings::StrCat("states[", idx, "]->key")), &key));
+                full_name(absl::StrCat("states[", idx, "]->key")), &key));
             std::vector<Tensor> state;
-            if (reader->Contains(full_name(
-                    strings::StrCat("states[", idx, "]->state_size")))) {
+            if (reader->Contains(
+                    full_name(absl::StrCat("states[", idx, "]->state_size")))) {
               int64_t state_size;
               TF_RETURN_IF_ERROR(reader->ReadScalar(
-                  full_name(strings::StrCat("states[", idx, "]->state_size")),
+                  full_name(absl::StrCat("states[", idx, "]->state_size")),
                   &state_size));
               state.resize(state_size);
               for (int j = 0; j < state_size; ++j) {
@@ -392,13 +392,13 @@ class GroupByReducerDatasetOp : public UnaryDatasetOpKernel {
             for (int idx = 0; idx < size; ++idx) {
               int64_t key;
               TF_RETURN_IF_ERROR(reader->ReadScalar(
-                  full_name(strings::StrCat("keys[", idx, "]")), &key));
+                  full_name(absl::StrCat("keys[", idx, "]")), &key));
               keys_[idx] = key;
             }
           }
         }
 
-        return Status::OK();
+        return absl::OkStatus();
       }
 
      private:

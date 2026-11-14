@@ -14,10 +14,6 @@
 # ==============================================================================
 """Array operations for RaggedTensors."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 
 from tensorflow.python.framework import constant_op
 from tensorflow.python.framework import ops
@@ -32,9 +28,9 @@ from tensorflow.python.ops.ragged import ragged_tensor_shape
 from tensorflow.python.ops.ragged import ragged_where_op
 
 
-#===============================================================================
+# ===============================================================================
 # ragged.batch_gather_with_default
-#===============================================================================
+# ===============================================================================
 def batch_gather_with_default(params,
                               indices,
                               default_value='',
@@ -132,7 +128,7 @@ def batch_gather_with_default(params,
       # Adjust the indices by substituting out-of-bound indices to the
       # default-value index (which is the first element)
       shifted_indices = indices + 1
-      is_out_of_bounds = (indices < 0) | (indices > upper_bounds)
+      is_out_of_bounds = (indices < 0) | (indices >= upper_bounds)
       adjusted_indices = ragged_where_op.where(
           is_out_of_bounds,
           x=array_ops.zeros_like(indices), y=shifted_indices,

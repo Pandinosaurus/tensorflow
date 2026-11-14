@@ -14,10 +14,6 @@
 # ==============================================================================
 """Unit tests for tfdbg v2 dumping callback."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import collections
 import os
 import shutil
@@ -289,10 +285,10 @@ class DumpingCallbackTest(
       reader.update()
       graph_exec_traces = reader.graph_execution_traces()
       executed_op_types = [trace.op_type for trace in graph_exec_traces
-                           if trace.op_type != "Const"]
+                           if trace.op_type not in ["Const", "Placeholder"]]
       self.assertCountEqual(
           executed_op_types,
-          ["Placeholder", "Placeholder", "AddV2", "Sub", "RealDiv"])
+          ["AddV2", "Sub", "RealDiv"])
       if tensor_debug_mode == "CURT_HEALTH":
         for trace in graph_exec_traces:
           # 1st element: tensor_id, should be >= 0.
@@ -408,10 +404,10 @@ class DumpingCallbackTest(
       reader.update()
       graph_exec_traces = reader.graph_execution_traces()
       executed_op_types = [trace.op_type for trace in graph_exec_traces
-                           if trace.op_type != "Const"]
+                           if trace.op_type not in ["Const", "Placeholder"]]
       self.assertEqual(
           executed_op_types,
-          ["Placeholder", "Placeholder", "LogicalAnd", "LogicalNot"])
+          ["LogicalAnd", "LogicalNot"])
       for trace in graph_exec_traces:
         tensor_id = reader.graph_execution_trace_to_tensor_id(trace)
         self.assertGreaterEqual(tensor_id, 0)
@@ -506,7 +502,6 @@ class DumpingCallbackTest(
                       set(reader.device_name_map().values()))
 
       # Verify the recorded graph-building history.
-      placeholder_op_digests = reader.graph_op_digests(op_type="Placeholder")
       add_op_digests = reader.graph_op_digests(op_type="AddV2")
       self.assertLen(add_op_digests, 2)
       self.assertEqual(
@@ -531,59 +526,33 @@ class DumpingCallbackTest(
         self._verifyStackFrames(stack_frames)
 
       graph_exec_traces = [trace for trace in reader.graph_execution_traces()
-                           if trace.op_type != "Const"]
+                           if trace.op_type not in ["Const", "Placeholder"]]
       executed_op_types = [digest.op_type for digest in graph_exec_traces]
       self.assertEqual(
-          executed_op_types,
-          ["Placeholder", "Placeholder", "Placeholder", "Placeholder",
-           "AddV2", "Log", "AddV2", "Sin"])
-      placeholder_traces = graph_exec_traces[:4]
-      non_placeholder_traces = graph_exec_traces[4:]
+          executed_op_types, ["AddV2", "Log", "AddV2", "Sin"])
 
       # Verify the graph ID stack of each op.
-      # The outer function's 1st Placeholder.
-      self.assertEqual(
-          reader.graph_by_id(placeholder_traces[0].graph_ids[-1]).name,
-          "sin1p_log_sum")
-      # The outer function's 2nd Placeholder.
-      self.assertEqual(
-          reader.graph_by_id(placeholder_traces[1].graph_ids[-1]).name,
-          "sin1p_log_sum")
-      # The inner function's 1st Placeholder.
-      self.assertEqual(
-          reader.graph_by_id(placeholder_traces[2].graph_ids[-1]).name,
-          "log_sum")
-      self.assertEqual(
-          reader.graph_by_id(placeholder_traces[2].graph_ids[-2]).name,
-          "sin1p_log_sum")
-      # The inner function's 2nd Placeholder.
-      self.assertEqual(
-          reader.graph_by_id(placeholder_traces[3].graph_ids[-1]).name,
-          "log_sum")
-      self.assertEqual(
-          reader.graph_by_id(placeholder_traces[3].graph_ids[-2]).name,
-          "sin1p_log_sum")
       # 1st AddV2 op.
       self.assertEqual(
-          reader.graph_by_id(non_placeholder_traces[0].graph_ids[-1]).name,
+          reader.graph_by_id(graph_exec_traces[0].graph_ids[-1]).name,
           "log_sum")
       self.assertEqual(
-          reader.graph_by_id(non_placeholder_traces[0].graph_ids[-2]).name,
+          reader.graph_by_id(graph_exec_traces[0].graph_ids[-2]).name,
           "sin1p_log_sum")
       # Log op.
       self.assertEqual(
-          reader.graph_by_id(non_placeholder_traces[1].graph_ids[-1]).name,
+          reader.graph_by_id(graph_exec_traces[1].graph_ids[-1]).name,
           "log_sum")
       self.assertEqual(
-          reader.graph_by_id(non_placeholder_traces[1].graph_ids[-2]).name,
+          reader.graph_by_id(graph_exec_traces[1].graph_ids[-2]).name,
           "sin1p_log_sum")
       # 2nd AddV2 op.
       self.assertEqual(
-          reader.graph_by_id(non_placeholder_traces[2].graph_ids[-1]).name,
+          reader.graph_by_id(graph_exec_traces[2].graph_ids[-1]).name,
           "sin1p_log_sum")
       # Sin op.
       self.assertEqual(
-          reader.graph_by_id(non_placeholder_traces[3].graph_ids[-1]).name,
+          reader.graph_by_id(graph_exec_traces[3].graph_ids[-1]).name,
           "sin1p_log_sum")
 
       if tensor_debug_mode == "NO_TENSOR":
@@ -596,61 +565,37 @@ class DumpingCallbackTest(
         # In each case, the 1st element of debug_tensor_value is the ID of the
         # symbolic tenosr and the 2nd element is a zero indicating there is no
         # inf or nan.
-        self.assertAllClose(  # 1st outer placeholder.
-            placeholder_traces[0].debug_tensor_value,
-            [placeholder_op_digests[0].output_tensor_ids[0], 0.0])
-        self.assertAllClose(  # 2nd outer placeholder.
-            placeholder_traces[1].debug_tensor_value,
-            [placeholder_op_digests[1].output_tensor_ids[0], 0.0])
-        self.assertAllClose(  # 1st inner placeholder.
-            placeholder_traces[2].debug_tensor_value,
-            [placeholder_op_digests[2].output_tensor_ids[0], 0.0])
-        self.assertAllClose(  # 2nd outer placeholder.
-            placeholder_traces[3].debug_tensor_value,
-            [placeholder_op_digests[3].output_tensor_ids[0], 0.0])
         self.assertAllClose(  # 1st AddV2 op.
-            non_placeholder_traces[0].debug_tensor_value,
+            graph_exec_traces[0].debug_tensor_value,
             [add_op_digests[0].output_tensor_ids[0], 0.0])
         self.assertAllClose(  # Log op.
-            non_placeholder_traces[1].debug_tensor_value,
+            graph_exec_traces[1].debug_tensor_value,
             [log_op_digests[0].output_tensor_ids[0], 0.0])
         self.assertAllClose(  # 2nd AddV2 op.
-            non_placeholder_traces[2].debug_tensor_value,
+            graph_exec_traces[2].debug_tensor_value,
             [add_op_digests[1].output_tensor_ids[0], 0.0])
         self.assertAllClose(  # Sin op.
-            non_placeholder_traces[3].debug_tensor_value,
+            graph_exec_traces[3].debug_tensor_value,
             [sin_op_digests[0].output_tensor_ids[0], 0.0])
       elif tensor_debug_mode == "CONCISE_HEALTH":
         # 1st element: tensor_id.
         # 2nd element: element count. Remaining elements: all zero because there
         # is no -inf, inf or nan.
-        self.assertAllClose(  # 1st outer placeholder.
-            placeholder_traces[0].debug_tensor_value,
-            [placeholder_op_digests[0].output_tensor_ids[0], 1., 0., 0., 0.])
-        self.assertAllClose(  # 2nd outer placeholder.
-            placeholder_traces[1].debug_tensor_value,
-            [placeholder_op_digests[1].output_tensor_ids[0], 1., 0., 0., 0.])
-        self.assertAllClose(  # 1st inner placeholder.
-            placeholder_traces[2].debug_tensor_value,
-            [placeholder_op_digests[2].output_tensor_ids[0], 1., 0., 0., 0.])
-        self.assertAllClose(  # 2nd outer placeholder.
-            placeholder_traces[3].debug_tensor_value,
-            [placeholder_op_digests[3].output_tensor_ids[0], 1., 0., 0., 0.])
         # 1st AddV2 op.
         self.assertAllClose(
-            non_placeholder_traces[0].debug_tensor_value,
+            graph_exec_traces[0].debug_tensor_value,
             [add_op_digests[0].output_tensor_ids[0], 1.0, 0.0, 0.0, 0.0])
         # Log op.
         self.assertAllClose(
-            non_placeholder_traces[1].debug_tensor_value,
+            graph_exec_traces[1].debug_tensor_value,
             [log_op_digests[0].output_tensor_ids[0], 1.0, 0.0, 0.0, 0.0])
         # 2nd AddV2 op.
         self.assertAllClose(
-            non_placeholder_traces[2].debug_tensor_value,
+            graph_exec_traces[2].debug_tensor_value,
             [add_op_digests[1].output_tensor_ids[0], 1.0, 0.0, 0.0, 0.0])
         # Sin op.
         self.assertAllClose(
-            non_placeholder_traces[3].debug_tensor_value,
+            graph_exec_traces[3].debug_tensor_value,
             [sin_op_digests[0].output_tensor_ids[0], 1.0, 0.0, 0.0, 0.0])
       elif tensor_debug_mode == "FULL_HEALTH":
         # Elements: [
@@ -659,40 +604,24 @@ class DumpingCallbackTest(
         #   dtype, rank, element_count,
         #   neg_inf_count, pos_inf_count, nan_count
         #   neg_finite_count, zero_count, pos_finite_count]
-        self.assertAllClose(  # 1st outer placeholder.
-            placeholder_traces[0].debug_tensor_value,
-            [placeholder_op_digests[0].output_tensor_ids[0],
-             -1, 1, 0, 1, 0, 0, 0, 0, 0, 1])
-        self.assertAllClose(  # 2nd outer placeholder.
-            placeholder_traces[1].debug_tensor_value,
-            [placeholder_op_digests[1].output_tensor_ids[0],
-             -1, 1, 0, 1, 0, 0, 0, 0, 0, 1])
-        self.assertAllClose(  # 1st inner placeholder.
-            placeholder_traces[2].debug_tensor_value,
-            [placeholder_op_digests[2].output_tensor_ids[0],
-             -1, 1, 0, 1, 0, 0, 0, 0, 0, 1])
-        self.assertAllClose(  # 2nd outer placeholder.
-            placeholder_traces[3].debug_tensor_value,
-            [placeholder_op_digests[3].output_tensor_ids[0],
-             -1, 1, 0, 1, 0, 0, 0, 0, 0, 1])
         # 1st AddV2 op.
         self.assertAllClose(
-            non_placeholder_traces[0].debug_tensor_value,
+            graph_exec_traces[0].debug_tensor_value,
             [add_op_digests[0].output_tensor_ids[0],
              -1, 1, 0, 1, 0, 0, 0, 0, 0, 1])
         # Log op.
         self.assertAllClose(
-            non_placeholder_traces[1].debug_tensor_value,
+            graph_exec_traces[1].debug_tensor_value,
             [log_op_digests[0].output_tensor_ids[0],
              -1, 1, 0, 1, 0, 0, 0, 0, 0, 1])
         # 2nd AddV2 op.
         self.assertAllClose(
-            non_placeholder_traces[2].debug_tensor_value,
+            graph_exec_traces[2].debug_tensor_value,
             [add_op_digests[1].output_tensor_ids[0],
              -1, 1, 0, 1, 0, 0, 0, 0, 0, 1])
         # Sin op.
         self.assertAllClose(
-            non_placeholder_traces[3].debug_tensor_value,
+            graph_exec_traces[3].debug_tensor_value,
             [sin_op_digests[0].output_tensor_ids[0],
              -1, 1, 0, 1, 0, 0, 0, 0, 0, 1])
       elif tensor_debug_mode == "SHAPE":
@@ -701,58 +630,36 @@ class DumpingCallbackTest(
         # 3rd element: rank (scalar).
         # 4th element: element count (1).
         # Remaining elements: shape padded to fixed length (6).
-        self.assertAllClose(  # 1st outer placeholder.
-            placeholder_traces[0].debug_tensor_value,
-            [placeholder_op_digests[0].output_tensor_ids[0],
-             1, 0, 1, 0, 0, 0, 0, 0, 0])
-        self.assertAllClose(  # 2nd outer placeholder.
-            placeholder_traces[1].debug_tensor_value,
-            [placeholder_op_digests[1].output_tensor_ids[0],
-             1, 0, 1, 0, 0, 0, 0, 0, 0])
-        self.assertAllClose(  # 1st inner placeholder.
-            placeholder_traces[2].debug_tensor_value,
-            [placeholder_op_digests[2].output_tensor_ids[0],
-             1, 0, 1, 0, 0, 0, 0, 0, 0])
-        self.assertAllClose(  # 2nd outer placeholder.
-            placeholder_traces[3].debug_tensor_value,
-            [placeholder_op_digests[3].output_tensor_ids[0],
-             1, 0, 1, 0, 0, 0, 0, 0, 0])
         # 1st AddV2 op.
         self.assertAllClose(
-            non_placeholder_traces[0].debug_tensor_value,
+            graph_exec_traces[0].debug_tensor_value,
             [add_op_digests[0].output_tensor_ids[0], 1, 0, 1, 0, 0, 0, 0, 0, 0])
         # Log op.
         self.assertAllClose(
-            non_placeholder_traces[1].debug_tensor_value,
+            graph_exec_traces[1].debug_tensor_value,
             [log_op_digests[0].output_tensor_ids[0], 1, 0, 1, 0, 0, 0, 0, 0, 0])
         # 2nd AddV2 op.
         self.assertAllClose(
-            non_placeholder_traces[2].debug_tensor_value,
+            graph_exec_traces[2].debug_tensor_value,
             [add_op_digests[1].output_tensor_ids[0], 1, 0, 1, 0, 0, 0, 0, 0, 0])
         # Sin op.
         self.assertAllClose(
-            non_placeholder_traces[3].debug_tensor_value,
+            graph_exec_traces[3].debug_tensor_value,
             [sin_op_digests[0].output_tensor_ids[0], 1, 0, 1, 0, 0, 0, 0, 0, 0])
       else:  # FULL_TENSOR.
-        placeholder_full_tensor_values = [
+
+        full_tensor_values = [
             reader.graph_execution_trace_to_tensor_value(trace)
-            for trace in placeholder_traces]
-        self.assertAllClose(placeholder_full_tensor_values[0], x)  # Input x.
-        self.assertAllClose(placeholder_full_tensor_values[1], y)  # Input y.
-        self.assertAllClose(placeholder_full_tensor_values[2], x)  # Input x.
-        self.assertAllClose(placeholder_full_tensor_values[3], y)  # Input y.
-        non_placeholder_full_tensor_values = [
-            reader.graph_execution_trace_to_tensor_value(trace)
-            for trace in non_placeholder_traces]
+            for trace in graph_exec_traces]
         self.assertAllClose(
-            non_placeholder_full_tensor_values[0], 5.0)  # 1st AddV2 op.
+            full_tensor_values[0], 5.0)  # 1st AddV2 op.
         self.assertAllClose(
-            non_placeholder_full_tensor_values[1], np.log(5.0))  # Log op.
+            full_tensor_values[1], np.log(5.0))  # Log op.
         self.assertAllClose(
-            non_placeholder_full_tensor_values[2],
+            full_tensor_values[2],
             np.log(5.0) + 1.0)  # 2nd AddV2 op.
         self.assertAllClose(
-            non_placeholder_full_tensor_values[3],
+            full_tensor_values[3],
             np.sin(np.log(5.0) + 1.0))  # Sin op.
 
   @parameterized.named_parameters(
@@ -1242,6 +1149,49 @@ class DumpingCallbackTest(
       self.assertEqual(reader.num_executions(), 0)
       self.assertEqual(reader.num_graph_execution_traces(), 0)
       self.assertFalse(reader.outermost_graphs())
+
+  def testDisableTracingKeepsTracedFunctions(self):
+
+    @def_function.function
+    def times_two(x):
+      return x * 2.0
+
+    x = constant_op.constant([1.0, 2.0])
+    dumping_callback.enable_dump_debug_info(
+        self.dump_root, tensor_debug_mode="FULL_HEALTH"
+    )
+    self.evaluate(times_two(x))
+    dumping_callback.disable_dump_debug_info()
+    self.assertAllClose(self.evaluate(times_two(x)), [2.0, 4.0])
+
+  def testReenablingWithSameDumpRootKeepsDataFromBothRuns(self):
+
+    @def_function.function
+    def times_two(x):
+      return x * 2.0
+
+    @def_function.function
+    def plus_one(x):
+      return x + 1.0
+
+    x = constant_op.constant([1.0, 2.0])
+    for func in (times_two, plus_one):
+      writer = dumping_callback.enable_dump_debug_info(
+          self.dump_root, tensor_debug_mode="FULL_HEALTH"
+      )
+      self.evaluate(func(x))
+      writer.FlushNonExecutionFiles()
+      writer.FlushExecutionFiles()
+      dumping_callback.disable_dump_debug_info()
+
+    with debug_events_reader.DebugDataReader(self.dump_root) as reader:
+      reader.update()
+      executed_op_types = [
+          trace.op_type
+          for trace in reader.graph_execution_traces()
+          if trace.op_type not in ["Const", "Placeholder"]
+      ]
+      self.assertCountEqual(executed_op_types, ["Mul", "AddV2"])
 
   @parameterized.named_parameters(
       ("NoTensor", "NO_TENSOR"),

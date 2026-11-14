@@ -13,14 +13,26 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include <cstdint>
+#include <string>
+#include <vector>
+
+#include "absl/log/check.h"
+#include "absl/log/log.h"
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
+#include "absl/strings/str_cat.h"
+#include "tensorflow/compiler/tf2xla/mlir_xla_op_kernel.h"
 #include "tensorflow/compiler/tf2xla/type_util.h"
 #include "tensorflow/compiler/tf2xla/xla_helpers.h"
 #include "tensorflow/compiler/tf2xla/xla_op_kernel.h"
 #include "tensorflow/compiler/tf2xla/xla_op_registry.h"
-#include "tensorflow/compiler/xla/client/lib/constants.h"
-#include "tensorflow/compiler/xla/client/lib/math.h"
-#include "tensorflow/compiler/xla/client/xla_builder.h"
-#include "tensorflow/compiler/xla/util.h"
+#include "xla/hlo/builder/lib/constants.h"
+#include "xla/hlo/builder/lib/math.h"
+#include "xla/hlo/builder/xla_builder.h"
+#include "xla/util.h"
+#include "xla/xla_data.pb.h"
+#include "tensorflow/core/framework/types.pb.h"
 #include "tensorflow/core/util/tensor_format.h"
 
 namespace tensorflow {
@@ -42,19 +54,22 @@ class CollectiveReduceV2Op : public XlaOpKernel {
                    ctx->ConstantInputAsIntScalar("group_size", &group_size));
     OP_REQUIRES(ctx,
                 communication_hint_ == "nccl" || communication_hint_ == "auto",
-                errors::InvalidArgument(
+                absl::InvalidArgumentError(absl::StrCat(
                     "Only compiling NCCL/auto collective is supported, got: ",
-                    communication_hint_));
+                    communication_hint_)));
 
-    // Store all traversed collective configurations.
-    OP_REQUIRES_OK(ctx, ctx->xla_context()->RecordCollectiveReduceV2OpInfo(
-                            group_key, group_size));
+    // Store all traversed collective configurations, and generate channel_id
+    // for the collective.
+    absl::StatusOr<int64_t> channel_id =
+        ctx->xla_context()->RecordCollectiveInfo(group_key, group_size);
+    OP_REQUIRES_OK(ctx, channel_id.status());
 
     DataType dtype = XlaHelpers::SumAccumulationType(ctx->input_type(0));
     OP_REQUIRES(ctx, merge_op_name_ == "Add" || merge_op_name_ == "Mul",
-                errors::InvalidArgument("Only Add and Mul reduction supported "
-                                        "for tf2xla all-reduce lowering, got: ",
-                                        merge_op_name_));
+                absl::InvalidArgumentError(
+                    absl::StrCat("Only Add and Mul reduction supported "
+                                 "for tf2xla all-reduce lowering, got: ",
+                                 merge_op_name_)));
     const xla::XlaComputation* reducer = [&] {
       if (merge_op_name_ == "Add") {
         return ctx->GetOrCreateAdd(dtype);
@@ -63,29 +78,50 @@ class CollectiveReduceV2Op : public XlaOpKernel {
       return ctx->GetOrCreateMul(dtype);
     }();
 
-    OP_REQUIRES(
-        ctx, final_op_name_ == "Id",
-        errors::InvalidArgument("Only 'Id' is supported as a final operation "
-                                "for all-reduce tf2xla lowering"));
+    OP_REQUIRES(ctx, final_op_name_ == "Id",
+                absl::InvalidArgumentError(
+                    "Only 'Id' is supported as a final operation "
+                    "for all-reduce tf2xla lowering"));
+    VLOG(2) << "Emitting xla::AllReduce on channel " << *channel_id
+            << " for Op " << ctx->op_kernel().name()
+            << " group_size=" << group_size << " group_key=" << group_key;
     xla::ChannelHandle channel_handle;
     channel_handle.set_type(xla::ChannelHandle::DEVICE_TO_DEVICE);
-    channel_handle.set_handle(group_key);
-    ctx->SetOutput(0,
-                   xla::AllReduce(ctx->Input(0), *reducer, {}, channel_handle));
+    channel_handle.set_handle(*channel_id);
+    std::vector<xla::ReplicaGroup> replica_groups(1);
+    for (int64_t i = 0; i < group_size; i++) {
+      replica_groups[0].add_replica_ids(i);
+    }
+    ctx->SetOutput(0, xla::AllReduce(ctx->Input(0), *reducer, replica_groups,
+                                     channel_handle));
   }
 
  private:
   DataType dtype_ = DT_INVALID;
-  string merge_op_name_;
-  string final_op_name_;
-  string communication_hint_;
+  std::string merge_op_name_;
+  std::string final_op_name_;
+  std::string communication_hint_;
 
-  TF_DISALLOW_COPY_AND_ASSIGN(CollectiveReduceV2Op);
+  CollectiveReduceV2Op(const CollectiveReduceV2Op&) = delete;
+  void operator=(const CollectiveReduceV2Op&) = delete;
 };
 
 REGISTER_XLA_OP(Name("CollectiveReduceV2")
                     .CompileTimeConstantInput("group_key")
                     .CompileTimeConstantInput("group_size"),
                 CollectiveReduceV2Op);
+
+REGISTER_XLA_OP(Name("CollectiveAssignGroupV2")
+                    .CompileTimeConstantInput("group_assignment"),
+                MlirXlaOpKernel);
+
+REGISTER_XLA_OP(Name("XlaReduceScatter")
+                    .CompileTimeConstantInput("group_assignment")
+                    .CompileTimeConstantInput("scatter_dimension"),
+                MlirXlaOpKernel);
+
+REGISTER_XLA_OP(
+    Name("XlaAllReduce").CompileTimeConstantInput("group_assignment"),
+    MlirXlaOpKernel);
 
 }  // namespace tensorflow

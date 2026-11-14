@@ -14,7 +14,9 @@ limitations under the License.
 ==============================================================================*/
 
 #include "tensorflow/core/framework/types.h"
+
 #include "tensorflow/core/framework/register_types.h"
+#include "tensorflow/core/framework/types.pb.h"
 #include "tensorflow/core/lib/strings/str_util.h"
 #include "tensorflow/core/lib/strings/strcat.h"
 #include "tensorflow/core/platform/logging.h"
@@ -46,32 +48,25 @@ auto* DT_TO_FT = new std::unordered_map<DataType, FullTypeId, DataTypeHasher>({
     {DT_HALF, TFT_HALF},
     {DT_UINT32, TFT_UINT32},
     {DT_UINT64, TFT_UINT64},
+    {DT_VARIANT, TFT_LEGACY_VARIANT},
 });
 
-void map_dtype_to_tensor(const DataType& dtype, FullTypeDef* t) {
-  t->set_type_id(TFT_TENSOR);
-  // If the dtype is not mapped, assume it's not supported and use
-  // TFT_ANY, for compatibility. See DT_TO_FT for more details.
+void map_dtype_to_tensor(const DataType& dtype, FullTypeDef& t) {
+  t.Clear();
+
   const auto& mapped = DT_TO_FT->find(dtype);
-  auto* arg = t->add_args();
+  // Only map known types, everything else remains unset. This is so that we
+  // only set the most specific type when it is fully known. For example, if the
+  // dtype is DT_VARIANT, then we don't know much and opt to assume that
+  // the type is unset, rather than TFT_ANY.
   if (mapped != DT_TO_FT->end()) {
-    arg->set_type_id(mapped->second);
-  } else {
-    arg->set_type_id(TFT_ANY);
+    t.set_type_id(mapped->second);
   }
 }
 
-bool DeviceType::operator<(const DeviceType& other) const {
-  return type_ < other.type_;
-}
-
-bool DeviceType::operator==(const DeviceType& other) const {
-  return type_ == other.type_;
-}
-
-std::ostream& operator<<(std::ostream& os, const DeviceType& d) {
-  os << d.type();
-  return os;
+void map_dtype_to_child_of_tensor(const DataType& dtype, FullTypeDef& t) {
+  t.set_type_id(TFT_TENSOR);
+  map_dtype_to_tensor(dtype, *t.add_args());
 }
 
 const char* const DEVICE_DEFAULT = "DEFAULT";
@@ -87,7 +82,7 @@ const std::string DeviceName<Eigen::GpuDevice>::value = DEVICE_GPU;
 #endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 
 namespace {
-string DataTypeStringInternal(DataType dtype) {
+std::string DataTypeStringInternal(DataType dtype) {
   switch (dtype) {
     case DT_INVALID:
       return "INVALID";
@@ -133,27 +128,49 @@ string DataTypeStringInternal(DataType dtype) {
       return "bfloat16";
     case DT_HALF:
       return "half";
+    case DT_FLOAT8_E5M2:
+      return "float8_e5m2";
+    case DT_FLOAT8_E4M3FN:
+      return "float8_e4m3fn";
+    case DT_FLOAT8_E4M3FNUZ:
+      return "float8_e4m3fnuz";
+    case DT_FLOAT8_E4M3B11FNUZ:
+      return "float8_e4m3b11fnuz";
+    case DT_FLOAT8_E5M2FNUZ:
+      return "float8_e5m2fnuz";
+    case DT_FLOAT8_E8M0FNU:
+      return "float8_e8m0fnu";
+    case DT_FLOAT4_E2M1FN:
+      return "float4_e2m1fn";
+    case DT_INT4:
+      return "int4";
+    case DT_UINT4:
+      return "uint4";
+    case DT_INT2:
+      return "int2";
+    case DT_UINT2:
+      return "uint2";
     case DT_RESOURCE:
       return "resource";
     case DT_VARIANT:
       return "variant";
     default:
       LOG(ERROR) << "Unrecognized DataType enum value " << dtype;
-      return strings::StrCat("unknown dtype enum (", dtype, ")");
+      return absl::StrCat("unknown dtype enum (", dtype, ")");
   }
 }
 }  // end namespace
 
-string DataTypeString(DataType dtype) {
+std::string DataTypeString(DataType dtype) {
   if (IsRefType(dtype)) {
     DataType non_ref = static_cast<DataType>(dtype - kDataTypeRefOffset);
-    return strings::StrCat(DataTypeStringInternal(non_ref), "_ref");
+    return absl::StrCat(DataTypeStringInternal(non_ref), "_ref");
   }
   return DataTypeStringInternal(dtype);
 }
 
-bool DataTypeFromString(StringPiece sp, DataType* dt) {
-  if (str_util::EndsWith(sp, "_ref")) {
+bool DataTypeFromString(absl::string_view sp, DataType* dt) {
+  if (absl::EndsWith(sp, "_ref")) {
     sp.remove_suffix(4);
     DataType non_ref;
     if (DataTypeFromString(sp, &non_ref) && !IsRefType(non_ref)) {
@@ -227,6 +244,39 @@ bool DataTypeFromString(StringPiece sp, DataType* dt) {
   } else if (sp == "half" || sp == "float16") {
     *dt = DT_HALF;
     return true;
+  } else if (sp == "float8_e5m2") {
+    *dt = DT_FLOAT8_E5M2;
+    return true;
+  } else if (sp == "float8_e4m3fn") {
+    *dt = DT_FLOAT8_E4M3FN;
+    return true;
+  } else if (sp == "float8_e4m3fnuz") {
+    *dt = DT_FLOAT8_E4M3FNUZ;
+    return true;
+  } else if (sp == "float8_e4m3b11fnuz") {
+    *dt = DT_FLOAT8_E4M3B11FNUZ;
+    return true;
+  } else if (sp == "float8_e5m2fnuz") {
+    *dt = DT_FLOAT8_E5M2FNUZ;
+    return true;
+  } else if (sp == "float8_e8m0fnu") {
+    *dt = DT_FLOAT8_E8M0FNU;
+    return true;
+  } else if (sp == "float4_e2m1fn") {
+    *dt = DT_FLOAT4_E2M1FN;
+    return true;
+  } else if (sp == "int4") {
+    *dt = DT_INT4;
+    return true;
+  } else if (sp == "uint4") {
+    *dt = DT_UINT4;
+    return true;
+  } else if (sp == "int2") {
+    *dt = DT_INT2;
+    return true;
+  } else if (sp == "uint2") {
+    *dt = DT_UINT2;
+    return true;
   } else if (sp == "resource") {
     *dt = DT_RESOURCE;
     return true;
@@ -237,15 +287,14 @@ bool DataTypeFromString(StringPiece sp, DataType* dt) {
   return false;
 }
 
-string DeviceTypeString(const DeviceType& device_type) {
+std::string DeviceTypeString(const DeviceType& device_type) {
   return device_type.type();
 }
 
-string DataTypeSliceString(const DataTypeSlice types) {
-  string out;
+std::string DataTypeSliceString(const DataTypeSlice types) {
+  std::string out;
   for (auto it = types.begin(); it != types.end(); ++it) {
-    strings::StrAppend(&out, ((it == types.begin()) ? "" : ", "),
-                       DataTypeString(*it));
+    absl::StrAppend(&out, it == types.begin() ? "" : ", ", DataTypeString(*it));
   }
   return out;
 }
@@ -274,6 +323,17 @@ int DataTypeSize(DataType dt) {
     // bitcast.
     TF_CALL_qint16(CASE);
     TF_CALL_quint16(CASE);
+    TF_CALL_float8_e5m2(CASE);
+    TF_CALL_float8_e4m3fn(CASE);
+    TF_CALL_float8_e4m3fnuz(CASE);
+    TF_CALL_float8_e4m3b11fnuz(CASE);
+    TF_CALL_float8_e5m2fnuz(CASE);
+    TF_CALL_float8_e8m0fnu(CASE);
+    TF_CALL_float4_e2m1fn(CASE);
+    TF_CALL_int4(CASE);
+    TF_CALL_uint4(CASE);
+    TF_CALL_int2(CASE);
+    TF_CALL_uint2(CASE);
 
     default:
       return 0;
@@ -287,17 +347,17 @@ int DataTypeSize(DataType dt) {
 
 DEFINE_DATATYPETOENUM_VALUE(float);
 DEFINE_DATATYPETOENUM_VALUE(double);
-DEFINE_DATATYPETOENUM_VALUE(int32);
-DEFINE_DATATYPETOENUM_VALUE(uint32);
-DEFINE_DATATYPETOENUM_VALUE(uint16);
-DEFINE_DATATYPETOENUM_VALUE(uint8);
-DEFINE_DATATYPETOENUM_VALUE(int16);
-DEFINE_DATATYPETOENUM_VALUE(int8);
+DEFINE_DATATYPETOENUM_VALUE(int32_t);
+DEFINE_DATATYPETOENUM_VALUE(uint32_t);
+DEFINE_DATATYPETOENUM_VALUE(uint16_t);
+DEFINE_DATATYPETOENUM_VALUE(uint8_t);
+DEFINE_DATATYPETOENUM_VALUE(int16_t);
+DEFINE_DATATYPETOENUM_VALUE(int8_t);
 DEFINE_DATATYPETOENUM_VALUE(tstring);
 DEFINE_DATATYPETOENUM_VALUE(complex64);
 DEFINE_DATATYPETOENUM_VALUE(complex128);
 DEFINE_DATATYPETOENUM_VALUE(int64_t);
-DEFINE_DATATYPETOENUM_VALUE(uint64);
+DEFINE_DATATYPETOENUM_VALUE(uint64_t);
 DEFINE_DATATYPETOENUM_VALUE(bool);
 DEFINE_DATATYPETOENUM_VALUE(qint8);
 DEFINE_DATATYPETOENUM_VALUE(quint8);
@@ -306,6 +366,17 @@ DEFINE_DATATYPETOENUM_VALUE(quint16);
 DEFINE_DATATYPETOENUM_VALUE(qint32);
 DEFINE_DATATYPETOENUM_VALUE(bfloat16);
 DEFINE_DATATYPETOENUM_VALUE(Eigen::half);
+DEFINE_DATATYPETOENUM_VALUE(float8_e5m2);
+DEFINE_DATATYPETOENUM_VALUE(float8_e4m3fn);
+DEFINE_DATATYPETOENUM_VALUE(float8_e4m3fnuz);
+DEFINE_DATATYPETOENUM_VALUE(float8_e4m3b11fnuz);
+DEFINE_DATATYPETOENUM_VALUE(float8_e5m2fnuz);
+DEFINE_DATATYPETOENUM_VALUE(float8_e8m0fnu);
+DEFINE_DATATYPETOENUM_VALUE(float4_e2m1fn);
+DEFINE_DATATYPETOENUM_VALUE(int4);
+DEFINE_DATATYPETOENUM_VALUE(uint4);
+DEFINE_DATATYPETOENUM_VALUE(int2);
+DEFINE_DATATYPETOENUM_VALUE(uint2);
 DEFINE_DATATYPETOENUM_VALUE(ResourceHandle);
 DEFINE_DATATYPETOENUM_VALUE(Variant);
 #undef DEFINE_DATATYPETOENUM_VALUE

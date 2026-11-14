@@ -1,100 +1,181 @@
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
+load("@xla//third_party/rules_python/python:py_library.bzl", "py_library")
 load("//tensorflow:tensorflow.bzl", "py_test")
 
 package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
     licenses = ["notice"],
 )
 
-filegroup(
-    name = "all_files",
-    srcs = glob(
-        ["**/*"],
-        exclude = [
-            "**/METADATA",
-            "**/OWNERS",
-        ],
-    ),
+py_library(
+    name = "type_registry",
+    srcs = [
+        "type_registry.py",
+    ],
+    strict_deps = True,
     visibility = ["//tensorflow:__subpackages__"],
 )
 
 py_library(
-    name = "utils",
-    srcs = [
-        "__init__.py",
-        "ag_logging.py",
-        "context_managers.py",
-        "misc.py",
-        "py_func.py",
-        "tensor_list.py",
-        "tensors.py",
-        "testing.py",
-    ],
-    srcs_version = "PY3",
+    name = "tensor_list",
+    srcs = ["tensor_list.py"],
+    strict_deps = True,
     visibility = ["//tensorflow:__subpackages__"],
     deps = [
-        "//tensorflow/python:dtypes",
-        "//tensorflow/python:list_ops",
-        "//tensorflow/python:platform",
-        "//tensorflow/python:script_ops",
-        "//tensorflow/python:util",
-        "//tensorflow/python/autograph/pyct",
-        "//tensorflow/python/data/ops:dataset_ops",
-        "@six_archive//:six",
+        "//tensorflow/python/framework:tensor",
+        "//tensorflow/python/ops:list_ops",
+        "//tensorflow/python/ops:tensor_array_ops",
+    ],
+)
+
+py_library(
+    name = "ag_logging",
+    srcs = ["ag_logging.py"],
+    strict_deps = True,
+    visibility = ["//tensorflow:__subpackages__"],
+    deps = [
+        "//tensorflow/python/platform:tf_logging",
+        "//tensorflow/python/util:tf_export",
+    ],
+)
+
+py_library(
+    name = "context_managers",
+    srcs = ["context_managers.py"],
+    strict_deps = True,
+    visibility = ["//tensorflow:__subpackages__"],
+    deps = [
+        "//tensorflow/python/framework:ops",
+        "//tensorflow/python/ops:tensor_array_ops",
+    ],
+)
+
+py_library(
+    name = "misc",
+    srcs = ["misc.py"],
+    strict_deps = True,
+    visibility = ["//tensorflow:__subpackages__"],
+    deps = [
+        "//tensorflow/python/framework:ops",
+        "//tensorflow/python/framework:tensor",
+        "//tensorflow/python/ops:array_ops",
+        "//tensorflow/python/ops:math_ops",
+        "//tensorflow/python/ops:math_ops_gen",
+    ],
+)
+
+py_library(
+    name = "testing",
+    srcs = ["testing.py"],
+    strict_deps = True,
+    visibility = ["//tensorflow:__subpackages__"],
+    deps = [
+        "//tensorflow/python/eager:def_function",
+        "//tensorflow/python/framework:op_callbacks",
+        "//tensorflow/python/framework:ops",
+        "//tensorflow/python/ops:variables",
+        "//tensorflow/python/platform:client_testlib",
+    ],
+)
+
+py_library(
+    name = "__init__",
+    srcs = ["__init__.py"],
+    strict_deps = True,
+    visibility = ["//tensorflow:__subpackages__"],
+    deps = [
+        ":context_managers",
+        ":misc",
+        ":tensor_list",
+    ],
+)
+
+py_library(
+    name = "tensors",
+    srcs = ["tensors.py"],
+    strict_deps = True,
+    visibility = ["//tensorflow:__subpackages__"],
+    deps = [
+        "//tensorflow/python/framework:dtypes",
+        "//tensorflow/python/framework:sparse_tensor",
+        "//tensorflow/python/framework:tensor_util",
+        "//tensorflow/python/ops:tensor_array_ops",
     ],
 )
 
 py_test(
     name = "context_managers_test",
     srcs = ["context_managers_test.py"],
-    python_version = "PY3",
-    srcs_version = "PY3",
+    strict_deps = True,
     deps = [
-        ":utils",
-        "//tensorflow/python:client_testlib",
+        ":context_managers",
+        #internal proto upb dep
+        "//tensorflow/python/framework:constant_op",
+        "//tensorflow/python/framework:dtypes",
+        "//tensorflow/python/ops:tensor_array_ops",
+        "//tensorflow/python/platform:client_testlib",
     ],
 )
 
 py_test(
     name = "misc_test",
     srcs = ["misc_test.py"],
-    python_version = "PY3",
-    srcs_version = "PY3",
+    strict_deps = True,
     deps = [
-        ":utils",
-        "//tensorflow/python:client_testlib",
-    ],
-)
-
-py_test(
-    name = "py_func_test",
-    srcs = ["py_func_test.py"],
-    python_version = "PY3",
-    srcs_version = "PY3",
-    tags = ["no_windows"],
-    deps = [
-        ":utils",
-        "//tensorflow/python:client_testlib",
+        ":misc",
+        #internal proto upb dep
+        "//tensorflow/python/eager:def_function",
+        "//tensorflow/python/framework:constant_op",
+        "//tensorflow/python/framework:test_lib",
+        "//tensorflow/python/ops:variables",
+        "//tensorflow/python/platform:client_testlib",
     ],
 )
 
 py_test(
     name = "tensor_list_test",
     srcs = ["tensor_list_test.py"],
-    python_version = "PY3",
-    srcs_version = "PY3",
+    strict_deps = True,
     deps = [
-        ":utils",
-        "//tensorflow/python:client_testlib",
-        "//tensorflow/python:list_ops",
+        ":tensor_list",
+        #internal proto upb dep
+        "//tensorflow/python/eager:context",
+        "//tensorflow/python/framework:constant_op",
+        "//tensorflow/python/framework:dtypes",
+        "//tensorflow/python/framework:ops",
+        "//tensorflow/python/framework:test_lib",
+        "//tensorflow/python/ops:list_ops",
+        "//tensorflow/python/ops:tensor_array_ops",
+        "//tensorflow/python/platform:client_testlib",
     ],
 )
 
 py_test(
     name = "tensors_test",
     srcs = ["tensors_test.py"],
-    python_version = "PY3",
-    srcs_version = "PY3",
+    strict_deps = True,
     deps = [
-        ":utils",
-        "//tensorflow/python:client_testlib",
+        ":tensors",
+        #internal proto upb dep
+        "//tensorflow/python/framework:constant_op",
+        "//tensorflow/python/framework:dtypes",
+        "//tensorflow/python/ops:list_ops",
+        "//tensorflow/python/ops:math_ops",
+        "//tensorflow/python/ops:tensor_array_ops",
+        "//tensorflow/python/platform:client_testlib",
     ],
 )

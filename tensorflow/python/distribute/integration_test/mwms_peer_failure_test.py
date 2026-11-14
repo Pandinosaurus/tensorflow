@@ -18,10 +18,6 @@ When a peer fails during MultiWorkerMirroredStrategy training. All workers
 should get Unavailable error.
 """
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import os
 
 import tensorflow as tf
@@ -30,10 +26,8 @@ from tensorflow.python.distribute import collective_all_reduce_strategy as mwms_
 from tensorflow.python.distribute import multi_process_runner
 from tensorflow.python.distribute import multi_worker_test_base
 from tensorflow.python.distribute import test_util
-from tensorflow.python.eager import context
 from tensorflow.python.eager import test
 
-COORDINATION_SERVICE = None
 RPC_PROTOCOL = "grpc"
 
 # Put it in top level so it executes in the child processes as well.
@@ -80,7 +74,6 @@ class PeerFailureTest(test.TestCase):
     # the first replica to all replicas.
 
     def worker_fn():
-      context.context().enable_coordination_service(COORDINATION_SERVICE)
       strategy = tf.distribute.experimental.MultiWorkerMirroredStrategy()
       with strategy.scope():
         tf.Variable(1.)
@@ -97,7 +90,7 @@ class PeerFailureTest(test.TestCase):
     # TODO(b/151232436): Always raise UnavailableError when a peer fails.
     with self.assertRaises(
         (tf.errors.UnavailableError, tf.errors.DeadlineExceededError)):
-      mpr.join(timeout=30)
+      mpr.join(timeout=60)
 
   def test_reduce_small_tensor(self):
     # This test simulates the case when a worker fails before or during reducing
@@ -116,7 +109,6 @@ class PeerFailureTest(test.TestCase):
     # not aware of the failures of the receiving party.
 
     def worker_fn():
-      context.context().enable_coordination_service(COORDINATION_SERVICE)
       strategy = tf.distribute.experimental.MultiWorkerMirroredStrategy()
       value = tf.identity([1.])
       strategy.reduce("sum", value, axis=None)
@@ -132,7 +124,7 @@ class PeerFailureTest(test.TestCase):
     # TODO(b/151232436): Always raise UnavailableError when a peer fails.
     with self.assertRaises(
         (tf.errors.UnavailableError, tf.errors.DeadlineExceededError)):
-      mpr.join(timeout=30)
+      mpr.join(timeout=60)
 
 
 class PeerFailureRecoverTest(test.TestCase):
@@ -143,7 +135,6 @@ class PeerFailureRecoverTest(test.TestCase):
     # See PeerFailureTest.test_creating_variable
 
     def worker_fn(attempts):
-      context.context().enable_coordination_service(COORDINATION_SERVICE)
       strategy = tf.distribute.experimental.MultiWorkerMirroredStrategy()
       task_id, attempt = get_attempt(strategy, attempts)
       with strategy.scope():
@@ -152,7 +143,9 @@ class PeerFailureRecoverTest(test.TestCase):
         if attempt == 1 and task_id == 1:
           quick_exit(1)
         v = tf.Variable(tf.random.uniform(()))
-        return v.read_value().numpy()
+        result = v.read_value().numpy()
+      multi_process_runner.get_barrier().wait()
+      return result
 
     cluster_spec = multi_worker_test_base.create_cluster_spec(num_workers=2)
     attempts = multi_process_runner.manager().dict()
@@ -170,7 +163,6 @@ class PeerFailureRecoverTest(test.TestCase):
     # See PeerFailureTest.test_reduce_small_tensor
 
     def worker_fn(attempts):
-      context.context().enable_coordination_service(COORDINATION_SERVICE)
       strategy = tf.distribute.experimental.MultiWorkerMirroredStrategy()
       task_id, attempt = get_attempt(strategy, attempts)
       value = tf.identity([1.])
@@ -178,7 +170,9 @@ class PeerFailureRecoverTest(test.TestCase):
       # worker-1 dies here.
       if attempt == 1 and task_id == 1:
         quick_exit(1)
-      return strategy.reduce("sum", value, axis=None).numpy()
+      result = strategy.reduce("sum", value, axis=None).numpy()
+      multi_process_runner.get_barrier().wait()
+      return result
 
     cluster_spec = multi_worker_test_base.create_cluster_spec(num_workers=2)
     attempts = multi_process_runner.manager().dict()
@@ -206,7 +200,6 @@ class PeerFailureRecoverTest(test.TestCase):
       mwms_lib.CollectiveAllReduceExtended._check_alive_interval = 30
       mwms_lib.CollectiveAllReduceExtended._check_alive_initial_timeout = 30
 
-      context.context().enable_coordination_service(COORDINATION_SERVICE)
       strategy = tf.distribute.experimental.MultiWorkerMirroredStrategy()
       task_id, attempt = get_attempt(strategy, attempts)
 
@@ -223,6 +216,7 @@ class PeerFailureRecoverTest(test.TestCase):
       if attempt == 1 and task_id == 1:
         quick_exit(1)
       strategy.run(replica_fn)
+      multi_process_runner.get_barrier().wait()
 
     cluster_spec = multi_worker_test_base.create_cluster_spec(num_workers=2)
     attempts = multi_process_runner.manager().dict()

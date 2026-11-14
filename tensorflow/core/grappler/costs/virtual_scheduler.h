@@ -16,8 +16,10 @@ limitations under the License.
 #ifndef TENSORFLOW_CORE_GRAPPLER_COSTS_VIRTUAL_SCHEDULER_H_
 #define TENSORFLOW_CORE_GRAPPLER_COSTS_VIRTUAL_SCHEDULER_H_
 
+#include <functional>
 #include <list>
 #include <memory>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -54,7 +56,7 @@ struct NodeState {
   std::vector<OpInfo::TensorProperties> output_properties;
 
   // Canonical device name used within VirtualScheduler.
-  string device_name;
+  std::string device_name;
 
   // States updated as scheduling nodes.
   int num_inputs_ready;
@@ -134,7 +136,7 @@ struct DeviceState {
   std::vector<std::pair<std::string, int64_t>> temporary_memory_usage_trace;
 
   Costs device_costs;
-  std::map<string, Costs> op_to_cost;  // Per-op cost.
+  std::map<std::string, Costs> op_to_cost;  // Per-op cost.
 
   int64_t memory_usage;      // Current temporary memory usage
   int64_t max_memory_usage;  // Max temporary memory usage
@@ -170,9 +172,9 @@ class ReadyNodeManager {
  public:
   ReadyNodeManager() {}
   virtual ~ReadyNodeManager() {}
-  virtual Status Init(
+  virtual absl::Status Init(
       const std::unordered_map<const NodeDef*, NodeState>* node_map) {
-    return Status::OK();
+    return absl::OkStatus();
   }
   virtual void AddNode(const NodeDef* node) = 0;
   virtual const NodeDef* GetCurrNode() = 0;
@@ -224,7 +226,7 @@ class LIFOManager : public ReadyNodeManager {
 class HeapReadyManager : public ReadyNodeManager {
  public:
   HeapReadyManager();
-  Status Init(
+  absl::Status Init(
       const std::unordered_map<const NodeDef*, NodeState>* node_map) override;
   ~HeapReadyManager() override {}
   void AddNode(const NodeDef* node) override;
@@ -272,7 +274,8 @@ class PriorityReadyManager : public HeapReadyManager {
   void AddNode(const NodeDef* node) override;
 
   // Note this should be called after Init().
-  Status SetPriority(const std::unordered_map<string, int>& node_priority);
+  absl::Status SetPriority(
+      const std::unordered_map<std::string, int>& node_priority);
 
  protected:
   std::function<bool(const NodeDef*, const NodeDef*)> Greater() override;
@@ -280,7 +283,7 @@ class PriorityReadyManager : public HeapReadyManager {
  private:
   // A map from unique node name to priority. Lower number means higher
   // priority.
-  std::unordered_map<string, int> node_priority_;
+  std::unordered_map<std::string, int> node_priority_;
 };
 
 // CompositeNodeManager has a few other NodeManagers: per-device LIFO for normal
@@ -294,7 +297,7 @@ class CompositeNodeManager : public ReadyNodeManager {
   CompositeNodeManager();
   ~CompositeNodeManager() override {}
 
-  Status Init(
+  absl::Status Init(
       const std::unordered_map<const NodeDef*, NodeState>* node_map) override;
   void AddNode(const NodeDef* node) override;
   const NodeDef* GetCurrNode() override;
@@ -305,7 +308,7 @@ class CompositeNodeManager : public ReadyNodeManager {
   // Internal ready node managers:
   // LIFO for normal ops to maximize producer consumer locality.
   // One LIFO per device.
-  std::unordered_map<string, LIFOManager> ops_lifo_map_;
+  std::unordered_map<std::string, LIFOManager> ops_lifo_map_;
   // FirstReady for send and recv. Handle send and recv separately ensures that
   // send and recv do not block previously read ops with LIFO schedule.
   FirstReadyManager send_manager_;
@@ -321,7 +324,7 @@ class CompositeNodeManager : public ReadyNodeManager {
 
 // Constructs a ready node manager from the given string.
 std::unique_ptr<ReadyNodeManager> ReadyNodeManagerFactory(
-    const string& ready_node_manager);
+    const std::string& ready_node_manager);
 
 // Encapsulates all of the various pieces uses to track state of a scheduler;
 // enables reuse of all scheduler state-related utilities across different
@@ -350,9 +353,9 @@ class SchedulerState {
   // initial_nodes is the set of nodes (primary inputs) discovered by Init()
   // which may be added by a ReadyNodeManager (or related/derivative scheduler)
   // to begin node schedule and graph simulation.
-  Status Init(const GrapplerItem* item,
-              std::vector<const NodeDef*>* initial_nodes,
-              bool create_explicit_channel_device = true);
+  absl::Status Init(const GrapplerItem* item,
+                    std::vector<const NodeDef*>* initial_nodes,
+                    bool create_explicit_channel_device = true);
 
   virtual Costs Summary() const;
   // Like the above, but writes detailed stats to RunMetadata.
@@ -365,11 +368,12 @@ class SchedulerState {
   void GenerateRunMetadata(RunMetadata* metadata);
 
   // Returns per device memory usage.
-  const std::unordered_map<string, int64_t> GetPeakMemoryUsage() const;
-  const std::unordered_map<string, int64_t> GetPersistentMemoryUsage() const;
+  const std::unordered_map<std::string, int64_t> GetPeakMemoryUsage() const;
+  const std::unordered_map<std::string, int64_t> GetPersistentMemoryUsage()
+      const;
   void enable_mem_usage_tracking() { track_mem_usage_snapshot_ = true; }
   // Returns (read only) device and node states.
-  const std::unordered_map<string, DeviceState>* GetDeviceStates() const {
+  const std::unordered_map<std::string, DeviceState>* GetDeviceStates() const {
     return &device_;
   }
 
@@ -402,7 +406,7 @@ class SchedulerState {
 
   // This method can be used by a class derived from SchedulerState to
   // access the device state map.
-  std::unordered_map<string, DeviceState>* GetMutableDeviceState() {
+  std::unordered_map<std::string, DeviceState>* GetMutableDeviceState() {
     return &device_;
   }
 
@@ -416,17 +420,21 @@ class SchedulerState {
   // the channel.
   std::pair<const NodeDef*, const NodeDef*> CreateSendRecv(
       const NodeDef* from, const NodeDef* to, const NodeDef* input_node,
-      const string& input_name, bool create_channel_device);
-  string DeviceName(const NodeDef* node) const;
-  string SanitizedDeviceName(const NodeDef* node) const;
-  string ChannelDeviceName(const NodeDef* from, const NodeDef* to) const;
+      const std::string& input_name, bool create_channel_device);
+  std::string DeviceName(const NodeDef* node) const;
+  std::string SanitizedDeviceName(const NodeDef* node) const;
+  std::string ChannelDeviceName(const NodeDef* from, const NodeDef* to) const;
 
   // Helper methods.
   void GetOutputNodes(const NodeDef* node, const Costs::Duration& curr_time,
                       std::vector<const NodeDef*>* output_nodes);
+  // Retrieves output size from node_cost at a port_num.  If the output size has
+  // not been set, defaults back to CalculateOutputSize.
+  int64_t GetOrCalculateOutputSize(const NodeState& node_state,
+                                   int port_num) const;
 
   std::unordered_map<const NodeDef*, NodeState> node_map_;
-  std::unordered_map<string, DeviceState> device_;
+  std::unordered_map<std::string, DeviceState> device_;
 
   // Pool of NodeDefs for SendRecv and Identity ops created.
   std::vector<std::unique_ptr<NodeDef>> additional_nodes_;
@@ -434,14 +442,14 @@ class SchedulerState {
   // Stats:
   // Op counts with key with input shape.
   // Example key: "[Op=AssignSub, input_shapes=[[7,1,160,160][7,1,160,160]]"
-  std::map<string, int> op_counts_;
+  std::map<std::string, int> op_counts_;
   // Individual op costs with key with input shape.
   // Integer field for execution time in micro seconds.
   // Boolean field for whether the cost is accurate.
-  std::map<string, std::pair<int, bool>> op_costs_;
+  std::map<std::string, std::pair<int, bool>> op_costs_;
 
   Costs graph_costs_;                   // Graph cost.
-  std::map<string, Costs> op_to_cost_;  // Per-op cost.
+  std::map<std::string, Costs> op_to_cost_;  // Per-op cost.
 
   // Auxiliary data structures for constructing NodeState and DeviceState.
   std::unique_ptr<GraphProperties> graph_properties_;  // Initialized in Init().
@@ -481,7 +489,7 @@ class VirtualScheduler {
   // This function should be called at least once after the scheduler is
   // constructed. An uninitialized or failed-to-initialize scheduler will cause
   // undefined behavior.
-  virtual Status Init(const GrapplerItem* item);
+  virtual absl::Status Init(const GrapplerItem* item);
 
   // Gets the current scheduled node for execution; the caller of this function
   // can accordingly simulate the execution of the current scheduled node.
@@ -505,14 +513,15 @@ class VirtualScheduler {
     scheduler_state_->GenerateRunMetadata(metadata);
   }
   // Returns per device memory usage.
-  const std::unordered_map<string, int64_t> GetPeakMemoryUsage() const {
+  const std::unordered_map<std::string, int64_t> GetPeakMemoryUsage() const {
     return scheduler_state_->GetPeakMemoryUsage();
   }
-  const std::unordered_map<string, int64_t> GetPersistentMemoryUsage() const {
+  const std::unordered_map<std::string, int64_t> GetPersistentMemoryUsage()
+      const {
     return scheduler_state_->GetPersistentMemoryUsage();
   }
   // Returns VirtualScheduler (read only) device and node states.
-  const std::unordered_map<string, DeviceState>* GetDeviceStates() const {
+  const std::unordered_map<std::string, DeviceState>* GetDeviceStates() const {
     return scheduler_state_->GetDeviceStates();
   }
   const std::unordered_map<const NodeDef*, NodeState>* GetNodeStates() const {

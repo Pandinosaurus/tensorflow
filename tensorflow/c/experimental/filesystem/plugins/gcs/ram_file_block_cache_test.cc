@@ -15,22 +15,33 @@ limitations under the License.
 
 #include "tensorflow/c/experimental/filesystem/plugins/gcs/ram_file_block_cache.h"
 
+#include <algorithm>
+#include <cstdint>
 #include <cstring>
+#include <list>
+#include <memory>
+#include <set>
+#include <string>
+#include <vector>
 
+#include "absl/status/status.h"
+#include "absl/strings/ascii.h"
+#include "absl/synchronization/blocking_counter.h"
+#include "absl/synchronization/notification.h"
+#include "absl/time/time.h"
 #include "tensorflow/c/tf_status.h"
 #include "tensorflow/c/tf_status_internal.h"
+#include "xla/tsl/protobuf/error_codes.pb.h"
 #include "tensorflow/core/lib/core/status_test_util.h"
-#include "tensorflow/core/platform/blocking_counter.h"
 #include "tensorflow/core/platform/cloud/now_seconds_env.h"
-#include "tensorflow/core/platform/notification.h"
 #include "tensorflow/core/platform/test.h"
 
 namespace tensorflow {
 namespace {
 
-Status ReadCache(tf_gcs_filesystem::RamFileBlockCache* cache,
-                 const string& filename, size_t offset, size_t n,
-                 std::vector<char>* out) {
+absl::Status ReadCache(tf_gcs_filesystem::RamFileBlockCache* cache,
+                       const std::string& filename, size_t offset, size_t n,
+                       std::vector<char>* out) {
   out->clear();
   out->resize(n, 0);
   TF_Status status;
@@ -44,7 +55,7 @@ Status ReadCache(tf_gcs_filesystem::RamFileBlockCache* cache,
 }
 
 TEST(RamFileBlockCacheTest, IsCacheEnabled) {
-  auto fetcher = [](const string& filename, size_t offset, size_t n,
+  auto fetcher = [](const std::string& filename, size_t offset, size_t n,
                     char* buffer, TF_Status* status) -> int64_t {
     // Do nothing.
     TF_SetStatus(status, TF_OK, "");
@@ -63,14 +74,14 @@ TEST(RamFileBlockCacheTest, IsCacheEnabled) {
 
 TEST(RamFileBlockCacheTest, ValidateAndUpdateFileSignature) {
   int calls = 0;
-  auto fetcher = [&calls](const string& filename, size_t offset, size_t n,
+  auto fetcher = [&calls](const std::string& filename, size_t offset, size_t n,
                           char* buffer, TF_Status* status) -> int64_t {
     calls++;
     memset(buffer, 'x', n);
     TF_SetStatus(status, TF_OK, "");
     return n;
   };
-  string filename = "file";
+  std::string filename = "file";
   tf_gcs_filesystem::RamFileBlockCache cache(16, 32, 0, fetcher);
   std::vector<char> out;
 
@@ -91,12 +102,12 @@ TEST(RamFileBlockCacheTest, ValidateAndUpdateFileSignature) {
 }
 
 TEST(RamFileBlockCacheTest, PassThrough) {
-  const string want_filename = "foo/bar";
+  const std::string want_filename = "foo/bar";
   const size_t want_offset = 42;
   const size_t want_n = 1024;
   int calls = 0;
   auto fetcher = [&calls, want_filename, want_offset, want_n](
-                     const string& got_filename, size_t got_offset,
+                     const std::string& got_filename, size_t got_offset,
                      size_t got_n, char* buffer, TF_Status* status) -> int64_t {
     EXPECT_EQ(got_filename, want_filename);
     EXPECT_EQ(got_offset, want_offset);
@@ -128,11 +139,12 @@ TEST(RamFileBlockCacheTest, BlockAlignment) {
   // do in this test.
   const size_t size = 256;
   std::vector<char> buf;
+  buf.reserve(size);
   for (int i = 0; i < size; i++) {
     buf.push_back(i);
   }
   // The fetcher just fetches slices of the buffer.
-  auto fetcher = [&buf](const string& filename, size_t offset, size_t n,
+  auto fetcher = [&buf](const std::string& filename, size_t offset, size_t n,
                         char* buffer, TF_Status* status) -> int64_t {
     int64_t bytes_transferred;
     if (offset < buf.size()) {
@@ -180,8 +192,8 @@ TEST(RamFileBlockCacheTest, BlockAlignment) {
 TEST(RamFileBlockCacheTest, CacheHits) {
   const size_t block_size = 16;
   std::set<size_t> calls;
-  auto fetcher = [&calls, block_size](const string& filename, size_t offset,
-                                      size_t n, char* buffer,
+  auto fetcher = [&calls, block_size](const std::string& filename,
+                                      size_t offset, size_t n, char* buffer,
                                       TF_Status* status) -> int64_t {
     EXPECT_EQ(n, block_size);
     EXPECT_EQ(offset % block_size, 0);
@@ -191,7 +203,7 @@ TEST(RamFileBlockCacheTest, CacheHits) {
     TF_SetStatus(status, TF_OK, "");
     return n;
   };
-  const uint32 block_count = 256;
+  const uint32_t block_count = 256;
   tf_gcs_filesystem::RamFileBlockCache cache(
       block_size, block_count * block_size, 0, fetcher);
   std::vector<char> out;
@@ -214,7 +226,7 @@ TEST(RamFileBlockCacheTest, OutOfRange) {
   bool first_block = false;
   bool second_block = false;
   auto fetcher = [block_size, file_size, &first_block, &second_block](
-                     const string& filename, size_t offset, size_t n,
+                     const std::string& filename, size_t offset, size_t n,
                      char* buffer, TF_Status* status) -> int64_t {
     EXPECT_EQ(n, block_size);
     EXPECT_EQ(offset % block_size, 0);
@@ -243,7 +255,7 @@ TEST(RamFileBlockCacheTest, OutOfRange) {
   // Reading at offset file_size + 4 will read the second block (since the read
   // at file_size + 4 = 28 will be aligned to an offset of 16) but will return
   // OutOfRange because the offset is past the end of the 24-byte file.
-  Status status = ReadCache(&cache, "", file_size + 4, 4, &out);
+  absl::Status status = ReadCache(&cache, "", file_size + 4, 4, &out);
   EXPECT_EQ(status.code(), error::OUT_OF_RANGE);
   EXPECT_TRUE(second_block);
   // Reading the second full block will return 8 bytes, from a cache hit.
@@ -258,8 +270,9 @@ TEST(RamFileBlockCacheTest, Inconsistent) {
   // where we expected complete blocks.
   const size_t block_size = 16;
   // This fetcher returns OK but only fills in one byte for any offset.
-  auto fetcher = [block_size](const string& filename, size_t offset, size_t n,
-                              char* buffer, TF_Status* status) -> int64_t {
+  auto fetcher = [block_size](const std::string& filename, size_t offset,
+                              size_t n, char* buffer,
+                              TF_Status* status) -> int64_t {
     EXPECT_EQ(n, block_size);
     EXPECT_EQ(offset % block_size, 0);
     EXPECT_GE(n, 1);
@@ -275,15 +288,15 @@ TEST(RamFileBlockCacheTest, Inconsistent) {
   EXPECT_EQ(out.size(), 1);
   // Now read the first block; this should yield an INTERNAL error because we
   // had already cached a partial block at a later position.
-  Status status = ReadCache(&cache, "", 0, block_size, &out);
+  absl::Status status = ReadCache(&cache, "", 0, block_size, &out);
   EXPECT_EQ(status.code(), error::INTERNAL);
 }
 
 TEST(RamFileBlockCacheTest, LRU) {
   const size_t block_size = 16;
   std::list<size_t> calls;
-  auto fetcher = [&calls, block_size](const string& filename, size_t offset,
-                                      size_t n, char* buffer,
+  auto fetcher = [&calls, block_size](const std::string& filename,
+                                      size_t offset, size_t n, char* buffer,
                                       TF_Status* status) -> int64_t {
     EXPECT_EQ(n, block_size);
     EXPECT_FALSE(calls.empty()) << "at offset = " << offset;
@@ -295,7 +308,7 @@ TEST(RamFileBlockCacheTest, LRU) {
     TF_SetStatus(status, TF_OK, "");
     return n;
   };
-  const uint32 block_count = 2;
+  const uint32_t block_count = 2;
   tf_gcs_filesystem::RamFileBlockCache cache(
       block_size, block_count * block_size, 0, fetcher);
   std::vector<char> out;
@@ -331,7 +344,7 @@ TEST(RamFileBlockCacheTest, LRU) {
 
 TEST(RamFileBlockCacheTest, MaxStaleness) {
   int calls = 0;
-  auto fetcher = [&calls](const string& filename, size_t offset, size_t n,
+  auto fetcher = [&calls](const std::string& filename, size_t offset, size_t n,
                           char* buffer, TF_Status* status) -> int64_t {
     calls++;
     memset(buffer, 'x', n);
@@ -375,13 +388,13 @@ TEST(RamFileBlockCacheTest, MaxStaleness) {
 
 TEST(RamFileBlockCacheTest, RemoveFile) {
   int calls = 0;
-  auto fetcher = [&calls](const string& filename, size_t offset, size_t n,
+  auto fetcher = [&calls](const std::string& filename, size_t offset, size_t n,
                           char* buffer, TF_Status* status) -> int64_t {
     calls++;
     char c = (filename == "a") ? 'a' : (filename == "b") ? 'b' : 'x';
     if (offset > 0) {
       // The first block is lower case and all subsequent blocks are upper case.
-      c = toupper(c);
+      c = absl::ascii_toupper(c);
     }
     memset(buffer, c, n);
     TF_SetStatus(status, TF_OK, "");
@@ -437,7 +450,7 @@ TEST(RamFileBlockCacheTest, RemoveFile) {
 
 TEST(RamFileBlockCacheTest, Prune) {
   int calls = 0;
-  auto fetcher = [&calls](const string& filename, size_t offset, size_t n,
+  auto fetcher = [&calls](const std::string& filename, size_t offset, size_t n,
                           char* buffer, TF_Status* status) -> int64_t {
     calls++;
     memset(buffer, 'x', n);
@@ -447,7 +460,7 @@ TEST(RamFileBlockCacheTest, Prune) {
   std::vector<char> out;
   // Our fake environment is initialized with the current timestamp.
   std::unique_ptr<NowSecondsEnv> env(new NowSecondsEnv);
-  uint64 now = Env::Default()->NowSeconds();
+  uint64_t now = Env::Default()->NowSeconds();
   env->SetNowSeconds(now);
   tf_gcs_filesystem::RamFileBlockCache cache(
       8, 32, 1 /* max staleness */, fetcher,
@@ -476,7 +489,7 @@ TEST(RamFileBlockCacheTest, Prune) {
   // timestamp of `now` + 2, file "a" is stale because its first block is stale,
   // but file "b" is not stale yet. Thus, once the pruning thread wakes up (in
   // one second of wall time), it should remove "a" and leave "b" alone.
-  uint64 start = Env::Default()->NowSeconds();
+  uint64_t start = Env::Default()->NowSeconds();
   do {
     Env::Default()->SleepForMicroseconds(100000);
   } while (cache.CacheSize() == 24 && Env::Default()->NowSeconds() - start < 3);
@@ -501,11 +514,19 @@ TEST(RamFileBlockCacheTest, ParallelReads) {
   // concurrently (at which point it will respond with success to all callers),
   // or 10 seconds have elapsed (at which point it will respond with an error).
   const int callers = 4;
-  BlockingCounter counter(callers);
-  auto fetcher = [&counter](const string& filename, size_t offset, size_t n,
-                            char* buffer, TF_Status* status) -> int64_t {
-    counter.DecrementCount();
-    if (!counter.WaitFor(std::chrono::seconds(10))) {
+  absl::BlockingCounter counter(callers);
+  absl::Notification notification;
+  auto fetcher = [&counter, &notification](
+                     const std::string& filename, size_t offset, size_t n,
+                     char* buffer, TF_Status* status) -> int64_t {
+    if (counter.DecrementCount()) {
+      notification.Notify();
+      // This call to `Wait()` is not expected to block. Calling `Wait()` here
+      // allows us to satisfy `BlockingCounter`'s requirement: "When `Wait()`
+      // returns, it is legal to destroy the `BlockingCounter`.".
+      counter.Wait();
+    }
+    if (!notification.WaitForNotificationWithTimeout(absl::Seconds(10))) {
       // This avoids having the test time out, which is harder to debug.
       TF_SetStatus(status, TF_FAILED_PRECONDITION,
                    "desired concurrency not reached");
@@ -539,9 +560,9 @@ TEST(RamFileBlockCacheTest, CoalesceConcurrentReads) {
   // Concurrent reads to the same file blocks should be de-duplicated.
   const size_t block_size = 16;
   int num_requests = 0;
-  Notification notification;
+  absl::Notification notification;
   auto fetcher = [&num_requests, &notification, block_size](
-                     const string& filename, size_t offset, size_t n,
+                     const std::string& filename, size_t offset, size_t n,
                      char* buffer, TF_Status* status) -> int64_t {
     EXPECT_EQ(n, block_size);
     EXPECT_EQ(offset, 0);
@@ -572,7 +593,7 @@ TEST(RamFileBlockCacheTest, CoalesceConcurrentReads) {
 
 TEST(RamFileBlockCacheTest, Flush) {
   int calls = 0;
-  auto fetcher = [&calls](const string& filename, size_t offset, size_t n,
+  auto fetcher = [&calls](const std::string& filename, size_t offset, size_t n,
                           char* buffer, TF_Status* status) -> int64_t {
     calls++;
     memset(buffer, 'x', n);
@@ -587,6 +608,35 @@ TEST(RamFileBlockCacheTest, Flush) {
   cache.Flush();
   TF_EXPECT_OK(ReadCache(&cache, "", 0, 16, &out));
   EXPECT_EQ(calls, 2);
+}
+
+// This test case reproduces a bug, now fixed, in which
+// RamFileBlockCache::Flush() used to clear the cache, invalidating the
+// lra_iterator field, without resetting the timestamp fields of the blocks.
+// This was a problem for the "reconcile_state" cleanup callback in
+// MaybeFetch(), which assumes that if the timestamp field is non-zero, the
+// lra_iterator is valid.  Later versions of Flush() should handle this case
+// correctly.
+TEST(RamFileBlockCacheTest, FlushDuringFetch) {
+  // The delays are sized to exceed the delay in RamFileBlockCache::Prune().
+  auto delayed_fetcher = [](const std::string& filename, size_t offset,
+                            size_t n, char* buffer,
+                            TF_Status* status) -> int64_t {
+    memset(buffer, 'x', n);
+    TF_SetStatus(status, TF_OK, "");
+    Env::Default()->SleepForMicroseconds(10 * 1000 * 1000);
+    return n;
+  };
+  tf_gcs_filesystem::RamFileBlockCache cache(16, 32, /*max_staleness=*/20,
+                                             delayed_fetcher);
+  std::vector<char> out;
+  std::unique_ptr<Thread> flush_thread(
+      Env::Default()->StartThread({}, "delayed_flush", [&cache] {
+        Env::Default()->SleepForMicroseconds(5 * 1000 * 1000);
+        cache.Flush();
+      }));
+  TF_EXPECT_OK(ReadCache(&cache, "", 0, 16, &out));
+  Env::Default()->SleepForMicroseconds(5 * 1000 * 1000);
 }
 
 }  // namespace

@@ -16,10 +16,6 @@
 # RUN: %p/remove_init_variable_v1 | FileCheck %s
 
 # pylint: disable=missing-docstring,line-too-long
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import tensorflow.compat.v1 as tf
 from tensorflow.compiler.mlir.tensorflow.tests.tf_saved_model import common_v1
 
@@ -33,7 +29,7 @@ from tensorflow.compiler.mlir.tensorflow.tests.tf_saved_model import common_v1
 # CHECK-SAME: min_consumer
 # CHECK-SAME: producer
 
-# CHECK: "tf_saved_model.global_tensor"() {is_mutable, sym_name = "[[VAR:[a-zA-Z_0-9]+]]", type = tensor<1x3xf32>, value = {{.*}} : tensor<1x3xf32>} : () -> ()
+# CHECK: "tf_saved_model.global_tensor"() <{is_mutable, sym_name = "[[VAR:[a-zA-Z_0-9]+]]", type = tensor<1x3xf32>, value = {{.*}} : tensor<1x3xf32>}> : () -> ()
 # CHECK-NOT: session_initializer
 
 # CHECK:      func {{@[a-zA-Z_0-9]+}}(
@@ -43,7 +39,7 @@ from tensorflow.compiler.mlir.tensorflow.tests.tf_saved_model import common_v1
 # CHECK-SAME: attributes {{.*}} tf_saved_model.exported_names = ["key"]
 
 # CHECK-NEXT: [[R0:%.*]] = "tf.ReadVariableOp"([[ARG1]]) {{{.*}}} : (tensor<!tf_type.resource<tensor<1x3xf32>>>) -> tensor<1x3xf32>
-# CHECK-NEXT: [[R1:%.*]] = "tf.MatMul"([[ARG0]], [[R0]]) {{{.*}}} : (tensor<3x1xf32>, tensor<1x3xf32>) -> tensor<3x3xf32>
+# CHECK-NEXT: [[R1:%.*]] = "tf.MatMul"([[ARG0]], [[R0]]) <{{{.*}}}> {{{.*}}} : (tensor<3x1xf32>, tensor<1x3xf32>) -> tensor<3x3xf32>
 # CHECK-NEXT: return [[R1]] : tensor<3x3xf32>
 
 

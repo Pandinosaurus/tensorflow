@@ -15,15 +15,16 @@ limitations under the License.
 #ifndef TENSORFLOW_LITE_TOOLS_EVALUATION_STAGES_TFLITE_INFERENCE_STAGE_H_
 #define TENSORFLOW_LITE_TOOLS_EVALUATION_STAGES_TFLITE_INFERENCE_STAGE_H_
 
-#include <stdint.h>
-
+#include <cstdint>
+#include <memory>
 #include <vector>
 
-#include "tensorflow/core/util/stats_calculator.h"
+#include "xla/tsl/util/stats_calculator.h"
 #include "tensorflow/lite/c/common.h"
 #include "tensorflow/lite/interpreter.h"
 #include "tensorflow/lite/kernels/register.h"
 #include "tensorflow/lite/model.h"
+#include "tensorflow/lite/model_builder.h"
 #include "tensorflow/lite/tools/evaluation/evaluation_delegate_provider.h"
 #include "tensorflow/lite/tools/evaluation/evaluation_stage.h"
 #include "tensorflow/lite/tools/evaluation/proto/evaluation_config.pb.h"
@@ -50,12 +51,23 @@ class TfliteInferenceStage : public EvaluationStage {
   // EvaluationStageMetrics.num_runs denotes the number of inferences run.
   EvaluationStageMetrics LatestMetrics() override;
 
-  ~TfliteInferenceStage() override {}
+  ~TfliteInferenceStage() override = default;
 
   // Call before Run().
   // This class does not take ownership of raw_input_ptrs.
   void SetInputs(const std::vector<void*>& raw_input_ptrs) {
     inputs_ = &raw_input_ptrs;
+    input_buffer_sizes_.reset();
+  }
+
+  // Call before Run().
+  // This class does not take ownership of raw_input_ptrs. It stores a copy of
+  // input_buffer_sizes.
+  void SetInputs(const std::vector<void*>& raw_input_ptrs,
+                 const std::vector<size_t>& input_buffer_sizes) {
+    inputs_ = &raw_input_ptrs;
+    input_buffer_sizes_ =
+        std::make_unique<std::vector<size_t>>(input_buffer_sizes);
   }
 
   // Resize input tensors with given shapes.
@@ -71,10 +83,10 @@ class TfliteInferenceStage : public EvaluationStage {
 
   // Provides a read-only view to the model's output tensor(s). Retains
   // ownership of object.
-  const std::vector<void*>* GetOutputs() const { return &outputs_; }
+  const std::vector<void*>* GetOutputs() const;
 
  private:
-  // Sets model_info_ & outputs_ after interpreter tensors are (re)allocated.
+  // Sets model_info_ after interpreter tensors are (re)allocated.
   void UpdateModelInfo();
 
   std::unique_ptr<FlatBufferModel> model_;
@@ -84,9 +96,10 @@ class TfliteInferenceStage : public EvaluationStage {
 
   TfLiteModelInfo model_info_;
   const std::vector<void*>* inputs_ = nullptr;
-  std::vector<void*> outputs_;
+  std::unique_ptr<std::vector<size_t>> input_buffer_sizes_;
+  mutable std::vector<void*> outputs_;
 
-  tensorflow::Stat<int64_t> latency_stats_;
+  tsl::Stat<int64_t> latency_stats_;
 };
 
 }  // namespace evaluation

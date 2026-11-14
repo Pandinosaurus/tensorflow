@@ -15,13 +15,13 @@ limitations under the License.
 
 #include "tensorflow/lite/delegates/gpu/gl/kernels/pooling.h"
 
-#include <algorithm>
+#include <any>
 #include <cstdint>
-#include <cstring>
+#include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
-#include "absl/memory/memory.h"
 #include "tensorflow/lite/delegates/gpu/common/status.h"
 #include "tensorflow/lite/delegates/gpu/common/types.h"
 #include "tensorflow/lite/delegates/gpu/gl/variable.h"
@@ -175,7 +175,7 @@ class Pooling : public NodeShader {
  public:
   absl::Status GenerateCode(const GenerationContext& ctx,
                             GeneratedCode* generated_code) const final {
-    const auto& attr = absl::any_cast<const Pooling2DAttributes&>(ctx.op_attr);
+    const auto& attr = std::any_cast<const Pooling2DAttributes&>(ctx.op_attr);
     switch (attr.type) {
       case PoolingType::AVERAGE:
         return GenerateAveragePoolingCode(attr, ctx, generated_code);
@@ -190,7 +190,7 @@ class Pooling : public NodeShader {
 }  // namespace
 
 std::unique_ptr<NodeShader> NewPoolingNodeShader() {
-  return absl::make_unique<Pooling>();
+  return std::make_unique<Pooling>();
 }
 
 }  // namespace gl

@@ -15,7 +15,13 @@ limitations under the License.
 #ifndef TENSORFLOW_CORE_KERNELS_DATA_TAKE_DATASET_OP_H_
 #define TENSORFLOW_CORE_KERNELS_DATA_TAKE_DATASET_OP_H_
 
+#include <cstdlib>
+#include <memory>
+#include <vector>
+
+#include "absl/status/status.h"
 #include "tensorflow/core/framework/dataset.h"
+#include "tensorflow/core/framework/tensor.h"
 
 namespace tensorflow {
 namespace data {
@@ -30,30 +36,37 @@ class TakeDataset : public DatasetBase {
   ~TakeDataset() override;
 
   std::unique_ptr<IteratorBase> MakeIteratorInternal(
-      const string& prefix) const override;
+      const std::string& prefix) const override;
 
   const DataTypeVector& output_dtypes() const override;
 
   const std::vector<PartialTensorShape>& output_shapes() const override;
 
-  string DebugString() const override;
+  std::string DebugString() const override;
 
-  int64_t Cardinality() const override;
+  int64_t CardinalityInternal(CardinalityOptions options) const override;
 
-  Status InputDatasets(std::vector<const DatasetBase*>* inputs) const override;
+  absl::Status InputDatasets(
+      std::vector<const DatasetBase*>* inputs) const override;
 
-  Status CheckExternalState() const override;
+  absl::Status Get(OpKernelContext* ctx, int64_t index,
+                   std::vector<Tensor>* out_tensors) const override;
+
+  absl::Status CheckExternalState() const override;
+
+  absl::Status RandomIndexingCompatible() const override;
 
  protected:
-  Status AsGraphDefInternal(SerializationContext* ctx,
-                            DatasetGraphDefBuilder* b,
-                            Node** output) const override;
+  absl::Status AsGraphDefInternal(SerializationContext* ctx,
+                                  DatasetGraphDefBuilder* b,
+                                  Node** output) const override;
 
  private:
   class EmptyIterator;
   class FiniteIterator;
   const int64_t count_;
   const DatasetBase* const input_;
+  absl::Status random_indexing_compatible_;
 };
 
 class TakeDatasetOp : public UnaryDatasetOpKernel {

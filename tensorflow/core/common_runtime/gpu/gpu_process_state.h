@@ -16,26 +16,22 @@ limitations under the License.
 #ifndef TENSORFLOW_CORE_COMMON_RUNTIME_GPU_GPU_PROCESS_STATE_H_
 #define TENSORFLOW_CORE_COMMON_RUNTIME_GPU_GPU_PROCESS_STATE_H_
 
-#include <functional>
-#include <map>
-#include <unordered_map>
+#include <cstddef>
+#include <memory>
 #include <vector>
 
-#include "tensorflow/core/common_runtime/gpu/gpu_id.h"
+#include "xla/tsl/framework/device_id.h"
 #include "tensorflow/core/common_runtime/process_state.h"
 #include "tensorflow/core/common_runtime/shared_counter.h"
 #include "tensorflow/core/framework/allocator.h"
 #include "tensorflow/core/platform/mutex.h"
 #include "tensorflow/core/platform/thread_annotations.h"
-#include "tensorflow/core/platform/types.h"
 #include "tensorflow/core/protobuf/config.pb.h"
 
 namespace tensorflow {
 
-class Allocator;
 class GPUBFCAllocator;
 class PoolAllocator;
-class SharedCounter;
 
 // Singleton that manages per-process state when GPUs are present.
 class GPUProcessState {
@@ -43,7 +39,7 @@ class GPUProcessState {
   // If ps == nullptr, returns pointer to the single instance of this class to
   // be used within this process.
   //
-  // If ps != nullptrs, accepts a value to be returned by all subsequent calls.
+  // If ps != nullptr, accepts a value to be returned by all subsequent calls.
   // A non-null ps may ONLY be provided during program static storage
   // initialization.  Must not be called more than once with a non-null ps.
   //
@@ -79,13 +75,16 @@ class GPUProcessState {
   // underlying allocator.  REQUIRES: Must be a valid type (see
   // config.proto for the list of supported strings.).
   //
+  // `options` is read on the very first call to this function in the process.
+  // After that if you pass in a set of options, they will be ignored.
+  //
   // REQUIRES: tf_device_id must be a valid id for a BaseGPUDevice available in
   // the current system environment.  Otherwise returns nullptr.
   virtual Allocator* GetGPUAllocator(
-      const GPUOptions& options, TfDeviceId tf_device_id, size_t total_bytes,
-      const std::vector<TfDeviceId>& peer_gpu_ids);
+      const GPUOptions& options, tsl::TfDeviceId tf_device_id,
+      size_t total_bytes, const std::vector<tsl::TfDeviceId>& peer_gpu_ids);
 
-  Allocator* GetGPUAllocator(TfDeviceId tf_device_id) {
+  Allocator* GetGPUAllocator(tsl::TfDeviceId tf_device_id) {
     return GetGPUAllocator(/*options=*/{}, tf_device_id, /*total_bytes=*/0,
                            /*peer_gpu_ids=*/{});
   }
@@ -95,7 +94,11 @@ class GPUProcessState {
     return gpu_allocators_.size();
   }
 
-  virtual Allocator* GetGpuHostAllocator(int numa_node);
+  // `options` is read on the very first call to this function in the process,
+  // e.g. to set the memory limit on this allocator.  After that if you pass in
+  // a different set of options, they will be ignored.
+  virtual Allocator* GetGpuHostAllocator(const GPUOptions& options,
+                                         int numa_node);
 
   // Registers a Visitor to be invoked on new chunks of memory allocated by the
   // SubAllocator of every GPU proximate to the specified bus.  The AllocVisitor
@@ -120,15 +123,15 @@ class GPUProcessState {
                                      const SubAllocator::Visitor& visitor);
 
   // Returns bus_id for the given GPU id.
-  virtual int BusIdForGPU(TfDeviceId tf_device_id);
+  virtual int BusIdForGPU(tsl::TfDeviceId tf_device_id);
 
-  SharedCounter* GPUAllocatorCounter(TfDeviceId tf_device_id);
+  SharedCounter* GPUAllocatorCounter(tsl::TfDeviceId tf_device_id);
 
  protected:
   // GPUProcessState is a singleton that should not normally be deleted except
   // at process shutdown.
   GPUProcessState();
-  virtual ~GPUProcessState() {}
+  virtual ~GPUProcessState() = default;
   friend class GPUDeviceTest;
 
   // Helper method for unit tests to reset the ProcessState singleton by
@@ -149,8 +152,8 @@ class GPUProcessState {
   struct AllocatorParts {
     std::unique_ptr<Allocator> allocator;
     std::unique_ptr<SharedCounter> counter;
-    GPUBFCAllocator* bfc_allocator;
-    SubAllocator* sub_allocator;  // owned by allocator
+    GPUBFCAllocator* bfc_allocator = nullptr;
+    SubAllocator* sub_allocator = nullptr;  // owned by allocator
     std::unique_ptr<Allocator> recording_allocator;
   };
   std::vector<AllocatorParts> gpu_allocators_ TF_GUARDED_BY(mu_);

@@ -18,7 +18,9 @@ limitations under the License.
 #include <deque>
 #include <utility>
 
-#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
+#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
+#include "tensorflow/core/framework/op_requires.h"
+#include "tensorflow/core/framework/resource_handle.h"
 #include "tensorflow/core/framework/resource_mgr.h"
 #include "tensorflow/core/framework/shared_ptr_variant.h"
 #include "tensorflow/core/framework/variant.h"
@@ -36,18 +38,18 @@ namespace {
 
 class Mutex : public ResourceBase {
  public:
-  explicit Mutex(OpKernelContext* c, const string& name)
+  explicit Mutex(OpKernelContext* c, const std::string& name)
       : locked_(false),
         thread_pool_(new thread::ThreadPool(
             c->env(), ThreadOptions(),
-            strings::StrCat("mutex_lock_thread_", SanitizeThreadSuffix(name)),
+            absl::StrCat("mutex_lock_thread_", SanitizeThreadSuffix(name)),
             1 /* num_threads */, false /* low_latency_hint */)),
         name_(name) {
     VLOG(2) << "Creating mutex with name " << name << ": " << this;
   }
 
-  string DebugString() const override {
-    return strings::StrCat("Mutex ", name_);
+  std::string DebugString() const override {
+    return absl::StrCat("Mutex ", name_);
   }
 
   class LockReleaser {
@@ -76,7 +78,7 @@ class Mutex : public ResourceBase {
 
   void AcquireAsync(
       OpKernelContext* c,
-      std::function<void(const Status& s, SharedLockReleaser lock)> fn) {
+      std::function<void(const absl::Status& s, SharedLockReleaser lock)> fn) {
     CancellationManager* cm = c->cancellation_manager();
     CancellationToken token{};
     bool* cancelled = nullptr;
@@ -91,14 +93,15 @@ class Mutex : public ResourceBase {
           });
       if (already_cancelled) {
         delete cancelled;
-        fn(errors::Cancelled("Lock acquisition cancelled."),
+        fn(absl::CancelledError("Lock acquisition cancelled."),
            SharedLockReleaser{nullptr});
         return;
       }
     }
     thread_pool_->Schedule(std::bind(
         [this, cm, cancelled,
-         token](std::function<void(const Status& s, SharedLockReleaser&& lock)>
+         token](std::function<void(const absl::Status& s,
+                                   SharedLockReleaser&& lock)>
                     fn_) {
           bool local_locked;
           {
@@ -113,10 +116,10 @@ class Mutex : public ResourceBase {
             delete cancelled;
           }
           if (local_locked) {  // Not cancelled.
-            fn_(Status::OK(),
+            fn_(absl::OkStatus(),
                 SharedLockReleaser{std::make_shared<LockReleaser>(this)});
           } else {
-            fn_(errors::Cancelled("Lock acquisition cancelled."),
+            fn_(absl::CancelledError("Lock acquisition cancelled."),
                 SharedLockReleaser{nullptr});
           }
         },
@@ -128,7 +131,7 @@ class Mutex : public ResourceBase {
   condition_variable cv_ TF_GUARDED_BY(mu_);
   bool locked_ TF_GUARDED_BY(mu_);
   std::unique_ptr<thread::ThreadPool> thread_pool_;
-  string name_;
+  std::string name_;
 };
 
 }  // namespace
@@ -140,13 +143,14 @@ class MutexLockOp : public AsyncOpKernel {
  public:
   void ComputeAsync(OpKernelContext* c, DoneCallback done) override {
     Mutex* mutex = nullptr;
+    ResourceHandle handle;
+    OP_REQUIRES_OK_ASYNC(c, HandleFromInput(c, 0, &handle), done);
     OP_REQUIRES_OK_ASYNC(
         c,
-        LookupOrCreateResource<Mutex>(c, HandleFromInput(c, 0), &mutex,
-                                      [c](Mutex** ptr) {
-                                        *ptr = new Mutex(
-                                            c, HandleFromInput(c, 0).name());
-                                        return Status::OK();
+        LookupOrCreateResource<Mutex>(c, handle, &mutex,
+                                      [c, handle](Mutex** ptr) {
+                                        *ptr = new Mutex(c, handle.name());
+                                        return absl::OkStatus();
                                       }),
         done);
 
@@ -158,7 +162,7 @@ class MutexLockOp : public AsyncOpKernel {
         c, std::bind(
                [c, variant, mutex](DoneCallback done_,
                                    // End of bound arguments.
-                                   const Status& s,
+                                   const absl::Status& s,
                                    Mutex::SharedLockReleaser&& lock) {
                  VLOG(2) << "Finished locking mutex " << mutex
                          << " with lock: " << lock.shared_ptr.get()
@@ -183,26 +187,26 @@ class ConsumeMutexLockOp : public OpKernel {
   void Compute(OpKernelContext* c) override {
     VLOG(2) << "Executing ConsumeMutexLockOp";
     const Tensor& lock_t = c->input(0);
-    OP_REQUIRES(
-        c, lock_t.dims() == 0,
-        errors::InvalidArgument("Expected input to be a scalar, saw shape: ",
-                                lock_t.shape().DebugString()));
-    OP_REQUIRES(
-        c, lock_t.dtype() == DT_VARIANT,
-        errors::InvalidArgument("Expected input to be a variant, saw type: ",
-                                DataTypeString(lock_t.dtype())));
+    OP_REQUIRES(c, lock_t.dims() == 0,
+                absl::InvalidArgumentError(
+                    absl::StrCat("Expected input to be a scalar, saw shape: ",
+                                 lock_t.shape().DebugString())));
+    OP_REQUIRES(c, lock_t.dtype() == DT_VARIANT,
+                absl::InvalidArgumentError(
+                    absl::StrCat("Expected input to be a variant, saw type: ",
+                                 DataTypeString(lock_t.dtype()))));
     const auto* lock =
         lock_t.scalar<Variant>()().get<Mutex::SharedLockReleaser>();
     OP_REQUIRES(c, lock,
-                errors::InvalidArgument(
+                absl::InvalidArgumentError(absl::StrCat(
                     "Expected input to contain a SharedLockReleaser "
                     "object, but saw variant: '",
-                    lock_t.scalar<Variant>()().DebugString(), "'"));
+                    lock_t.scalar<Variant>()().DebugString(), "'")));
     const int use_count = lock->shared_ptr.use_count();
     OP_REQUIRES(
         c, use_count == 1,
-        errors::InvalidArgument("Expected use count of lock to be 1, but saw: ",
-                                use_count));
+        absl::InvalidArgumentError(absl::StrCat(
+            "Expected use count of lock to be 1, but saw: ", use_count)));
   }
 
   bool IsExpensive() override { return false; }

@@ -15,6 +15,7 @@ limitations under the License.
 #include "tensorflow/core/distributed_runtime/rpc/grpc_state.h"
 
 #include "absl/strings/str_format.h"
+#include "tensorflow/core/distributed_runtime/rpc/grpc_util.h"
 
 namespace tensorflow {
 
@@ -53,10 +54,10 @@ void UntypedStreamingRPCState::Tag::OnCompleted(bool ok) {
   streaming_state_->Unref();  // Ref acquired when tag was handed to grpc.
 }
 
-void Exchange::Complete(Status status) {
+void Exchange::Complete(absl::Status status) {
   if (status.ok()) {
-    if (!GrpcMaybeParseProto(&response_buf_, response_)) {
-      status.Update(errors::Internal("could not parse rpc response"));
+    if (!tsl::GrpcMaybeParseProto(&response_buf_, response_)) {
+      status.Update(absl::InternalError("could not parse rpc response"));
     }
   }
   VLOG(3) << "Completing exchange " << DebugString() << " with "
@@ -82,13 +83,13 @@ const char* ToString(Exchange::State state) {
   }
 }
 
-string Exchange::DebugString() const {
+std::string Exchange::DebugString() const {
   return absl::StrFormat("%p@%s_%s", this, ToString(state_), debug_string_);
 }
 
 void ExchangeQueue::Emplace(const ::grpc::ByteBuffer& request_buf,
                             protobuf::Message* response, StatusCallback cb,
-                            string debug_string) {
+                            std::string debug_string) {
   exchanges_.emplace(exchanges_.end(), request_buf, response, std::move(cb),
                      debug_string);
 }
@@ -148,10 +149,11 @@ void ExchangeQueue::PopFront() {
   exchanges_.pop_front();
 }
 
-string ExchangeQueue::DebugString() const {
-  return absl::StrJoin(exchanges_, ", ", [](string* out, const Exchange& e) {
-    out->append(e.DebugString());
-  });
+std::string ExchangeQueue::DebugString() const {
+  return absl::StrJoin(exchanges_, ", ",
+                       [](std::string* out, const Exchange& e) {
+                         out->append(e.DebugString());
+                       });
 }
 
 void ExchangeQueue::Swap(ExchangeQueue* other) {
@@ -159,7 +161,7 @@ void ExchangeQueue::Swap(ExchangeQueue* other) {
   std::swap(call_started_, other->call_started_);
 }
 
-void ExchangeQueue::CompleteAll(Status status) {
+void ExchangeQueue::CompleteAll(absl::Status status) {
   for (Exchange& exchange : exchanges_) {
     exchange.Complete(status);
   }

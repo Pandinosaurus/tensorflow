@@ -1,38 +1,38 @@
-load("//tensorflow:tensorflow.bzl", "filegroup")
-load(
-    "//tensorflow/core/platform:rules_cc.bzl",
-    "cc_library",
-)
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
+load("//tensorflow:tensorflow.default.bzl", "filegroup", "get_compatible_with_portable")
+load("//tensorflow/core/platform:rules_cc.bzl", "cc_library")
 
 package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
     default_visibility = [
         # tensorflow/core:lib effectively exposes all targets under tensorflow/core/lib/**
         "//tensorflow/core:__pkg__",
-        # tensorflow/core/platform/cloud depends on random.h
-        "//tensorflow/core/platform:__subpackages__",
-        # All of the following packages depend on random/simple_philox.h for tests
-        "//tensorflow/core/lib/core:__pkg__",
-        "//tensorflow/core/lib/gtl:__pkg__",
-        "//tensorflow/core/lib/io:__pkg__",
-        "//tensorflow/core/lib/strings:__pkg__",
     ],
     licenses = ["notice"],
 )
 
-# Todo(bmzhao): Remaining targets to add to this BUILD file are: all tests.
-
 cc_library(
     name = "exact_uniform_int",
     hdrs = ["exact_uniform_int.h"],
+    deps = ["@xla//xla/tsl/lib/random:exact_uniform_int"],
 )
 
 cc_library(
     name = "philox",
-    srcs = [
-        "distribution_sampler.cc",
-        "random_distributions.cc",
-        "simple_philox.cc",
-    ],
     hdrs = [
         "distribution_sampler.h",
         "random_distributions.h",
@@ -41,44 +41,40 @@ cc_library(
     deps = [
         ":exact_uniform_int",
         ":philox_random",
+        ":random_distributions_utils",
         "//tensorflow/core/lib/gtl:array_slice",
         "//tensorflow/core/platform:logging",
         "//tensorflow/core/platform:macros",
         "//tensorflow/core/platform:types",
-        "//third_party/eigen3",
+        "@eigen_archive//:eigen3",
+        "@xla//xla/tsl/lib/random:philox",
     ],
-    alwayslink = 1,
+)
+
+cc_library(
+    name = "random_distributions_utils",
+    hdrs = ["random_distributions_utils.h"],
+    compatible_with = get_compatible_with_portable(),
+    visibility = ["//visibility:private"],
+    deps = [
+        ":philox_random",
+        "@xla//xla/tsl/lib/random:random_distributions_utils",
+    ],
 )
 
 cc_library(
     name = "philox_random",
     hdrs = ["philox_random.h"],
-    deps = ["//tensorflow/core/platform:types"],
-)
-
-cc_library(
-    name = "philox_random_test_utils",
-    testonly = True,
-    hdrs = ["philox_random_test_utils.h"],
-    deps = [
-        ":philox_random",
-        ":random",
-        "//tensorflow/core/platform:logging",
-    ],
+    compatible_with = get_compatible_with_portable(),
+    deps = ["@xla//xla/tsl/lib/random:philox_random"],
 )
 
 cc_library(
     name = "random",
     hdrs = ["random.h"],
     visibility = [
-        "//tensorflow/c/eager:__pkg__",
         "//tensorflow/core:__pkg__",
         "//tensorflow/core/grappler/optimizers:__pkg__",
-        "//tensorflow/core/lib/core:__pkg__",
-        "//tensorflow/core/lib/gtl:__pkg__",
-        "//tensorflow/core/lib/io:__pkg__",
-        "//tensorflow/core/lib/strings:__pkg__",
-        "//tensorflow/core/platform:__subpackages__",
     ],
     deps = [
         "//tensorflow/core/platform:random",
@@ -87,31 +83,36 @@ cc_library(
 
 cc_library(
     name = "weighted_picker",
-    srcs = ["weighted_picker.cc"],
     hdrs = ["weighted_picker.h"],
     deps = [
         ":philox",
         "//tensorflow/core/platform:logging",
         "//tensorflow/core/platform:macros",
         "//tensorflow/core/platform:types",
+        "@xla//xla/tsl/lib/random:weighted_picker",
     ],
-    alwayslink = 1,
 )
 
 # Export source files needed for mobile builds, which do not use granular targets.
 filegroup(
     name = "mobile_srcs_only_runtime",
     srcs = [
-        "distribution_sampler.cc",
+        "@xla//xla/tsl/lib/random:mobile_srcs_only_runtime",
+    ],
+)
+
+filegroup(
+    name = "mobile_hdrs_only_runtime",
+    srcs = [
         "distribution_sampler.h",
         "exact_uniform_int.h",
         "philox_random.h",
         "random.h",
         "random_distributions.h",
-        "simple_philox.cc",
+        "random_distributions_utils.h",
         "simple_philox.h",
-        "weighted_picker.cc",
         "weighted_picker.h",
+        "@xla//xla/tsl/lib/random:mobile_hdrs_only_runtime",
     ],
 )
 
@@ -121,7 +122,9 @@ filegroup(
         "distribution_sampler.h",
         "philox_random.h",
         "random_distributions.h",
+        "random_distributions_utils.h",
         "simple_philox.h",
+        "@xla//xla/tsl/lib/random:legacy_lib_random_headers",
     ],
     visibility = ["//tensorflow/core:__pkg__"],
 )
@@ -131,15 +134,9 @@ filegroup(
     srcs = [
         "random.h",
         "random_distributions.h",
+        "random_distributions_utils.h",
         "weighted_picker.h",
-    ],
-    visibility = ["//tensorflow/core:__pkg__"],
-)
-
-filegroup(
-    name = "legacy_lib_test_internal_headers",
-    srcs = [
-        "philox_random_test_utils.h",
+        "@xla//xla/tsl/lib/random:legacy_lib_internal_public_random_headers",
     ],
     visibility = ["//tensorflow/core:__pkg__"],
 )
@@ -150,40 +147,12 @@ filegroup(
         "distribution_sampler.h",
         "exact_uniform_int.h",
         "philox_random.h",
-        "philox_random_test_utils.h",
         "random.h",
         "random_distributions.h",
+        "random_distributions_utils.h",
         "simple_philox.h",
         "weighted_picker.h",
-    ],
-    visibility = ["//tensorflow/core:__pkg__"],
-)
-
-filegroup(
-    name = "legacy_lib_random_tests",
-    srcs = [
-        "distribution_sampler_test.cc",
-        "philox_random_test.cc",
-        "random_distributions_test.cc",
-        "random_test.cc",
-        "simple_philox_test.cc",
-        "weighted_picker_test.cc",
-    ],
-    visibility = ["//tensorflow/core:__pkg__"],
-)
-
-filegroup(
-    name = "legacy_lib_random_random_distributions_test",
-    srcs = [
-        "random_distributions_test.cc",
-    ],
-    visibility = ["//tensorflow/core:__pkg__"],
-)
-
-filegroup(
-    name = "legacy_lib_random_random_weighted_picker_test",
-    srcs = [
-        "weighted_picker_test.cc",
+        "@xla//xla/tsl/lib/random:legacy_lib_random_all_headers",
     ],
     visibility = ["//tensorflow/core:__pkg__"],
 )

@@ -26,16 +26,17 @@ limitations under the License.
 namespace tensorflow {
 namespace {
 
-Status CreatePoolFromSet(const protobuf::FileDescriptorSet& set,
-                         std::unique_ptr<protobuf::DescriptorPool>* out_pool) {
-  *out_pool = absl::make_unique<protobuf::DescriptorPool>();
+absl::Status CreatePoolFromSet(
+    const protobuf::FileDescriptorSet& set,
+    std::unique_ptr<protobuf::DescriptorPool>* out_pool) {
+  *out_pool = std::make_unique<protobuf::DescriptorPool>();
   for (const auto& file : set.file()) {
     if ((*out_pool)->BuildFile(file) == nullptr) {
-      return errors::InvalidArgument("Failed to load FileDescriptorProto: ",
-                                     file.DebugString());
+      return absl::InvalidArgumentError(absl::StrCat(
+          "Failed to load FileDescriptorProto: ", file.DebugString()));
     }
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 // Build a `DescriptorPool` from the named file or URI. The file or URI
@@ -43,10 +44,10 @@ Status CreatePoolFromSet(const protobuf::FileDescriptorSet& set,
 //
 // The file must contain a serialized `FileDescriptorSet`. See
 // `GetDescriptorPool()` for more information.
-Status GetDescriptorPoolFromFile(
-    tensorflow::Env* env, const string& filename,
+absl::Status GetDescriptorPoolFromFile(
+    tensorflow::Env* env, const std::string& filename,
     std::unique_ptr<protobuf::DescriptorPool>* owned_desc_pool) {
-  Status st = env->FileExists(filename);
+  absl::Status st = env->FileExists(filename);
   if (!st.ok()) {
     return st;
   }
@@ -58,25 +59,25 @@ Status GetDescriptorPoolFromFile(
     return st;
   }
   if (!descs.ParseFromArray(buf->data(), buf->length())) {
-    return errors::InvalidArgument(
-        "descriptor_source contains invalid FileDescriptorSet: ", filename);
+    return absl::InvalidArgumentError(absl::StrCat(
+        "descriptor_source contains invalid FileDescriptorSet: ", filename));
   }
   return CreatePoolFromSet(descs, owned_desc_pool);
 }
 
-Status GetDescriptorPoolFromBinary(
-    const string& source,
+absl::Status GetDescriptorPoolFromBinary(
+    const std::string& source,
     std::unique_ptr<protobuf::DescriptorPool>* owned_desc_pool) {
   if (!absl::StartsWith(source, "bytes://")) {
-    return errors::InvalidArgument(absl::StrCat(
+    return absl::InvalidArgumentError(absl::StrCat(
         "Source does not represent serialized file descriptor set proto. ",
         "This may be due to a missing dependency on the file containing ",
         "REGISTER_DESCRIPTOR_POOL(\"", source, "\", ...);"));
   }
   // Parse the FileDescriptorSet.
   protobuf::FileDescriptorSet proto;
-  if (!proto.ParseFromString(string(absl::StripPrefix(source, "bytes://")))) {
-    return errors::InvalidArgument(absl::StrCat(
+  if (!proto.ParseFromString(absl::StripPrefix(source, "bytes://"))) {
+    return absl::InvalidArgumentError(absl::StrCat(
         "Source does not represent serialized file descriptor set proto. ",
         "This may be due to a missing dependency on the file containing ",
         "REGISTER_DESCRIPTOR_POOL(\"", source, "\", ...);"));
@@ -86,8 +87,8 @@ Status GetDescriptorPoolFromBinary(
 
 }  // namespace
 
-Status GetDescriptorPool(
-    Env* env, string const& descriptor_source,
+absl::Status GetDescriptorPool(
+    Env* env, const std::string& descriptor_source,
     protobuf::DescriptorPool const** desc_pool,
     std::unique_ptr<protobuf::DescriptorPool>* owned_desc_pool) {
   // Attempt to lookup the pool in the registry.
@@ -98,11 +99,11 @@ Status GetDescriptorPool(
 
   // If there is no pool function registered for the given source, let the
   // runtime find the file or URL.
-  Status status =
+  absl::Status status =
       GetDescriptorPoolFromFile(env, descriptor_source, owned_desc_pool);
   if (status.ok()) {
     *desc_pool = owned_desc_pool->get();
-    return Status::OK();
+    return absl::OkStatus();
   }
 
   status = GetDescriptorPoolFromBinary(descriptor_source, owned_desc_pool);

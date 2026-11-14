@@ -12,52 +12,61 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
-#include "grpcpp/channel.h"
-#include "grpcpp/create_channel.h"
 #include "grpcpp/generic/generic_stub.h"
-#include "grpcpp/impl/codegen/client_context.h"
-#include "grpcpp/impl/codegen/server_context.h"
-#include "grpcpp/impl/codegen/status.h"
+#include "grpcpp/grpcpp.h"
 #include "grpcpp/security/credentials.h"
-#include "grpcpp/server_builder.h"
+#include "grpcpp/security/server_credentials.h"
+#include "absl/container/flat_hash_map.h"
+#include "absl/log/log.h"
+#include "absl/status/status.h"
+#include "absl/strings/ascii.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 // Needed for encoding and decoding ResourceDeleter Variant.
-#include "tensorflow/core/data/dataset_utils.h"
+#include "absl/strings/str_join.h"
+#include "absl/synchronization/notification.h"
+#include "tensorflow/core/common_runtime/input_colocation_exemption_registry.h"
 #include "tensorflow/core/distributed_runtime/rpc/grpc_client_cq_tag.h"
 #include "tensorflow/core/distributed_runtime/rpc/grpc_state.h"
 #include "tensorflow/core/distributed_runtime/rpc/grpc_util.h"
+#include "tensorflow/core/framework/allocator.h"
 #include "tensorflow/core/framework/attr_value.pb.h"
 #include "tensorflow/core/framework/function.h"
+#include "tensorflow/core/framework/function.pb.h"
 #include "tensorflow/core/framework/node_def_util.h"
 #include "tensorflow/core/framework/op_kernel.h"
+#include "tensorflow/core/framework/op_requires.h"
+#include "tensorflow/core/framework/resource_base.h"
+#include "tensorflow/core/framework/resource_handle.h"
 #include "tensorflow/core/framework/resource_mgr.h"
 #include "tensorflow/core/framework/tensor.h"
 #include "tensorflow/core/framework/tensor.pb.h"
+#include "tensorflow/core/framework/tensor_shape.h"
+#include "tensorflow/core/framework/types.h"
 #include "tensorflow/core/framework/types.pb.h"
 #include "tensorflow/core/framework/variant.h"
+#include "tensorflow/core/lib/gtl/cleanup.h"
 #include "tensorflow/core/lib/gtl/flatmap.h"
-#include "tensorflow/core/lib/strings/str_util.h"
 #include "tensorflow/core/platform/env.h"
-#include "tensorflow/core/platform/errors.h"
 #include "tensorflow/core/platform/mutex.h"
-#include "tensorflow/core/platform/notification.h"
 #include "tensorflow/core/platform/random.h"
+#include "tensorflow/core/platform/refcount.h"
 #include "tensorflow/core/platform/status.h"
-#include "tensorflow/core/platform/statusor.h"
-#include "tensorflow/core/platform/strcat.h"
-#include "tensorflow/core/platform/stringpiece.h"
+#include "tensorflow/core/platform/thread_annotations.h"
 #include "tensorflow/core/platform/threadpool.h"
 #include "tensorflow/core/platform/tstring.h"
-#include "tensorflow/core/platform/types.h"
 #include "tensorflow/core/protobuf/struct.pb.h"
 #include "tensorflow/distribute/experimental/rpc/kernels/grpc_credentials.h"
-#include "tensorflow/distribute/experimental/rpc/kernels/grpc_rpc_service.h"
+#include "tensorflow/distribute/experimental/rpc/proto/tf_rpc_service.grpc.pb.h"
 #include "tensorflow/distribute/experimental/rpc/proto/tf_rpc_service.pb.h"
 
 namespace tensorflow {
@@ -74,7 +83,8 @@ class RpcServerRegisterOp : public OpKernel {
   NameAttrList func_;
   StructuredValue output_specs_;
   StructuredValue input_specs_;
-  TF_DISALLOW_COPY_AND_ASSIGN(RpcServerRegisterOp);
+  RpcServerRegisterOp(const RpcServerRegisterOp&) = delete;
+  void operator=(const RpcServerRegisterOp&) = delete;
 };
 
 // Create a server resource to store registered functions
@@ -84,7 +94,8 @@ class RpcServerOp : public OpKernel {
   void Compute(OpKernelContext* ctx) override;
 
  private:
-  TF_DISALLOW_COPY_AND_ASSIGN(RpcServerOp);
+  RpcServerOp(const RpcServerOp&) = delete;
+  void operator=(const RpcServerOp&) = delete;
 };
 
 // Start GRPC server with registered methods
@@ -94,7 +105,8 @@ class RpcServerStartOp : public OpKernel {
   void Compute(OpKernelContext* ctx) override;
 
  private:
-  TF_DISALLOW_COPY_AND_ASSIGN(RpcServerStartOp);
+  RpcServerStartOp(const RpcServerStartOp&) = delete;
+  void operator=(const RpcServerStartOp&) = delete;
 };
 
 // Create a client resource to store registered functions.
@@ -106,7 +118,8 @@ class RpcClientOp : public AsyncOpKernel {
  private:
   std::string name_;
   bool list_registered_methods_;
-  TF_DISALLOW_COPY_AND_ASSIGN(RpcClientOp);
+  RpcClientOp(const RpcClientOp&) = delete;
+  void operator=(const RpcClientOp&) = delete;
 };
 
 // Remote RPC using client handle passed and returns a future Resource handle to
@@ -117,7 +130,8 @@ class RpcCallOp : public OpKernel {
   void Compute(OpKernelContext* ctx) override;
 
  private:
-  TF_DISALLOW_COPY_AND_ASSIGN(RpcCallOp);
+  RpcCallOp(const RpcCallOp&) = delete;
+  void operator=(const RpcCallOp&) = delete;
 };
 
 // Remote Check Status Op waits till the RPC issued by Call Op is finished.
@@ -127,7 +141,8 @@ class RpcCheckStatusOp : public AsyncOpKernel {
   void ComputeAsync(OpKernelContext* ctx, DoneCallback done) override;
 
  private:
-  TF_DISALLOW_COPY_AND_ASSIGN(RpcCheckStatusOp);
+  RpcCheckStatusOp(const RpcCheckStatusOp&) = delete;
+  void operator=(const RpcCheckStatusOp&) = delete;
 };
 
 // Op to get response output after RPC Call.
@@ -137,7 +152,8 @@ class RpcGetValueOp : public AsyncOpKernel {
   void ComputeAsync(OpKernelContext* ctx, DoneCallback done) override;
 
  private:
-  TF_DISALLOW_COPY_AND_ASSIGN(RpcGetValueOp);
+  RpcGetValueOp(const RpcGetValueOp&) = delete;
+  void operator=(const RpcGetValueOp&) = delete;
 };
 
 class DeleteRpcFutureResourceOp : public OpKernel {
@@ -176,12 +192,11 @@ class FunctionRegistry {
     return debug_string;
   }
 
-  tensorflow::Status Register(const std::string& method,
-                              FunctionLibraryRuntime* lib,
-                              FunctionLibraryRuntime::Handle fn_handle,
-                              std::vector<Tensor> captured_inputs,
-                              const StructuredValue& input_specs,
-                              const StructuredValue& output_specs) {
+  absl::Status Register(const std::string& method, FunctionLibraryRuntime* lib,
+                        FunctionLibraryRuntime::Handle fn_handle,
+                        std::vector<Tensor> captured_inputs,
+                        const StructuredValue& input_specs,
+                        const StructuredValue& output_specs) {
     mutex_lock l(mu_);
     FunctionMetadata fn_metadata;
     fn_metadata.handle = fn_handle;
@@ -192,26 +207,27 @@ class FunctionRegistry {
     auto result = registered_methods_.insert(
         std::pair<std::string, FunctionMetadata>(method, fn_metadata));
     if (!result.second) {
-      return tensorflow::errors::InvalidArgument(
+      return absl::InvalidArgumentError(
           absl::StrCat(method, " is already registered."));
     }
-    return tensorflow::Status::OK();
+    return absl::OkStatus();
   }
 
-  tensorflow::Status LookUp(const std::string& method,
-                            FunctionMetadata* output) const {
+  absl::Status LookUp(const std::string& method,
+                      FunctionMetadata* output) const {
     mutex_lock l(mu_);
     auto it = registered_methods_.find(method);
     if (it == registered_methods_.end()) {
-      return tensorflow::errors::InvalidArgument(
+      return absl::InvalidArgumentError(
           absl::StrCat(method, " is not registered."));
     }
 
     *output = it->second;
-    return tensorflow::Status::OK();
+    return absl::OkStatus();
   }
 
-  const gtl::FlatMap<std::string, FunctionMetadata>& List() const {
+  gtl::FlatMap<std::string, FunctionMetadata> List() const {
+    mutex_lock l(mu_);
     return registered_methods_;
   }
 
@@ -261,19 +277,20 @@ class RpcServiceImpl : public grpc::RpcService::Service {
     }
 
     std::vector<Tensor>* rets = new std::vector<Tensor>;
-    Notification notification;
-    fn_lib->Run(opts, handle, args, rets,
-                [rets, response, &notification, &status](const Status& st) {
-                  status = st;
-                  if (status.ok()) {
-                    for (size_t i = 0; i < rets->size(); ++i) {
-                      auto t = response->add_output_tensors();
-                      (*rets)[i].AsProtoField(t);
-                    }
-                  }
-                  delete rets;
-                  notification.Notify();
-                });
+    absl::Notification notification;
+    fn_lib->Run(
+        opts, handle, args, rets,
+        [rets, response, &notification, &status](const absl::Status& st) {
+          status = st;
+          if (status.ok()) {
+            for (size_t i = 0; i < rets->size(); ++i) {
+              auto t = response->add_output_tensors();
+              (*rets)[i].AsProtoField(t);
+            }
+          }
+          delete rets;
+          notification.Notify();
+        });
 
     notification.WaitForNotification();
     return ToGrpcStatus(status);
@@ -316,15 +333,14 @@ class RpcServer : public ResourceBase {
     return absl::StrCat("RpcServer resource with ", registry_.DebugString());
   }
 
-  tensorflow::Status Register(const std::string& method,
-                              FunctionLibraryRuntime* lib,
-                              FunctionLibraryRuntime::Handle fn_handle,
-                              std::vector<Tensor> captured_inputs,
-                              const StructuredValue& input_specs,
-                              const StructuredValue& output_specs) {
+  absl::Status Register(const std::string& method, FunctionLibraryRuntime* lib,
+                        FunctionLibraryRuntime::Handle fn_handle,
+                        std::vector<Tensor> captured_inputs,
+                        const StructuredValue& input_specs,
+                        const StructuredValue& output_specs) {
     mutex_lock m(mu_);
     if (server_started_) {
-      return tensorflow::errors::FailedPrecondition(
+      return absl::FailedPreconditionError(
           "All methods must be registered before starting the server. Method "
           "registration after starting the server is not supported.");
     }
@@ -358,10 +374,11 @@ class GrpcPollingThread {
   explicit GrpcPollingThread(std::string thread_name) {
     // Thread name can only have alpha numeric characters. Remove special
     // characters from input thread_name.
-    thread_name.erase(
-        std::remove_if(thread_name.begin(), thread_name.end(),
-                       [](auto const c) -> bool { return !std::isalnum(c); }),
-        thread_name.end());
+    thread_name.erase(std::remove_if(thread_name.begin(), thread_name.end(),
+                                     [](unsigned char const c) -> bool {
+                                       return !absl::ascii_isalnum(c);
+                                     }),
+                      thread_name.end());
     thread_.reset(Env::Default()->StartThread(
         ThreadOptions(), absl::StrCat("GrpcPollingThread", thread_name),
         [this]() {
@@ -389,7 +406,7 @@ class GrpcPollingThread {
 class RpcClient : public ResourceBase {
  public:
   explicit RpcClient(std::string address, std::string resource_name,
-                     int64 timeout_in_ms)
+                     int64_t timeout_in_ms)
       : server_address_(address),
         thread_(resource_name),
         timeout_in_ms_(timeout_in_ms) {
@@ -411,7 +428,7 @@ class RpcClient : public ResourceBase {
 
   void CallAsync(const std::string& method_name,
                  const std::vector<Tensor>& inputs, CallResponse* response,
-                 StatusCallback callback, int64 timeout_in_ms) {
+                 StatusCallback callback, int64_t timeout_in_ms) {
     CallRequest request;
     request.set_method(method_name);
     for (const auto& t : inputs) {
@@ -419,7 +436,7 @@ class RpcClient : public ResourceBase {
     }
     ::grpc::ClientContext context;
     // Use per call timeout if specified, otherwise use default client timeout.
-    int64 timeout = timeout_in_ms > 0 ? timeout_in_ms : timeout_in_ms_;
+    int64_t timeout = timeout_in_ms > 0 ? timeout_in_ms : timeout_in_ms_;
     new RPCState<CallResponse>(
         stub_.get(), cq_, "/tensorflow.rpc.RpcService/Call", request, response,
         /*done=*/std::move(callback),
@@ -451,11 +468,11 @@ class RpcClient : public ResourceBase {
   ::grpc::CompletionQueue* cq_;
   GrpcPollingThread thread_;
   std::unique_ptr<thread::ThreadPool> callback_threadpool_;
-  int64 timeout_in_ms_;
+  int64_t timeout_in_ms_;
 };
 
 class RpcFutureResource : public ResourceBase {
-  typedef std::function<void(const Status&, const CallResponse&)>
+  typedef std::function<void(const absl::Status&, const CallResponse&)>
       FutureCallBack;
 
  public:
@@ -479,20 +496,20 @@ class RpcFutureResource : public ResourceBase {
     done_ = true;
   }
 
-  void set_status(Status status) { status_.Update(status); }
-  Status get_status() { return status_; }
+  void set_status(absl::Status status) { status_.Update(status); }
+  absl::Status get_status() { return status_; }
   CallResponse* get_response() { return &response_; }
 
  private:
   CallResponse response_;
   bool done_ TF_GUARDED_BY(mu_);
-  Status status_;
+  absl::Status status_;
   std::vector<FutureCallBack> call_backs_ TF_GUARDED_BY(mu_);
   mutable mutex mu_;
 };
 
-Status ExtractServerAddressFromInput(OpKernelContext* ctx,
-                                     std::string* address) {
+absl::Status ExtractServerAddressFromInput(OpKernelContext* ctx,
+                                           std::string* address) {
   const Tensor* server_address;
   auto status = ctx->input("server_address", &server_address);
   if (status.ok()) {
@@ -521,7 +538,7 @@ void RpcServerOp::Compute(OpKernelContext* ctx) {
   // Create resource
   auto creator = [address](RpcServer** server) {
     *server = new RpcServer(address);
-    return Status::OK();
+    return absl::OkStatus();
   };
   core::RefCountPtr<RpcServer> server;
   OP_REQUIRES_OK(ctx, LookupOrCreateResource<RpcServer>(ctx, resource_handle,
@@ -562,7 +579,7 @@ void RpcClientOp::ComputeAsync(OpKernelContext* ctx, DoneCallback done) {
   // Create resource
   auto creator = [&address, &resource_name, timeout_in_ms](RpcClient** client) {
     *client = new RpcClient(address, resource_name, timeout_in_ms);
-    return Status::OK();
+    return absl::OkStatus();
   };
 
   core::RefCountPtr<RpcClient> client;
@@ -573,33 +590,36 @@ void RpcClientOp::ComputeAsync(OpKernelContext* ctx, DoneCallback done) {
   ctx->set_output(0, handle);
 
   if (!list_registered_methods_) {
+    Tensor* method_output_t;
+    OP_REQUIRES_OK_ASYNC(
+        ctx, ctx->allocate_output(1, TensorShape({}), &method_output_t), done);
+    method_output_t->scalar<tstring>()() = "";
     done();
     return;
   }
   auto* response = new ListResponse();
-  client->ListAsync(
-      response, [ctx, response, done](const Status& status) {
-        if (!status.ok()) {
-          ctx->SetStatus(status);
-        } else {
-          Tensor* method_output_signatures_t;
-          auto method_output_shape = TensorShape(
-              {static_cast<int64>(response->registered_methods_size())});
-          OP_REQUIRES_OK_ASYNC(
-              ctx,
-              ctx->allocate_output(1, method_output_shape,
-                                   &method_output_signatures_t),
-              done);
-          auto method_output_signatures =
-              method_output_signatures_t->vec<tstring>();
-          for (int i = 0; i < response->registered_methods_size(); ++i) {
-            method_output_signatures(i) =
-                response->registered_methods(i).SerializeAsString();
-          }
-        }
-        delete response;
-        done();
-      });
+  client->ListAsync(response, [ctx, response,
+                               done](const absl::Status& status) {
+    std::unique_ptr<ListResponse> safe_response(response);
+    if (!status.ok()) {
+      ctx->SetStatus(status);
+    } else {
+      Tensor* method_output_signatures_t;
+      auto method_output_shape = TensorShape(
+          {static_cast<int64_t>(response->registered_methods_size())});
+      OP_REQUIRES_OK_ASYNC(ctx,
+                           ctx->allocate_output(1, method_output_shape,
+                                                &method_output_signatures_t),
+                           done);
+      auto method_output_signatures =
+          method_output_signatures_t->vec<tstring>();
+      for (int i = 0; i < response->registered_methods_size(); ++i) {
+        method_output_signatures(i) =
+            response->registered_methods(i).SerializeAsString();
+      }
+    }
+    done();
+  });
 }
 
 RpcServerStartOp::RpcServerStartOp(OpKernelConstruction* ctx) : OpKernel(ctx) {}
@@ -609,7 +629,7 @@ void RpcServerStartOp::Compute(OpKernelContext* ctx) {
   OP_REQUIRES_OK(ctx, LookupResource(ctx, HandleFromInput(ctx, 0), &server));
 
   server->StartServer();
-  ctx->SetStatus(Status::OK());
+  ctx->SetStatus(absl::OkStatus());
 }
 
 RpcServerRegisterOp::RpcServerRegisterOp(OpKernelConstruction* ctx)
@@ -620,23 +640,23 @@ RpcServerRegisterOp::RpcServerRegisterOp(OpKernelConstruction* ctx)
   OP_REQUIRES_OK(ctx, ctx->GetAttr("output_specs", &output_specs_string));
 
   OP_REQUIRES(ctx, output_specs_.ParseFromString(output_specs_string),
-              tensorflow::errors::InvalidArgument(
+              absl::InvalidArgumentError(absl::StrCat(
                   "Unable to parse StructuredValue output_spec string: ",
-                  output_specs_string));
+                  output_specs_string)));
 
   std::string input_specs_string;
   OP_REQUIRES_OK(ctx, ctx->GetAttr("input_specs", &input_specs_string));
 
   OP_REQUIRES(ctx, input_specs_.ParseFromString(input_specs_string),
-              tensorflow::errors::InvalidArgument(
+              absl::InvalidArgumentError(absl::StrCat(
                   "Unable to parse StructuredValue output_spec string: ",
-                  input_specs_string));
+                  input_specs_string)));
 }
 
 void RpcServerRegisterOp::Compute(OpKernelContext* ctx) {
   FunctionLibraryRuntime* lib = ctx->function_library();
   OP_REQUIRES(ctx, lib != nullptr,
-              errors::Internal("No function library is provided"));
+              absl::InternalError("No function library is provided"));
 
   const Tensor* method_name;
   OP_REQUIRES_OK(ctx, ctx->input("method_name", &method_name));
@@ -656,7 +676,7 @@ void RpcServerRegisterOp::Compute(OpKernelContext* ctx) {
   const FunctionDef* fdef =
       lib->GetFunctionLibraryDefinition()->Find(func_.name());
   OP_REQUIRES(ctx, fdef != nullptr,
-              errors::Internal("Failed to find function."));
+              absl::InternalError("Failed to find function."));
   int num_args = fdef->signature().input_arg_size();
 
   const int num_non_captured_inputs = num_args - captured.size();
@@ -664,7 +684,7 @@ void RpcServerRegisterOp::Compute(OpKernelContext* ctx) {
     instantiate_opts.input_devices.push_back(ctx->device()->name());
   }
 
-  absl::flat_hash_map<string, std::vector<string>> composite_devices;
+  absl::flat_hash_map<std::string, std::vector<std::string>> composite_devices;
   for (int i = 0; i < captured.size(); ++i) {
     if (captured[i].dtype() == DT_RESOURCE) {
       instantiate_opts.input_devices.push_back(GetFunctionResourceInputDevice(
@@ -720,7 +740,7 @@ void RpcCallOp::Compute(OpKernelContext* ctx) {
   // Create resource
   auto creator = [](RpcFutureResource** resource) {
     *resource = new RpcFutureResource();
-    return Status::OK();
+    return absl::OkStatus();
   };
   core::RefCountPtr<RpcFutureResource> future_resource;
   OP_REQUIRES_OK(ctx, LookupOrCreateResource<RpcFutureResource>(
@@ -739,7 +759,7 @@ void RpcCallOp::Compute(OpKernelContext* ctx) {
 
   client->CallAsync(
       method, args, response,
-      [future_resource_ptr](const Status& status) {
+      [future_resource_ptr](const absl::Status& status) {
         future_resource_ptr->set_status(status);
         future_resource_ptr->OperationFinished();
         future_resource_ptr->Unref();
@@ -751,29 +771,31 @@ RpcCheckStatusOp::RpcCheckStatusOp(OpKernelConstruction* ctx)
     : AsyncOpKernel(ctx) {}
 
 void RpcCheckStatusOp::ComputeAsync(OpKernelContext* ctx, DoneCallback done) {
+  auto cleanup = gtl::MakeCleanup([&done]() { done(); });
   core::RefCountPtr<RpcFutureResource> future_resource;
   auto handle = HandleFromInput(ctx, 0);
   {
     auto status = LookupResource(ctx, handle, &future_resource);
     if (!status.ok()) {
-      if (errors::IsNotFound(status)) {
-        ctx->SetStatus(tensorflow::errors::NotFound(
-            absl::StrCat("Future resource no longer exists. Please make sure "
-                         "resource is not already deleted.")));
-        done();
-        return;
+      if (absl::IsNotFound(status)) {
+        ctx->SetStatus(absl::NotFoundError(
+            "Future resource no longer exists. Please make sure "
+            "resource is not already deleted."));
       } else {
         ctx->SetStatus(status);
       }
+      return;
     }
   }
 
+  cleanup.release();
   future_resource->AddDoneCallback(
-      [ctx, done, handle](const Status& status, const CallResponse& response) {
+      [ctx, done, handle](const absl::Status& status,
+                          const CallResponse& response) {
         Tensor error_code(DT_INT64, TensorShape({})),
             error_message(DT_STRING, TensorShape({}));
-        error_code.scalar<int64>()() = status.code();
-        error_message.scalar<tstring>()() = status.error_message();
+        error_code.scalar<int64_t>()() = status.raw_code();
+        error_message.scalar<tstring>()() = status.message();
 
         ctx->set_output(0, error_code);
         ctx->set_output(1, error_message);
@@ -785,102 +807,55 @@ void RpcCheckStatusOp::ComputeAsync(OpKernelContext* ctx, DoneCallback done) {
 RpcGetValueOp::RpcGetValueOp(OpKernelConstruction* ctx) : AsyncOpKernel(ctx) {}
 
 void RpcGetValueOp::ComputeAsync(OpKernelContext* ctx, DoneCallback done) {
+  auto cleanup = gtl::MakeCleanup([&done]() { done(); });
   core::RefCountPtr<RpcFutureResource> future_resource;
   auto handle = HandleFromInput(ctx, 0);
   {
     auto status = LookupResource(ctx, handle, &future_resource);
     if (!status.ok()) {
-      if (errors::IsNotFound(status)) {
-        ctx->SetStatus(tensorflow::errors::NotFound(
-            absl::StrCat("Future resource no longer exists. Please ensure "
-                         "resource is not already deleted.")));
-        done();
-        return;
+      if (absl::IsNotFound(status)) {
+        ctx->SetStatus(absl::NotFoundError(
+            "Future resource no longer exists. Please ensure "
+            "resource is not already deleted."));
       } else {
         ctx->SetStatus(status);
       }
+      return;
     }
   }
 
-  future_resource->AddDoneCallback(
-      [ctx, done, handle](const Status& status, const CallResponse& response) {
-        if (!status.ok()) {
-          ctx->SetStatus(status);
-        } else {
-          if (ctx->num_outputs() != response.output_tensors().size()) {
-            ctx->SetStatus(tensorflow::errors::InvalidArgument(absl::StrCat(
-                "Incorrect number of output types specified.",
-                ctx->num_outputs(), " ", response.output_tensors().size())));
-          } else {
-            int i = 0;
-            for (const auto& t_proto : response.output_tensors()) {
-              Tensor t;
-              if (!t.FromProto(t_proto)) {
-                ctx->SetStatus(tensorflow::errors::Internal(
-                    absl::StrCat("Invalid Tensor Proto response returned.")));
-              }
-              ctx->set_output(i++, std::move(t));
-            }
-          }
+  cleanup.release();
+  future_resource->AddDoneCallback([ctx, done, handle](
+                                       const absl::Status& status,
+                                       const CallResponse& response) {
+    if (!status.ok()) {
+      ctx->SetStatus(status);
+    } else {
+      if (ctx->num_outputs() != response.output_tensors().size()) {
+        ctx->SetStatus(absl::InvalidArgumentError(absl::StrCat(
+            "Incorrect number of output types specified.", ctx->num_outputs(),
+            " ", response.output_tensors().size())));
+      } else {
+        int i = 0;
+        for (const auto& t_proto : response.output_tensors()) {
+          Tensor t;
+          OP_REQUIRES_ASYNC(
+              ctx, t.FromProto(t_proto),
+              absl::InternalError("Invalid Tensor Proto response returned."),
+              done);
+          OP_REQUIRES_ASYNC(ctx, t.dtype() == ctx->expected_output_dtype(i),
+                            absl::InvalidArgumentError(absl::StrCat(
+                                "Type mismatch for output tensor. Expected: ",
+                                DataTypeString(ctx->expected_output_dtype(i)),
+                                " but got: ", DataTypeString(t.dtype()))),
+                            done);
+          ctx->set_output(i++, std::move(t));
         }
-        done();
-      });
+      }
+    }
+    done();
+  });
 }
-
-REGISTER_OP("RpcServer")
-    .Input("server_address: string")
-    .Output("server: resource")
-    .SetIsStateful();
-
-REGISTER_OP("RpcClient")
-    .Attr("shared_name: string = ''")
-    .Input("server_address: string")
-    .Attr("list_registered_methods: bool = false")
-    .Input("timeout_in_ms: int64")  // 0 indicates no timeout.
-                                    // Positive value indicates specified
-                                    // timeout.
-    .Output("client: resource")
-    .Output("method_specs: string")
-    .SetIsStateful();
-
-REGISTER_OP("RpcServerStart").Input("server: resource").SetIsStateful();
-
-REGISTER_OP("RpcServerRegister")
-    .Input("server: resource")
-    .Input("method_name: string")
-    .Input("captured_inputs: Tin")
-    .Attr("Tin: list(type) >=0 = []")
-    .Attr("f: func")
-    .Attr("input_specs: string = ''")
-    .Attr("output_specs: string")
-    .SetIsStateful();
-
-REGISTER_OP("DeleteRpcFutureResource")
-    .Input("handle: resource")
-    .Input("deleter: variant")
-    .SetShapeFn(shape_inference::NoOutputs);
-
-REGISTER_OP("RpcCall")
-    .Input("client: resource")
-    .Input("method_name: string")
-    .Input("args: Tin")
-    .Input("timeout_in_ms: int64")
-    .Attr("Tin: list(type) >= 0")
-    .Output("future: resource")
-    .Output("deleter: variant")
-    .SetIsStateful();
-
-REGISTER_OP("RpcCheckStatus")
-    .Input("status_or: resource")
-    .Output("error_code: int64")
-    .Output("error: string")
-    .SetIsStateful();
-
-REGISTER_OP("RpcGetValue")
-    .Input("status_or: resource")
-    .Attr("Tout: list(type) >= 0")
-    .Output("output: Tout")
-    .SetIsStateful();
 
 REGISTER_KERNEL_BUILDER(Name("RpcServer").Device(DEVICE_CPU), RpcServerOp);
 REGISTER_KERNEL_BUILDER(Name("RpcClient").Device(DEVICE_CPU), RpcClientOp);
@@ -894,6 +869,8 @@ REGISTER_KERNEL_BUILDER(Name("RpcCheckStatus").Device(DEVICE_CPU),
 REGISTER_KERNEL_BUILDER(Name("RpcGetValue").Device(DEVICE_CPU), RpcGetValueOp);
 REGISTER_KERNEL_BUILDER(Name("DeleteRpcFutureResource").Device(DEVICE_CPU),
                         DeleteRpcFutureResourceOp);
+
+REGISTER_INPUT_COLOCATION_EXEMPTION("RpcServerRegister");
 
 }  // namespace rpc
 }  // namespace tensorflow

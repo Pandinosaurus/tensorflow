@@ -16,18 +16,33 @@ limitations under the License.
 #include "tensorflow/core/tpu/graph_rewrite/variable_merger_pass.h"
 
 #include <algorithm>
+#include <cstdint>
+#include <string>
 #include <utility>
 #include <vector>
 
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
+#include "absl/log/log.h"
+#include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
 #include "absl/strings/str_join.h"
 #include "absl/strings/string_view.h"
 #include "absl/types/span.h"
-#include "tensorflow/compiler/xla/status_macros.h"
+#include "xla/status_macros.h"
+#include "xla/tsl/platform/errors.h"
+#include "xla/tsl/platform/statusor.h"
+#include "tensorflow/core/common_runtime/optimization_registry.h"
+#include "tensorflow/core/framework/node_def.pb.h"
 #include "tensorflow/core/framework/node_def_builder.h"
+#include "tensorflow/core/framework/node_def_util.h"
+#include "tensorflow/core/framework/tensor_shape.h"
+#include "tensorflow/core/framework/types.h"
 #include "tensorflow/core/graph/graph.h"
 #include "tensorflow/core/platform/fingerprint.h"
+#include "tensorflow/core/platform/status.h"
+#include "tensorflow/core/platform/strcat.h"
+#include "tensorflow/core/platform/types.h"
 #include "tensorflow/core/util/dump_graph.h"
 
 namespace tensorflow {
@@ -37,8 +52,8 @@ namespace {
 // The name of a stateful op is semantically meaningful because ops with the
 // same name will share the same kernel. We therefore form new op names using a
 // deterministic function (a fingerprint) of the old names.
-uint64 MergedOpFingerprint(absl::Span<Node* const> ops) {
-  std::vector<string> op_names;
+uint64_t MergedOpFingerprint(absl::Span<Node* const> ops) {
+  std::vector<std::string> op_names;
   op_names.reserve(ops.size());
   for (const Node* node : ops) {
     op_names.push_back(node->name());
@@ -46,13 +61,13 @@ uint64 MergedOpFingerprint(absl::Span<Node* const> ops) {
   return Fingerprint64(absl::StrJoin(op_names, ","));
 }
 
-Status MergeVarHandleOps(const string& device, absl::Span<Node* const> nodes,
-                         Graph* graph) {
+absl::Status MergeVarHandleOps(const std::string& device,
+                               absl::Span<Node* const> nodes, Graph* graph) {
   int num_var_handles(nodes.size());
-  if (num_var_handles <= 1) return Status::OK();
+  if (num_var_handles <= 1) return absl::OkStatus();
 
-  std::vector<string> containers(num_var_handles);
-  std::vector<string> names(num_var_handles);
+  std::vector<std::string> containers(num_var_handles);
+  std::vector<std::string> names(num_var_handles);
   DataTypeVector dtypes(num_var_handles);
   std::vector<PartialTensorShape> shapes(num_var_handles);
   for (int i = 0; i < num_var_handles; ++i) {
@@ -63,9 +78,9 @@ Status MergeVarHandleOps(const string& device, absl::Span<Node* const> nodes,
     TF_RETURN_IF_ERROR(GetNodeAttr(nodes[i]->attrs(), "dtype", &dtypes[i]));
     TF_RETURN_IF_ERROR(GetNodeAttr(nodes[i]->attrs(), "shape", &shapes[i]));
   }
-  NodeDefBuilder builder(graph->NewName(strings::StrCat(
-                             "VarHandles_", MergedOpFingerprint(nodes))),
-                         "_VarHandlesOp");
+  NodeDefBuilder builder(
+      graph->NewName(absl::StrCat("VarHandles_", MergedOpFingerprint(nodes))),
+      "_VarHandlesOp");
   builder.Attr("N", num_var_handles);
   builder.Attr("containers", containers);
   builder.Attr("shared_names", names);
@@ -74,9 +89,7 @@ Status MergeVarHandleOps(const string& device, absl::Span<Node* const> nodes,
   builder.Device(device);
   NodeDef node_def;
   TF_RETURN_IF_ERROR(builder.Finalize(&node_def));
-  Status status;
-  Node* node = graph->AddNode(node_def, &status);
-  TF_RETURN_IF_ERROR(status);
+  TF_ASSIGN_OR_RETURN(Node * node, graph->AddNode(node_def));
   node->set_assigned_device_name(device);
 
   graph->AddControlEdge(graph->source_node(), node);
@@ -90,13 +103,13 @@ Status MergeVarHandleOps(const string& device, absl::Span<Node* const> nodes,
       graph->AddEdge(node, t.second < 0 ? -1 : i, t.first, t.second);
     }
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-Status MergeReadVariableOps(Node* handle_op, Node* control_node,
-                            absl::Span<Node* const> nodes, Graph* graph) {
+absl::Status MergeReadVariableOps(Node* handle_op, Node* control_node,
+                                  absl::Span<Node* const> nodes, Graph* graph) {
   int num_reads(nodes.size());
-  if (num_reads <= 1) return Status::OK();
+  if (num_reads <= 1) return absl::OkStatus();
 
   DataTypeVector dtypes(num_reads);
   for (int i = 0; i < num_reads; ++i) {
@@ -104,14 +117,12 @@ Status MergeReadVariableOps(Node* handle_op, Node* control_node,
   }
   NodeDef node_def;
   node_def.set_name(graph->NewName(
-      strings::StrCat("ReadVariables_", MergedOpFingerprint(nodes))));
+      absl::StrCat("ReadVariables_", MergedOpFingerprint(nodes))));
   node_def.set_op("_ReadVariablesOp");
   AddNodeAttr("N", num_reads, &node_def);
   AddNodeAttr("dtypes", dtypes, &node_def);
   node_def.set_device(handle_op->requested_device());
-  Status status;
-  Node* node = graph->AddNode(node_def, &status);
-  TF_RETURN_IF_ERROR(status);
+  TF_ASSIGN_OR_RETURN(Node * node, graph->AddNode(node_def));
   node->set_assigned_device_name(handle_op->assigned_device_name());
   if (control_node) graph->AddControlEdge(control_node, node);
   for (int i = 0; i < num_reads; ++i) {
@@ -128,19 +139,20 @@ Status MergeReadVariableOps(Node* handle_op, Node* control_node,
       graph->AddEdge(node, t.second < 0 ? -1 : i, t.first, t.second);
     }
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 }  // namespace
 
-Status VariableMergerPass::Run(const GraphOptimizationPassOptions& options) {
+absl::Status VariableMergerPass::Run(
+    const GraphOptimizationPassOptions& options) {
   Graph* graph = options.graph->get();
 
   VLOG(1) << DumpGraphToFile("variable_merger_pass_before", *graph);
 
   // Find VarHandleOps that are graph roots and group them by assigned device.
   // Also find any ReadVariableOps that are consumers of those handles.
-  absl::flat_hash_map<string, std::vector<Node*>> var_handle_ops_by_device;
+  absl::flat_hash_map<std::string, std::vector<Node*>> var_handle_ops_by_device;
   absl::flat_hash_set<Node*> read_variable_ops;
 
   for (Node* m : graph->source_node()->out_nodes()) {
@@ -198,7 +210,7 @@ Status VariableMergerPass::Run(const GraphOptimizationPassOptions& options) {
   }
 
   VLOG(1) << DumpGraphToFile("variable_merger_pass_after", *graph);
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 }  // namespace tensorflow

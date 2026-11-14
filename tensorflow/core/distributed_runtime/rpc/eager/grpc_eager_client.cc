@@ -15,15 +15,33 @@ limitations under the License.
 
 #include "tensorflow/core/distributed_runtime/rpc/eager/grpc_eager_client.h"
 
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <tuple>
+#include <unordered_map>
+#include <utility>
+#include <vector>
+
 #include "grpcpp/generic/generic_stub.h"
+#include "absl/log/log.h"
+#include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
+#include "absl/synchronization/notification.h"
+#include "xla/tsl/distributed_runtime/call_options.h"
 #include "tensorflow/core/distributed_runtime/call_options.h"
 #include "tensorflow/core/distributed_runtime/rpc/eager/grpc_eager_service.h"
 #include "tensorflow/core/distributed_runtime/rpc/grpc_client_cq_tag.h"
 #include "tensorflow/core/distributed_runtime/rpc/grpc_state.h"
 #include "tensorflow/core/distributed_runtime/rpc/grpc_util.h"
+#include "tensorflow/core/framework/metrics.h"
 #include "tensorflow/core/lib/core/refcount.h"
 #include "tensorflow/core/lib/core/status.h"
 #include "tensorflow/core/platform/env.h"
+#include "tensorflow/core/platform/error_payloads.h"
+#include "tensorflow/core/platform/macros.h"
+#include "tensorflow/core/protobuf/core_platform_payloads.pb.h"
 #include "tensorflow/core/protobuf/eager_service.pb.h"
 #include "tensorflow/core/util/env_var.h"
 
@@ -31,7 +49,7 @@ namespace tensorflow {
 namespace eager {
 namespace {
 
-/*
+/* Retrieve the global env variable.
  * Setting environment variable "TF_ENABLE_EAGER_CLIENT_STREAMING_ENQUEUE" to
  * true will turn on asynchronous execution of remote op. It means that when
  * executing an op on a remote worker, client will not block on waiting
@@ -49,6 +67,12 @@ namespace {
  * When turning on this feature, you should explicitly wait for some result
  * from remote workers at the end of you python program. Otherwise, client may
  * shutdown remote workers without waiting all pending ops.
+ *
+ * Note that the caller could still disable streaming enqueue, even though
+ * EnableStreaminh() returns true, if the caller's executor is set to disable
+ * streaming enqueue when the executor was created. EnableStreaming() is
+ * determined based on the global env variable, which by default is turned on
+ * for the main executor.
  *
  * TODO(fishx): When exiting client, make sure all pending ops on remote workers
  * are finished.
@@ -92,7 +116,7 @@ class GrpcEagerClientThread : public core::RefCounted {
         }));
   }
 
-  ~GrpcEagerClientThread() override {}
+  ~GrpcEagerClientThread() override = default;
 
   ::grpc::CompletionQueue* completion_queue() { return &completion_queue_; }
 
@@ -104,7 +128,7 @@ class GrpcEagerClientThread : public core::RefCounted {
 class GrpcEagerClient : public EagerClient {
  public:
   GrpcEagerClient(const tensorflow::SharedGrpcChannelPtr& channel,
-                  GrpcEagerClientThread* thread, const string& target)
+                  GrpcEagerClientThread* thread, const std::string& target)
       : stub_(channel), thread_(thread), target_(target) {
     // Hold a reference to make sure the corresponding EagerClientThread
     // outlives the client.
@@ -135,6 +159,33 @@ class GrpcEagerClient : public EagerClient {
   CLIENT_METHOD(KeepAlive);
 
 #undef CLIENT_METHOD
+
+#define CLIENT_METHOD_WITH_TIMEOUT_AND_RETRIES(method)                       \
+  void method##Async(const method##Request* request,                         \
+                     method##Response* response, StatusCallback done,        \
+                     int64_t init_timeout_in_ms, int retries) override {     \
+    CallOptions* call_ops = nullptr;                                         \
+    StatusCallback done_wrapped;                                             \
+    if (init_timeout_in_ms > 0) {                                            \
+      call_ops = new CallOptions;                                            \
+      call_ops->SetTimeout(init_timeout_in_ms);                              \
+      auto new_done = [call_ops, done = std::move(done)](const Status& s) {  \
+        done(s);                                                             \
+        delete call_ops;                                                     \
+      };                                                                     \
+      done_wrapped = callback_wrapper(new_done);                             \
+    } else {                                                                 \
+      done_wrapped = callback_wrapper(std::move(done));                      \
+    }                                                                        \
+    new RPCState<protobuf::Message>(                                         \
+        &stub_, cq_, "/tensorflow.eager.EagerService/" #method, *request,    \
+        response, std::move(done_wrapped), call_ops, /*threadpool=*/nullptr, \
+        /*max_retries=*/retries, /*fail_fast=*/true, &target_);              \
+  }
+
+  CLIENT_METHOD_WITH_TIMEOUT_AND_RETRIES(CreateContext);
+
+#undef CLIENT_METHOD_WITH_TIMEOUT_AND_RETRIES
 
 #define CLIENT_CANCELABLE_METHOD(method)                                      \
   void method##Async(CallOptions* call_opts, const method##Request* request,  \
@@ -176,12 +227,17 @@ class GrpcEagerClient : public EagerClient {
     }
   }
 
-  void StreamingEnqueueAsync(CallOptions* call_opts,
+  void StreamingEnqueueAsync(bool enable_streaming_enqueue,
+                             CallOptions* call_opts,
                              const EnqueueRequest* request,
                              EnqueueResponse* response,
                              StatusCallback done) override {
     StatusCallback done_wrapped = callback_wrapper(std::move(done));
-    if (EnableStreaming()) {
+    // Whether streaming enqueue is used is determined based on 2 factors:
+    // 1. The global env variable, as checked in EnableStreaming().
+    // 2. The flag set in the eager executor.
+    // Streaming enqueue is allowed only when the both are enabled.
+    if (EnableStreaming() && enable_streaming_enqueue) {
       mutex_lock l(mu_);
       auto it = enqueue_dispatchers_.find(request->context_id());
       if (it == enqueue_dispatchers_.end()) {
@@ -196,10 +252,10 @@ class GrpcEagerClient : public EagerClient {
       // TODO(haoyuzhang): Consider supporting cancellation for streaming RPC?
       it->second.SendNextRequest(*request, response, std::move(done_wrapped));
     } else {
-      Notification n;
-      Status status;
+      absl::Notification n;
+      absl::Status status;
       EnqueueAsync(call_opts, request, response,
-                   [&n, &status](const Status& s) {
+                   [&n, &status](const absl::Status& s) {
                      status.Update(s);
                      n.Notify();
                    });
@@ -211,20 +267,37 @@ class GrpcEagerClient : public EagerClient {
  private:
   ::grpc::GenericStub stub_;
   const GrpcEagerClientThread* thread_;
-  const string target_;
+  const std::string target_;
 
   ::grpc::CompletionQueue* cq_;
 
   mutable mutex mu_;
 
-  std::unordered_map<uint64, StreamingRPCDispatcher<EnqueueResponse>>
+  std::unordered_map<uint64_t, StreamingRPCDispatcher<EnqueueResponse>>
       enqueue_dispatchers_ TF_GUARDED_BY(mu_);
 
   StatusCallback callback_wrapper(StatusCallback done) {
     Ref();
-    return [this, done = std::move(done)](const Status& status) {
+    return [this, done = std::move(done)](const absl::Status& status) {
       done(status);
       this->Unref();
+      if (TF_PREDICT_FALSE(!status.ok())) {
+        // Retrieve the location where the error was produced.
+        auto error_source_payload = status.GetPayload(kErrorSource);
+
+        if (error_source_payload.has_value()) {
+          tensorflow::core::platform::ErrorSourceProto error_source_proto;
+          error_source_proto.ParseFromString(
+              std::string(*error_source_payload));  // NOLINT
+          metrics::UpdateEagerClientErrorCounter(
+              error_source_proto.ErrorSource_Name(
+                  error_source_proto.error_source()),
+              absl::StatusCodeToString(status.code()));
+        } else {
+          metrics::UpdateEagerClientErrorCounter(
+              "unknown", absl::StatusCodeToString(status.code()));
+        }
+      }
     };
   }
 };
@@ -241,16 +314,16 @@ class GrpcEagerClientCache : public EagerClientCache {
 
   ~GrpcEagerClientCache() override { threads_.clear(); }
 
-  Status GetClient(const string& target,
-                   core::RefCountPtr<EagerClient>* client) override {
+  absl::Status GetClient(const std::string& target,
+                         core::RefCountPtr<EagerClient>* client) override {
     mutex_lock l(clients_mu_);
     auto it = clients_.find(target);
     if (it == clients_.end()) {
       tensorflow::SharedGrpcChannelPtr shared =
           cache_->FindWorkerChannel(target);
       if (shared == nullptr) {
-        return errors::InvalidArgument("Client for target ", target,
-                                       " not found.");
+        return absl::InvalidArgumentError(
+            absl::StrCat("Client for target ", target, " not found."));
       }
       int assigned_index = AssignClientToThread(target);
       GrpcEagerClientThread* thread = threads_[assigned_index].get();
@@ -261,7 +334,7 @@ class GrpcEagerClientCache : public EagerClientCache {
 
     it->second->Ref();
     client->reset(it->second.get());
-    return Status::OK();
+    return absl::OkStatus();
   }
 
  private:
@@ -270,7 +343,7 @@ class GrpcEagerClientCache : public EagerClientCache {
       TF_GUARDED_BY(assignment_mu_);
   size_t next_round_robin_assignment_ TF_GUARDED_BY(assignment_mu_);
 
-  size_t AssignClientToThread(const string& target) {
+  size_t AssignClientToThread(const std::string& target) {
     // Round-robin target assignment, but keeps the same target on the same
     // polling thread always, as this is important for gRPC performance
     mutex_lock lock(assignment_mu_);
@@ -286,7 +359,7 @@ class GrpcEagerClientCache : public EagerClientCache {
 
   std::shared_ptr<tensorflow::GrpcChannelCache> cache_;
   mutable mutex clients_mu_;
-  std::unordered_map<string, core::RefCountPtr<EagerClient>> clients_
+  std::unordered_map<std::string, core::RefCountPtr<EagerClient>> clients_
       TF_GUARDED_BY(clients_mu_);
   std::vector<core::RefCountPtr<GrpcEagerClientThread>> threads_;
 };

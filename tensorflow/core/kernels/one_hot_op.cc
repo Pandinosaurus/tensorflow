@@ -25,7 +25,8 @@ limitations under the License.
 #include "tensorflow/core/kernels/one_hot_op.h"
 
 #include <memory>
-#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
+
+#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/register_types.h"
 #include "tensorflow/core/framework/tensor.h"
@@ -59,33 +60,36 @@ class OneHotOp : public OpKernel {
     const int output_dims = indices_dims + 1;
 
     // Preliminary validation of sizes.
+    OP_REQUIRES(ctx, axis_ == -1 || (axis_ >= 0 && axis_ < output_dims),
+                absl::InvalidArgumentError(
+                    absl::StrCat("Expected axis to be -1 or between [0, ",
+                                 output_dims, ").  But received: ", axis_)));
     OP_REQUIRES(
-        ctx, axis_ == -1 || (axis_ >= 0 && axis_ < output_dims),
-        errors::InvalidArgument("Expected axis to be -1 or between [0, ",
-                                output_dims, ").  But received: ", axis_));
-    OP_REQUIRES(ctx, TensorShapeUtils::IsScalar(depth.shape()),
-                errors::InvalidArgument("depth must be a scalar, but got: ",
-                                        depth.shape().DebugString()));
+        ctx, TensorShapeUtils::IsScalar(depth.shape()),
+        absl::InvalidArgumentError(absl::StrCat(
+            "depth must be a scalar, but got: ", depth.shape().DebugString())));
     OP_REQUIRES(ctx, TensorShapeUtils::IsScalar(on_value.shape()),
-                errors::InvalidArgument("on_value must be a scalar, but got: ",
-                                        on_value.shape().DebugString()));
+                absl::InvalidArgumentError(
+                    absl::StrCat("on_value must be a scalar, but got: ",
+                                 on_value.shape().DebugString())));
     OP_REQUIRES(ctx, TensorShapeUtils::IsScalar(off_value.shape()),
-                errors::InvalidArgument("off_value must be a scalar, but got: ",
-                                        off_value.shape().DebugString()));
+                absl::InvalidArgumentError(
+                    absl::StrCat("off_value must be a scalar, but got: ",
+                                 off_value.shape().DebugString())));
 
     const int axis = (axis_ == -1) ? indices_dims : axis_;
 
     // The one-hot dimension.
-    const int32_t depth_v = depth.scalar<int32>()();
-    OP_REQUIRES(
-        ctx, depth_v >= 0,
-        errors::InvalidArgument("depth must be non-negative, got: ", depth_v));
+    const int32_t depth_v = depth.scalar<int32_t>()();
+    OP_REQUIRES(ctx, depth_v >= 0,
+                absl::InvalidArgumentError(absl::StrCat(
+                    "depth must be non-negative, got: ", depth_v)));
     OP_REQUIRES(
         ctx,
         MultiplyWithoutOverflow(indices_shape.num_elements(), depth_v) >= 0,
-        errors::InvalidArgument("OneHot result would have shape ",
-                                indices_shape.DebugString(), " + [", depth_v,
-                                "], which exceeds 2**63 - 1 elements"));
+        absl::InvalidArgumentError(absl::StrCat(
+            "OneHot result would have shape ", indices_shape.DebugString(),
+            " + [", depth_v, "], which exceeds 2**63 - 1 elements")));
 
     TensorShape output_shape = indices_shape;
     output_shape.InsertDim(axis, depth_v);
@@ -121,9 +125,10 @@ class OneHotOp : public OpKernel {
   }
 
  private:
-  int32 axis_;
+  int32_t axis_;
 
-  TF_DISALLOW_COPY_AND_ASSIGN(OneHotOp);
+  OneHotOp(const OneHotOp&) = delete;
+  void operator=(const OneHotOp&) = delete;
 };
 
 #define REGISTER_ONE_HOT_INDEX(type, index_type)                \
@@ -136,6 +141,7 @@ class OneHotOp : public OpKernel {
 
 #define REGISTER_ONE_HOT(type)         \
   REGISTER_ONE_HOT_INDEX(type, uint8); \
+  REGISTER_ONE_HOT_INDEX(type, int8);  \
   REGISTER_ONE_HOT_INDEX(type, int32); \
   REGISTER_ONE_HOT_INDEX(type, int64_t)
 
@@ -157,9 +163,11 @@ namespace functor {
 
 #define DECLARE_GPU_SPEC(T)         \
   DECLARE_GPU_SPEC_INDEX(T, uint8); \
+  DECLARE_GPU_SPEC_INDEX(T, int8);  \
   DECLARE_GPU_SPEC_INDEX(T, int32); \
   DECLARE_GPU_SPEC_INDEX(T, int64_t);
 
+TF_CALL_int8(DECLARE_GPU_SPEC);
 TF_CALL_int32(DECLARE_GPU_SPEC);
 TF_CALL_int64(DECLARE_GPU_SPEC);
 TF_CALL_GPU_ALL_TYPES(DECLARE_GPU_SPEC);
@@ -180,9 +188,11 @@ TF_CALL_GPU_ALL_TYPES(DECLARE_GPU_SPEC);
 
 #define REGISTER_ONE_HOT_GPU(type)         \
   REGISTER_ONE_HOT_GPU_INDEX(type, uint8); \
+  REGISTER_ONE_HOT_GPU_INDEX(type, int8);  \
   REGISTER_ONE_HOT_GPU_INDEX(type, int32); \
   REGISTER_ONE_HOT_GPU_INDEX(type, int64_t);
 
+TF_CALL_int8(REGISTER_ONE_HOT_GPU);
 TF_CALL_int32(REGISTER_ONE_HOT_GPU);
 TF_CALL_int64(REGISTER_ONE_HOT_GPU);
 TF_CALL_GPU_ALL_TYPES(REGISTER_ONE_HOT_GPU);

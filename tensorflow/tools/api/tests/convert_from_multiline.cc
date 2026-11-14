@@ -13,6 +13,11 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 // Converts all *.pbtxt files in a directory from Multiline to proto format.
+#include <iostream>
+#include <string>
+#include <vector>
+
+#include "absl/status/status.h"
 #include "tensorflow/core/framework/op_gen_lib.h"
 #include "tensorflow/core/lib/io/path.h"
 #include "tensorflow/core/platform/env.h"
@@ -23,12 +28,12 @@ namespace tensorflow {
 namespace {
 constexpr char kApiDefFilePattern[] = "*.pbtxt";
 
-Status ConvertFilesFromMultiline(const string& input_dir,
-                                 const string& output_dir) {
+absl::Status ConvertFilesFromMultiline(const std::string& input_dir,
+                                       const std::string& output_dir) {
   Env* env = Env::Default();
 
-  const string file_pattern = io::JoinPath(input_dir, kApiDefFilePattern);
-  std::vector<string> matching_paths;
+  const std::string file_pattern = io::JoinPath(input_dir, kApiDefFilePattern);
+  std::vector<std::string> matching_paths;
   TF_CHECK_OK(env->GetMatchingPaths(file_pattern, &matching_paths));
 
   if (!env->IsDirectory(output_dir).ok()) {
@@ -36,15 +41,15 @@ Status ConvertFilesFromMultiline(const string& input_dir,
   }
 
   for (const auto& path : matching_paths) {
-    string contents;
+    std::string contents;
     TF_RETURN_IF_ERROR(tensorflow::ReadFileToString(env, path, &contents));
     contents = tensorflow::PBTxtFromMultiline(contents);
-    string output_path = io::JoinPath(output_dir, io::Basename(path));
+    std::string output_path = io::JoinPath(output_dir, io::Basename(path));
     // Write contents to output_path
     TF_RETURN_IF_ERROR(
         tensorflow::WriteStringToFile(env, output_path, contents));
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 }  // namespace
 }  // namespace tensorflow

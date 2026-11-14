@@ -1,6 +1,6 @@
 /* Copyright 2021 The TensorFlow Authors. All Rights Reserved.
 
-Licensed under the Apache License, Version 2.0 (the "License");;
+Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
@@ -16,10 +16,12 @@ limitations under the License.
 // Defines the pywrap_saved_model module. In order to have only one dynamically-
 // linked shared object, all SavedModel python bindings should be added here.
 
-#include "pybind11/pybind11.h"
+#include "pybind11/pybind11.h"  // from @pybind11
 #include "tensorflow/cc/experimental/libexport/save.h"
 #include "tensorflow/python/lib/core/pybind11_status.h"
 #include "tensorflow/python/saved_model/pywrap_saved_model_constants.h"
+#include "tensorflow/python/saved_model/pywrap_saved_model_fingerprinting.h"
+// Placeholder for protosplitter merger include.
 #include "tensorflow/python/saved_model/pywrap_saved_model_metrics.h"
 
 namespace tensorflow {
@@ -35,6 +37,8 @@ PYBIND11_MODULE(pywrap_saved_model, m) {
 
   DefineConstantsModule(m);
   DefineMetricsModule(m);
+  DefineFingerprintingModule(m);
+  // Placeholder for protosplitter merger module definition.
 }
 
 }  // namespace python

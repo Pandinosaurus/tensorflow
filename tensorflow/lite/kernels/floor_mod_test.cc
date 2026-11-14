@@ -18,6 +18,7 @@ limitations under the License.
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
+#include "tensorflow/lite/kernels/floor_mod_test_common.h"
 #include "tensorflow/lite/kernels/test_util.h"
 #include "tensorflow/lite/schema/schema_generated.h"
 
@@ -26,38 +27,13 @@ namespace {
 
 using ::testing::ElementsAre;
 
-template <typename T>
-class FloorModModel : public SingleOpModel {
- public:
-  FloorModModel(const TensorData& input1, const TensorData& input2,
-                const TensorData& output) {
-    input1_ = AddInput(input1);
-    input2_ = AddInput(input2);
-    output_ = AddOutput(output);
-    SetBuiltinOp(BuiltinOperator_FLOOR_MOD, BuiltinOptions_FloorModOptions,
-                 CreateFloorModOptions(builder_).Union());
-    BuildInterpreter({GetShape(input1_), GetShape(input2_)});
-  }
-
-  int input1() { return input1_; }
-  int input2() { return input2_; }
-
-  std::vector<T> GetOutput() { return ExtractVector<T>(output_); }
-  std::vector<int> GetOutputShape() { return GetTensorShape(output_); }
-
- private:
-  int input1_;
-  int input2_;
-  int output_;
-};
-
 TEST(FloorModModel, Simple) {
   FloorModModel<int32_t> model({TensorType_INT32, {1, 2, 2, 1}},
                                {TensorType_INT32, {1, 2, 2, 1}},
                                {TensorType_INT32, {}});
   model.PopulateTensor<int32_t>(model.input1(), {10, 9, 11, 3});
   model.PopulateTensor<int32_t>(model.input2(), {2, 2, 3, 4});
-  model.Invoke();
+  ASSERT_EQ(model.Invoke(), kTfLiteOk);
   EXPECT_THAT(model.GetOutputShape(), ElementsAre(1, 2, 2, 1));
   EXPECT_THAT(model.GetOutput(), ElementsAre(0, 1, 2, 3));
 }
@@ -68,7 +44,7 @@ TEST(FloorModModel, NegativeValue) {
                                {TensorType_INT32, {}});
   model.PopulateTensor<int32_t>(model.input1(), {10, -9, -11, 7});
   model.PopulateTensor<int32_t>(model.input2(), {2, 2, -3, -4});
-  model.Invoke();
+  ASSERT_EQ(model.Invoke(), kTfLiteOk);
   EXPECT_THAT(model.GetOutputShape(), ElementsAre(1, 2, 2, 1));
   EXPECT_THAT(model.GetOutput(), ElementsAre(0, 1, -2, -1));
 }
@@ -78,7 +54,7 @@ TEST(FloorModModel, BroadcastFloorMod) {
                                {TensorType_INT32, {1}}, {TensorType_INT32, {}});
   model.PopulateTensor<int32_t>(model.input1(), {10, -9, -11, 7});
   model.PopulateTensor<int32_t>(model.input2(), {-3});
-  model.Invoke();
+  ASSERT_EQ(model.Invoke(), kTfLiteOk);
   EXPECT_THAT(model.GetOutputShape(), ElementsAre(1, 2, 2, 1));
   EXPECT_THAT(model.GetOutput(), ElementsAre(-2, 0, -2, -2));
 }
@@ -86,43 +62,94 @@ TEST(FloorModModel, BroadcastFloorMod) {
 TEST(FloorModModel, Int64WithBroadcast) {
   FloorModModel<int64_t> model({TensorType_INT64, {1, 2, 2, 1}},
                                {TensorType_INT64, {1}}, {TensorType_INT64, {}});
-  model.PopulateTensor<int64_t>(model.input1(), {10, -9, -11, (1LL << 34) + 9});
+  std::vector<int64_t> data1 = {10, -9, -11, (1LL << 34) + 9};
+  model.PopulateTensor<int64_t>(model.input1(), data1);
   model.PopulateTensor<int64_t>(model.input2(), {-(1LL << 33)});
-  model.Invoke();
+  ASSERT_EQ(model.Invoke(), kTfLiteOk);
   EXPECT_THAT(model.GetOutputShape(), ElementsAre(1, 2, 2, 1));
   EXPECT_THAT(model.GetOutput(),
               ElementsAre(-8589934582, -9, -11, -8589934583));
 }
 
-TEST(FloorModModel, FloatSimple) {
-  FloorModModel<float> model({TensorType_FLOAT32, {1, 2, 2, 1}},
-                             {TensorType_FLOAT32, {1, 2, 2, 1}},
-                             {TensorType_FLOAT32, {}});
-  model.PopulateTensor<float>(model.input1(), {10, 9, 11, 3});
-  model.PopulateTensor<float>(model.input2(), {2, 2, 3, 4});
-  model.Invoke();
+template <typename T>
+class FloatFloorModTest : public ::testing::Test {};
+
+using FloatFloorModTestTypes = ::testing::Types<float, half, Eigen::bfloat16>;
+TYPED_TEST_SUITE(FloatFloorModTest, FloatFloorModTestTypes);
+
+TYPED_TEST(FloatFloorModTest, Simple) {
+  using T = TypeParam;
+  FloorModModel<T> model({GetTensorType<T>(), {1, 2, 2, 1}},
+                         {GetTensorType<T>(), {1, 2, 2, 1}},
+                         {GetTensorType<T>(), {}}, /*allocate=*/false);
+  TFLITE_ALLOCATE_AND_CHECK(T, &model);
+  model.template PopulateTensor<T>(model.input1(), {10, 9, 11, 3});
+  model.template PopulateTensor<T>(model.input2(), {2, 2, 3, 4});
+  TFLITE_INVOKE_AND_CHECK(T, &model);
+  EXPECT_THAT(model.GetOutputShape(), ElementsAre(1, 2, 2, 1));
+  EXPECT_THAT(model.GetOutput(),
+              ElementsAreArray(
+                  ArrayFloatNear({0, 1, 2, 3}, NumericLimits<T>::epsilon())));
+}
+
+TYPED_TEST(FloatFloorModTest, NegativeValue) {
+  using T = TypeParam;
+  FloorModModel<T> model({GetTensorType<T>(), {1, 2, 2, 1}},
+                         {GetTensorType<T>(), {1, 2, 2, 1}},
+                         {GetTensorType<T>(), {}}, /*allocate=*/false);
+  TFLITE_ALLOCATE_AND_CHECK(T, &model);
+  model.template PopulateTensor<T>(model.input1(), {10, -9, -11, 7});
+  model.template PopulateTensor<T>(model.input2(), {2, 2, -3, -4});
+  TFLITE_INVOKE_AND_CHECK(T, &model);
+  EXPECT_THAT(model.GetOutputShape(), ElementsAre(1, 2, 2, 1));
+  EXPECT_THAT(model.GetOutput(),
+              ElementsAreArray(
+                  ArrayFloatNear({0, 1, -2, -1}, NumericLimits<T>::epsilon())));
+}
+
+TYPED_TEST(FloatFloorModTest, BroadcastFloorMod) {
+  using T = TypeParam;
+  FloorModModel<T> model({GetTensorType<T>(), {1, 2, 2, 1}},
+                         {GetTensorType<T>(), {1}}, {GetTensorType<T>(), {}},
+                         /*allocate=*/false);
+  TFLITE_ALLOCATE_AND_CHECK(T, &model);
+  model.template PopulateTensor<T>(model.input1(), {10, -9, -11, 7});
+  model.template PopulateTensor<T>(model.input2(), {-3});
+  TFLITE_INVOKE_AND_CHECK(T, &model);
+  EXPECT_THAT(model.GetOutputShape(), ElementsAre(1, 2, 2, 1));
+  EXPECT_THAT(model.GetOutput(),
+              ElementsAreArray(ArrayFloatNear({-2, 0, -2, -2},
+                                              NumericLimits<T>::epsilon())));
+}
+
+TEST(FloorModModel, SimpleInt16) {
+  FloorModModel<int16_t> model({TensorType_INT16, {1, 2, 2, 1}},
+                               {TensorType_INT16, {1, 2, 2, 1}},
+                               {TensorType_INT16, {}});
+  model.PopulateTensor<int16_t>(model.input1(), {10, 9, 11, 3});
+  model.PopulateTensor<int16_t>(model.input2(), {2, 2, 3, 4});
+  ASSERT_EQ(model.Invoke(), kTfLiteOk);
   EXPECT_THAT(model.GetOutputShape(), ElementsAre(1, 2, 2, 1));
   EXPECT_THAT(model.GetOutput(), ElementsAre(0, 1, 2, 3));
 }
 
-TEST(FloorModModel, FloatNegativeValue) {
-  FloorModModel<float> model({TensorType_FLOAT32, {1, 2, 2, 1}},
-                             {TensorType_FLOAT32, {1, 2, 2, 1}},
-                             {TensorType_FLOAT32, {}});
-  model.PopulateTensor<float>(model.input1(), {10, -9, -11, 7});
-  model.PopulateTensor<float>(model.input2(), {2, 2, -3, -4});
-  model.Invoke();
+TEST(FloorModModel, NegativeValueInt16) {
+  FloorModModel<int16_t> model({TensorType_INT16, {1, 2, 2, 1}},
+                               {TensorType_INT16, {1, 2, 2, 1}},
+                               {TensorType_INT16, {}});
+  model.PopulateTensor<int16_t>(model.input1(), {10, -9, -11, 7});
+  model.PopulateTensor<int16_t>(model.input2(), {2, 2, -3, -4});
+  ASSERT_EQ(model.Invoke(), kTfLiteOk);
   EXPECT_THAT(model.GetOutputShape(), ElementsAre(1, 2, 2, 1));
   EXPECT_THAT(model.GetOutput(), ElementsAre(0, 1, -2, -1));
 }
 
-TEST(FloorModModel, FloatBroadcastFloorMod) {
-  FloorModModel<float> model({TensorType_FLOAT32, {1, 2, 2, 1}},
-                             {TensorType_FLOAT32, {1}},
-                             {TensorType_FLOAT32, {}});
-  model.PopulateTensor<float>(model.input1(), {10, -9, -11, 7});
-  model.PopulateTensor<float>(model.input2(), {-3});
-  model.Invoke();
+TEST(FloorModModel, BroadcastFloorModInt16) {
+  FloorModModel<int16_t> model({TensorType_INT16, {1, 2, 2, 1}},
+                               {TensorType_INT16, {1}}, {TensorType_INT16, {}});
+  model.PopulateTensor<int16_t>(model.input1(), {10, -9, -11, 7});
+  model.PopulateTensor<int16_t>(model.input2(), {-3});
+  ASSERT_EQ(model.Invoke(), kTfLiteOk);
   EXPECT_THAT(model.GetOutputShape(), ElementsAre(1, 2, 2, 1));
   EXPECT_THAT(model.GetOutput(), ElementsAre(-2, 0, -2, -2));
 }

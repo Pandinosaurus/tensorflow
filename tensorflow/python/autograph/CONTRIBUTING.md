@@ -1,6 +1,6 @@
 # How to contribute
 
-We'd love to have your patches and contributions! Here are some guidelines. In general, we follow the [TensorFlow contributing guidelines](../../CONTRIBUTING.md), but have some [AutoGraph-specific style guidelines](STYLE_GUIDE.md). More details below.
+We'd love to have your patches and contributions! Here are some guidelines. In general, we follow the [TensorFlow contributing guidelines](../../../CONTRIBUTING.md), but have some [AutoGraph-specific style guidelines](STYLE_GUIDE.md). More details below.
 
 ### Note to active contributors
 
@@ -10,7 +10,7 @@ does not impact functionality, and AutoGraph will remain accessible under
 `tensorflow.contrib.autograph` until `tensorflow.contrib` is retired.
 
 ## TensorFlow Code of Conduct
-Please review and follow the [TensorFlow Code of Conduct](../../CODE_OF_CONDUCT.md).
+Please review and follow the [TensorFlow Code of Conduct](../../../CODE_OF_CONDUCT.md).
 
 ## Contributor License Agreement
 
@@ -42,8 +42,11 @@ See the [AutoGraph style guide](STYLE_GUIDE.md).
 
 ## Unit tests
 
-Please include unit tests when contributing new features ([example here](converters/continue_statements_test.py)), as they help to a) prove that your code works correctly, and b) guard against future breaking
-changes to lower the maintenance cost.
+Please include unit tests when contributing new features
+([example here](converters/continue_statements_test.py)), as they help to prove
+that your code works correctly, and guard against future breaking changes to
+lower the maintenance cost.
+
 It's also helpful to check that any
 changes you propose do not break existing unit tests. You can run tests using the command,
 
@@ -52,7 +55,7 @@ bazel test --config=opt --copt=-O3 --copt=-march=native \
   //tensorflow/contrib/autograph/...
 ```
 
-from the root of the `tensorflow` repository. For more details see the [main TensorFlow Contributing File](../../CONTRIBUTING.md)
+from the root of the `tensorflow` repository. For more details see the [main TensorFlow Contributing File](../../../CONTRIBUTING.md)
 
 ## Developer info
 

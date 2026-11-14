@@ -15,6 +15,7 @@ limitations under the License.
 
 #include "tensorflow/c/ops.h"
 
+#include "tensorflow/c/tf_status.h"
 #include "tensorflow/c/tf_status_helper.h"
 #include "tensorflow/core/framework/common_shape_fns.h"
 #include "tensorflow/core/framework/op.h"
@@ -22,6 +23,7 @@ limitations under the License.
 #include "tensorflow/core/framework/shape_inference.h"
 
 using ::tensorflow::DataType;
+
 using ::tensorflow::OpDef;
 using ::tensorflow::OpDefBuilder;
 using ::tensorflow::OpDeprecation;
@@ -54,7 +56,9 @@ void TF_OpDefinitionBuilderAddOutput(TF_OpDefinitionBuilder* builder,
 #define DEFINE_BUILDER_BOOL_SETTER(func_name)                             \
   void TF_OpDefinitionBuilder##func_name(TF_OpDefinitionBuilder* builder, \
                                          bool arg_name) {                 \
-    reinterpret_cast<OpDefBuilder*>(builder)->func_name();                \
+    if (builder != nullptr) {                                             \
+      reinterpret_cast<OpDefBuilder*>(builder)->func_name(arg_name);      \
+    }                                                                     \
   }
 
 DEFINE_BUILDER_BOOL_SETTER(SetIsCommutative)
@@ -90,11 +94,11 @@ void TF_OpDefinitionBuilderSetShapeInferenceFunction(
                                  TF_Status* status)) {
   auto* cc_builder = reinterpret_cast<OpDefBuilder*>(builder);
   cc_builder->SetShapeFn(
-      [shape_inference_func](InferenceContext* ctx) -> tensorflow::Status {
+      [shape_inference_func](InferenceContext* ctx) -> absl::Status {
         TF_Status* c_status = TF_NewStatus();
         auto c_ctx = reinterpret_cast<TF_ShapeInferenceContext*>(ctx);
         shape_inference_func(c_ctx, c_status);
-        tensorflow::Status result = ::tensorflow::StatusFromTF_Status(c_status);
+        absl::Status result = ::tensorflow::StatusFromTF_Status(c_status);
         TF_DeleteStatus(c_status);
         return result;
       });
@@ -143,7 +147,7 @@ void TF_ShapeInferenceContextGetInput(TF_ShapeInferenceContext* ctx, int i,
                                       TF_Status* status) {
   TF_SetStatus(status, TF_OK, "");
   auto* cc_ctx = reinterpret_cast<InferenceContext*>(ctx);
-  if (0 < i || i >= cc_ctx->num_inputs()) {
+  if (i < 0 || i >= cc_ctx->num_inputs()) {
     TF_SetStatus(status, TF_INVALID_ARGUMENT, "input index out of range");
   }
   if (TF_GetCode(status) == TF_OK) {
@@ -163,7 +167,7 @@ void TF_ShapeInferenceContextSetOutput(TF_ShapeInferenceContext* ctx, int i,
                                        TF_Status* status) {
   TF_SetStatus(status, TF_OK, "");
   auto* cc_ctx = reinterpret_cast<InferenceContext*>(ctx);
-  if (0 < i || i >= cc_ctx->num_outputs()) {
+  if (i < 0 || i >= cc_ctx->num_outputs()) {
     TF_SetStatus(status, TF_INVALID_ARGUMENT, "output index out of range");
   }
   if (TF_GetCode(status) == TF_OK) {
@@ -227,15 +231,22 @@ int64_t TF_ShapeInferenceContextRank(TF_ShapeInferenceContext* ctx,
 void TF_ShapeInferenceContextDim(TF_ShapeInferenceContext* ctx,
                                  TF_ShapeHandle* shape_handle, int64_t i,
                                  TF_DimensionHandle* result) {
+  auto* cc_ctx = reinterpret_cast<InferenceContext*>(ctx);
+  if (cc_ctx == nullptr) return;
+  if (shape_handle == nullptr || result == nullptr) return;
   int64_t rank = TF_ShapeInferenceContextRank(ctx, shape_handle);
   auto* cc_result = reinterpret_cast<DimensionHandle*>(result);
+
+  if (rank == InferenceContext::kUnknownRank) {
+    *cc_result = cc_ctx->UnknownDim();
+    return;
+  }
 
   if (i < -rank || i >= rank) {
     *cc_result = DimensionHandle();
     return;
   }
 
-  auto* cc_ctx = reinterpret_cast<InferenceContext*>(ctx);
   auto* cc_shape_handle = reinterpret_cast<ShapeHandle*>(shape_handle);
   *cc_result = cc_ctx->Dim(*cc_shape_handle, i);
 }

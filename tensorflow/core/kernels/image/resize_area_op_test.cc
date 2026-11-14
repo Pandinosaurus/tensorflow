@@ -28,11 +28,13 @@ namespace tensorflow {
 
 class ResizeAreaOpTest : public OpsTestBase {
  protected:
-  ResizeAreaOpTest() {
+  ResizeAreaOpTest() = default;
+
+  void CreateOp(bool align_corners) {
     TF_EXPECT_OK(NodeDefBuilder("resize_area_op", "ResizeArea")
                      .Input(FakeInput(DT_FLOAT))
                      .Input(FakeInput(DT_INT32))
-                     .Attr("align_corners", false)
+                     .Attr("align_corners", align_corners)
                      .Finalize(node_def()));
     TF_EXPECT_OK(InitOp());
   }
@@ -150,7 +152,7 @@ class ResizeAreaOpTest : public OpsTestBase {
                      int target_width, int channels) {
     const Tensor* input =
         SetRandomImageInput(TensorShape({1, in_height, in_width, channels}));
-    AddInputFromArray<int32>(TensorShape({2}), {target_height, target_width});
+    AddInputFromArray<int32_t>(TensorShape({2}), {target_height, target_width});
 
     TF_ASSERT_OK(RunOpKernel());
     std::unique_ptr<Tensor> expected(
@@ -175,26 +177,42 @@ class ResizeAreaOpTest : public OpsTestBase {
 };
 
 TEST_F(ResizeAreaOpTest, TestAreaRandom141x186) {
+  CreateOp(/*align_corners=*/false);
   RunRandomTest(141, 186, 299, 299, 3 /* channels */);
 }
 
 TEST_F(ResizeAreaOpTest, TestAreaRandom183x229) {
+  CreateOp(/*align_corners=*/false);
   RunRandomTest(183, 229, 299, 299, 3 /* channels */);
 }
 
 TEST_F(ResizeAreaOpTest, TestAreaRandom749x603) {
+  CreateOp(/*align_corners=*/false);
   RunRandomTest(749, 603, 299, 299, 3 /* channels */);
 }
 
+TEST_F(ResizeAreaOpTest, TestAreaRandom1x1) {
+  CreateOp(/*align_corners=*/false);
+  RunRandomTest(1, 1, 8, 8, 3 /* channels */);
+}
+
+TEST_F(ResizeAreaOpTest, TestAreaRandom1x1AlignCorners) {
+  CreateOp(/*align_corners=*/true);
+  RunRandomTest(1, 1, 8, 8, 3 /* channels */);
+}
+
 TEST_F(ResizeAreaOpTest, TestAreaRandomDataSeveralInputsSizes1Channel) {
+  CreateOp(/*align_corners=*/false);
   RunManyRandomTests(1);
 }
 
 TEST_F(ResizeAreaOpTest, TestAreaRandomDataSeveralInputsSizes3Channels) {
+  CreateOp(/*align_corners=*/false);
   RunManyRandomTests(3);
 }
 
 TEST_F(ResizeAreaOpTest, TestAreaRandomDataSeveralInputsSizes4Channels) {
+  CreateOp(/*align_corners=*/false);
   RunManyRandomTests(4);
 }
 

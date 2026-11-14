@@ -21,7 +21,7 @@ limitations under the License.
 #define EIGEN_HAS_C99_MATH 1
 
 #include "tensorflow/core/kernels/betainc_op.h"
-#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
+#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
 #include "tensorflow/core/framework/numeric_op.h"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/register_types.h"
@@ -49,21 +49,21 @@ class BetaincOp : public OpKernel {
     const TensorShape& x_shape = x.shape();
     if (a_shape.dims() > 0 && b_shape.dims() > 0) {
       OP_REQUIRES(ctx, a_shape == b_shape,
-                  errors::InvalidArgument(
+                  absl::InvalidArgumentError(absl::StrCat(
                       "Shapes of a and b are inconsistent: ",
-                      a_shape.DebugString(), " vs. ", b_shape.DebugString()));
+                      a_shape.DebugString(), " vs. ", b_shape.DebugString())));
     }
     if (a_shape.dims() > 0 && x_shape.dims() > 0) {
       OP_REQUIRES(ctx, a_shape == x_shape,
-                  errors::InvalidArgument(
+                  absl::InvalidArgumentError(absl::StrCat(
                       "Shapes of a and x are inconsistent: ",
-                      a_shape.DebugString(), " vs. ", x_shape.DebugString()));
+                      a_shape.DebugString(), " vs. ", x_shape.DebugString())));
     }
     if (b_shape.dims() > 0 && x_shape.dims() > 0) {
       OP_REQUIRES(ctx, b_shape == x_shape,
-                  errors::InvalidArgument(
+                  absl::InvalidArgumentError(absl::StrCat(
                       "Shapes of b and x are inconsistent: ",
-                      b_shape.DebugString(), " vs. ", x_shape.DebugString()));
+                      b_shape.DebugString(), " vs. ", x_shape.DebugString())));
     }
 
     TensorShape merged_shape(a_shape);
@@ -105,8 +105,8 @@ class BetaincOp : public OpKernel {
       CASE(1);
       CASE(2);
       default: {
-        ctx->SetStatus(errors::InvalidArgument(
-            "Broadcasting rank not supported: ", ndims));
+        ctx->SetStatus(absl::InvalidArgumentError(
+            absl::StrCat("Broadcasting rank not supported: ", ndims)));
         return;
       }
     }

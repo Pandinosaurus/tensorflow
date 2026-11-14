@@ -13,17 +13,30 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include "tensorflow/java/src/gen/cc/op_specs.h"
+
 #include <map>
+#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include "absl/log/log.h"
+#include "absl/strings/ascii.h"
+#include "absl/strings/match.h"
+#include "absl/strings/str_join.h"
+#include "absl/strings/string_view.h"
+#include "absl/strings/strip.h"
 #include "re2/re2.h"
-#include "tensorflow/core/framework/op.h"
+#include "tensorflow/core/framework/api_def.pb.h"
+#include "tensorflow/core/framework/attr_value.pb.h"
+#include "tensorflow/core/framework/op_def.pb.h"
 #include "tensorflow/core/framework/types.h"
+#include "tensorflow/core/framework/types.pb.h"
 #include "tensorflow/core/lib/strings/str_util.h"
 #include "tensorflow/core/platform/logging.h"
-#include "tensorflow/java/src/gen/cc/op_specs.h"
+#include "tensorflow/core/platform/stringpiece.h"
+#include "tensorflow/java/src/gen/cc/java_defs.h"
 
 namespace tensorflow {
 namespace java {
@@ -65,7 +78,7 @@ class TypeResolver {
                                 bool* iterable_out);
 
   // Returns true if the type of this attribute has already been resolved
-  bool IsAttributeVisited(const string& attr_name) {
+  bool IsAttributeVisited(const std::string& attr_name) {
     return visited_attrs_.find(attr_name) != visited_attrs_.cend();
   }
 
@@ -85,7 +98,7 @@ class TypeResolver {
     if (next_generic_letter_ > 'Z') {
       next_generic_letter_ = 'A';
     }
-    return Type::Generic(string(1, generic_letter));
+    return Type::Generic(std::string(1, generic_letter));
   }
 };
 
@@ -129,7 +142,7 @@ std::pair<Type, Type> TypeResolver::TypesOf(const OpDef_AttrDef& attr_def,
                                             bool* iterable_out) {
   std::pair<Type, Type> types = MakeTypePair(Type::Wildcard());
   *iterable_out = false;
-  StringPiece attr_type = attr_def.type();
+  absl::string_view attr_type = attr_def.type();
   if (absl::ConsumePrefix(&attr_type, "list(")) {
     attr_type.remove_suffix(1);  // remove closing brace
     *iterable_out = true;
@@ -168,15 +181,15 @@ std::pair<Type, Type> TypeResolver::TypesOf(const OpDef_AttrDef& attr_def,
   return types;
 }
 
-string SnakeToCamelCase(const string& str, bool upper = false) {
-  string result;
+std::string SnakeToCamelCase(const std::string& str, bool upper = false) {
+  std::string result;
   bool cap = upper;
-  for (string::const_iterator it = str.begin(); it != str.end(); ++it) {
+  for (std::string::const_iterator it = str.begin(); it != str.end(); ++it) {
     const char c = *it;
     if (c == '_') {
       cap = true;
     } else if (cap) {
-      result += toupper(c);
+      result += absl::ascii_toupper(c);
       cap = false;
     } else {
       result += c;
@@ -185,9 +198,9 @@ string SnakeToCamelCase(const string& str, bool upper = false) {
   return result;
 }
 
-bool FindAndCut(string* input, const RE2& expr, string* before_match,
-                string* ret_match = nullptr) {
-  string match;
+bool FindAndCut(std::string* input, const RE2& expr, std::string* before_match,
+                std::string* ret_match = nullptr) {
+  std::string match;
   if (!RE2::PartialMatch(*input, expr, &match)) return false;
   *before_match = input->substr(0, input->find(match));
   *input = input->substr(before_match->size() + match.size());
@@ -195,13 +208,13 @@ bool FindAndCut(string* input, const RE2& expr, string* before_match,
   return true;
 }
 
-string ParseDocumentation(const string& inp) {
+std::string ParseDocumentation(const std::string& inp) {
   std::stringstream javadoc_text;
 
   // TODO(karllessard) This is a very minimalist utility method for converting
   // markdown syntax, as found in ops descriptions, to Javadoc/html tags. Check
   // for alternatives to increase the level of support for markups.
-  std::vector<string> markups_subexpr;
+  std::vector<std::string> markups_subexpr;
   markups_subexpr.push_back("\n+\\*\\s+");                // lists
   markups_subexpr.push_back("\n{2,}");                    // paragraphs
   markups_subexpr.push_back("`{3,}\\s*[^\\s\n]*\\s*\n");  // code blocks
@@ -211,9 +224,9 @@ string ParseDocumentation(const string& inp) {
   const RE2 markup_expr("(" + absl::StrJoin(markups_subexpr, "|") + ")");
 
   bool in_list = false;
-  string input = inp;
+  std::string input = inp;
   while (true) {
-    string text, markup;
+    std::string text, markup;
     if (!FindAndCut(&input, markup_expr, &text, &markup)) {
       javadoc_text << input;
       break;  // end of loop
@@ -263,8 +276,8 @@ string ParseDocumentation(const string& inp) {
       }
     } else if (absl::StartsWith(markup, "[")) {
       // hyperlinks
-      string label;
-      string link;
+      std::string label;
+      std::string link;
       if (RE2::PartialMatch(input, "([^\\[]+)\\]\\((http.+)\\)", &label,
                             &link) &&
           absl::StartsWith(input, label + link)) {
@@ -334,9 +347,10 @@ ArgumentSpec CreateOutput(const OpDef_ArgDef& output_def,
 
 EndpointSpec CreateEndpoint(const OpDef& op_def, const ApiDef& api_def,
                             const ApiDef_Endpoint& endpoint_def) {
-  std::vector<string> name_tokens = str_util::Split(endpoint_def.name(), ".");
-  string package;
-  string name;
+  std::vector<std::string> name_tokens =
+      str_util::Split(endpoint_def.name(), ".");
+  std::string package;
+  std::string name;
   if (name_tokens.size() > 1) {
     package = name_tokens.at(0);
     name = name_tokens.at(1);
@@ -355,7 +369,7 @@ OpSpec OpSpec::Create(const OpDef& op_def, const ApiDef& api_def) {
   OpSpec op(api_def.graph_op_name(), api_def.visibility() == ApiDef::HIDDEN,
             op_def.deprecation().explanation());
   TypeResolver type_resolver(op_def);
-  for (const string& next_input_name : api_def.arg_order()) {
+  for (const std::string& next_input_name : api_def.arg_order()) {
     for (int i = 0; i < op_def.input_arg().size(); ++i) {
       if (op_def.input_arg(i).name() == next_input_name) {
         op.inputs_.push_back(CreateInput(op_def.input_arg(i), api_def.in_arg(i),

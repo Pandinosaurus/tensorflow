@@ -38,18 +38,19 @@ limitations under the License.
 namespace tensorflow {
 namespace graph_transforms {
 namespace {
-using StringPieceSet = std::unordered_set<StringPiece, StringPieceHasher>;
+using StringPieceSet = std::unordered_set<absl::string_view, StringPieceHasher>;
 template <typename T>
-using StringPieceMap = std::unordered_map<StringPiece, T, StringPieceHasher>;
+using StringPieceMap =
+    std::unordered_map<absl::string_view, T, StringPieceHasher>;
 }  // namespace
 
-Status ReplaceSendRecvs(const GraphDef& original_graph_def,
-                        const GraphDef& rewritten_graph_def,
-                        const std::vector<string>& inputs,
-                        const std::vector<string>& outputs,
-                        GraphDef* output_graph_def) {
+absl::Status ReplaceSendRecvs(const GraphDef& original_graph_def,
+                              const GraphDef& rewritten_graph_def,
+                              const std::vector<std::string>& inputs,
+                              const std::vector<std::string>& outputs,
+                              GraphDef* output_graph_def) {
   // recv_node_names serves as a string storage for recv node names.
-  std::vector<string> recv_node_names(inputs.size());
+  std::vector<std::string> recv_node_names(inputs.size());
   StringPieceMap<TensorId> recv_node_map;
   StringPieceSet input_nodes;
   for (int i = 0; i < inputs.size(); ++i) {
@@ -59,8 +60,8 @@ Status ReplaceSendRecvs(const GraphDef& original_graph_def,
     // node.
     TensorId id = ParseTensorName(inputs[i]);
     input_nodes.insert(id.first);
-    string& recv_node_name = recv_node_names[i];
-    recv_node_name = strings::StrCat("_recv_", id.first, "_", id.second);
+    std::string& recv_node_name = recv_node_names[i];
+    recv_node_name = absl::StrCat("_recv_", id.first, "_", id.second);
     recv_node_map.emplace(recv_node_name, id);
   }
 
@@ -80,7 +81,7 @@ Status ReplaceSendRecvs(const GraphDef& original_graph_def,
     NodeDef* new_node = output_graph_def->add_node();
     new_node->MergeFrom(node);
     for (int i = 0; i < new_node->input_size(); ++i) {
-      string& input = *new_node->mutable_input(i);
+      std::string& input = *new_node->mutable_input(i);
       TensorId id = ParseTensorName(input);
       const auto iter = recv_node_map.find(id.first);
       if (iter != recv_node_map.end()) {
@@ -108,18 +109,18 @@ Status ReplaceSendRecvs(const GraphDef& original_graph_def,
 
   // Some input nodes are removed in rewrite_graph_def. Add those nodes to
   // output_graph_def.
-  for (StringPiece name : input_nodes) {
+  for (absl::string_view name : input_nodes) {
     const NodeDef& removed_node = *CHECK_NOTNULL(original_map[name]);
     output_graph_def->add_node()->MergeFrom(removed_node);
   }
 
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-Status RewriteInputsAsPlaceholders(const TransformFuncContext& context,
-                                   GraphDef* graph_def) {
-  std::unordered_set<string> input_names;
-  for (const string& input_name : context.input_names) {
+absl::Status RewriteInputsAsPlaceholders(const TransformFuncContext& context,
+                                         GraphDef* graph_def) {
+  std::unordered_set<std::string> input_names;
+  for (const std::string& input_name : context.input_names) {
     input_names.emplace(ParseTensorName(input_name).first);
   }
 
@@ -131,46 +132,47 @@ Status RewriteInputsAsPlaceholders(const TransformFuncContext& context,
       node.set_op("Placeholder");
       node.clear_input();
     } else if (node.op() != "Placeholder") {
-      return errors::InvalidArgument(
+      return absl::InvalidArgumentError(absl::StrCat(
           "Input '", node.name(),
           "' was expected to be a Placeholder or PlaceholderWithDefault op, "
           "but was ",
-          node.op());
+          node.op()));
     }
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-Status RemoveUnusedNodes(const GraphDef& input_graph_def,
-                         const TransformFuncContext& context,
-                         GraphDef* output_graph_def) {
+absl::Status RemoveUnusedNodes(const GraphDef& input_graph_def,
+                               const TransformFuncContext& context,
+                               GraphDef* output_graph_def) {
   StringPieceMap<const NodeDef*> node_map;
   for (const NodeDef& node : input_graph_def.node()) {
     node_map.emplace(node.name(), &node);
   }
 
   std::unordered_set<TensorId, TensorId::Hasher> input_names;
-  for (const string& input : context.input_names) {
+  for (const std::string& input : context.input_names) {
     input_names.insert(ParseTensorName(input));
   }
   StringPieceSet used_nodes;
   StringPieceSet current_nodes;
-  for (const string& name : context.output_names) {
+  for (const std::string& name : context.output_names) {
     TensorId id = ParseTensorName(name);
     used_nodes.insert(id.first);
     current_nodes.insert(id.first);
   }
   while (!current_nodes.empty()) {
     StringPieceSet next_nodes;
-    for (StringPiece node_name : current_nodes) {
+    for (absl::string_view node_name : current_nodes) {
       if (node_map.count(node_name) == 0) {
         LOG(ERROR) << "Bad graph structure, no node named '" << node_name
                    << "' found for input lookup";
-        return errors::InvalidArgument("Bad graph structure, no node named '",
-                                       node_name, "' found for input lookup");
+        return absl::InvalidArgumentError(
+            absl::StrCat("Bad graph structure, no node named '", node_name,
+                         "' found for input lookup"));
       }
       const NodeDef& node = *(node_map[node_name]);
-      for (const string& input : node.input()) {
+      for (const std::string& input : node.input()) {
         TensorId id = ParseTensorName(input);
         if (input_names.count(id) > 0) {
           continue;
@@ -191,15 +193,15 @@ Status RemoveUnusedNodes(const GraphDef& input_graph_def,
       output_graph_def);
   TF_RETURN_IF_ERROR(RewriteInputsAsPlaceholders(context, output_graph_def));
 
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 // Converts a shape inference handle to a PartialTensorShape.
-Status ShapeHandleToTensorShape(const shape_inference::ShapeHandle& handle,
-                                shape_inference::InferenceContext* context,
-                                PartialTensorShape* shape) {
+absl::Status ShapeHandleToTensorShape(
+    const shape_inference::ShapeHandle& handle,
+    shape_inference::InferenceContext* context, PartialTensorShape* shape) {
   // The default is already unknown.
-  if (!context->RankKnown(handle)) return Status::OK();
+  if (!context->RankKnown(handle)) return absl::OkStatus();
 
   std::vector<int64_t> dims(context->Rank(handle));
   for (int32_t i = 0; i < dims.size(); ++i) {
@@ -210,9 +212,9 @@ Status ShapeHandleToTensorShape(const shape_inference::ShapeHandle& handle,
 
 // Converts any sub-graphs that can be resolved into constant expressions into
 // single Const ops.
-Status FoldConstants(const GraphDef& input_graph_def,
-                     const TransformFuncContext& context,
-                     GraphDef* output_graph_def) {
+absl::Status FoldConstants(const GraphDef& input_graph_def,
+                           const TransformFuncContext& context,
+                           GraphDef* output_graph_def) {
   Graph input_graph(OpRegistry::Global());
   TF_RETURN_IF_ERROR(input_graph.AddFunctionLibrary(input_graph_def.library()));
 
@@ -243,7 +245,7 @@ Status FoldConstants(const GraphDef& input_graph_def,
   input_names.reserve(context.input_names.size());
   std::transform(context.input_names.begin(), context.input_names.end(),
                  std::back_inserter(input_names),
-                 [](const string& name) { return ParseTensorName(name); });
+                 [](const std::string& name) { return ParseTensorName(name); });
 
   const auto compare = [](TensorId lhs, TensorId rhs) {
     return lhs.first < rhs.first;
@@ -252,7 +254,7 @@ Status FoldConstants(const GraphDef& input_graph_def,
   std::sort(input_names.begin(), input_names.end(), compare);
 
   // Set statically inferred shapes.
-  std::unordered_map<string, std::vector<PartialTensorShape>> shape_map;
+  std::unordered_map<std::string, std::vector<PartialTensorShape>> shape_map;
   for (const Node* const node : input_graph.nodes()) {
     auto ctx = shape_refiner.GetContext(node);
     if (ctx == nullptr) {
@@ -278,8 +280,8 @@ Status FoldConstants(const GraphDef& input_graph_def,
     const auto pair = std::equal_range(input_names.begin(), input_names.end(),
                                        TensorId{node->name(), 0}, compare);
     for (auto it = pair.first; it != pair.second; ++it) {
-      const string recv_name =
-          strings::StrCat("_recv_", it->first, "_", it->second);
+      const std::string recv_name =
+          absl::StrCat("_recv_", it->first, "_", it->second);
       auto& recv_partial_shapes = shape_map[recv_name];
       // For whatever reason (for example, name collision) if the map entry was
       // already there, then do nothing.
@@ -298,14 +300,14 @@ Status FoldConstants(const GraphDef& input_graph_def,
   cf_opts.shape_map = &shape_map;
 
   // Exclude specified nodes from constant folding.
-  std::set<string> excluded_ops, excluded_nodes;
+  std::set<std::string> excluded_ops, excluded_nodes;
   if (context.params.count("exclude_op") > 0) {
     const auto& ops = context.params.at("exclude_op");
-    excluded_ops = std::set<string>(ops.begin(), ops.end());
+    excluded_ops = std::set<std::string>(ops.begin(), ops.end());
   }
   if (context.params.count("exclude_node") > 0) {
     const auto& nodes = context.params.at("exclude_node");
-    excluded_nodes = std::set<string>(nodes.begin(), nodes.end());
+    excluded_nodes = std::set<std::string>(nodes.begin(), nodes.end());
   }
   if (!excluded_ops.empty() || !excluded_nodes.empty()) {
     cf_opts.consider = [excluded_ops, excluded_nodes](const Node* n) {
@@ -330,7 +332,7 @@ Status FoldConstants(const GraphDef& input_graph_def,
                                       &send_recvs_replaced));
   TF_RETURN_IF_ERROR(
       RemoveUnusedNodes(send_recvs_replaced, context, output_graph_def));
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 REGISTER_GRAPH_TRANSFORM("fold_constants", FoldConstants);

@@ -1,3 +1,18 @@
+// Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+// ==============================================================================
+
 // A test resource file which contains some pre-defined internal tfr.functions
 // for decomposition and external tfr.functions for raising the decomposition
 // result to the ops in the TF dialect.
@@ -9,15 +24,15 @@
 
 tfr.func @tf__my_add_n(%values: !tfr.tensor_list,
                        %n: i64 {tfr.name="N"}) -> !tfr.tensor {
-  %index = constant 0 : index
-  %cst = constant 1 : i64
-  %eq = cmpi eq, %n, %cst : i64
+  %index = arith.constant 0 : index
+  %cst = arith.constant 1 : i64
+  %eq = arith.cmpi eq, %n, %cst : i64
   %v1 = tfr.get_element %values[%index] : (!tfr.tensor_list, index) -> !tfr.tensor
   %res = scf.if %eq -> !tfr.tensor {
     scf.yield %v1 : !tfr.tensor
   } else {
-    %step = index_cast %cst : i64 to index
-    %end = index_cast %n : i64 to index
+    %step = arith.index_cast %cst : i64 to index
+    %end = arith.index_cast %n : i64 to index
     %reduce = scf.for %i = %step to %end step %step iter_args(%reduce_iter=%v1) -> !tfr.tensor {
       %v = tfr.get_element %values[%i] : (!tfr.tensor_list, index) -> !tfr.tensor
       %reduce_next =  tfr.call @tf__add(%reduce_iter, %v) : (!tfr.tensor, !tfr.tensor) -> !tfr.tensor

@@ -1,13 +1,34 @@
-load("//tensorflow/core/platform:rules_cc.bzl", "cc_library")
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
 load("@flatbuffers//:build_defs.bzl", "flatbuffer_cc_library")
-load("//tensorflow:tensorflow.bzl", "tf_cc_binary", "tf_cc_test")
-load("//tensorflow:tensorflow.bzl", "get_compatible_with_cloud")
 load(
     "@llvm-project//mlir:tblgen.bzl",
     "gentbl_cc_library",
 )
+load("@xla//third_party/rules_python/python:py_library.bzl", "py_library")
+load("//tensorflow:tensorflow.bzl", "if_google", "tf_cc_binary", "tf_cc_test")
+load("//tensorflow:tensorflow.default.bzl", "get_compatible_with_portable")
+load(
+    "//tensorflow/core/platform:build_config.bzl",
+    "tf_proto_library",
+)
+load("//tensorflow/core/platform:rules_cc.bzl", "cc_library")
 
 package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:LICENSE"],
     default_visibility = [
         "//visibility:public",
     ],
@@ -17,7 +38,7 @@ package(
 flatbuffer_cc_library(
     name = "runtime_metadata_fbs",
     srcs = ["runtime_metadata.fbs"],
-    compatible_with = get_compatible_with_cloud(),
+    compatible_with = get_compatible_with_portable(),
 )
 
 cc_library(
@@ -29,15 +50,18 @@ cc_library(
         "execution_metadata_exporter.h",
     ],
     deps = [
+        ":common",
         ":runtime_metadata_fbs",
         "//tensorflow/compiler/mlir/lite:tensorflow_lite",
-        "//tensorflow/compiler/mlir/lite/experimental/tac:common",
         "//tensorflow/compiler/mlir/lite/experimental/tac/hardwares:target_hardware",
+        "//tensorflow/compiler/mlir/lite/quantization/ir:QuantOps",
         "//tensorflow/compiler/mlir/tensorflow",
         "@flatbuffers",
         "@llvm-project//llvm:Support",
+        "@llvm-project//mlir:ArithDialect",
+        "@llvm-project//mlir:FuncDialect",
         "@llvm-project//mlir:IR",
-        "@llvm-project//mlir:StandardOps",
+        "@llvm-project//mlir:Support",
     ],
 )
 
@@ -49,16 +73,14 @@ tf_cc_test(
     deps = [
         ":execution_metadata_exporter",
         ":runtime_metadata_fbs",
-        "//tensorflow/compiler/mlir/lite:flatbuffer_translate_lib",
         "//tensorflow/compiler/mlir/lite:tensorflow_lite",
         "//tensorflow/compiler/mlir/lite/experimental/tac/hardwares:all-target-hardwares",
         "@com_google_googletest//:gtest_main",
         "@flatbuffers",
-        "@llvm-project//llvm:Support",
-        "@llvm-project//mlir:AllPassesAndDialects",
+        "@llvm-project//mlir:ArithDialect",
+        "@llvm-project//mlir:FuncDialect",
         "@llvm-project//mlir:IR",
         "@llvm-project//mlir:Parser",
-        "@llvm-project//mlir:StandardOps",
     ],
 )
 
@@ -76,25 +98,29 @@ cc_library(
     deps = [
         "//tensorflow/compiler/mlir/lite:tensorflow_lite",
         "@llvm-project//llvm:Support",
+        "@llvm-project//mlir:ArithDialect",
+        "@llvm-project//mlir:BytecodeOpInterface",
+        "@llvm-project//mlir:CallOpInterfaces",
+        "@llvm-project//mlir:CastInterfaces",
+        "@llvm-project//mlir:FuncDialect",
         "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:QuantOps",
+        "@llvm-project//mlir:SideEffectInterfaces",
+        "@llvm-project//mlir:Support",
     ],
 )
 
 gentbl_cc_library(
     name = "transform_patterns_inc_gen",
-    compatible_with = get_compatible_with_cloud(),
-    tbl_outs = [
-        (
-            ["-gen-rewriters"],
-            "transforms/generated_transform_patterns.inc",
-        ),
-    ],
+    compatible_with = get_compatible_with_portable(),
+    tbl_outs = {"transforms/generated_transform_patterns.inc": ["-gen-rewriters"]},
     tblgen = "@llvm-project//mlir:mlir-tblgen",
     td_file = "transforms/transform_patterns.td",
     deps = [
         "//tensorflow/compiler/mlir/lite:tensorflow_lite_ops_td_files",
         "//tensorflow/compiler/mlir/tensorflow:tensorflow_ops_td_files",
-        "@llvm-project//mlir:StdOpsTdFiles",
+        "@llvm-project//mlir:ArithOpsTdFiles",
+        "@llvm-project//mlir:FuncTdFiles",
     ],
 )
 
@@ -112,14 +138,13 @@ cc_library(
     deps = [
         ":common",
         "//tensorflow/compiler/mlir/lite:tensorflow_lite",
-        "//tensorflow/compiler/mlir/lite/quantization:quantization_lib",
         "//tensorflow/compiler/mlir/tensorflow",
         "//tensorflow/compiler/mlir/tensorflow:verification_utils",
         "@llvm-project//llvm:Support",
+        "@llvm-project//mlir:FuncDialect",
         "@llvm-project//mlir:IR",
         "@llvm-project//mlir:Pass",
         "@llvm-project//mlir:QuantOps",
-        "@llvm-project//mlir:StandardOps",
         "@llvm-project//mlir:Support",
     ],
 )
@@ -138,9 +163,9 @@ cc_library(
         "//tensorflow/compiler/mlir/lite/experimental/tac/hardwares:gpu_hardware",
         "//tensorflow/compiler/mlir/tensorflow",
         "@llvm-project//llvm:Support",
+        "@llvm-project//mlir:FuncDialect",
         "@llvm-project//mlir:IR",
         "@llvm-project//mlir:Pass",
-        "@llvm-project//mlir:StandardOps",
         "@llvm-project//mlir:Support",
         "@llvm-project//mlir:TransformUtils",
     ],
@@ -158,9 +183,9 @@ cc_library(
         "//tensorflow/compiler/mlir/lite/experimental/tac/hardwares:nnapi_hardware",
         "//tensorflow/compiler/mlir/tensorflow",
         "@llvm-project//llvm:Support",
+        "@llvm-project//mlir:FuncDialect",
         "@llvm-project//mlir:IR",
         "@llvm-project//mlir:Pass",
-        "@llvm-project//mlir:StandardOps",
         "@llvm-project//mlir:Support",
         "@llvm-project//mlir:TransformUtils",
     ],
@@ -184,10 +209,11 @@ cc_library(
         "//tensorflow/compiler/mlir/lite/experimental/tac/hardwares:target_hardware",
         "//tensorflow/compiler/mlir/tensorflow",
         "@llvm-project//llvm:Support",
+        "@llvm-project//mlir:FuncDialect",
         "@llvm-project//mlir:IR",
         "@llvm-project//mlir:QuantOps",
-        "@llvm-project//mlir:StandardOps",
         "@llvm-project//mlir:Support",
+        "@llvm-project//mlir:TransformUtils",
         "@llvm-project//mlir:Transforms",
     ],
 )
@@ -206,9 +232,10 @@ cc_library(
         "//tensorflow/compiler/mlir/lite/experimental/tac/hardwares:target_hardware",
         "@com_google_absl//absl/strings",
         "@llvm-project//llvm:Support",
+        "@llvm-project//mlir:CallOpInterfaces",
+        "@llvm-project//mlir:FuncDialect",
         "@llvm-project//mlir:IR",
         "@llvm-project//mlir:Pass",
-        "@llvm-project//mlir:StandardOps",
         "@llvm-project//mlir:Support",
     ],
     alwayslink = 1,
@@ -224,6 +251,7 @@ cc_library(
         "transforms/get_alternative_subgraph.cc",
         "transforms/pick_subgraphs.cc",
         "transforms/raise_target_subgraphs.cc",
+        "transforms/tac_filter.cc",
         "transforms/target_annotation.cc",
     ],
     hdrs = [
@@ -235,31 +263,39 @@ cc_library(
         ":common",
         ":cost_model",
         ":device_transform",
+        ":tac_filter_proto_cc",
         ":tac_importer_exporter",
         "//tensorflow/compiler/mlir/lite:tensorflow_lite",
         "//tensorflow/compiler/mlir/lite:tf_tfl_passes",
+        "//tensorflow/compiler/mlir/lite/experimental/common:outline_operations",
         "//tensorflow/compiler/mlir/lite/experimental/tac/hardwares:target_hardware",
-        "//tensorflow/compiler/mlir/tensorflow",
+        "//tensorflow/compiler/mlir/tensorflow:cluster_util",
         "//tensorflow/compiler/mlir/tensorflow:error_util",
+        "//tensorflow/compiler/mlir/tensorflow:tensorflow_analysis",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/strings",
+        "@com_google_protobuf//:protobuf_headers",
         "@llvm-project//llvm:Support",
+        "@llvm-project//mlir:ArithDialect",
+        "@llvm-project//mlir:CallOpInterfaces",
+        "@llvm-project//mlir:FuncDialect",
         "@llvm-project//mlir:IR",
         "@llvm-project//mlir:Pass",
-        "@llvm-project//mlir:StandardOps",
+        "@llvm-project//mlir:SideEffectInterfaces",
         "@llvm-project//mlir:Support",
+        "@llvm-project//mlir:TransformUtils",
         "@llvm-project//mlir:Transforms",
+        "@stablehlo//:stablehlo_ops",
     ],
     alwayslink = 1,
 )
 
 cc_library(
     name = "tac-opt_lib",
+    testonly = True,
     deps = [
         ":target_aware_conversion",
-        "//tensorflow/compiler/mlir:tf_mlir_opt_main",
-        "//tensorflow/compiler/mlir/tensorflow:mlir_roundtrip_pass_registration",
-        "//tensorflow/compiler/mlir/tensorflow:tf_graph_optimization_pass",
+        "//tensorflow/compiler/mlir/lite:litert_mlir_opt_main",
     ],
     alwayslink = 1,
 )
@@ -267,6 +303,7 @@ cc_library(
 # Binary with no hardwares linked.
 tf_cc_binary(
     name = "tac-opt",
+    testonly = True,
     deps = [
         ":tac-opt_lib",
     ],
@@ -275,8 +312,10 @@ tf_cc_binary(
 # Binary with all backends linked.
 tf_cc_binary(
     name = "tac-opt-all-backends",
+    testonly = True,
     deps = [
         ":tac-opt_lib",
+        "//tensorflow/compiler/mlir/lite/experimental/common:outline_operations",
         "//tensorflow/compiler/mlir/lite/experimental/tac/hardwares:all-target-hardwares",
     ],
 )
@@ -293,24 +332,25 @@ cc_library(
         ":tflite_importer_exporter",
         "//tensorflow/compiler/mlir:init_mlir",
         "//tensorflow/compiler/mlir/lite:tensorflow_lite_legalize_tf",
-        "//tensorflow/compiler/mlir/lite:tf_tfl_passes",
+        "//tensorflow/compiler/mlir/lite:tensorflow_lite_optimize",
         "//tensorflow/compiler/mlir/lite/experimental/tac/hardwares:target_hardware",
         "//tensorflow/compiler/mlir/lite/experimental/tac/utils",
         "//tensorflow/compiler/mlir/tensorflow",
         "//tensorflow/compiler/mlir/tensorflow:error_util",
-        "//tensorflow/compiler/mlir/tensorflow:mlir_roundtrip_pass_registration",
-        "//tensorflow/compiler/mlir/tensorflow:tensorflow_passes",
+        "//tensorflow/compiler/mlir/tensorflow/transforms:tensorflow_passes",
         "//tensorflow/core:lib",
+        "@com_google_absl//absl/log",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/strings:str_format",
         "@llvm-project//llvm:Support",
+        "@llvm-project//mlir:FuncDialect",
         "@llvm-project//mlir:IR",
         "@llvm-project//mlir:Parser",
         "@llvm-project//mlir:Pass",
         "@llvm-project//mlir:Support",
         "@llvm-project//mlir:Transforms",
-        "@llvm-project//mlir:Translation",
+        "@llvm-project//mlir:TranslateLib",
     ],
 )
 
@@ -327,6 +367,7 @@ cc_library(
     hdrs = ["tac_importer_exporter.h"],
     deps = [
         "@com_google_absl//absl/status:statusor",
+        "@llvm-project//mlir:FuncDialect",
         "@llvm-project//mlir:IR",
     ],
 )
@@ -358,9 +399,16 @@ py_library(
     srcs = [
         "tac.py",
     ],
-    srcs_version = "PY3",
+    strict_deps = True,
     visibility = ["//visibility:public"],
     deps = [
         "//tensorflow/compiler/mlir/lite/experimental/tac/py_wrapper:_pywrap_tac_wrapper",
     ],
+)
+
+tf_proto_library(
+    name = "tac_filter_proto",
+    srcs = ["tac_filter.proto"],
+    protodeps = if_google(["//google/protobuf:any"]),
+    visibility = ["//visibility:public"],
 )

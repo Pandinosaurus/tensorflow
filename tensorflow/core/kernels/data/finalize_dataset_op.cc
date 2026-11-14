@@ -14,10 +14,17 @@ limitations under the License.
 ==============================================================================*/
 #include "tensorflow/core/kernels/data/finalize_dataset_op.h"
 
+#include <cstdint>
+
+#include "absl/container/flat_hash_set.h"
+#include "absl/log/log.h"
+#include "absl/strings/str_join.h"
 #include "tensorflow/core/data/dataset_utils.h"
 #include "tensorflow/core/data/name_utils.h"
 #include "tensorflow/core/framework/dataset.h"
+#include "tensorflow/core/framework/dataset_options.pb.h"
 #include "tensorflow/core/framework/model.h"
+#include "tensorflow/core/framework/model.pb.h"
 #include "tensorflow/core/framework/partial_tensor_shape.h"
 #include "tensorflow/core/framework/tensor.h"
 #include "tensorflow/core/kernels/data/experimental/threadpool_dataset_op.h"
@@ -37,7 +44,7 @@ namespace {
 
 void GetModelDatasetParams(const Options& options,
                            model::AutotuneAlgorithm* algorithm,
-                           bool* cpu_budget, bool* ram_budget) {
+                           int64_t* cpu_budget, int64_t* ram_budget) {
   *algorithm = model::AutotuneAlgorithm::HILL_CLIMB;
   *cpu_budget = options.autotune_options().cpu_budget();
   *ram_budget = options.autotune_options().ram_budget();
@@ -64,8 +71,8 @@ void MakeDatasetHelper(OpKernelContext* ctx, bool has_captured_ref,
   }
   if (ShouldUseAutotuning(options)) {
     model::AutotuneAlgorithm algorithm;
-    bool cpu_budget;
-    bool ram_budget;
+    int64_t cpu_budget;
+    int64_t ram_budget;
     GetModelDatasetParams(options, &algorithm, &cpu_budget, &ram_budget);
     ModelDatasetOp::MakeDatasetFromOptions(ctx, input, algorithm, cpu_budget,
                                            ram_budget, output);

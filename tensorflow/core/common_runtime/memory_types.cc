@@ -34,25 +34,26 @@ struct Endpoint {
 };
 
 struct EndpointHash {
-  uint32 operator()(const Endpoint& x) const {
+  uint32_t operator()(const Endpoint& x) const {
     return Hash32(reinterpret_cast<const char*>(&x.node_id), sizeof(int),
                   x.output_index);
   }
 };
 
 struct EndpointEq {
-  uint32 operator()(const Endpoint& x, const Endpoint& y) const {
+  uint32_t operator()(const Endpoint& x, const Endpoint& y) const {
     return (x.node_id == y.node_id) && (x.output_index == y.output_index);
   }
 };
 
-static Status ProcessMemoryTypes(
+static absl::Status ProcessMemoryTypes(
     const DeviceType& device_type, const Graph* g,
-    const std::function<Status(const Edge*, MemoryType, MemoryType)>& fn) {
+    const std::function<absl::Status(const Edge*, MemoryType, MemoryType)>&
+        fn) {
   if (device_type != DEVICE_GPU &&
       !DeviceFactory::IsPluggableDevice(device_type.type_string())) {
     // On non-GPU devices, HOST_MEMORY and DEVICE_MEMORY are always compatible.
-    return Status::OK();
+    return absl::OkStatus();
   }
   // For GPU, HOST_MEMORY and DEVICE_MEMORY is not compatible. I.e., a
   // conversion/transfer must be done.
@@ -89,14 +90,15 @@ static Status ProcessMemoryTypes(
             << dm;
     TF_RETURN_IF_ERROR(fn(e, sm, dm));
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-Status ValidateMemoryTypes(const DeviceType& device_type, const Graph* g) {
+absl::Status ValidateMemoryTypes(const DeviceType& device_type,
+                                 const Graph* g) {
   return ProcessMemoryTypes(
       device_type, g, [](const Edge* e, MemoryType sm, MemoryType dm) {
         if (sm == dm) {
-          return Status::OK();
+          return absl::OkStatus();
         }
         return errors::Internal("Memory type mismatch (", sm, " ", dm,
                                 ") between :", e->src()->id(), ":",
@@ -114,14 +116,14 @@ Status ValidateMemoryTypes(const DeviceType& device_type, const Graph* g) {
 // within this process. That is sufficient because EnsureMemoryTypes
 // is only used on a TensorFlow graph that is gonna to be executed in
 // a single tf device (hence within a single process).
-static string GetTensorName(const Edge* edge) {
+static std::string GetTensorName(const Edge* edge) {
   static std::atomic<int64_t> counter(0);
-  return strings::StrCat("memtype_", counter.fetch_add(1), "_",
-                         edge->src()->name());
+  return absl::StrCat("memtype_", counter.fetch_add(1), "_",
+                      edge->src()->name());
 }
 
-static Node* Send(Graph* g, const string& tensor_name,
-                  const string& device_name, bool host, const Edge* edge) {
+static Node* Send(Graph* g, const std::string& tensor_name,
+                  const std::string& device_name, bool host, const Edge* edge) {
   Node* ret;
   TF_CHECK_OK(NodeBuilder(g->NewName("n"), host ? "_HostSend" : "_Send")
                   .Input(edge->src(), edge->src_output())
@@ -136,8 +138,8 @@ static Node* Send(Graph* g, const string& tensor_name,
   return ret;
 }
 
-static Node* Recv(Graph* g, const string& tensor_name,
-                  const string& device_name, bool host, const Edge* edge) {
+static Node* Recv(Graph* g, const std::string& tensor_name,
+                  const std::string& device_name, bool host, const Edge* edge) {
   Node* ret;
   TF_CHECK_OK(
       NodeBuilder(g->NewName("n"), host ? "_HostRecv" : "_Recv")
@@ -153,8 +155,8 @@ static Node* Recv(Graph* g, const string& tensor_name,
   return ret;
 }
 
-Status EnsureMemoryTypes(const DeviceType& device_type,
-                         const string& device_name, Graph* g) {
+absl::Status EnsureMemoryTypes(const DeviceType& device_type,
+                               const std::string& device_name, Graph* g) {
   struct Item {
     const Edge* edge;
     MemoryType sm;
@@ -164,15 +166,15 @@ Status EnsureMemoryTypes(const DeviceType& device_type,
   TF_RETURN_IF_ERROR(ProcessMemoryTypes(
       device_type, g, [&edges](const Edge* e, MemoryType sm, MemoryType dm) {
         if (sm == dm) {
-          return Status::OK();
+          return absl::OkStatus();
         }
         if (((sm == HOST_MEMORY) && (dm == DEVICE_MEMORY)) ||
             ((sm == DEVICE_MEMORY) && (dm == HOST_MEMORY))) {
           edges.push_back({e, sm, dm});
-          return Status::OK();
+          return absl::OkStatus();
         }
-        return errors::Internal("Unexpected memory type pair on an edge: ", sm,
-                                " vs. ", dm);
+        return absl::InternalError(absl::StrCat(
+            "Unexpected memory type pair on an edge: ", sm, " vs. ", dm));
       }));
 
   // edges contains edges in 'g' that memtype is not
@@ -189,7 +191,7 @@ Status EnsureMemoryTypes(const DeviceType& device_type,
       Endpoint key{e->src()->id(), e->src_output()};
       auto iter = recv_nodes.find(key);
       if (iter == recv_nodes.end()) {
-        const string tensor_name = GetTensorName(e);
+        const std::string tensor_name = GetTensorName(e);
         Node* send =
             Send(g, tensor_name, device_name, (item.sm == HOST_MEMORY), e);
         recv = Recv(g, tensor_name, device_name, (item.dm == HOST_MEMORY), e);
@@ -214,19 +216,21 @@ Status EnsureMemoryTypes(const DeviceType& device_type,
   return ValidateMemoryTypes(device_type, g);
 }
 
-Status MemoryTypeForOutput(const DeviceType& device_type, const Graph* g,
-                           const Node* n, int index, MemoryType* memory_type) {
+absl::Status MemoryTypeForOutput(const DeviceType& device_type, const Graph* g,
+                                 const Node* n, int index,
+                                 MemoryType* memory_type) {
   MemoryTypeVector inp_mvec;
   MemoryTypeVector out_mvec;
   TF_RETURN_IF_ERROR(MemoryTypesForNode(g->op_registry(), device_type, n->def(),
                                         &inp_mvec, &out_mvec));
   if (out_mvec.size() <= index) {
-    return errors::Internal("Trying to get the memory type for ", index,
-                            "'th output of node ", FormatNodeForError(*n),
-                            " that has only ", out_mvec.size(), " outputs");
+    return absl::InternalError(
+        absl::StrCat("Trying to get the memory type for ", index,
+                     "'th output of node ", FormatNodeForError(*n),
+                     " that has only ", out_mvec.size(), " outputs"));
   }
   *memory_type = out_mvec[index];
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 }  // end namespace tensorflow

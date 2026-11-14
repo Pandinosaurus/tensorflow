@@ -14,17 +14,15 @@
 # ==============================================================================
 """Tests for miscellaneous functionality in tensorflow.ops.nn."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import functools
 import math
+import sys
 
 from absl.testing import parameterized
 import numpy as np
-from six.moves import xrange  # pylint: disable=redefined-builtin
 
+from tensorflow.python.eager import backprop
+from tensorflow.python.eager import context
 from tensorflow.python.eager import def_function
 from tensorflow.python.framework import constant_op
 from tensorflow.python.framework import dtypes
@@ -40,6 +38,7 @@ from tensorflow.python.ops import nn
 from tensorflow.python.ops import nn_impl
 from tensorflow.python.ops import nn_ops
 from tensorflow.python.ops import partitioned_variables
+from tensorflow.python.ops import stateful_random_ops
 from tensorflow.python.ops import variable_scope
 from tensorflow.python.ops import variables
 import tensorflow.python.ops.nn_grad  # pylint: disable=unused-import
@@ -97,16 +96,18 @@ class ZeroFractionTest(test_lib.TestCase):
                           sess.run(sparsity, {value: [[0., 1.], [0.3, 2.]]}))
 
 
+@test_util.run_all_in_graph_and_eager_modes
 class SoftmaxTest(test_lib.TestCase, parameterized.TestCase):
 
   def _softmax(self, x):
     assert len(x.shape) == 2
+    if x.shape[1] == 0:
+      return x
     m = x.max(1)[:, np.newaxis]
     u = np.exp(x - m)
     z = u.sum(1)[:, np.newaxis]
     return u / z
 
-  @test_util.run_in_graph_and_eager_modes
   def testSoftmax(self):
     x_shape = [5, 10]
     x_np = np.random.randn(*x_shape).astype(np.float32)
@@ -145,18 +146,15 @@ class SoftmaxTest(test_lib.TestCase, parameterized.TestCase):
     self.assertAllClose(y_bf16_tf, expected, rtol=tol, atol=tol)
 
   @parameterized.parameters(((5, 10),), ((2, 3, 4),))
-  @test_util.run_deprecated_v1
   def testGradient(self, x_shape):
     x_np = np.random.randn(*x_shape).astype(np.float64)
-    with self.cached_session():
-      x_tf = constant_op.constant(x_np)
-      y_tf = nn_ops.softmax_v2(x_tf)
-      err = gradient_checker.compute_gradient_error(x_tf, x_shape, y_tf,
-                                                    x_shape)
-    eps = 2e-8
-    self.assertLess(err, eps)
+    x_tf = constant_op.constant(x_np)
+    theoretical, numerical = gradient_checker_v2.compute_gradient(
+        nn_ops.softmax_v2, [x_tf])
+    self.assertAllClose(theoretical, numerical)
 
 
+@test_util.run_all_in_graph_and_eager_modes
 class LogPoissonLossTest(test_lib.TestCase):
 
   def _log_poisson_loss(self, x, z, compute_full_loss=False):
@@ -166,7 +164,6 @@ class LogPoissonLossTest(test_lib.TestCase):
       lpl += np.ma.masked_array(stirling_approx, mask=(z <= 1)).filled(0.)
     return lpl
 
-  @test_util.run_in_graph_and_eager_modes
   def testLogPoissonLoss(self):
     x_shape = [5, 10]
     x_np = np.random.randn(*x_shape).astype(np.float32)
@@ -181,25 +178,19 @@ class LogPoissonLossTest(test_lib.TestCase):
     self.assertAllClose(y_tf_np, y_np, eps)
     self.assertAllClose(y_tf_np_stirling, y_np_stirling, eps)
 
-  @test_util.run_deprecated_v1
   def testGradient(self):
     x_shape = [5, 10]
     x_np = np.random.randn(*x_shape).astype(np.float64)
     z_np = np.random.randint(0, 5, size=x_shape).astype(np.float64)
     with self.cached_session():
       x_tf = constant_op.constant(x_np)
-      y_tf = nn_impl.log_poisson_loss(z_np, x_tf, compute_full_loss=False)
-      y_tf_stirling = nn_impl.log_poisson_loss(
-          z_np, x_tf, compute_full_loss=True)
-      err = gradient_checker.compute_gradient_error(x_tf, x_shape, y_tf,
-                                                    x_shape)
-      err_stirling = gradient_checker.compute_gradient_error(
-          x_tf, x_shape, y_tf_stirling, x_shape)
-    eps = 1e-6
-    self.assertLess(err, eps)
-    self.assertLess(err_stirling, eps)
+      # TODO(b/241834841): Test with `compute_full_loss` set as True
+      theoretical, numerical = gradient_checker_v2.compute_gradient(
+          nn_impl.log_poisson_loss, [z_np, x_tf])
+      self.assertAllClose(theoretical, numerical)
 
 
+@test_util.run_all_in_graph_and_eager_modes
 class LogSoftmaxTest(test_lib.TestCase, parameterized.TestCase):
 
   def _log_softmax(self, x):
@@ -208,7 +199,6 @@ class LogSoftmaxTest(test_lib.TestCase, parameterized.TestCase):
     u = x - m
     return u - np.log(np.sum(np.exp(u), 1, keepdims=True))
 
-  @test_util.run_in_graph_and_eager_modes
   def testLogSoftmax(self):
     x_shape = [5, 10]
     x_np = np.random.randn(*x_shape).astype(np.float32)
@@ -232,23 +222,23 @@ class LogSoftmaxTest(test_lib.TestCase, parameterized.TestCase):
     self.assertAllClose(y_pos_axis_tf, z_gt_axis_tf, eps)
 
   @parameterized.parameters(((5, 10),), ((2, 3, 4),))
-  @test_util.run_deprecated_v1
   def testGradient(self, x_shape):
     x_np = np.random.randn(*x_shape).astype(np.float64)
     with self.cached_session():
       x_tf = constant_op.constant(x_np)
-      y_tf = nn_ops.log_softmax_v2(x_tf)
-      err = gradient_checker.compute_gradient_error(x_tf, x_shape, y_tf,
-                                                    x_shape)
-    eps = 1e-7
-    self.assertLess(err, eps)
+      theoretical, numerical = gradient_checker_v2.compute_gradient(
+          nn_ops.log_softmax_v2, [x_tf])
+      self.assertAllClose(theoretical, numerical)
 
 
+@test_util.run_all_in_graph_and_eager_modes
 class L2LossTest(test_lib.TestCase):
 
-  @test_util.run_in_graph_and_eager_modes
   def testL2Loss(self):
-    for dtype in [dtypes.float32, dtypes.float64]:
+    dtype_list = [dtypes.float32, dtypes.float64]
+    if test_util.is_gpu_available(cuda_only=True):
+      dtype_list.append(dtypes.bfloat16)
+    for dtype in dtype_list:
       x = constant_op.constant([1.0, 0.0, 3.0, 2.0],
                                shape=[2, 2],
                                name="x",
@@ -257,20 +247,18 @@ class L2LossTest(test_lib.TestCase):
       value = self.evaluate(l2loss)
       self.assertAllClose(7.0, value)
 
-  @test_util.run_deprecated_v1
   def testGradient(self):
     x_shape = [20, 7, 3]
     np.random.seed(1)  # Make it reproducible.
     x_val = np.random.random_sample(x_shape).astype(np.float64)
     with self.cached_session():
       x = constant_op.constant(x_val, name="x")
-      output = nn_ops.l2_loss(x)
-      err = gradient_checker.compute_gradient_error(x, x_shape, output, [1])
-    print("L2Loss gradient err = %g " % err)
-    err_tolerance = 1e-10
-    self.assertLess(err, err_tolerance)
+      theoretical, numerical = gradient_checker_v2.compute_gradient(
+          nn_ops.l2_loss, [x])
+      self.assertAllClose(theoretical, numerical)
 
 
+@test_util.run_all_in_graph_and_eager_modes
 class L2NormalizeTest(test_lib.TestCase):
 
   def _l2Normalize(self, x, dim):
@@ -283,7 +271,6 @@ class L2NormalizeTest(test_lib.TestCase):
       norm = np.apply_along_axis(np.linalg.norm, dim, x)
       return x / np.expand_dims(norm, dim)
 
-  @test_util.run_in_graph_and_eager_modes
   def testL2Normalize(self):
     x_shape = [20, 7, 3]
     np.random.seed(1)
@@ -294,7 +281,6 @@ class L2NormalizeTest(test_lib.TestCase):
       y_tf = nn_impl.l2_normalize(x_tf, dim)
       self.assertAllClose(y_np, self.evaluate(y_tf))
 
-  @test_util.run_in_graph_and_eager_modes
   def testL2NormalizeDimArray(self):
     x_shape = [20, 7, 3]
     np.random.seed(1)
@@ -305,21 +291,17 @@ class L2NormalizeTest(test_lib.TestCase):
     y_tf = nn_impl.l2_normalize(x_tf, dim)
     self.assertAllClose(y_np, self.evaluate(y_tf))
 
-  @test_util.run_deprecated_v1
   def testL2NormalizeGradient(self):
     x_shape = [20, 7, 3]
     np.random.seed(1)
     x_np = np.random.random_sample(x_shape).astype(np.float64)
-    for dim in range(len(x_shape)):
-      with self.cached_session():
-        x_tf = constant_op.constant(x_np, name="x")
-        y_tf = nn_impl.l2_normalize(x_tf, dim)
-        err = gradient_checker.compute_gradient_error(x_tf, x_shape, y_tf,
-                                                      x_shape)
-      print("L2Normalize gradient err = %g " % err)
-      self.assertLess(err, 1e-4)
+    with self.cached_session():
+      x_tf = constant_op.constant(x_np, name="x")
+      # TODO(b/241834841): Test l2_normalize with `axis` set to other dims
+      theoretical, numerical = gradient_checker_v2.compute_gradient(
+          nn_impl.l2_normalize, [x_tf])
+      self.assertAllClose(theoretical, numerical)
 
-  @test_util.run_in_graph_and_eager_modes
   def testL2NormalizeComplex(self):
     x_shape = [20, 7, 3]
     for dtype in [np.complex64, np.complex128]:
@@ -333,27 +315,90 @@ class L2NormalizeTest(test_lib.TestCase):
         y_tf = nn_impl.l2_normalize(x_tf, dim)
         self.assertAllClose(y_np, self.evaluate(y_tf))
 
+  def testL2NormalizeHalfPrecision(self):
+    x_np = np.array([[300.0, 400.0], [0.0, 0.0], [1e-4, 0.0]], np.float32)
+    expected = [[0.6, 0.8], [0.0, 0.0], [1.0, 0.0]]
+    for dtype in [dtypes.float16, dtypes.bfloat16]:
+      x_tf = constant_op.constant(x_np, dtype=dtype)
+      y_tf = nn_impl.l2_normalize(x_tf, 1)
+      self.assertEqual(dtype, y_tf.dtype)
+      y = self.evaluate(y_tf).astype(np.float32)
+      self.assertAllClose(expected, y, atol=1e-2)
+
+  def testL2NormalizeHalfPrecisionNegativeValues(self):
+    x_np = np.array([[-300.0, 400.0], [300.0, -400.0]], np.float32)
+    expected = [[-0.6, 0.8], [0.6, -0.8]]
+    for dtype in [dtypes.float16, dtypes.bfloat16]:
+      y_tf = nn_impl.l2_normalize(constant_op.constant(x_np, dtype=dtype), 1)
+      self.assertEqual(dtype, y_tf.dtype)
+      self.assertAllClose(
+          expected, self.evaluate(y_tf).astype(np.float32), atol=1e-2
+      )
+
+  def testL2NormalizeHalfPrecisionTensorEpsilon(self):
+    x_np = np.array([[3.0, 4.0]], np.float32)
+    # The sum of squares (25) is below `epsilon` (100), so the output is
+    # scaled by `rsqrt(epsilon)` = 0.1.
+    expected = [[0.3, 0.4]]
+    for dtype in [dtypes.float16, dtypes.bfloat16]:
+      epsilon = constant_op.constant(100.0, dtype=dtype)
+      y_tf = nn_impl.l2_normalize(
+          constant_op.constant(x_np, dtype=dtype), 1, epsilon=epsilon
+      )
+      self.assertEqual(dtype, y_tf.dtype)
+      self.assertAllClose(
+          expected, self.evaluate(y_tf).astype(np.float32), atol=1e-2
+      )
+
+  def testL2NormalizeHalfPrecisionGradient(self):
+    x_np = np.array([[300.0, 400.0], [-300.0, 400.0]], np.float32)
+    weights = np.array([[1.0, 0.0], [1.0, 1.0]], np.float32)
+    # Reference gradient computed in float32.
+    x32 = constant_op.constant(x_np)
+    with backprop.GradientTape() as tape:
+      tape.watch(x32)
+      loss = math_ops.reduce_sum(nn_impl.l2_normalize(x32, 1) * weights)
+    expected = self.evaluate(tape.gradient(loss, x32))
+    for dtype in [dtypes.float16, dtypes.bfloat16]:
+      x = constant_op.constant(x_np, dtype=dtype)
+      with backprop.GradientTape() as tape:
+        tape.watch(x)
+        y = nn_impl.l2_normalize(x, 1)
+        loss = math_ops.reduce_sum(y * math_ops.cast(weights, dtype))
+      grad = tape.gradient(loss, x)
+      self.assertEqual(dtype, grad.dtype)
+      grad = self.evaluate(grad).astype(np.float32)
+      self.assertFalse(np.any(np.isnan(grad)))
+      self.assertAllClose(expected, grad, atol=1e-3)
+
 
 DROPOUT_FNS = [
     ("stateful_v1", nn_ops.dropout),
     ("stateful_v2", nn_ops.dropout_v2),
     ("stateless", functools.partial(nn_ops.stateless_dropout, seed=(1, 2))),
     ("stateless_philox", functools.partial(
-        nn_ops.stateless_dropout, seed=(1, 2), rng_alg="philox"))]
+        nn_ops.stateless_dropout, seed=(1, 2), rng_alg="philox")),
+    ("generator", functools.partial(  # pylint: disable=g-long-lambda
+        nn_ops.general_dropout, uniform_sampler=lambda shape, dtype: (  # pylint: disable=g-long-lambda
+            stateful_random_ops.Generator.from_seed(1).uniform(
+                shape=shape, dtype=dtype)))),
+    ]
 
 
 class DropoutTest(test_lib.TestCase, parameterized.TestCase):
 
   @parameterized.named_parameters(
-      ("_%s_%s_%s" % (case_name, use_noise_shape, keep_prob), dropout_fn,  # pylint: disable=g-complex-comprehension
-       use_noise_shape, keep_prob)
+      ("_%s_%s_%s" % (case_name, use_noise_shape, keep_prob), case_name,  # pylint: disable=g-complex-comprehension
+       dropout_fn, use_noise_shape, keep_prob)
       for keep_prob in [0.1, 0.5, 0.8]
       for use_noise_shape in ["no", "concrete", "partial"]
       for case_name, dropout_fn in DROPOUT_FNS)
-  def testDropout(self, dropout_fn, use_noise_shape, keep_prob):
+  def testDropout(self, case_name, dropout_fn, use_noise_shape, keep_prob):
     # Runs dropout with 0-1 tensor 10 times, sum the number of ones and validate
     # that it is producing approximately the right number of ones over a large
     # number of samples, based on the keep probability.
+    if "generator" in case_name and not context.executing_eagerly():
+      self.skipTest("tf.random.Generator can only be used in TF2.")
     if use_noise_shape == "no":
       x_dim = 70
       y_dim = 30
@@ -371,7 +416,7 @@ class DropoutTest(test_lib.TestCase, parameterized.TestCase):
     dropout = dropout_fn(t, rate=(1 - keep_prob), noise_shape=noise_shape)
     final_count = 0
     self.assertEqual([x_dim, y_dim], dropout.get_shape())
-    for _ in xrange(0, num_iter):
+    for _ in range(0, num_iter):
       value = self.evaluate(dropout)
       final_count += np.count_nonzero(value)
       # Verifies that there are only two values: 0 and 1/keep_prob.
@@ -385,21 +430,23 @@ class DropoutTest(test_lib.TestCase, parameterized.TestCase):
     self.assertLess(rel_error, 0.15)
 
   @parameterized.named_parameters(
-      ("_%s_%s" % (case_name, keep_prob), dropout_fn, keep_prob)  # pylint: disable=g-complex-comprehension
+      ("_%s_%s" % (case_name, keep_prob), case_name, dropout_fn, keep_prob)  # pylint: disable=g-complex-comprehension
       for keep_prob in [0.1, 0.5, 0.8]
       for case_name, dropout_fn in DROPOUT_FNS)
-  def testShapedDropoutCorrelation(self, dropout_fn, keep_prob):
+  def testShapedDropoutCorrelation(self, case_name, dropout_fn, keep_prob):
     # Runs a shaped dropout and tests that the correlations are correct.
+    if "generator" in case_name and not context.executing_eagerly():
+      self.skipTest("tf.random.Generator can only be used in TF2.")
     x_dim = 40
     y_dim = 30
     num_iter = 10
     t = constant_op.constant(1.0, shape=[x_dim, y_dim], dtype=dtypes.float32)
     dropout = dropout_fn(t, rate=(1 - keep_prob), noise_shape=[x_dim, 1])
     self.assertEqual([x_dim, y_dim], dropout.get_shape())
-    for _ in xrange(0, num_iter):
+    for _ in range(0, num_iter):
       value = self.evaluate(dropout)
       # Verifies that each row has only one type of activation.
-      for i in xrange(x_dim):
+      for i in range(x_dim):
         sorted_value = np.unique(np.sort(value[i, :]))
         self.assertEqual(sorted_value.size, 1)
 
@@ -409,7 +456,6 @@ class DropoutTest(test_lib.TestCase, parameterized.TestCase):
       for use_keep_prob in [False, True]
       for keep_prob in [0.1, 0.5, 0.8]
       for case_name, dropout_fn in DROPOUT_FNS)
-  @test_util.run_deprecated_v1
   def testDropoutPlaceholderRateAndKeepProb(self, case_name, dropout_fn,
                                             keep_prob, use_keep_prob):
     # Runs dropout with 0-1 tensor 10 times, sum the number of ones and validate
@@ -417,26 +463,26 @@ class DropoutTest(test_lib.TestCase, parameterized.TestCase):
     # number of samples, based on the keep probability.
     if use_keep_prob and case_name != "stateful_v1":
       self.skipTest("Only V1 `dropout` has the `keep_prob` argument.")
+    if "generator" in case_name and not context.executing_eagerly():
+      self.skipTest("tf.random.Generator can only be used in TF2.")
     x_dim = 70
     y_dim = 30
     num_iter = 10
-    with self.cached_session():
-      t = constant_op.constant(
-          1.0, shape=[x_dim, y_dim], dtype=dtypes.float32)
-      keep_prob_placeholder = array_ops.placeholder(dtypes.float32)
+    t = constant_op.constant(
+        1.0, shape=[x_dim, y_dim], dtype=dtypes.float32)
+    final_count = 0
+    for _ in range(0, num_iter):
       if use_keep_prob:
-        dropout = dropout_fn(t, keep_prob=keep_prob_placeholder)
+        dropout = dropout_fn(t, keep_prob=keep_prob)
       else:
-        dropout = dropout_fn(t, rate=1 - keep_prob_placeholder)
-      final_count = 0
+        dropout = dropout_fn(t, rate=1 - keep_prob)
       self.assertEqual([x_dim, y_dim], dropout.get_shape())
-      for _ in xrange(0, num_iter):
-        value = dropout.eval(feed_dict={keep_prob_placeholder: keep_prob})
-        final_count += np.count_nonzero(value)
-        # Verifies that there are only two values: 0 and 1/keep_prob.
-        sorted_value = np.unique(np.sort(value))
-        self.assertEqual(0, sorted_value[0])
-        self.assertAllClose(1 / keep_prob, sorted_value[1])
+      value = self.evaluate(dropout)
+      final_count += np.count_nonzero(value)
+      # Verifies that there are only two values: 0 and 1/keep_prob.
+      sorted_value = np.unique(np.sort(value))
+      self.assertEqual(0, sorted_value[0])
+      self.assertAllClose(1 / keep_prob, sorted_value[1])
     # Check that we are in the 15% error range
     expected_count = x_dim * y_dim * keep_prob * num_iter
     rel_error = math.fabs(final_count - expected_count) / expected_count
@@ -547,6 +593,7 @@ class DropoutTest(test_lib.TestCase, parameterized.TestCase):
 class ComputeSampledLogitsTest(test_lib.TestCase):
 
   def setUp(self):
+    super().setUp()
     self._eps = 1e-3
 
   def _GenerateTestData(self, num_classes, dim, batch_size, num_true, labels,
@@ -629,7 +676,7 @@ class ComputeSampledLogitsTest(test_lib.TestCase):
           "b",
           partitioner=partitioned_variables.fixed_size_partitioner(num_shards),
           initializer=constant_op.constant(biases))
-      with self.session(graph=g) as sess:
+      with self.session(graph=g):
         self.evaluate(variables.global_variables_initializer())
         return self.evaluate([list(sharded_weights), list(sharded_biases)])
 
@@ -741,9 +788,9 @@ class ComputeSampledLogitsTest(test_lib.TestCase):
       # First we need to find the hits in this random test run:
       labels_reshape = labels.reshape((batch_size, num_true))
       got_logits = self.evaluate(logits_tensor)
-      for row in xrange(batch_size):
+      for row in range(batch_size):
         row_labels = labels_reshape[row, :]
-        for col in xrange(len(sampled)):
+        for col in range(len(sampled)):
           if sampled[col] in row_labels:
             # We need to add the num_true_test offset into logits_*
             self.assertNear(
@@ -886,7 +933,7 @@ class ComputeSampledLogitsTest(test_lib.TestCase):
       stable_exp_logits = np.exp(logits -
                                  np.amax(logits, axis=1, keepdims=True))
       pred = stable_exp_logits / np.sum(stable_exp_logits, 1, keepdims=True)
-      return -np.sum(targets * np.log(pred + 1.0e-20), axis=1)
+      return np.negative(np.sum(targets * np.log(pred + 1.0e-20), axis=1))
 
     np.random.seed(0)
     num_classes = 5
@@ -943,7 +990,7 @@ class ComputeSampledLogitsTest(test_lib.TestCase):
       stable_exp_logits = np.exp(logits -
                                  np.amax(logits, axis=1, keepdims=True))
       pred = stable_exp_logits / np.sum(stable_exp_logits, 1, keepdims=True)
-      return -np.sum(targets * np.log(pred + 1.0e-20), axis=1)
+      return np.negative(np.sum(targets * np.log(pred + 1.0e-20), axis=1))
 
     np.random.seed(0)
     num_classes = 5
@@ -1067,7 +1114,7 @@ class GeluTest(test_lib.TestCase):
 
   def test(self):
 
-    def gelu(x, approximate=False):
+    def _Gelu(x, approximate=False):
       if approximate:
         return 0.5 * x * (1.0 + np.tanh(
             np.sqrt(2.0 / np.pi) * (x + 0.044715 * np.power(x, 3))))
@@ -1075,20 +1122,23 @@ class GeluTest(test_lib.TestCase):
         from scipy.stats import norm  # pylint: disable=g-import-not-at-top
         return x * norm.cdf(x)
 
-    np.random.seed(1)  # Make it reproducible.
-    x = np.random.randn(3, 4).astype(np.float32)
-    y = gelu(x)
+    # Make sure we test for negative arguments where GeLU is difficult to
+    # evaluate accurately.
+    x = np.linspace(-12, 5, 1000).astype(np.float32)
+    y = _Gelu(x)
+
     z = self.evaluate(nn_ops.gelu(x))
-    self.assertAllClose(y, z)
+    self.assertAllClose(y, z, atol=0, rtol=2e-5)
 
-    y = gelu(x, True)
+    y = _Gelu(x, True)
     z = self.evaluate(nn_ops.gelu(x, True))
+
     self.assertAllClose(y, z)
 
 
-class SwishTest(test_lib.TestCase):
+@test_util.run_all_in_graph_and_eager_modes
+class SwishTest(test_lib.TestCase, parameterized.TestCase):
 
-  @test_util.run_deprecated_v1
   def testValues(self):
     np_values = np.array(
         [np.linspace(-7.0, 0.0, 100),
@@ -1103,16 +1153,96 @@ class SwishTest(test_lib.TestCase):
 
     self.assertAllClose(actual_outputs, expected_outputs)
 
-  @test_util.run_deprecated_v1
+  def testValuesWithBeta(self):
+    np_values = np.array(
+        [np.linspace(-7.0, 0.0, 100),
+         np.linspace(0.0, 7.0, 100)],
+        dtype=np.float32)
+    tf_values = constant_op.constant(np_values)
+    actual_tf_outputs = nn_impl.swish(tf_values, beta=0.5)
+    expected_tf_outputs = tf_values * math_ops.sigmoid(0.5 * tf_values)
+
+    actual_outputs, expected_outputs = self.evaluate(
+        [actual_tf_outputs, expected_tf_outputs])
+
+    self.assertAllClose(actual_outputs, expected_outputs)
+
   def testGradients(self):
     shape = [5, 3, 4]
     sigma = 5
     input_values = np.random.randn(*shape) * sigma
     x_tf = constant_op.constant(input_values)
-    y_tf = nn_impl.swish(x_tf)
     with self.cached_session():
-      err = gradient_checker.compute_gradient_error(x_tf, shape, y_tf, shape)
-    self.assertLess(err, 1e-4)
+      def f(x):  # pylint: disable=invalid-name
+        return nn_impl.swish(x)
+
+      theoretical, numerical = gradient_checker_v2.compute_gradient(
+          f, [x_tf])
+      self.assertAllClose(theoretical, numerical)
+
+  def testGradientsWithBeta(self):
+    shape = [5, 3, 4]
+    sigma = 5
+    input_values = np.random.randn(*shape) * sigma
+    x_tf = constant_op.constant(input_values)
+    with self.cached_session():
+      def f(x):  # pylint: disable=invalid-name
+        return nn_impl.swish(x, beta=0.5)
+
+      theoretical, numerical = gradient_checker_v2.compute_gradient(
+          f, [x_tf])
+      self.assertAllClose(theoretical, numerical)
+
+  @parameterized.product(
+      shapes=[
+          ((2, 3), ()),  # Scalar beta.
+          ((2, 3), (3,)),  # Vector beta.
+          ((2, 3), (1, 3)),  # Singleton dimension in beta.
+          ((2, 3), (2, 3)),  # Matching shapes.
+          ((3,), (2, 3)),  # Broadcast features.
+          ((2, 1), (1, 3)),  # Broadcast both inputs.
+          ((), (3,)),  # Scalar features.
+          ((0, 3), (3,)),  # Empty output.
+      ],
+      dtype=[dtypes.float32, dtypes.float64],
+      dynamic_shapes=[False, True],
+  )
+  def testBroadcastGradients(self, shapes, dtype, dynamic_shapes):
+    features_shape, beta_shape = shapes
+    features = constant_op.constant(
+        np.linspace(-1.0, 1.0, int(np.prod(features_shape))).reshape(
+            features_shape
+        ),
+        dtype=dtype,
+    )
+    beta = constant_op.constant(
+        np.linspace(0.5, 1.5, int(np.prod(beta_shape))).reshape(beta_shape),
+        dtype=dtype,
+    )
+    swish = nn_impl.swish
+    if dynamic_shapes:
+      swish = def_function.function(
+          swish, input_signature=[tensor_spec.TensorSpec(None, dtype)] * 2
+      )
+    theoretical, numerical = gradient_checker_v2.compute_gradient(
+        swish, [features, beta]
+    )
+    self.assertAllClose(theoretical[0], numerical[0], atol=1e-4)
+    self.assertAllClose(theoretical[1], numerical[1], atol=1e-4)
+
+  def testFloat16AndBfloat16Gradients(self):
+    for dtype in [dtypes.float16, dtypes.bfloat16]:
+      features = constant_op.constant([[1.0, 2.0], [3.0, 4.0]], dtype=dtype)
+      beta = constant_op.constant([0.5, 1.5], dtype=dtype)
+      with backprop.GradientTape() as tape:
+        tape.watch([features, beta])
+        y = nn_impl.swish(features, beta)
+      g_features, g_beta = tape.gradient(y, [features, beta])
+      self.assertEqual(g_features.dtype, dtype)
+      self.assertEqual(g_beta.dtype, dtype)
+      self.assertEqual(g_features.shape.as_list(), [2, 2])
+      self.assertEqual(g_beta.shape.as_list(), [2])
+      self.evaluate([g_features, g_beta])
 
 
 class MomentsTest(test_lib.TestCase):
@@ -1131,9 +1261,10 @@ class MomentsTest(test_lib.TestCase):
           expected_var = np.var(
               input_values, axis=moments_axes, keepdims=keep_dims)
           with ops.Graph().as_default() as g:
-            with self.session(graph=g) as sess:
+            with self.session(graph=g):
               inputs = constant_op.constant(
                   input_values, shape=input_shape, dtype=dtypes.float32)
+
               mean, variance = nn_impl.moments_v2(
                   inputs, moments_axes, keepdims=keep_dims)
 
@@ -1182,6 +1313,59 @@ class MomentsTest(test_lib.TestCase):
 
   def testOutput4DInput123(self):
     self.doOutputTest((10, 10, 10, 30), (1, 2, 3))
+
+  def testIdenticalLargeValues(self):
+    for dtype in [
+        dtypes.float16,
+        dtypes.bfloat16,
+        dtypes.float32,
+        dtypes.float64,
+    ]:
+      for sign in [1.0, -1.0]:
+        val = sign * (
+            100.0 if dtype in (dtypes.float16, dtypes.bfloat16) else 7.5e10
+        )
+        for keepdims in [False, True]:
+          with context.eager_mode():
+            t = constant_op.constant([[val, val, val]], dtype=dtype)
+            _, var_eager = nn_impl.moments(t, axes=[1], keepdims=keepdims)
+            expected = [[0.0]] if keepdims else [0.0]
+            atol = 2.5 if dtype == dtypes.float32 else 1e-5
+            self.assertAllClose(var_eager, expected, atol=atol)
+            try:
+              _, var_jit = def_function.function(
+                  lambda x, kd=keepdims: nn_impl.moments(
+                      x, axes=[1], keepdims=kd
+                  ),
+                  jit_compile=True,
+              )(t)
+              self.assertAllClose(var_jit, expected, atol=atol)
+            except (errors.UnimplementedError, errors.InvalidArgumentError):
+              pass
+
+  def testMomentsGradient(self):
+    for dtype in [dtypes.float32, dtypes.float64]:
+      x_val = np.random.randn(4, 5).astype(
+          np.float32 if dtype == dtypes.float32 else np.float64
+      )
+      with context.eager_mode():
+        x = constant_op.constant(x_val, dtype=dtype)
+
+        def _MeanFunc(val):
+          return nn_impl.moments(val, axes=[1])[0]
+
+        def _VarFunc(val):
+          return nn_impl.moments(val, axes=[1])[1]
+
+        err_mean = gradient_checker_v2.max_error(
+            *gradient_checker_v2.compute_gradient(_MeanFunc, [x])
+        )
+        err_var = gradient_checker_v2.max_error(
+            *gradient_checker_v2.compute_gradient(_VarFunc, [x])
+        )
+
+        self.assertLess(err_mean, 1e-3)
+        self.assertLess(err_var, 1e-3)
 
 
 class DataFormatDimMapTest(test_lib.TestCase):
@@ -1733,6 +1917,27 @@ class MaxPoolTest(test_lib.TestCase):
         "`input.shape.rank` must be 3, 4 or 5.*of rank 6."):
       nn_ops.max_pool_v2(x, 2, 2, "SAME")
 
+  @test_util.disable_xla("XLA catches the error and rethrows as different one")
+  def testIncoorectKSize(self):
+    with self.assertRaisesRegex(
+        errors.InvalidArgumentError, "Sliding window ksize must be positive."
+    ):
+      op = nn_ops.max_pool_v2(
+          array_ops.ones([3, 4, 4, 5]), [1, -1, -1, 1], 2, "SAME"
+      )
+      with test_util.use_gpu():
+        self.evaluate(op)
+
+    ksize = sys.maxsize + 100  # Set to a value larger than sys.maxsize
+    with self.assertRaises(
+        OverflowError if context.executing_eagerly() else ValueError
+    ):
+      op = nn_ops.max_pool_v2(
+          array_ops.ones([3, 4, 4, 5]), ksize=ksize, strides=2, padding="SAME"
+      )
+      with test_util.use_gpu():
+        self.evaluate(op)
+
 
 @test_util.run_all_in_graph_and_eager_modes
 class ConvolutionTest(test_lib.TestCase):
@@ -1837,7 +2042,7 @@ class RaggedEmbeddingTest(test_lib.TestCase):
     ragged_ids = ragged_factory_ops.constant([[1, 2, 3], [0], [1, 2]],
                                              ragged_rank=1)
 
-    embedded_ragged = nn.embedding_lookup_ragged(weights, ragged_ids)
+    embedded_ragged = nn.embedding_lookup(weights, ragged_ids)
     expected_output = ragged_factory_ops.constant(
         [[[1, 1, 1], [2, 2, 2], [3, 3, 3]], [[0, 0, 0]], [[1, 1, 1], [2, 2, 2]]
         ],
@@ -1853,7 +2058,7 @@ class RaggedEmbeddingTest(test_lib.TestCase):
                                                                        ]],
         ragged_rank=2)
 
-    embedded_ragged = nn.embedding_lookup_ragged(weights, ragged_ids)
+    embedded_ragged = nn.embedding_lookup(weights, ragged_ids)
     expected_output = ragged_factory_ops.constant(
         [[[[[3, 3], [4, 4]], [[0, 0], [6, 6]]], []],
          [[[[2, 2], [1, 1]], [[1, 1], [0, 0]]],
@@ -1865,16 +2070,14 @@ class RaggedEmbeddingTest(test_lib.TestCase):
   def testMissingWeights(self):
     ragged_ids = ragged_factory_ops.constant([[1, 2, 3], [0], [1, 2]])
 
-    with self.assertRaisesRegex(ValueError,
-                                "The embedding weights must be specified.*"):
-      nn.embedding_lookup_ragged(None, ragged_ids)
+    with self.assertRaisesRegex(ValueError, "params must be specified.*"):
+      nn.embedding_lookup(None, ragged_ids)
 
   def testEmptyWeights(self):
     ragged_ids = ragged_factory_ops.constant([[1, 2, 3], [0], [1, 2]])
 
-    with self.assertRaisesRegex(ValueError,
-                                "The embedding weights should not be empty.*"):
-      nn.embedding_lookup_ragged([], ragged_ids)
+    with self.assertRaisesRegex(ValueError, "params should not be empty.*"):
+      nn.embedding_lookup([], ragged_ids)
 
   def testInvalidIndicesType(self):
     weights = constant_op.constant([[0, 0, 0], [1, 1, 1], [2, 2, 2]])
@@ -1882,7 +2085,7 @@ class RaggedEmbeddingTest(test_lib.TestCase):
 
     with self.assertRaisesRegex(
         ValueError, "The values contained by the inputs have type*"):
-      nn.embedding_lookup_ragged(weights, ragged_ids)
+      nn.embedding_lookup(weights, ragged_ids)
 
   def testMaxNormForEmbeddings(self):
     weights = constant_op.constant(
@@ -1959,6 +2162,77 @@ class IsotonicTest(parameterized.TestCase, test_lib.TestCase):
             [2.5, 1, 4.5, 3, 6.5]
         ])
     self.assertAllClose(segments, [[0, 0, 0, 0, 0], [0, 1, 0, 1, 0]])
+
+  @parameterized.product(
+      shape=[(3,), (2, 3), (2, 2, 3)],
+      axis=[0, -1],
+      decreasing=[True, False],
+      dtype=[np.float32, np.float64],
+  )
+  @test_util.run_in_graph_and_eager_modes
+  def test_pooled_gradient(self, shape, axis, decreasing, dtype):
+    # Each row has one singleton and a stable block pooling its last two values.
+    values = np.broadcast_to([4.0, 0.7, 2.0], shape).astype(dtype)
+    weights = np.arange(1, np.prod(shape) + 1, dtype=dtype).reshape(shape)
+    expected = weights.copy()
+    expected[..., 1:] = weights[..., 1:].mean(axis=-1, keepdims=True)
+    if not decreasing:
+      values = -values
+    x = constant_op.constant(np.moveaxis(values, -1, axis))
+    weights = constant_op.constant(np.moveaxis(weights, -1, axis))
+    with backprop.GradientTape() as tape:
+      tape.watch(x)
+      y, _ = nn_ops.isotonic_regression(x, decreasing=decreasing, axis=axis)
+    gradient = tape.gradient(y, x, output_gradients=weights)
+    self.assertAllClose(
+        np.moveaxis(expected, -1, axis), self.evaluate(gradient)
+    )
+
+  @parameterized.parameters((0,), (0, 3), (2, 0), (2, 0, 3))
+  @test_util.run_in_graph_and_eager_modes
+  def test_empty_gradient(self, *shape):
+    x = array_ops.zeros(shape, dtype=dtypes.float64)
+    with backprop.GradientTape() as tape:
+      tape.watch(x)
+      y, _ = nn_ops.isotonic_regression(x)
+    self.assertAllEqual(np.zeros(shape), self.evaluate(tape.gradient(y, x)))
+
+  @test_util.run_v2_only
+  def test_gradient_unknown_shape(self):
+    @def_function.function(
+        input_signature=[tensor_spec.TensorSpec(None, dtypes.float64)]
+    )
+    def ComputeGradient(x):
+      with backprop.GradientTape() as tape:
+        tape.watch(x)
+        y, _ = nn_ops.isotonic_regression(x)
+        selected = y[..., 1]
+      return tape.gradient(selected, x)
+
+    for shape in [(3,), (2, 3), (2, 2, 3)]:
+      x = constant_op.constant(np.broadcast_to([4.0, 0.7, 2.0], shape))
+      expected = np.broadcast_to([0.0, 0.5, 0.5], shape)
+      self.assertAllClose(expected, self.evaluate(ComputeGradient(x)))
+
+  @test_util.run_v2_only
+  def testGradient1D(self):
+    """Checks the gradient for a 1-D input, which has no batch dimension.
+
+    Pooling happens along the last axis, so a 1-D input has to be treated as
+    a single row rather than as one row per element.
+    """
+
+    @def_function.function
+    def ComputeIsotonicFn(x):
+      y, _ = nn_ops.isotonic_regression(x, decreasing=True)
+      return y
+
+    np.random.seed(0)
+    x_init = np.random.randn(50).astype(np.float64)
+    grad_theoretical, grad_numerical = gradient_checker_v2.compute_gradient(
+        ComputeIsotonicFn, [x_init], delta=1e-5
+    )
+    self.assertAllClose(grad_theoretical, grad_numerical)
 
   @test_util.run_v2_only
   def testGradientV2(self, dtype=np.float64, batch_size=30, dimensions=50):

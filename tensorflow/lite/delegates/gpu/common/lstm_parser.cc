@@ -15,6 +15,7 @@ limitations under the License.
 
 #include "tensorflow/lite/delegates/gpu/common/lstm_parser.h"
 
+#include <cstring>
 #include <optional>
 #include <string>
 #include <utility>
@@ -22,8 +23,8 @@ limitations under the License.
 #include "absl/container/flat_hash_map.h"
 #include "absl/strings/str_cat.h"
 #include "absl/types/any.h"
-#include "tensorflow/lite/c/builtin_op_data.h"
-#include "tensorflow/lite/c/common.h"
+#include "tensorflow/lite/core/c/builtin_op_data.h"
+#include "tensorflow/lite/core/c/common.h"
 #include "tensorflow/lite/delegates/gpu/common/data_type.h"
 #include "tensorflow/lite/delegates/gpu/common/model.h"
 #include "tensorflow/lite/delegates/gpu/common/model_builder_helper.h"

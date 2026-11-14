@@ -15,21 +15,32 @@ limitations under the License.
 
 #include "tensorflow/compiler/jit/compilability_check_util.h"
 
-#include "absl/memory/memory.h"
+#include <algorithm>
+#include <memory>
+#include <vector>
+
+#include "absl/log/check.h"
+#include "absl/strings/match.h"
+#include "absl/types/span.h"
+#include "tensorflow/cc/framework/ops.h"
 #include "tensorflow/cc/framework/scope.h"
-#include "tensorflow/cc/ops/function_ops.h"
+#include "tensorflow/cc/ops/array_ops.h"
 #include "tensorflow/cc/ops/functional_ops.h"
-#include "tensorflow/cc/ops/standard_ops.h"
+#include "tensorflow/compiler/jit/defs.h"
 #include "tensorflow/compiler/tf2xla/xla_op_kernel.h"
 #include "tensorflow/compiler/tf2xla/xla_op_registry.h"
+#include "xla/tsl/lib/core/status_test_util.h"
 #include "tensorflow/core/common_runtime/graph_def_builder_util.h"
 #include "tensorflow/core/framework/attr_value.pb.h"
 #include "tensorflow/core/framework/function.h"
-#include "tensorflow/core/framework/graph_to_functiondef.h"
 #include "tensorflow/core/framework/node_def_util.h"
+#include "tensorflow/core/framework/op.h"
+#include "tensorflow/core/framework/op_kernel.h"
+#include "tensorflow/core/framework/types.h"
 #include "tensorflow/core/graph/graph_def_builder.h"
-#include "tensorflow/core/lib/core/status_test_util.h"
+#include "tensorflow/core/platform/env.h"
 #include "tensorflow/core/platform/test.h"
+#include "tensorflow/core/public/version.h"
 
 namespace tensorflow {
 namespace {
@@ -51,6 +62,7 @@ constexpr char kUncompilableFunctionName[] = "UncompilableFn";
 constexpr char kUncompilableFunctionNodeName[] = "n_c_uncompilable";
 constexpr char kUncompilableFunctionTwoName[] = "UncompilableFnTwo";
 constexpr char kUncompilableFunctionNodeTwoName[] = "n_d_uncompilable";
+constexpr char kNonMaxSuppressionNodeName[] = "NonMaxSuppression";
 
 // A dummy OpKernel for testing.
 class DummyCompilableOp : public XlaOpKernel {
@@ -63,6 +75,7 @@ class DummyCompilableOp : public XlaOpKernel {
 
 // Register the DummyCompilableOp kernel for CPU.
 REGISTER_OP("InputFloatOp").Output("o: float");
+REGISTER_OP("InputInt32Op").Output("o: int32");
 REGISTER_OP("CompilableOp").Input("i: float").Output("o: float");
 REGISTER_XLA_OP(Name("CompilableOp").Device(DEVICE_CPU_XLA_JIT),
                 DummyCompilableOp);
@@ -90,13 +103,13 @@ class CompilabilityCheckUtilTest : public ::testing::Test {
   }
 
   std::unique_ptr<RecursiveCompilabilityChecker> CreateCompilabilityChecker() {
-    return absl::make_unique<RecursiveCompilabilityChecker>(op_filter_,
+    return std::make_unique<RecursiveCompilabilityChecker>(op_filter_,
                                                             device_type_);
   }
 
   FunctionLibraryRuntime* GetFunctionLibraryRuntime() {
     OptimizerOptions opts;
-    pflr_ = absl::make_unique<ProcessFunctionLibraryRuntime>(
+    pflr_ = std::make_unique<ProcessFunctionLibraryRuntime>(
         nullptr, Env::Default(), /*config=*/nullptr, TF_GRAPH_DEF_VERSION,
         flib_def_.get(), opts);
 
@@ -106,9 +119,9 @@ class CompilabilityCheckUtilTest : public ::testing::Test {
   RecursiveCompilabilityChecker::OperationFilter op_filter_;
   DeviceType device_type_ = DeviceType(DEVICE_CPU_XLA_JIT);
   std::unique_ptr<FunctionDefLibrary> func_library_ =
-      absl::make_unique<FunctionDefLibrary>();
+      std::make_unique<FunctionDefLibrary>();
   std::unique_ptr<FunctionLibraryDefinition> flib_def_ =
-      absl::make_unique<FunctionLibraryDefinition>(OpRegistry::Global(),
+      std::make_unique<FunctionLibraryDefinition>(OpRegistry::Global(),
                                                    *func_library_);
   std::unique_ptr<RecursiveCompilabilityChecker> checker_;
   std::unique_ptr<ProcessFunctionLibraryRuntime> pflr_;
@@ -258,7 +271,7 @@ TEST_F(CompilabilityCheckUtilTest, CheckFunctionalWhileNode) {
   GraphDef graph_def;
   TF_EXPECT_OK(builder.ToGraphDef(&graph_def));
   std::unique_ptr<Graph> graph(new Graph(flib_def_.get()));
-  TF_CHECK_OK(GraphDefBuilderToGraph(builder, graph.get()));
+  CHECK_OK(GraphDefBuilderToGraph(builder, graph.get()));
 
   auto while_node_it = std::find_if(
       graph->nodes().begin(), graph->nodes().end(),
@@ -552,6 +565,91 @@ TEST_F(CompilabilityCheckUtilTest, TestCanTriggerXlaCompilation) {
   TF_ASSERT_OK(root.ToGraphDef(&graph_def));
 
   EXPECT_TRUE(CanTriggerXlaCompilation(graph_def));
+}
+
+TEST_F(CompilabilityCheckUtilTest, CheckNonMaxSuppressionV3UncompilableSlowOp) {
+  GraphDefBuilder builder(GraphDefBuilder::kFailImmediately);
+  auto opts = builder.opts();
+
+  Node* boxes = ops::SourceOp("InputFloatOp", opts);
+  Node* scores = ops::SourceOp("InputFloatOp", opts);
+  Node* max_output_size = ops::SourceOp("InputInt32Op", opts);
+  Node* iou_threshold = ops::SourceOp("InputFloatOp", opts);
+  Node* score_threshold = ops::SourceOp("InputFloatOp", opts);
+
+  NodeBuilder non_max_suppression_builder(
+      kNonMaxSuppressionNodeName, "NonMaxSuppressionV3", opts.op_registry());
+  non_max_suppression_builder.Input(boxes)
+      .Input(scores)
+      .Input(max_output_size)
+      .Input(iou_threshold)
+      .Input(score_threshold)
+      .Attr("T", DT_FLOAT);
+  Node* non_max_suppression;
+  non_max_suppression =
+      builder.opts().FinalizeBuilder(&non_max_suppression_builder);
+
+  GraphDef graph_def;
+  TF_EXPECT_OK(builder.ToGraphDef(&graph_def));
+  auto* flib_runtime = GetFunctionLibraryRuntime();
+
+  EXPECT_FALSE(checker_->IsCompilableNode(*non_max_suppression, flib_runtime));
+
+  const auto uncompilable_nodes =
+      checker_->FindUncompilableNodes(*non_max_suppression, flib_runtime);
+  ASSERT_EQ(1, uncompilable_nodes.size());
+  auto node_info_it =
+      uncompilable_nodes.find(NameAttrList().ShortDebugString());
+  ASSERT_NE(uncompilable_nodes.end(), node_info_it);
+
+  const auto& uncompilable_nodes_inside_function = node_info_it->second.second;
+  ASSERT_EQ(1, uncompilable_nodes_inside_function.size());
+  const auto& uncompilable_node_info = uncompilable_nodes_inside_function.at(0);
+  EXPECT_TRUE(absl::StrContains(uncompilable_node_info.uncompilable_reason,
+                                "slow operation"));
+}
+
+TEST_F(CompilabilityCheckUtilTest, CheckNonMaxSuppressionV4UncompilableSlowOp) {
+  GraphDefBuilder builder(GraphDefBuilder::kFailImmediately);
+  auto opts = builder.opts();
+
+  Node* boxes = ops::SourceOp("InputFloatOp", opts);
+  Node* scores = ops::SourceOp("InputFloatOp", opts);
+  Node* max_output_size = ops::SourceOp("InputInt32Op", opts);
+  Node* iou_threshold = ops::SourceOp("InputFloatOp", opts);
+  Node* score_threshold = ops::SourceOp("InputFloatOp", opts);
+
+  NodeBuilder non_max_suppression_v4_builder(
+      kNonMaxSuppressionNodeName, "NonMaxSuppressionV4", opts.op_registry());
+  non_max_suppression_v4_builder.Input(boxes)
+      .Input(scores)
+      .Input(max_output_size)
+      .Input(iou_threshold)
+      .Input(score_threshold)
+      .Attr("T", DT_FLOAT);
+  Node* non_max_suppression_v4;
+  non_max_suppression_v4 =
+      builder.opts().FinalizeBuilder(&non_max_suppression_v4_builder);
+
+  GraphDef graph_def;
+  TF_EXPECT_OK(builder.ToGraphDef(&graph_def));
+  auto* flib_runtime = GetFunctionLibraryRuntime();
+
+  EXPECT_FALSE(
+      checker_->IsCompilableNode(*non_max_suppression_v4, flib_runtime));
+
+  const auto uncompilable_nodes =
+      checker_->FindUncompilableNodes(*non_max_suppression_v4, flib_runtime);
+  ASSERT_EQ(1, uncompilable_nodes.size());
+  auto node_info_it =
+      uncompilable_nodes.find(NameAttrList().ShortDebugString());
+  ASSERT_NE(uncompilable_nodes.end(), node_info_it);
+
+  const auto& uncompilable_nodes_inside_function = node_info_it->second.second;
+  ASSERT_EQ(1, uncompilable_nodes_inside_function.size());
+  const auto& uncompilable_node_info = uncompilable_nodes_inside_function.at(0);
+  EXPECT_TRUE(absl::StrContains(uncompilable_node_info.uncompilable_reason,
+                                "slow operation"));
 }
 
 }  // namespace

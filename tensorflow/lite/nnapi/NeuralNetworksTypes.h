@@ -20,6 +20,9 @@ limitations under the License.
 
 #include <string>
 
+// WARNING: this header file is DEPRECATED.
+// See https://developer.android.com/ndk/guides/neuralnetworks/migration-guide.
+
 typedef struct AHardwareBuffer AHardwareBuffer;
 
 // NN api types based on NNAPI header file
@@ -105,6 +108,7 @@ enum {
   ANEURALNETWORKS_GATHER = 51,
   ANEURALNETWORKS_GREATER = 53,
   ANEURALNETWORKS_GREATER_EQUAL = 54,
+  ANEURALNETWORKS_GROUPED_CONV_2D = 55,
   ANEURALNETWORKS_LESS = 58,
   ANEURALNETWORKS_LESS_EQUAL = 59,
   ANEURALNETWORKS_LOG = 60,
@@ -145,6 +149,10 @@ enum {
   ANEURALNETWORKS_HARD_SWISH = 99,
   ANEURALNETWORKS_FILL = 100,
   ANEURALNETWORKS_RANK = 101,
+  ANEURALNETWORKS_BATCH_MATMUL = 102,
+  ANEURALNETWORKS_PACK = 103,
+  ANEURALNETWORKS_MIRROR_PAD = 104,
+  ANEURALNETWORKS_REVERSE = 105,
 };
 
 /**
@@ -255,6 +263,12 @@ enum {
    * API releases.
    */
   ANEURALNETWORKS_FEATURE_LEVEL_5 = 31,
+  /** Android NNAPI feature level 6 */
+  ANEURALNETWORKS_FEATURE_LEVEL_6 = 1000006,
+  /** Android NNAPI feature level 7 */
+  ANEURALNETWORKS_FEATURE_LEVEL_7 = 1000007,
+  /** Android NNAPI feature level 8 */
+  ANEURALNETWORKS_FEATURE_LEVEL_8 = 1000008,
 };
 
 /**
@@ -328,9 +342,9 @@ typedef struct ANeuralNetworksMemory ANeuralNetworksMemory;
  * mathematical operations that constitute the model.
  *
  * <p>The model will be built by calling<ul>
- * <li>{@link ANeuralNetworksModel_create},</li>
- * <li>{@link ANeuralNetworksModel_addOperation},</li>
- * <li>{@link ANeuralNetworksModel_addOperand},</li>
+ * <li>{@link ANeuralNetworksModel_create @/link},</li>
+ * <li>{@link ANeuralNetworksModel_addOperation @/link},</li>
+ * <li>{@link ANeuralNetworksModel_addOperand @/link},</li>
  * </ul>
  *
  * A model is completed by calling {@link ANeuralNetworksModel_finish}.
@@ -353,13 +367,14 @@ typedef struct ANeuralNetworksModel ANeuralNetworksModel;
  *
  * <p>To use:<ul>
  *    <li>Create a new compilation instance by calling the
- *        {@link ANeuralNetworksCompilation_create} function.</li>
+ *        {@link ANeuralNetworksCompilation_create @/link} function.</li>
  *    <li>Perform the compilation with {@link
- * ANeuralNetworksCompilation_start}.</li> <li>Wait for the compilation to
- * complete with {@link ANeuralNetworksCompilation_wait}.</li> <li>Use the
- * compilation as many times as needed with {@link
- * ANeuralNetworksExecution_create}.</li> <li>Destroy the compilation with
- * {@link ANeuralNetworksCompilation_free} once all executions using the
+ * ANeuralNetworksCompilation_start @/link}.</li> <li>Wait for the compilation
+ * to complete with {@link ANeuralNetworksCompilation_wait @/link}.</li> <li>Use
+ * the compilation as many times as needed with {@link
+ * ANeuralNetworksExecution_create @/link}.</li> <li>Destroy the compilation
+ * with
+ * {@link ANeuralNetworksCompilation_free @/link} once all executions using the
  * compilation have completed.</li></ul></p>
  *
  * <p>A compilation cannot be modified once {@link
@@ -384,18 +399,18 @@ typedef struct ANeuralNetworksCompilation ANeuralNetworksCompilation;
  *
  * <p>To use:<ul>
  *    <li>Create a new execution instance by calling the
- *        {@link ANeuralNetworksExecution_create} function.</li>
+ *        {@link ANeuralNetworksExecution_create @/link} function.</li>
  *    <li>Associate data to the model inputs with
- *        {@link ANeuralNetworksExecution_setInput} or
- *        {@link ANeuralNetworksExecution_setInputFromMemory}.</li>
+ *        {@link ANeuralNetworksExecution_setInput @/link} or
+ *        {@link ANeuralNetworksExecution_setInputFromMemory @/link}.</li>
  *    <li>Associate output buffers to the model outputs with
- *        {@link ANeuralNetworksExecution_setOutput} or
- *        {@link ANeuralNetworksExecution_setOutputFromMemory}.</li>
+ *        {@link ANeuralNetworksExecution_setOutput @/link} or
+ *        {@link ANeuralNetworksExecution_setOutputFromMemory @/link}.</li>
  *    <li>Apply the model with {@link
- * ANeuralNetworksExecution_startCompute}.</li> <li>Wait for the execution to
- * complete with {@link ANeuralNetworksExecution_wait}.</li> <li>Destroy the
- * execution with
- *        {@link ANeuralNetworksExecution_free}.</li></ul></p>
+ * ANeuralNetworksExecution_startCompute @/link}.</li> <li>Wait for the
+ * execution to complete with {@link ANeuralNetworksExecution_wait @/link}.</li>
+ * <li>Destroy the execution with
+ *        {@link ANeuralNetworksExecution_free @/link}.</li></ul></p>
  *
  * <p>An execution cannot be modified once {@link
  * ANeuralNetworksExecution_start} has been called on it.</p>

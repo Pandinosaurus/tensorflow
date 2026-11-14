@@ -12,15 +12,33 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
-#include "tensorflow/lite/allocation.h"
+#include "tensorflow/compiler/mlir/lite/allocation.h"
 
-#if defined(__linux__)
+#include <cstddef>
+#include <cstdint>
+
+#if defined(__linux__) || defined(_WIN32)
 #include <fcntl.h>
+#endif
+#if defined(_WIN32)
+#include <io.h>
 #endif
 
 #include <sys/stat.h>
 
-#include <string>
+#if defined(_WIN32)
+#define sys_open _open
+#define SYS_O_RDONLY (_O_RDONLY | _O_BINARY)
+#define sys_close _close
+#define sys_stat _stat64
+#define sys_fstat _fstat64
+#else
+#define sys_open open
+#define SYS_O_RDONLY O_RDONLY
+#define sys_close close
+#define sys_stat stat
+#define sys_fstat fstat
+#endif
 
 #include <gtest/gtest.h>
 #include "tensorflow/lite/testing/util.h"
@@ -52,7 +70,7 @@ TEST(MMAPAllocation, TestValidFile) {
   EXPECT_NE(allocation.base(), nullptr);
 }
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(_WIN32)
 TEST(MMAPAllocation, TestInvalidFileDescriptor) {
   if (!MMAPAllocation::IsSupported()) {
     return;
@@ -68,12 +86,12 @@ TEST(MMAPAllocation, TestInvalidSizeAndOffset) {
     return;
   }
 
-  int fd =
-      open("tensorflow/lite/testdata/empty_model.bin", O_RDONLY);
+  int fd = sys_open("tensorflow/lite/testdata/empty_model.bin",
+                    SYS_O_RDONLY);
   ASSERT_GT(fd, 0);
 
-  struct stat fd_stat;
-  ASSERT_EQ(fstat(fd, &fd_stat), 0);
+  struct sys_stat fd_stat;
+  ASSERT_EQ(sys_fstat(fd, &fd_stat), 0);
 
   size_t file_size = fd_stat.st_size;
 
@@ -86,7 +104,8 @@ TEST(MMAPAllocation, TestInvalidSizeAndOffset) {
                                            &error_reporter);
   EXPECT_FALSE(allocation_invalid_length.valid());
 
-  MMAPAllocation allocation_excessive_length(fd, /*offset=*/0, /*length=*/0,
+  MMAPAllocation allocation_excessive_length(fd, /*offset=*/0,
+                                             /*length=*/file_size + 1,
                                              &error_reporter);
   EXPECT_FALSE(allocation_excessive_length.valid());
 
@@ -94,7 +113,11 @@ TEST(MMAPAllocation, TestInvalidSizeAndOffset) {
       fd, /*offset=*/10, /*length=*/file_size, &error_reporter);
   EXPECT_FALSE(allocation_excessive_length_with_offset.valid());
 
-  close(fd);
+  MMAPAllocation allocation_integer_overflow(
+      fd, /*offset=*/10, /*length=*/SIZE_MAX - 5, &error_reporter);
+  EXPECT_FALSE(allocation_integer_overflow.valid());
+
+  sys_close(fd);
 }
 
 TEST(MMAPAllocation, TestValidFileDescriptor) {
@@ -102,8 +125,8 @@ TEST(MMAPAllocation, TestValidFileDescriptor) {
     return;
   }
 
-  int fd =
-      open("tensorflow/lite/testdata/empty_model.bin", O_RDONLY);
+  int fd = sys_open("tensorflow/lite/testdata/empty_model.bin",
+                    SYS_O_RDONLY);
   ASSERT_GT(fd, 0);
 
   TestErrorReporter error_reporter;
@@ -113,7 +136,7 @@ TEST(MMAPAllocation, TestValidFileDescriptor) {
   EXPECT_GT(allocation.bytes(), 0);
   EXPECT_NE(allocation.base(), nullptr);
 
-  close(fd);
+  sys_close(fd);
 }
 
 TEST(MMAPAllocation, TestValidFileDescriptorWithOffset) {
@@ -121,12 +144,12 @@ TEST(MMAPAllocation, TestValidFileDescriptorWithOffset) {
     return;
   }
 
-  int fd =
-      open("tensorflow/lite/testdata/empty_model.bin", O_RDONLY);
+  int fd = sys_open("tensorflow/lite/testdata/empty_model.bin",
+                    SYS_O_RDONLY);
   ASSERT_GT(fd, 0);
 
-  struct stat fd_stat;
-  ASSERT_EQ(fstat(fd, &fd_stat), 0);
+  struct sys_stat fd_stat;
+  ASSERT_EQ(sys_fstat(fd, &fd_stat), 0);
   size_t file_size = fd_stat.st_size;
 
   TestErrorReporter error_reporter;
@@ -137,8 +160,8 @@ TEST(MMAPAllocation, TestValidFileDescriptorWithOffset) {
   EXPECT_GT(allocation.bytes(), 0);
   EXPECT_NE(allocation.base(), nullptr);
 
-  close(fd);
+  sys_close(fd);
 }
-#endif  // defined(__linux__)
+#endif  // defined(__linux__) || defined(_WIN32)
 
 }  // namespace tflite

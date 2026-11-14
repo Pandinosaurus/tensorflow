@@ -13,6 +13,10 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include <functional>
+
+#include "absl/status/status.h"
+#include "absl/strings/string_view.h"
 #include "tensorflow/core/common_runtime/device.h"
 #include "tensorflow/core/common_runtime/device/device_event_mgr.h"
 #include "tensorflow/core/common_runtime/gpu/gpu_util.h"
@@ -33,7 +37,7 @@ void GPUDeviceContext::CopyCPUTensorToDevice(const Tensor* cpu_tensor,
 }
 
 void GPUDeviceContext::CopyDeviceTensorToCPU(const Tensor* device_tensor,
-                                             StringPiece tensor_name,
+                                             absl::string_view tensor_name,
                                              Device* device, Tensor* cpu_tensor,
                                              StatusCallback done) {
   GPUUtil::CopyGPUTensorToCPU(device, this, device_tensor, cpu_tensor, done);
@@ -47,12 +51,12 @@ void GPUDeviceContext::CopyTensorInSameDevice(const Tensor* input_tensor,
                                   done);
 }
 
-Status GPUDeviceContext::ThenExecute(Device* device, se::Stream* stream,
-                                     std::function<void()> func) {
-  const DeviceBase::GpuDeviceInfo* gpu_info =
-      device->tensorflow_gpu_device_info();
+absl::Status GPUDeviceContext::ThenExecute(Device* device, se::Stream* stream,
+                                           std::function<void()> func) {
+  const DeviceBase::AcceleratorDeviceInfo* gpu_info =
+      device->tensorflow_accelerator_device_info();
   gpu_info->event_mgr->ThenExecute(stream, func);
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 }  // namespace tensorflow

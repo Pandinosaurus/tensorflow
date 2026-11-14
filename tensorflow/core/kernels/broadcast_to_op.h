@@ -16,7 +16,9 @@ limitations under the License.
 #ifndef TENSORFLOW_CORE_KERNELS_BROADCAST_TO_OP_H_
 #define TENSORFLOW_CORE_KERNELS_BROADCAST_TO_OP_H_
 
-#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
+#include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
+#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/tensor.h"
 #include "tensorflow/core/framework/tensor_shape.h"
@@ -77,9 +79,9 @@ struct BroadcastTo {
         ReshapeAndBCast<5>(device, output_tensor, input_tensor, bcast);
         break;
       default:
-        ctx->SetStatus(errors::Unimplemented(
+        ctx->SetStatus(absl::UnimplementedError(absl::StrCat(
             "Broadcast between ", input_shape.DebugString(), " and ",
-            output_shape.DebugString(), " is not supported yet."));
+            output_shape.DebugString(), " is not supported yet.")));
         break;
     }
   }

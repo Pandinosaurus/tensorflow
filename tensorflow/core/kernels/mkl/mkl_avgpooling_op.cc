@@ -16,21 +16,20 @@
 #ifdef INTEL_MKL
 #define EIGEN_USE_THREADS
 
-#include "mkldnn.hpp"
+#include "absl/algorithm/container.h"
+#include "dnnl.hpp"
 #include "tensorflow/core/common_runtime/device.h"
 #include "tensorflow/core/framework/common_shape_fns.h"
-#include "tensorflow/core/framework/numeric_op.h"
 #include "tensorflow/core/framework/register_types.h"
 #include "tensorflow/core/kernels/mkl/mkl_pooling_ops_common.h"
-#include "tensorflow/core/util/mkl_util.h"
 
-using mkldnn::algorithm;
-using mkldnn::engine;
-using mkldnn::error;
-using mkldnn::memory;
-using mkldnn::pooling_backward;
-using mkldnn::pooling_forward;
-using mkldnn::prop_kind;
+using dnnl::algorithm;
+using dnnl::engine;
+using dnnl::error;
+using dnnl::memory;
+using dnnl::pooling_backward;
+using dnnl::pooling_forward;
+using dnnl::prop_kind;
 
 namespace tensorflow {
 
@@ -41,7 +40,7 @@ class MklAvgPoolingOp : public MklPoolingForwardOpBase<T> {
  public:
   explicit MklAvgPoolingOp(OpKernelConstruction* context)
       : MklPoolingForwardOpBase<T>(context) {
-    // Workspace is an MKLDNN construct that is only used in Max Pooling.
+    // Workspace is an oneDNN construct that is only used in Max Pooling.
     // So set workspace_enabled_ to false.
     this->workspace_enabled_ = false;
     this->native_format_ = native_format;
@@ -63,6 +62,18 @@ class MklAvgPoolingOp : public MklPoolingForwardOpBase<T> {
       MklPoolParameters pool_params;
       // Check whether pooling is 2D or 3D.
       bool is_pool2d = (this->ksize_.size() == 4);
+
+      // Validate that the input tensor rank matches the pooling type.
+      // This prevents a CHECK failure in TFShapeToMklDnnDimsInNCDHW when
+      // the input does not have the expected number of dimensions.
+      if (!dnn_shape_input.IsMklTensor()) {
+        int expected_rank = is_pool2d ? 4 : 5;
+        OP_REQUIRES(context, input_tensor.dims() == expected_rank,
+                    absl::InvalidArgumentError(
+                        absl::StrCat("Input must be rank ", expected_rank,
+                                     " but got rank ", input_tensor.dims())));
+      }
+
       // Get the input tensor and initialize the pooling parameters.
       TensorShape input_tensor_shape = input_tensor.shape();
       this->InitMklPoolParameters(context, &pool_params, dnn_shape_input,
@@ -72,9 +83,11 @@ class MklAvgPoolingOp : public MklPoolingForwardOpBase<T> {
       Tensor* output_tensor = nullptr;
       memory::dims output_dims_mkl_order;
       this->GetOutputDims(pool_params, &output_dims_mkl_order);
+      // Check for corner case - if output is an empty tensor, return.
+      TensorShape out_tf_shape = MklDnnDimsToTFShape(output_dims_mkl_order);
 
       // If input is an empty tensor, allocate an empty output tensor.
-      if (input_tensor.NumElements() == 0) {
+      if (input_tensor.NumElements() == 0 || out_tf_shape.num_elements() == 0) {
         const int kOutputIndex = 0;
         this->AllocateEmptyOutputTensor(context, kOutputIndex, &pool_params,
                                         output_dims_mkl_order, &output_tensor);
@@ -83,17 +96,21 @@ class MklAvgPoolingOp : public MklPoolingForwardOpBase<T> {
 
       memory::dims filter_dims, strides, padding_left, padding_right;
       // Get src/filter/stride/padding information.
+#ifndef ENABLE_ONEDNN_V3
       this->PoolParamsToDims(&pool_params, &filter_dims, &strides,
+#else
+      memory::dims dilations;
+      this->PoolParamsToDims(&pool_params, &filter_dims, &strides, &dilations,
+#endif  // !ENABLE_ONEDNN_V3
                              &padding_left, &padding_right, is_pool2d);
 
       // Get the input memory descriptor.
       memory::dims src_dims =
-          dnn_shape_input.IsMklTensor()
-              ? dnn_shape_input.GetSizesAsMklDnnDims()
-              : is_pool2d ? TFShapeToMklDnnDimsInNCHW(input_tensor.shape(),
-                                                      this->data_format_tf_)
-                          : TFShapeToMklDnnDimsInNCDHW(input_tensor.shape(),
-                                                       this->data_format_tf_);
+          dnn_shape_input.IsMklTensor() ? dnn_shape_input.GetSizesAsMklDnnDims()
+          : is_pool2d ? TFShapeToMklDnnDimsInNCHW(input_tensor.shape(),
+                                                  this->data_format_tf_)
+                      : TFShapeToMklDnnDimsInNCDHW(input_tensor.shape(),
+                                                   this->data_format_tf_);
       memory::desc input_md = dnn_shape_input.IsMklTensor()
                                   ? dnn_shape_input.GetMklLayout()
                                   : memory::desc(src_dims, MklDnnType<T>(),
@@ -109,13 +126,22 @@ class MklAvgPoolingOp : public MklPoolingForwardOpBase<T> {
       else
         pooling_prop_kind = prop_kind::forward_training;
 
-      // TODO(DNNL): Find out what should we use input_md.data.format.
       MklPoolingParams fwdParams(
-          src_dims, output_dims_mkl_order, filter_dims, strides, padding_left,
-          padding_right, mkldnn::algorithm::pooling_avg_exclude_padding,
-          pooling_prop_kind,
+#ifndef ENABLE_ONEDNN_V3
+          src_dims, output_dims_mkl_order, filter_dims, strides,
+#else
+          src_dims, output_dims_mkl_order, filter_dims, strides, dilations,
+#endif  // !ENABLE_ONEDNN_V3
+          padding_left, padding_right,
+          dnnl::algorithm::pooling_avg_exclude_padding, pooling_prop_kind,
           static_cast<memory::format_tag>(this->data_format_mkldnn_), input_md,
           this->native_format_);
+      // Create the oneDNN wrapper over Eigen threadpool and set max threads
+      // in oneDNN.
+      Eigen::ThreadPoolInterface* eigen_interface =
+          EigenThreadPoolFromTfContext(context);
+      tsl::OneDnnThreadPool eigen_tp(eigen_interface,
+                                     ThreadPoolUseCallerThread());
       pooling_fwd = MklPoolingFwdPrimitiveFactory<T>::Get(fwdParams);
 
       // Allocate output tensor.
@@ -129,7 +155,6 @@ class MklAvgPoolingOp : public MklPoolingForwardOpBase<T> {
 
       T* dst_data = output_tensor->flat<T>().data();
       std::shared_ptr<stream> fwd_cpu_stream;
-      MklDnnThreadPool eigen_tp(context);
       fwd_cpu_stream.reset(CreateStream(&eigen_tp, pooling_fwd->GetEngine()));
       // Execute pooling op.
       pooling_fwd->Execute(src_data, dst_data, nullptr, fwd_cpu_stream);
@@ -138,8 +163,20 @@ class MklAvgPoolingOp : public MklPoolingForwardOpBase<T> {
       if (int8_forward_inference) {
         const Tensor& min_input_t = MklGetInput(context, 1);
         const Tensor& max_input_t = MklGetInput(context, 2);
-        const float min_input = min_input_t.flat<float>()(0);
-        const float max_input = max_input_t.flat<float>()(0);
+
+        OP_REQUIRES(context, TensorShapeUtils::IsScalar(min_input_t.shape()),
+                    absl::InvalidArgumentError(absl::StrCat(
+                        "min_input shape must be rank 0 but is rank ",
+                        min_input_t.dims(), ", received shape: ",
+                        min_input_t.shape().DebugString())));
+        OP_REQUIRES(context, TensorShapeUtils::IsScalar(max_input_t.shape()),
+                    absl::InvalidArgumentError(absl::StrCat(
+                        "max_input shape must be rank 0 but is rank ",
+                        max_input_t.dims(), ", received shape: ",
+                        max_input_t.shape().DebugString())));
+
+        const float min_input = min_input_t.scalar<float>()();
+        const float max_input = max_input_t.scalar<float>()();
 
         Tensor* output_min = nullptr;
         Tensor* output_max = nullptr;
@@ -150,16 +187,16 @@ class MklAvgPoolingOp : public MklPoolingForwardOpBase<T> {
                                   output_min_mkl_shape, this->native_format_);
         AllocateOutputSetMklShape(context, 2, &output_max, {},
                                   output_max_mkl_shape, this->native_format_);
-        output_min->flat<float>()(0) = min_input;
-        output_max->flat<float>()(0) = max_input;
+        output_min->scalar<float>()() = min_input;
+        output_max->scalar<float>()() = max_input;
       }
-    } catch (mkldnn::error& e) {
+    } catch (dnnl::error& e) {
       string error_msg = "Status: " + std::to_string(e.status) +
                          ", message: " + string(e.message) + ", in file " +
                          string(__FILE__) + ":" + std::to_string(__LINE__);
-      OP_REQUIRES_OK(
-          context,
-          errors::Aborted("Operation received an exception:", error_msg));
+      OP_REQUIRES_OK(context,
+                     absl::AbortedError(absl::StrCat(
+                         "Operation received an exception:", error_msg)));
     }
   }  // Compute
 
@@ -181,7 +218,6 @@ class MklAvgPoolingGradOp : public MklPoolingBackwardOpBase<T> {
           MklGetInput(context, kInputTensorIndexInputShape);
       const Tensor& grad_tensor =
           MklGetInput(context, kInputTensorIndexInputGradient);
-
       MklDnnShape orig_input_mkl_shape, grad_mkl_shape;
       GetMklShape(context, kInputTensorIndexInputShape, &orig_input_mkl_shape,
                   this->native_format_);
@@ -189,40 +225,130 @@ class MklAvgPoolingGradOp : public MklPoolingBackwardOpBase<T> {
                   this->native_format_);
       if (!context->status().ok()) return;
 
-      // Used to allocate output_diff_src/diff_src.
-      MklDnnData<T> grad_dnn_data(&cpu_engine_);
-      MklPoolParameters pool_params;
-      auto shape_vec = orig_input_tensor.vec<int32>();
-      TensorShape orig_input_shape;
-      for (int i = 0; i < orig_input_tensor.NumElements(); i++) {
-        orig_input_shape.AddDim(shape_vec(i));
-      }
+      // Verify that orig_input_tensor is a 1D vector before calling
+      // .vec<int32>(). A scalar or higher-rank tensor would cause an
+      // assertion crash.
+      OP_REQUIRES(context, orig_input_tensor.dims() == 1,
+                  absl::InvalidArgumentError(absl::StrCat(
+                      "orig_input_shape must be a 1D tensor, but got a ",
+                      orig_input_tensor.dims(), "D tensor with shape ",
+                      orig_input_tensor.shape().DebugString())));
+
+      // Defensive validation that ksize has the expected number of
+      // dimensions. The constructor already validates this, but we
+      // check here to guard against potential memory safety issues
+      // if ksize is somehow invalid at Compute time.
+      OP_REQUIRES(context, this->ksize_.size() == 4 || this->ksize_.size() == 5,
+                  absl::InvalidArgumentError(
+                      absl::StrCat("ksize must have 4 or 5 elements, but got ",
+                                   this->ksize_.size())));
 
       bool is_pool2d = (this->ksize_.size() == 4);
+      int expected_rank = is_pool2d ? 4 : 5;
+      int expected_grad_rank = is_pool2d ? 4 : 5;
+
+      // Validate grad tensor rank before accessing its dimensions.
+      // For 2D pooling, grad must be 4D; for 3D pooling, grad must be 5D.
+      if (!grad_mkl_shape.IsMklTensor()) {
+        OP_REQUIRES(context, grad_tensor.dims() == expected_rank,
+                    absl::InvalidArgumentError(absl::StrCat(
+                        "Expected grad tensor to be ", expected_rank,
+                        "D, but got a ", grad_tensor.dims(), "D tensor.")));
+      }
+
+      // For empty tensor, avg_pool_3d_grad in oneDNN doesn't handle this case.
+      // Follow what native TF does in this case.
+
+      TensorShape output_shape;
+      auto shape_vec = orig_input_tensor.vec<int32>();
+      for (int64_t i = 0; i < orig_input_tensor.NumElements(); ++i) {
+        OP_REQUIRES_OK(context, output_shape.AddDimWithStatus(shape_vec(i)));
+      }
+
+      // Validate that output_shape has the expected rank to prevent CHECK
+      // failure in TFShapeToMklDnnDims* functions which unconditionally access
+      // dim_size(N) (see #118354).
+      OP_REQUIRES(
+          context, output_shape.dims() == expected_rank,
+          absl::InvalidArgumentError(absl::StrCat(
+              "Expected orig_input shape to represent a ", expected_rank,
+              "D shape, but got a ", output_shape.dims(), "D shape.")));
+
+      Tensor* output_tensor = nullptr;
+      OP_REQUIRES_OK(context,
+                     context->allocate_output(0, output_shape, &output_tensor));
+      output_tensor->flat<T>().setZero();
+
+      if (output_shape.num_elements() == 0) {
+        return;
+      }
+
+      MklPoolParameters pool_params;
       this->InitMklPoolParameters(context, &pool_params, orig_input_mkl_shape,
-                                  orig_input_shape);
+                                  output_shape);
+
+      TensorShape forward_output_shape;
+      if (is_pool2d) {
+        OP_REQUIRES_OK(context,
+                       ShapeFromFormatWithStatus(
+                           this->data_format_tf_, pool_params.tensor_in_batch,
+                           pool_params.out_height, pool_params.out_width,
+                           pool_params.out_depth, &forward_output_shape));
+      } else {
+        OP_REQUIRES_OK(context,
+                       ShapeFromFormatWithStatus(
+                           this->data_format_tf_, pool_params.tensor_in_batch,
+                           {pool_params.out_planes, pool_params.out_height,
+                            pool_params.out_width},
+                           pool_params.out_depth, &forward_output_shape));
+      }
+      OP_REQUIRES(
+          context, grad_tensor.shape() == forward_output_shape,
+          absl::InvalidArgumentError(absl::StrCat(
+              "Expected grad shape to be ", forward_output_shape.DebugString(),
+              ", but got ", grad_tensor.shape().DebugString())));
+
+      // Used to allocate output_diff_src/diff_src.
+      MklDnnData<T> grad_dnn_data(&cpu_engine_);
 
       memory::dims filter_dims, strides, padding_left, padding_right;
+#ifndef ENABLE_ONEDNN_V3
       this->PoolParamsToDims(&pool_params, &filter_dims, &strides,
+#else
+      memory::dims dilations;
+      this->PoolParamsToDims(&pool_params, &filter_dims, &strides, &dilations,
+#endif  // !ENABLE_ONEDNN_V3
                              &padding_left, &padding_right, is_pool2d);
 
       memory::dims orig_input_dims_mkl_order =
           orig_input_mkl_shape.IsMklTensor()
               ? orig_input_mkl_shape.GetSizesAsMklDnnDims()
-              : is_pool2d ? TFShapeToMklDnnDimsInNCHW(orig_input_shape,
-                                                      this->data_format_tf_)
-                          : TFShapeToMklDnnDimsInNCDHW(orig_input_shape,
-                                                       this->data_format_tf_);
+          : is_pool2d
+              ? TFShapeToMklDnnDimsInNCHW(output_shape, this->data_format_tf_)
+              : TFShapeToMklDnnDimsInNCDHW(output_shape, this->data_format_tf_);
 
       memory::dims diff_dst_dims =
-          grad_mkl_shape.IsMklTensor()
-              ? grad_mkl_shape.GetSizesAsMklDnnDims()
-              : is_pool2d ? TFShapeToMklDnnDimsInNCHW(grad_tensor.shape(),
-                                                      this->data_format_tf_)
-                          : TFShapeToMklDnnDimsInNCDHW(grad_tensor.shape(),
-                                                       this->data_format_tf_);
+          grad_mkl_shape.IsMklTensor() ? grad_mkl_shape.GetSizesAsMklDnnDims()
+          : is_pool2d ? TFShapeToMklDnnDimsInNCHW(grad_tensor.shape(),
+                                                  this->data_format_tf_)
+                      : TFShapeToMklDnnDimsInNCDHW(grad_tensor.shape(),
+                                                   this->data_format_tf_);
+
+      OP_REQUIRES(
+          context, orig_input_dims_mkl_order[0] == diff_dst_dims[0],
+          absl::InvalidArgumentError(absl::StrCat(
+              "Expected first dimension of orig_input and diff_dst to match, "
+              "got ",
+              orig_input_dims_mkl_order[0], " and ", diff_dst_dims[0])));
+
       memory::dims output_dims_mkl_order;
       this->GetOutputDims(pool_params, &output_dims_mkl_order);
+
+      // Check if there is any 0-dimension in output.
+      if (absl::c_any_of(output_dims_mkl_order,
+                         [](dnnl_dim_t dim) { return dim == 0; })) {
+        return;
+      }
 
       // get src memory::desc
       memory::desc src_md =
@@ -242,23 +368,25 @@ class MklAvgPoolingGradOp : public MklPoolingBackwardOpBase<T> {
       // that is used in the backward pass.
       MklPoolingParams bwdParams(
           orig_input_dims_mkl_order, output_dims_mkl_order, filter_dims,
+#ifndef ENABLE_ONEDNN_V3
           strides, padding_left, padding_right,
-          mkldnn::algorithm::pooling_avg_exclude_padding,
+#else
+          strides, dilations, padding_left, padding_right,
+#endif  // !ENABLE_ONEDNN_V3
+          dnnl::algorithm::pooling_avg_exclude_padding,
           prop_kind::forward_training,
           static_cast<memory::format_tag>(this->data_format_mkldnn_), src_md,
           this->native_format_);
+      Eigen::ThreadPoolInterface* eigen_interface =
+          EigenThreadPoolFromTfContext(context);
+      tsl::OneDnnThreadPool eigen_tp(eigen_interface,
+                                     ThreadPoolUseCallerThread());
       MklPoolingBwdPrimitive<T>* pooling_bwd =
           MklPoolingBwdPrimitiveFactory<T>::Get(bwdParams);
 
       std::shared_ptr<stream> bwd_cpu_stream;
-      MklDnnThreadPool eigen_tp(context);
       bwd_cpu_stream.reset(CreateStream(&eigen_tp, pooling_bwd->GetEngine()));
-      Tensor* output_tensor = nullptr;
-      this->AllocateOutputTensor(context, *(pooling_bwd->GetPoolingBwdPd()),
-                                 orig_input_dims_mkl_order,
-                                 this->tensor_format_mkldnn_, &output_tensor);
-
-      // TODO(nammbash): Refactor (lines 249-262) common code for
+      // TODO(intel-tf): Refactor (lines 249-262) common code for
       // max & avg pooling into superclass or common utils function.
       // Check whether we need to reorder diff_dst.
       std::shared_ptr<PoolingBwdPd> pooling_bwd_pd =
@@ -281,12 +409,13 @@ class MklAvgPoolingGradOp : public MklPoolingBackwardOpBase<T> {
       // Execute pooling op.
       pooling_bwd->Execute(diff_dst_data, diff_src_data, nullptr,
                            bwd_cpu_stream);
-    } catch (mkldnn::error& e) {
+    } catch (dnnl::error& e) {
       string error_msg = "Status: " + std::to_string(e.status) +
                          ", message: " + string(e.message) + ", in file " +
                          string(__FILE__) + ":" + std::to_string(__LINE__);
-      OP_REQUIRES_OK(context, errors::Aborted("Compute received an exception:",
-                                              error_msg));
+      OP_REQUIRES_OK(context,
+                     absl::AbortedError(absl::StrCat(
+                         "Compute received an exception:", error_msg)));
     }
   }
 
@@ -324,6 +453,7 @@ class MklAvgPoolingGradOp : public MklPoolingBackwardOpBase<T> {
 
 TF_CALL_float(REGISTER_MKL_AVGPOOL3D_KERNELS);
 TF_CALL_bfloat16(REGISTER_MKL_AVGPOOL3D_KERNELS);
+#undef REGISTER_MKL_AVGPOOL3D_KERNELS
 
 #define REGISTER_MKL_AVGPOOL_KERNELS(T)                                       \
   REGISTER_KERNEL_BUILDER(                                                    \
@@ -351,6 +481,7 @@ TF_CALL_bfloat16(REGISTER_MKL_AVGPOOL3D_KERNELS);
 
 TF_CALL_float(REGISTER_MKL_AVGPOOL_KERNELS);
 TF_CALL_bfloat16(REGISTER_MKL_AVGPOOL_KERNELS);
+#undef REGISTER_MKL_AVGPOOL_KERNELS
 
 REGISTER_KERNEL_BUILDER(Name("_MklQuantizedAvgPool")
                             .Device(DEVICE_CPU)

@@ -16,13 +16,21 @@ limitations under the License.
 #include "tensorflow/core/common_runtime/executor.h"
 
 #include <algorithm>
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
 
+#include "absl/strings/str_cat.h"
 #include "tensorflow/cc/framework/ops.h"
 #include "tensorflow/cc/ops/array_ops.h"
 #include "tensorflow/cc/ops/const_op.h"
 #include "tensorflow/cc/ops/control_flow_ops_internal.h"
 #include "tensorflow/cc/ops/function_ops.h"
 #include "tensorflow/cc/ops/standard_ops.h"
+#include "xla/tsl/platform/test_benchmark.h"
 #include "tensorflow/core/common_runtime/device.h"
 #include "tensorflow/core/common_runtime/device_factory.h"
 #include "tensorflow/core/common_runtime/graph_constructor.h"
@@ -31,19 +39,24 @@ limitations under the License.
 #include "tensorflow/core/common_runtime/process_util.h"
 #include "tensorflow/core/common_runtime/step_stats_collector.h"
 #include "tensorflow/core/framework/attr_value.pb.h"
+#include "tensorflow/core/framework/cancellation.h"
+#include "tensorflow/core/framework/local_rendezvous.h"
 #include "tensorflow/core/framework/op.h"
 #include "tensorflow/core/framework/rendezvous.h"
 #include "tensorflow/core/framework/step_stats.pb.h"
 #include "tensorflow/core/framework/tensor_testutil.h"
 #include "tensorflow/core/framework/versions.pb.h"
 #include "tensorflow/core/graph/algorithm.h"
+#include "tensorflow/core/graph/testlib.h"
+#include "tensorflow/core/lib/core/status.h"
 #include "tensorflow/core/lib/core/status_test_util.h"
 #include "tensorflow/core/lib/random/simple_philox.h"
+#include "tensorflow/core/lib/strings/str_util.h"
 #include "tensorflow/core/lib/strings/strcat.h"
 #include "tensorflow/core/platform/logging.h"
+#include "tensorflow/core/platform/strcat.h"
 #include "tensorflow/core/platform/test.h"
 #include "tensorflow/core/platform/test_benchmark.h"
-#include "tensorflow/core/platform/tracing.h"
 #include "tensorflow/core/public/session_options.h"
 
 namespace tensorflow {
@@ -60,6 +73,14 @@ class ExecutorTest : public ::testing::Test {
   }
 
   ~ExecutorTest() override {
+    // LocalRendezvous::AsyncRecv() might still executing after done_callback
+    // returns. Wait until the local rc_owner_ releases.
+    while (!rendez_->RefCountIsOne()) {
+      LOG(INFO) << "Waiting for rendezvous to release. Current refcount: "
+                << rendez_->RefCount();
+      absl::SleepFor(absl::Milliseconds(200));
+      LocalRendezvous::ReleaseAbortedRendezvous();
+    }
     // There should always be exactly one Ref left on the Rendezvous
     // when the test completes.
     CHECK(rendez_->Unref());
@@ -86,12 +107,17 @@ class ExecutorTest : public ::testing::Test {
     runner_ = [this](std::function<void()> fn) { thread_pool_->Schedule(fn); };
   }
 
-  Status Run(Rendezvous* rendez) {
+  absl::Status Run(Rendezvous* rendez) {
     Executor::Args args;
     args.rendezvous = rendez;
     args.stats_collector = &step_stats_collector_;
     args.runner = runner_;
     return exec_->Run(args);
+  }
+
+  const StepStats& GetStepStats() {
+    step_stats_collector_.Finalize();
+    return step_stats_;
   }
 
   thread::ThreadPool* thread_pool_ = nullptr;
@@ -113,7 +139,7 @@ Tensor V(const float val) {
 // A int32 val -> Tensor<int32>
 Tensor VI(const int32_t val) {
   Tensor tensor(DT_INT32, TensorShape({}));
-  tensor.scalar<int32>()() = val;
+  tensor.scalar<int32_t>()() = val;
   return tensor;
 }
 
@@ -138,16 +164,16 @@ float V(const Tensor& tensor) {
   return tensor.scalar<float>()();
 }
 
-static uint64 kIncarnation = 1;  // Uses in following tests.
+static uint64_t kIncarnation = 1;  // Uses in following tests.
 
-Rendezvous::ParsedKey Key(const string& sender, const uint64 incarnation,
-                          const string& receiver, const string& name) {
+Rendezvous::ParsedKey Key(const std::string& sender, const uint64_t incarnation,
+                          const std::string& receiver,
+                          const std::string& name) {
   Rendezvous::ParsedKey result;
-  CHECK(
+  CHECK_OK(
       Rendezvous::ParseKey(Rendezvous::CreateKey(sender, incarnation, receiver,
                                                  name, FrameAndIter(0, 0)),
-                           &result)
-          .ok());
+                           &result));
   return result;
 }
 
@@ -156,7 +182,7 @@ Rendezvous::ParsedKey Key(const string& sender, const uint64 incarnation,
 
 TEST_F(ExecutorTest, SimpleAdd) {
   // c = a + b
-  auto g = absl::make_unique<Graph>(OpRegistry::Global());
+  auto g = std::make_unique<Graph>(OpRegistry::Global());
   auto in0 = test::graph::Recv(g.get(), "a", "float", ALICE, 1, BOB);
   auto in1 = test::graph::Recv(g.get(), "b", "float", ALICE, 1, BOB);
   auto tmp = test::graph::Add(g.get(), in0, in1);
@@ -175,6 +201,60 @@ TEST_F(ExecutorTest, SimpleAdd) {
   EXPECT_EQ(2.0, V(out));  // out = 1.0 + 1.0 = 2.0
 }
 
+TEST_F(ExecutorTest, StepStatsNumerical) {
+  // Similar to SimpleAdd, but tests numerical values in StepStats
+
+  // c = a + b
+  auto g = std::make_unique<Graph>(OpRegistry::Global());
+  auto in0 = test::graph::Recv(g.get(), "a", "float", ALICE, 1, BOB);
+  auto in1 = test::graph::Recv(g.get(), "b", "float", ALICE, 1, BOB);
+  auto tmp = test::graph::Add(g.get(), in0, in1);
+  test::graph::Send(g.get(), tmp, "c", BOB, 1, ALICE);
+  Create(std::move(g));
+  Rendezvous::Args args;
+  TF_ASSERT_OK(rendez_->Send(Key(ALICE, kIncarnation, BOB, "a"), args, V(1.0),
+                             false));  // in0 = 1.0
+  TF_ASSERT_OK(rendez_->Send(Key(ALICE, kIncarnation, BOB, "b"), args, V(1.0),
+                             false));  // in1 = 1.0
+  TF_ASSERT_OK(Run(rendez_));
+  Tensor out = V(-1);
+  bool is_dead = false;
+  TF_ASSERT_OK(
+      rendez_->Recv(Key(BOB, kIncarnation, ALICE, "c"), args, &out, &is_dead));
+  EXPECT_EQ(2.0, V(out));  // out = 1.0 + 1.0 = 2.0
+
+  auto& step_stats = GetStepStats();
+  EXPECT_EQ(1, step_stats.dev_stats_size());
+  for (const auto& dev_stat : step_stats.dev_stats()) {
+    EXPECT_EQ(2, dev_stat.node_stats_size());
+    for (const auto& node_stat : dev_stat.node_stats()) {
+      // scheduled_nanos <= all_start_nanos <= op_start_nanos <= op_end_nanos <=
+      // all_end_nanos
+      auto scheduled_nanos = node_stat.scheduled_nanos();
+      auto all_start_nanos = node_stat.all_start_nanos();
+      auto op_start_nanos = all_start_nanos + node_stat.op_start_rel_nanos();
+      auto op_end_nanos = all_start_nanos + node_stat.op_end_rel_nanos();
+      auto all_end_nanos = all_start_nanos + node_stat.all_end_rel_nanos();
+      EXPECT_LE(scheduled_nanos, all_start_nanos);
+      EXPECT_LE(all_start_nanos, op_start_nanos);
+      EXPECT_LE(op_start_nanos, op_end_nanos);
+      EXPECT_LE(op_end_nanos, all_end_nanos);
+
+      auto scheduled_micros = node_stat.scheduled_micros();
+      auto all_start_micros = node_stat.all_start_micros();
+      auto op_start_micros = all_start_micros + node_stat.op_start_rel_micros();
+      auto op_end_micros = all_start_micros + node_stat.op_end_rel_micros();
+      auto all_end_micros = all_start_micros + node_stat.all_end_rel_micros();
+      const int64_t kMicrosToNanos = 1000;
+      EXPECT_EQ(scheduled_nanos / kMicrosToNanos, scheduled_micros);
+      EXPECT_EQ(all_start_nanos / kMicrosToNanos, all_start_micros);
+      EXPECT_EQ(op_start_nanos / kMicrosToNanos, op_start_micros);
+      EXPECT_EQ(op_end_nanos / kMicrosToNanos, op_end_micros);
+      EXPECT_EQ(all_end_nanos / kMicrosToNanos, all_end_micros);
+    }
+  }
+}
+
 TEST_F(ExecutorTest, SelfAdd) {
   // v0 <- a
   // v1 = v0 + v0
@@ -184,7 +264,7 @@ TEST_F(ExecutorTest, SelfAdd) {
   //
   // b <- v10
   // All nodes are executed by one thread.
-  auto g = absl::make_unique<Graph>(OpRegistry::Global());
+  auto g = std::make_unique<Graph>(OpRegistry::Global());
   auto v = test::graph::Recv(g.get(), "a", "float", ALICE, 1, BOB);
   const int N = 10;
   for (int i = 1; i <= N; ++i) {
@@ -241,7 +321,7 @@ void BuildTree(int N, Graph* g) {
 }
 
 TEST_F(ExecutorTest, RandomTree) {
-  auto g = absl::make_unique<Graph>(OpRegistry::Global());
+  auto g = std::make_unique<Graph>(OpRegistry::Global());
   BuildTree(4096, g.get());
   Create(std::move(g));
   Rendezvous::Args args;
@@ -274,7 +354,7 @@ void BuildConcurrentAddAssign(Graph* g) {
 
 #ifndef THREAD_SANITIZER
 TEST_F(ExecutorTest, ConcurrentAddAssign) {
-  auto g = absl::make_unique<Graph>(OpRegistry::Global());
+  auto g = std::make_unique<Graph>(OpRegistry::Global());
   BuildConcurrentAddAssign(g.get());
   Create(std::move(g));
   for (int iters = 0; iters < 16; ++iters) {
@@ -293,7 +373,7 @@ TEST_F(ExecutorTest, ConcurrentAddAssign) {
 #endif
 
 TEST_F(ExecutorTest, SimpleSwitchLive) {
-  auto g = absl::make_unique<Graph>(OpRegistry::Global());
+  auto g = std::make_unique<Graph>(OpRegistry::Global());
   auto in0 = test::graph::Recv(g.get(), "a", "float", ALICE, 1, BOB);
   auto in1 = test::graph::Constant(g.get(), VB(false));
   auto tmp = test::graph::Switch(g.get(), in0, in1);
@@ -312,7 +392,7 @@ TEST_F(ExecutorTest, SimpleSwitchLive) {
 }
 
 TEST_F(ExecutorTest, SimpleSwitchDead) {
-  auto g = absl::make_unique<Graph>(OpRegistry::Global());
+  auto g = std::make_unique<Graph>(OpRegistry::Global());
   auto in0 = test::graph::Recv(g.get(), "a", "float", ALICE, 1, BOB);
   auto in1 = test::graph::Constant(g.get(), VB(true));
   auto tmp = test::graph::Switch(g.get(), in0, in1);
@@ -331,7 +411,7 @@ TEST_F(ExecutorTest, SimpleSwitchDead) {
 
 TEST_F(ExecutorTest, Abort) {
   // e = a + b + c + d
-  auto g = absl::make_unique<Graph>(OpRegistry::Global());
+  auto g = std::make_unique<Graph>(OpRegistry::Global());
   auto in0 = test::graph::Recv(g.get(), "a", "float", ALICE, 1, BOB);
   auto in1 = test::graph::Recv(g.get(), "b", "float", ALICE, 1, BOB);
   auto in2 = test::graph::Recv(g.get(), "c", "float", ALICE, 1, BOB);
@@ -346,44 +426,43 @@ TEST_F(ExecutorTest, Abort) {
   rendez_->Ref();
   SchedClosure([this]() {
     Env::Default()->SleepForMicroseconds(100 * 1000);
-    Status s = rendez_->Send(Key(ALICE, kIncarnation, BOB, "a"),
-                             Rendezvous::Args(), V(1.0), false);
+    absl::Status s = rendez_->Send(Key(ALICE, kIncarnation, BOB, "a"),
+                                   Rendezvous::Args(), V(1.0), false);
     rendez_->Unref();
   });
   rendez_->Ref();
   SchedClosure([this]() {
     Env::Default()->SleepForMicroseconds(100 * 1000);
-    Status s = rendez_->Send(Key(ALICE, kIncarnation, BOB, "b"),
-                             Rendezvous::Args(), V(1.0), false);
+    absl::Status s = rendez_->Send(Key(ALICE, kIncarnation, BOB, "b"),
+                                   Rendezvous::Args(), V(1.0), false);
     rendez_->Unref();
   });
   rendez_->Ref();
   SchedClosure([this]() {
     Env::Default()->SleepForMicroseconds(100 * 1000);
-    Status s = rendez_->Send(Key(ALICE, kIncarnation, BOB, "c"),
-                             Rendezvous::Args(), V(1.0), false);
+    absl::Status s = rendez_->Send(Key(ALICE, kIncarnation, BOB, "c"),
+                                   Rendezvous::Args(), V(1.0), false);
     rendez_->Unref();
   });
   rendez_->Ref();
   SchedClosure([this]() {
     Env::Default()->SleepForMicroseconds(100 * 1000);
-    rendez_->StartAbort(errors::Aborted(""));
+    rendez_->StartAbort(absl::AbortedError(""));
     rendez_->Unref();
   });
-  EXPECT_TRUE(errors::IsAborted(Run(rendez_)));
+  EXPECT_TRUE(absl::IsAborted(Run(rendez_)));
   Tensor out = V(-1);
   bool is_dead = false;
-  EXPECT_TRUE(errors::IsAborted(rendez_->Recv(
+  EXPECT_TRUE(absl::IsAborted(rendez_->Recv(
       Key(BOB, kIncarnation, ALICE, "c"), Rendezvous::Args(), &out, &is_dead)));
   // At this point there can still be pending (albeit Aborted) Send
   // closures holding Refs on rendez_.  We need to wait for them, or
-  // else there can be a memory leak at termination.
-  while (!rendez_->RefCountIsOne()) {
-  }
+  // else there can be a memory leak at termination. This wait logic is in test
+  // dtor.
 }
 
 TEST_F(ExecutorTest, RecvInvalidDtype) {
-  auto g = absl::make_unique<Graph>(OpRegistry::Global());
+  auto g = std::make_unique<Graph>(OpRegistry::Global());
   // An input vector of type float of size 1.
   auto one = test::graph::Recv(g.get(), "one", "float", ALICE, 1, BOB);
   // A floating point variable vector of size 1.
@@ -399,36 +478,245 @@ TEST_F(ExecutorTest, RecvInvalidDtype) {
   TF_ASSERT_OK(rendez->Send(Key(ALICE, 1, BOB, "one"), Rendezvous::Args(),
                             VD(1.0), false));
   // Fails due to invalid dtype.
-  EXPECT_TRUE(errors::IsInternal(Run(rendez)));
+  EXPECT_TRUE(absl::IsInternal(Run(rendez)));
   Tensor output;
   bool is_dead;
-  EXPECT_TRUE(errors::IsInternal(rendez->Recv(
+  EXPECT_TRUE(absl::IsInternal(rendez->Recv(
       Key(BOB, 1, ALICE, "two"), Rendezvous::Args(), &output, &is_dead)));
   rendez->Unref();
 }
 
 TEST_F(ExecutorTest, RecvInvalidRefDtype) {
-  auto g = absl::make_unique<Graph>(OpRegistry::Global());
+  auto g = std::make_unique<Graph>(OpRegistry::Global());
   // A var that always produces as invalid dtype.
   auto var = test::graph::InvalidRefType(g.get(), DT_FLOAT, DT_DOUBLE);
   test::graph::Send(g.get(), var, "out", BOB, 1, ALICE);
   Create(std::move(g));
   Rendezvous* rendez = NewLocalRendezvous();
-  EXPECT_TRUE(errors::IsInternal(Run(rendez)));
+  EXPECT_TRUE(absl::IsInternal(Run(rendez)));
   Tensor output;
   bool is_dead;
-  EXPECT_TRUE(errors::IsInternal(rendez->Recv(
+  EXPECT_TRUE(absl::IsInternal(rendez->Recv(
       Key(BOB, 1, ALICE, "out"), Rendezvous::Args(), &output, &is_dead)));
   rendez->Unref();
 }
 
 TEST_F(ExecutorTest, NoInputTensors) {
   // Create a graph where none of the nodes have input tensors.
-  auto g = absl::make_unique<Graph>(OpRegistry::Global());
+  auto g = std::make_unique<Graph>(OpRegistry::Global());
   test::graph::Constant(g.get(), V(1.0));
   Create(std::move(g));
   TF_ASSERT_OK(Run(rendez_));
 }
+
+namespace {
+
+// A test Rendezvous that waits until all three _Recv nodes are in-flight,
+// cancels the shared CancellationManager (simulating a nested function
+// cancelling the shared manager when an op inside it fails), and then completes
+// the _Recv callbacks in deterministic order:
+//   1. "derived_cancelled": CancelledError while CancellationManager is
+//      cancelled (marked derived by ExecutorState::NodeDone).
+//   2. "root_cause_error": non-derived InvalidArgumentError (simulating the
+//      nested function completing with its original root-cause error).
+//   3. "later_derived_cancelled": derived CancelledError arriving after the
+//      non-derived error has already been recorded.
+class OrderedFailureRendezvous : public Rendezvous {
+ public:
+  absl::Status Send(const ParsedKey& key, const Args& send_args,
+                    const Tensor& val, const bool is_dead) override {
+    return absl::OkStatus();
+  }
+
+  void RecvAsync(const ParsedKey& key, const Args& recv_args,
+                 DoneCallback done) override {
+    Args derived_args;
+    DoneCallback derived_done;
+    Args root_cause_args;
+    DoneCallback root_cause_done;
+    Args later_derived_args;
+    DoneCallback later_derived_done;
+    {
+      mutex_lock l(mu_);
+      if (key.edge_name == "derived_cancelled") {
+        derived_args_ = recv_args;
+        derived_done_ = std::move(done);
+      } else if (key.edge_name == "root_cause_error") {
+        root_cause_args_ = recv_args;
+        root_cause_done_ = std::move(done);
+      } else if (key.edge_name == "later_derived_cancelled") {
+        later_derived_args_ = recv_args;
+        later_derived_done_ = std::move(done);
+      }
+      if (!derived_done_ || !root_cause_done_ || !later_derived_done_) {
+        return;
+      }
+      derived_args = derived_args_;
+      derived_done = std::move(derived_done_);
+      root_cause_args = root_cause_args_;
+      root_cause_done = std::move(root_cause_done_);
+      later_derived_args = later_derived_args_;
+      later_derived_done = std::move(later_derived_done_);
+    }
+
+    if (derived_args.cancellation_manager != nullptr) {
+      CancellationManager* cm = derived_args.cancellation_manager;
+      CancellationToken token = cm->get_cancellation_token();
+      bool registered = cm->RegisterCallback(token, [&]() {
+        derived_done(absl::CancelledError("RecvFromRemoteAsync is cancelled."),
+                     Rendezvous::Args(), derived_args, Tensor(),
+                     /*is_dead=*/false);
+      });
+      CHECK(registered);
+      cm->StartCancel();
+    } else {
+      derived_done(absl::CancelledError("RecvFromRemoteAsync is cancelled."),
+                   Rendezvous::Args(), derived_args, Tensor(),
+                   /*is_dead=*/false);
+    }
+    root_cause_done(
+        absl::InvalidArgumentError("Nan in summary histogram for: tag"),
+        Rendezvous::Args(), root_cause_args, Tensor(), /*is_dead=*/false);
+    later_derived_done(
+        StatusGroup::MakeDerived(absl::CancelledError("Later recv cancelled.")),
+        Rendezvous::Args(), later_derived_args, Tensor(), /*is_dead=*/false);
+  }
+
+  void StartAbort(const absl::Status& status) override {}
+
+ private:
+  mutex mu_;
+  Args derived_args_ TF_GUARDED_BY(mu_);
+  DoneCallback derived_done_ TF_GUARDED_BY(mu_);
+  Args root_cause_args_ TF_GUARDED_BY(mu_);
+  DoneCallback root_cause_done_ TF_GUARDED_BY(mu_);
+  Args later_derived_args_ TF_GUARDED_BY(mu_);
+  DoneCallback later_derived_done_ TF_GUARDED_BY(mu_);
+};
+
+}  // namespace
+
+TEST_F(ExecutorTest, NonDerivedErrorOverridesDerivedCancellationError) {
+  auto g = std::make_unique<Graph>(OpRegistry::Global());
+  auto in0 =
+      test::graph::Recv(g.get(), "derived_cancelled", "float", ALICE, 1, BOB);
+  auto in1 =
+      test::graph::Recv(g.get(), "root_cause_error", "float", ALICE, 1, BOB);
+  auto in2 = test::graph::Recv(g.get(), "later_derived_cancelled", "float",
+                               ALICE, 1, BOB);
+  auto add0 = test::graph::Add(g.get(), in0, in1);
+  auto add1 = test::graph::Add(g.get(), add0, in2);
+  test::graph::Send(g.get(), add1, "out", BOB, 1, ALICE);
+  Create(std::move(g));
+
+  CancellationManager cm;
+  auto* rendez = new OrderedFailureRendezvous();
+  Executor::Args args;
+  args.rendezvous = rendez;
+  args.cancellation_manager = &cm;
+  args.stats_collector = &step_stats_collector_;
+  args.runner = runner_;
+
+  absl::Status s = exec_->Run(args);
+  EXPECT_TRUE(absl::IsInvalidArgument(s)) << s;
+  EXPECT_FALSE(StatusGroup::IsDerived(s)) << s;
+  EXPECT_TRUE(
+      absl::StrContains(s.message(), "Nan in summary histogram for: tag"))
+      << s;
+  rendez->Unref();
+}
+
+Node* BuildLoweredWhileLoop(int loop_iters, Graph* g) {
+  Node* in0 = test::graph::Constant(g, VI(0));
+  Node* enter = test::graph::Enter(g, in0, "while_frame");
+  const std::string next_name = "next_iter";
+  Node* merge = test::graph::Merge(g, enter, {next_name});
+  Node* bound = test::graph::Constant(g, VI(loop_iters));
+  g->AddControlEdge(merge, bound);
+  Node* less = test::graph::Less(g, merge, bound);
+  Node* cond = test::graph::LoopCond(g, less);
+  Node* sw = test::graph::Switch(g, merge, cond);
+  Node* exit = test::graph::Exit(g, sw);
+  Node* body_in = test::graph::Identity(g, sw, 1);
+  Node* one = test::graph::Constant(g, VI(1));
+  g->AddControlEdge(body_in, one);
+  Node* add = test::graph::Add(g, body_in, one);
+  Node* next = test::graph::Next(g, next_name, add);
+  g->AddEdge(next, 0, merge, 1);
+  return exit;
+}
+
+TEST_F(ExecutorTest, InlineLoweredWhileLoop) {
+  for (const int loop_iters : {0, 1, 10}) {
+    SCOPED_TRACE(absl::StrCat("loop_iters = ", loop_iters));
+    if (rendez_ != nullptr) {
+      CHECK(rendez_->Unref());
+      rendez_ = nullptr;
+    }
+    auto g = std::make_unique<Graph>(OpRegistry::Global());
+    Node* exit = BuildLoweredWhileLoop(loop_iters, g.get());
+    test::graph::Send(g.get(), exit, "out", BOB, kIncarnation, ALICE);
+    Create(std::move(g));
+
+    Executor::Args exec_args;
+    exec_args.rendezvous = rendez_;
+    exec_args.stats_collector = &step_stats_collector_;
+    exec_args.runner = [](std::function<void()> fn) { fn(); };
+    exec_args.run_all_kernels_inline = true;
+    TF_ASSERT_OK(exec_->Run(exec_args));
+
+    Tensor out = VI(-1);
+    bool is_dead = false;
+    TF_ASSERT_OK(rendez_->Recv(Key(BOB, kIncarnation, ALICE, "out"),
+                               Rendezvous::Args(), &out, &is_dead));
+    EXPECT_FALSE(is_dead);
+    EXPECT_EQ(loop_iters, out.scalar<int32_t>()());
+  }
+}
+
+static void BM_ProcessInlineLoweredWhileLoop(
+    ::testing::benchmark::State& state) {
+  const int loop_iters = state.range(0);
+
+  auto g = std::make_unique<Graph>(OpRegistry::Global());
+  Node* exit = BuildLoweredWhileLoop(loop_iters, g.get());
+  test::graph::Identity(g.get(), exit);
+  FixupSourceAndSinkEdges(g.get());
+
+  std::unique_ptr<Device> device(
+      DeviceFactory::NewDevice("CPU", {}, "/job:localhost/replica:0/task:0"));
+  const int version = g->versions().producer();
+  LocalExecutorParams params;
+  params.device = device.get();
+  params.create_kernel = [&device, version](
+                             const std::shared_ptr<const NodeProperties>& props,
+                             OpKernel** kernel) {
+    return CreateNonCachedKernel(device.get(), nullptr, props, version, kernel);
+  };
+  params.delete_kernel = [](OpKernel* kernel) {
+    DeleteNonCachedKernel(kernel);
+  };
+  Executor* exec = nullptr;
+  TF_CHECK_OK(NewLocalExecutor(params, *g, &exec));
+  std::unique_ptr<Executor> exec_owner(exec);
+
+  Rendezvous* rendez = NewLocalRendezvous();
+  Executor::Args args;
+  args.rendezvous = rendez;
+  args.runner = [](std::function<void()> fn) { fn(); };
+  args.run_all_kernels_inline = true;
+
+  for (auto s : state) {
+    TF_CHECK_OK(exec->Run(args));
+  }
+  rendez->Unref();
+}
+BENCHMARK(BM_ProcessInlineLoweredWhileLoop)  // NOLINT(misc-include-cleaner)
+    ->Arg(0)
+    ->Arg(1)
+    ->Arg(10)
+    ->Arg(100)
+    ->Arg(1000);
 
 // Create a graph that is 'depth' deep. At each level, fan-in and fan-out a
 // maximum of 'width' nodes. All nodes are no-ops and all dependencies are
@@ -440,8 +728,8 @@ static void BM_executor(::testing::benchmark::State& state) {
   Graph* g = new Graph(OpRegistry::Global());
   random::PhiloxRandom philox(1729, 17);
   random::SimplePhilox rand(&philox);
-  uint64 cur = 0;
-  uint32 r = 1 + rand.Rand32() % width;
+  uint64_t cur = 0;
+  uint32_t r = 1 + rand.Rand32() % width;
   std::vector<Node*> ready_nodes;
   for (int i = 0; i < r; ++i) {
     ready_nodes.push_back(test::graph::NoOp(g, {}));
@@ -469,7 +757,7 @@ static void BM_executor(::testing::benchmark::State& state) {
   FixupSourceAndSinkEdges(g);
   test::Benchmark("cpu", g, /*old_benchmark_api=*/false).Run(state);
 
-  state.SetLabel(strings::StrCat("Nodes = ", cur));
+  state.SetLabel(absl::StrCat("Nodes = ", cur));
   state.SetItemsProcessed(cur * static_cast<int64_t>(state.iterations()));
 }
 
@@ -498,7 +786,7 @@ static void BM_const_identity(::testing::benchmark::State& state) {
   }
   FixupSourceAndSinkEdges(g);
   test::Benchmark("cpu", g, /*old_benchmark_api=*/false).Run(state);
-  state.SetLabel(strings::StrCat("Nodes = ", (1 + outputs_per_const) * width));
+  state.SetLabel(absl::StrCat("Nodes = ", (1 + outputs_per_const) * width));
   state.SetItemsProcessed((1 + outputs_per_const) * width *
                           static_cast<int64_t>(state.iterations()));
 }
@@ -521,9 +809,9 @@ static void BM_FeedInputFetchOutput(::testing::benchmark::State& state) {
   Node* sum = test::graph::Add(g, x, y);
   Node* z = test::graph::Send(g, sum, "z", BOB, 1, ALICE);
 
-  string x_key = test::GetRendezvousKey(x);
-  string y_key = test::GetRendezvousKey(y);
-  string z_key = test::GetRendezvousKey(z);
+  std::string x_key = test::GetRendezvousKey(x);
+  std::string y_key = test::GetRendezvousKey(y);
+  std::string z_key = test::GetRendezvousKey(z);
 
   Tensor val(DT_FLOAT, TensorShape({}));
   val.scalar<float>()() = 3.14;
@@ -534,6 +822,50 @@ static void BM_FeedInputFetchOutput(::testing::benchmark::State& state) {
 }
 BENCHMARK(BM_FeedInputFetchOutput);
 
+absl::Status ReplaceEdgeWithSendRecv(Graph* g, const Edge* edge,
+                                     const std::string& tensor,
+                                     const std::string& sender,
+                                     const uint64_t sender_incarnation,
+                                     const std::string& receiver) {
+  Node* send;
+  NodeDef send_def;
+  TF_CHECK_OK(NodeDefBuilder(g->NewName("n"), "_Send")
+                  .Input(edge->src()->name(), edge->src_output(),
+                         edge->src()->output_type(edge->src_output()))
+                  .Attr("tensor_name", tensor)
+                  .Attr("send_device", sender)
+                  .Attr("send_device_incarnation",
+                        static_cast<int64_t>(sender_incarnation))
+                  .Attr("recv_device", receiver)
+                  .Finalize(&send_def));
+
+  TF_ASSIGN_OR_RETURN(send, g->AddNode(send_def));
+
+  Node* recv;
+  NodeDef recv_def;
+  TF_CHECK_OK(
+      NodeDefBuilder(g->NewName("n"), "_Recv")
+          .Attr("tensor_name", tensor)
+          .Attr("send_device", sender)
+          .Attr("send_device_incarnation",
+                static_cast<int64_t>(sender_incarnation))
+          .Attr("recv_device", receiver)
+          .Attr("tensor_type", edge->dst()->input_type(edge->dst_input()))
+          .Finalize(&recv_def));
+
+  TF_ASSIGN_OR_RETURN(recv, g->AddNode(recv_def));
+
+  g->AddEdge(edge->src(), edge->src_output(), send, 0);
+  g->AddEdge(recv, 0, edge->dst(), edge->dst_input());
+
+  // This control dependency can ensure Exit op can still be downstream
+  // op of Enter after inserting Send/Recv.
+  g->AddControlEdge(edge->src(), recv);
+
+  g->RemoveEdge(edge);
+  return absl::OkStatus();
+}
+
 // Defines a graph to perform the following computation:
 //
 //     i = 0
@@ -543,27 +875,28 @@ BENCHMARK(BM_FeedInputFetchOutput);
 // ...using the functional `WhileOp` (if `lower` is false) or the
 // `Switch`/`Merge`-style of control flow (if `lower` is true).
 static void BM_WhileLoopHelper(::testing::benchmark::State& state,
-                               int loop_iters, int loop_vars, bool lower) {
+                               int loop_iters, int loop_vars, bool lower,
+                               bool transfer) {
   std::unique_ptr<Graph> graph(new Graph(OpRegistry::Global()));
 
   // Add test functions for cond and body.
   FunctionDefLibrary f_lib_proto;
 
   // Define the loop body as a function: `x = x + 1`.
-  const Tensor one_t = test::AsScalar<int32>(1);
+  const Tensor one_t = test::AsScalar<int32_t>(1);
 
-  std::vector<string> args;
+  std::vector<std::string> args;
   args.reserve(loop_vars);
   args.push_back("x: int32");
   for (int i = 1; i < loop_vars; ++i) {
-    args.push_back(strings::StrCat("x", i, ": int32"));
+    args.push_back(absl::StrCat("x", i, ": int32"));
   }
 
-  std::vector<string> body_rets;
+  std::vector<std::string> body_rets;
   body_rets.reserve(loop_vars);
   body_rets.push_back("y: int32");
   for (int i = 1; i < loop_vars; ++i) {
-    body_rets.push_back(strings::StrCat("y", i, ": int32"));
+    body_rets.push_back(absl::StrCat("y", i, ": int32"));
   }
 
   std::vector<FunctionDefHelper::Node> body_nodes;
@@ -572,9 +905,9 @@ static void BM_WhileLoopHelper(::testing::benchmark::State& state,
       {{"one"}, "Const", {}, {{"value", one_t}, {"dtype", DT_INT32}}});
   body_nodes.push_back({{"y"}, "Add", {"x", "one"}, {{"T", DT_INT32}}});
   for (int i = 1; i < loop_vars; ++i) {
-    body_nodes.push_back({{strings::StrCat("y", i)},
-                          "Identity",
-                          {strings::StrCat("x", i)},
+    body_nodes.push_back({{absl::StrCat("y", i)},
+                          "Relu",
+                          {absl::StrCat("x", i)},
                           {{"T", DT_INT32}}});
   }
 
@@ -591,7 +924,7 @@ static void BM_WhileLoopHelper(::testing::benchmark::State& state,
       body_nodes);
 
   // Define the loop condition as a function: `x < loop_iters`.
-  const Tensor loop_iters_t = test::AsScalar<int32>(loop_iters);
+  const Tensor loop_iters_t = test::AsScalar<int32_t>(loop_iters);
   *f_lib_proto.add_function() = FunctionDefHelper::Define(
       // Name
       "LessThanOrEqualToN",
@@ -629,7 +962,7 @@ static void BM_WhileLoopHelper(::testing::benchmark::State& state,
           .Attr("T", input_types)
           .Attr("cond", cond_func)
           .Attr("body", body_func)
-          .Attr("parallel_iterations", 100)
+          .Attr("parallel_iterations", 20)
           .Attr(LowerFunctionalOpsPass::kLowerUsingSwitchMergeAttr, true)
           .Finalize(root.graph(), &while_node));
   auto c = ops::Identity(
@@ -650,10 +983,32 @@ static void BM_WhileLoopHelper(::testing::benchmark::State& state,
     opt_options.flib_def = &flib_def;
     LowerFunctionalOpsPass pass;
     TF_ASSERT_OK(pass.Run(opt_options));
+
+    if (transfer) {
+      // Insert Send/Recv between LoopCond and Switch. This can represent
+      // distributed training loop which has been used widely in TF2.
+      for (Node* node : graph->nodes()) {
+        if (node->type_string() != "LoopCond") {
+          continue;
+        }
+
+        for (const Edge* edge : node->out_edges()) {
+          if (edge->dst()->type_string() != "Switch") {
+            continue;
+          }
+          std::string tensor_name = absl::StrCat("c", edge->id());
+          TF_ASSERT_OK(ReplaceEdgeWithSendRecv(graph.get(), edge, tensor_name,
+                                               BOB, 1, ALICE));
+        }
+      }
+    }
   }
 
+  SessionOptions options;
+  options.config.set_inter_op_parallelism_threads(4);
   FixupSourceAndSinkEdges(graph.get());
-  test::Benchmark("cpu", graph.release(), /*old_benchmark_api=*/false)
+  test::Benchmark("cpu", graph.release(), &options, nullptr, nullptr, "",
+                  /*old_benchmark_api=*/false)
       .Run(state);
 }
 
@@ -661,7 +1016,8 @@ static void BM_LoweredWhileLoop(::testing::benchmark::State& state) {
   const int loop_iters = state.range(0);
   const int loop_vars = state.range(1);
 
-  BM_WhileLoopHelper(state, loop_iters, loop_vars, /* lower= */ true);
+  BM_WhileLoopHelper(state, loop_iters, loop_vars, /* lower= */ true,
+                     /* transfer= */ false);
 }
 BENCHMARK(BM_LoweredWhileLoop)
     ->ArgPair(0, 1)
@@ -675,11 +1031,31 @@ BENCHMARK(BM_LoweredWhileLoop)
     ->ArgPair(100, 100)
     ->ArgPair(1000, 100);
 
+static void BM_LoweredWhileLoopWithTransfer(
+    ::testing::benchmark::State& state) {
+  const int loop_iters = state.range(0);
+  const int loop_vars = state.range(1);
+
+  BM_WhileLoopHelper(state, loop_iters, loop_vars, /* lower= */ true,
+                     /* transfer= */ true);
+}
+BENCHMARK(BM_LoweredWhileLoopWithTransfer)
+    ->ArgPair(0, 100)
+    ->ArgPair(1, 100)
+    ->ArgPair(10, 100)
+    ->ArgPair(100, 100)
+    ->ArgPair(1000, 100)
+    ->ArgPair(1, 5000)
+    ->ArgPair(10, 5000)
+    ->ArgPair(100, 5000)
+    ->ArgPair(1000, 5000);
+
 static void BM_FunctionalWhileLoop(::testing::benchmark::State& state) {
   const int loop_iters = state.range(0);
   const int loop_vars = state.range(1);
 
-  BM_WhileLoopHelper(state, loop_iters, loop_vars, /* lower= */ false);
+  BM_WhileLoopHelper(state, loop_iters, loop_vars, /* lower= */ false,
+                     /* transfer= */ false);
 }
 BENCHMARK(BM_FunctionalWhileLoop)
     ->ArgPair(0, 1)

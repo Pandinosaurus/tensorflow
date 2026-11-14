@@ -19,14 +19,19 @@ limitations under the License.
 
 #include <algorithm>
 #include <complex>
+#include <initializer_list>
 #include <limits>
 #include <memory>
+
 #ifndef TF_LITE_STATIC_MEMORY
 #include <string>
+
+#include "tensorflow/lite/array.h"
 #endif  // TF_LITE_STATIC_MEMORY
 
-#include "tensorflow/lite/c/builtin_op_data.h"
-#include "tensorflow/lite/c/common.h"
+#include "tensorflow/lite/context_util.h"
+#include "tensorflow/lite/core/c/builtin_op_data.h"
+#include "tensorflow/lite/core/c/common.h"
 #include "tensorflow/lite/kernels/internal/cppmath.h"
 #include "tensorflow/lite/kernels/internal/quantization_util.h"
 
@@ -97,9 +102,8 @@ inline TfLiteStatus GetMutableInputSafe(const TfLiteContext* context,
                                         const TfLiteNode* node, int index,
                                         const TfLiteTensor** tensor) {
   int tensor_index;
-  TF_LITE_ENSURE_OK(
-      context, ValidateTensorIndexingSafe(context, index, node->inputs->size,
-                                          node->inputs->data, &tensor_index));
+  TF_LITE_ENSURE_STATUS(ValidateTensorIndexingSafe(
+      context, index, node->inputs->size, node->inputs->data, &tensor_index));
   *tensor = GetTensorAtIndex(context, tensor_index);
   return kTfLiteOk;
 }
@@ -136,9 +140,8 @@ TfLiteTensor* GetOutput(TfLiteContext* context, const TfLiteNode* node,
 TfLiteStatus GetOutputSafe(const TfLiteContext* context, const TfLiteNode* node,
                            int index, TfLiteTensor** tensor) {
   int tensor_index;
-  TF_LITE_ENSURE_OK(
-      context, ValidateTensorIndexingSafe(context, index, node->outputs->size,
-                                          node->outputs->data, &tensor_index));
+  TF_LITE_ENSURE_STATUS(ValidateTensorIndexingSafe(
+      context, index, node->outputs->size, node->outputs->data, &tensor_index));
   *tensor = GetTensorAtIndex(context, tensor_index);
   return kTfLiteOk;
 }
@@ -163,8 +166,8 @@ TfLiteStatus GetTemporarySafe(const TfLiteContext* context,
                               const TfLiteNode* node, int index,
                               TfLiteTensor** tensor) {
   int tensor_index;
-  TF_LITE_ENSURE_OK(context, ValidateTensorIndexingSafe(
-                                 context, index, node->temporaries->size,
+  TF_LITE_ENSURE_STATUS(
+      ValidateTensorIndexingSafe(context, index, node->temporaries->size,
                                  node->temporaries->data, &tensor_index));
   *tensor = GetTensorAtIndex(context, tensor_index);
   return kTfLiteOk;
@@ -184,8 +187,8 @@ TfLiteStatus GetIntermediatesSafe(const TfLiteContext* context,
                                   const TfLiteNode* node, int index,
                                   TfLiteTensor** tensor) {
   int tensor_index;
-  TF_LITE_ENSURE_OK(context, ValidateTensorIndexingSafe(
-                                 context, index, node->intermediates->size,
+  TF_LITE_ENSURE_STATUS(
+      ValidateTensorIndexingSafe(context, index, node->intermediates->size,
                                  node->intermediates->data, &tensor_index));
   *tensor = GetTensorAtIndex(context, tensor_index);
   return kTfLiteOk;
@@ -235,7 +238,8 @@ TfLiteStatus PopulateConvolutionQuantizationParams(
     //  Currently only Int8/Int16 is supported for per channel quantization.
     TF_LITE_ENSURE(context,
                    input->type == kTfLiteInt8 || input->type == kTfLiteInt16);
-    TF_LITE_ENSURE_EQ(context, filter->type, kTfLiteInt8);
+    TF_LITE_ENSURE(context,
+                   filter->type == kTfLiteInt8 || filter->type == kTfLiteInt4);
     TF_LITE_ENSURE_EQ(context, affine_quantization->scale->size, num_channels);
     TF_LITE_ENSURE_EQ(
         context, num_channels,
@@ -326,8 +330,8 @@ TfLiteStatus GetQuantizedConvolutionMultipler(TfLiteContext* context,
                                               const TfLiteTensor* filter,
                                               TfLiteTensor* output,
                                               double* multiplier) {
-  const double input_product_scale =
-      static_cast<double>(input->params.scale * filter->params.scale);
+  const double input_product_scale = static_cast<double>(input->params.scale) *
+                                     static_cast<double>(filter->params.scale);
   TF_LITE_ENSURE(context, input_product_scale >= 0);
   *multiplier = input_product_scale / static_cast<double>(output->params.scale);
 
@@ -420,8 +424,7 @@ TfLiteStatus GetOutputShapeFromInput(TfLiteContext* context,
     return kTfLiteError;
   }
   const int output_dims = SizeOfDimension(input, 0);
-  std::unique_ptr<TfLiteIntArray, void (*)(TfLiteIntArray*)> shape(
-      TfLiteIntArrayCreate(output_dims), TfLiteIntArrayFree);
+  IntArrayUniquePtr shape(TfLiteIntArrayCreate(output_dims));
   for (int i = 0; i < output_dims; i++) {
     shape->data[i] = input->data.i32[i];
   }
@@ -440,10 +443,22 @@ std::string GetShapeDebugString(const TfLiteIntArray* shape) {
     if (str.empty())
       str = "[" + std::to_string(shape->data[d]);
     else
-      str += ", " + std::to_string(shape->data[d]);
+      // Don't add space after "," to make the output consistent with
+      // tensorflow::shape_inference::InferenceContext::DebugString()
+      str += "," + std::to_string(shape->data[d]);
   }
-  str += "]";
+  if (str.empty()) {
+    str = "[]";
+  } else {
+    str += "]";
+  }
   return str;
+}
+
+std::string GetTensorDebugString(const TfLiteTensor* tensor) {
+  return std::string("{\n  type: ") + TfLiteTypeGetName(tensor->type) +
+         "\n  data: {...}\n  dims: " + GetShapeDebugString(tensor->dims) +
+         "\n}";
 }
 
 TfLiteStatus CalculateShapeForBroadcast(TfLiteContext* context,
@@ -454,16 +469,15 @@ TfLiteStatus CalculateShapeForBroadcast(TfLiteContext* context,
   const int dims2 = NumDimensions(input2);
   const int out_dims = std::max(dims1, dims2);
 
-  std::unique_ptr<TfLiteIntArray, void (*)(TfLiteIntArray*)> shape(
-      TfLiteIntArrayCreate(out_dims), TfLiteIntArrayFree);
+  IntArrayUniquePtr shape(TfLiteIntArrayCreate(out_dims));
   for (int i = 0; i < out_dims; ++i) {
     const int d1 = i >= dims1 ? 1 : SizeOfDimension(input1, dims1 - i - 1);
     const int d2 = i >= dims2 ? 1 : SizeOfDimension(input2, dims2 - i - 1);
     if (!(d1 == d2 || d1 == 1 || d2 == 1)) {
-      context->ReportError(context,
-                           "Given shapes, %s and %s, are not broadcastable.",
-                           GetShapeDebugString(input1->dims).c_str(),
-                           GetShapeDebugString(input2->dims).c_str());
+      TF_LITE_KERNEL_LOG(context,
+                         "Given shapes, %s and %s, are not broadcastable.",
+                         GetShapeDebugString(input1->dims).c_str(),
+                         GetShapeDebugString(input2->dims).c_str());
       return kTfLiteError;
     }
 
@@ -486,8 +500,7 @@ TfLiteStatus CalculateShapeForBroadcast(TfLiteContext* context,
   const int dims2 = NumDimensions(input2);
   const int dims3 = NumDimensions(input3);
   const int out_dims = std::max(std::max(dims1, dims2), dims3);
-  std::unique_ptr<TfLiteIntArray, void (*)(TfLiteIntArray*)> shape(
-      TfLiteIntArrayCreate(out_dims), TfLiteIntArrayFree);
+  IntArrayUniquePtr shape(TfLiteIntArrayCreate(out_dims));
   for (int i = 0; i < out_dims; ++i) {
     const int d1 = i >= dims1 ? 1 : SizeOfDimension(input1, dims1 - i - 1);
     const int d2 = i >= dims2 ? 1 : SizeOfDimension(input2, dims2 - i - 1);
@@ -498,11 +511,11 @@ TfLiteStatus CalculateShapeForBroadcast(TfLiteContext* context,
     if (min_value == 0) max_value = 0;
     if (!(d1 == 1 || d1 == max_value) || !(d2 == 1 || d2 == max_value) ||
         !(d3 == 1 || d3 == max_value)) {
-      context->ReportError(
-          context, "Given shapes, %s, %s and %s, are not broadcastable.",
-          GetShapeDebugString(input1->dims).c_str(),
-          GetShapeDebugString(input2->dims).c_str(),
-          GetShapeDebugString(input3->dims).c_str());
+      TF_LITE_KERNEL_LOG(context,
+                         "Given shapes, %s, %s and %s, are not broadcastable.",
+                         GetShapeDebugString(input1->dims).c_str(),
+                         GetShapeDebugString(input2->dims).c_str(),
+                         GetShapeDebugString(input3->dims).c_str());
       return kTfLiteError;
     }
     shape->data[out_dims - i - 1] = max_value;
@@ -514,59 +527,123 @@ TfLiteStatus CalculateShapeForBroadcast(TfLiteContext* context,
 
 // Size of string is not constant, return 0 in such case.
 int TfLiteTypeGetSize(TfLiteType type) {
-  switch (type) {
-    case kTfLiteUInt8:
-      static_assert(sizeof(uint8_t) == 1, "");
-      return 1;
-    case kTfLiteInt8:
-      static_assert(sizeof(int8_t) == 1, "");
-      return 1;
-    case kTfLiteBool:
-      return sizeof(bool);
-    case kTfLiteInt16:
-      static_assert(sizeof(int16_t) == 2, "");
-      return 2;
-    case kTfLiteFloat16:
-      static_assert(sizeof(int16_t) == 2, "");
-      return 2;
-    case kTfLiteFloat32:
-      static_assert(sizeof(float) == 4, "");
-      return 4;
-    case kTfLiteInt32:
-      static_assert(sizeof(int32_t) == 4, "");
-      return 4;
-    case kTfLiteUInt32:
-      static_assert(sizeof(uint32_t) == 4, "");
-      return 4;
-    case kTfLiteInt64:
-      static_assert(sizeof(int64_t) == 8, "");
-      return 8;
-    case kTfLiteUInt64:
-      static_assert(sizeof(uint64_t) == 8, "");
-      return 8;
-    case kTfLiteFloat64:
-      static_assert(sizeof(double) == 8, "");
-      return 8;
-    case kTfLiteComplex64:
-      static_assert(sizeof(std::complex<float>) == 8, "");
-      return 8;
-    case kTfLiteComplex128:
-      static_assert(sizeof(std::complex<double>) == 16, "");
-      return 16;
-    default:
-      return 0;
+  int size_bits = TfLiteTypeGetSizeBits(type);
+  if (size_bits % 8 == 0) {
+    return size_bits / 8;
+  } else {
+    // For non-byte sized types, return 0.
+    return 0;
   }
+}
+
+int TfLiteTypeGetSizeBits(TfLiteType type) {
+  switch (type) {
+    case kTfLiteInt2:
+      return 2;
+    case kTfLiteInt4:
+    case kTfLiteUInt4:
+      return 4;
+    case kTfLiteUInt8:
+    case kTfLiteInt8:
+    case kTfLiteFloat8E4M3FN:
+    case kTfLiteFloat8E5M2:
+      return 8;
+    case kTfLiteUInt16:
+    case kTfLiteInt16:
+    case kTfLiteFloat16:
+    case kTfLiteBFloat16:
+      return 16;
+    case kTfLiteFloat32:
+    case kTfLiteInt32:
+    case kTfLiteUInt32:
+      return 32;
+    case kTfLiteInt64:
+    case kTfLiteUInt64:
+    case kTfLiteFloat64:
+    case kTfLiteComplex64:
+      return 64;
+    case kTfLiteComplex128:
+      return 128;
+    case kTfLiteBool:
+      return sizeof(bool) * 8;
+    case kTfLiteString:
+    case kTfLiteNoType:
+    case kTfLiteResource:
+    case kTfLiteVariant:
+      break;
+  }
+  return 0;
 }
 
 bool IsMobilePlatform() {
 #if defined(ANDROID) || defined(__ANDROID__)
   return true;
-#elif defined(__APPLE__)
-#if TARGET_IPHONE_SIMULATOR || TARGET_OS_IPHONE
+#elif defined(__APPLE__) && (TARGET_IPHONE_SIMULATOR || TARGET_OS_IPHONE)
   return true;
-#endif
-#endif
+#else
   return false;
+#endif
+}
+
+bool HasUnspecifiedDimension(const TfLiteTensor* tensor) {
+#ifndef TF_LITE_STATIC_MEMORY
+  if (tensor->dims_signature) {
+    for (int i : TfLiteIntArrayView(tensor->dims_signature)) {
+      if (i == -1) return true;
+    }
+  }
+#endif  // TF_LITE_STATIC_MEMORY
+  return false;
+}
+
+TfLiteStatus CheckedShapeProduct(TfLiteContext* context,
+                                 std::initializer_list<int> dims,
+                                 const char* error_message, size_t& product) {
+  return CheckedShapeProduct(context, dims.begin(), dims.size(), error_message,
+                             product);
+}
+
+TfLiteStatus CheckedShapeProduct(TfLiteContext* context, const int* dims,
+                                 int count, const char* error_message,
+                                 size_t& product) {
+  TF_LITE_ENSURE(context, count >= 0);
+  TF_LITE_ENSURE(context, dims != nullptr || count == 0);
+  size_t checked_count = 1;
+  for (int i = 0; i < count; ++i) {
+    const int d = dims[i];
+    TF_LITE_ENSURE_MSG(context, d >= 0, "Encountered a negative dimension.");
+    TF_LITE_ENSURE_MSG(
+        context,
+        checked_count == 0 ||
+            static_cast<size_t>(d) <=
+                std::numeric_limits<size_t>::max() / checked_count,
+        "%s", error_message);
+    checked_count *= d;
+  }
+  product = checked_count;
+  return kTfLiteOk;
+}
+
+TfLiteStatus CheckedShapeProductToInt(TfLiteContext* context,
+                                      std::initializer_list<int> dims,
+                                      const char* error_message, int& product) {
+  size_t checked_count = 1;
+  for (const int d : dims) {
+    TF_LITE_ENSURE_MSG(context, d >= 0, "Encountered a negative dimension.");
+    TF_LITE_ENSURE_MSG(
+        context,
+        checked_count == 0 ||
+            static_cast<size_t>(d) <=
+                std::numeric_limits<size_t>::max() / checked_count,
+        "%s", error_message);
+    checked_count *= d;
+  }
+  TF_LITE_ENSURE_MSG(
+      context,
+      checked_count <= static_cast<size_t>(std::numeric_limits<int>::max()),
+      "%s", error_message);
+  product = static_cast<int>(checked_count);
+  return kTfLiteOk;
 }
 
 }  // namespace tflite

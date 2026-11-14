@@ -15,6 +15,7 @@ limitations under the License.
 #include <stdint.h>
 
 #include <initializer_list>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -24,6 +25,7 @@ limitations under the License.
 #include "tensorflow/lite/kernels/test_util.h"
 #include "tensorflow/lite/schema/schema_generated.h"
 #include "tensorflow/lite/string_type.h"
+#include "tensorflow/lite/types/half.h"
 
 namespace tflite {
 namespace {
@@ -34,21 +36,29 @@ class ComparisonOpModel : public SingleOpModel {
  public:
   ComparisonOpModel(std::initializer_list<int> input1_shape,
                     std::initializer_list<int> input2_shape,
-                    TensorType input_type, BuiltinOperator op) {
+                    TensorType input_type, BuiltinOperator op,
+                    bool allocate = true) {
     input1_ = AddInput(input_type);
     input2_ = AddInput(input_type);
     output_ = AddOutput(TensorType_BOOL);
     ConfigureBuiltinOp(op);
-    BuildInterpreter({input1_shape, input2_shape});
+    BuildInterpreter({input1_shape, input2_shape}, /*num_threads=*/-1,
+                     /*allow_fp32_relax_to_fp16=*/false,
+                     /*apply_delegate=*/true,
+                     /*allocate_and_delegate=*/allocate);
   }
 
   ComparisonOpModel(const TensorData& input1, const TensorData& input2,
-                    TensorType input_type, BuiltinOperator op) {
+                    TensorType input_type, BuiltinOperator op,
+                    bool allocate = true) {
     input1_ = AddInput(input1);
     input2_ = AddInput(input2);
     output_ = AddOutput(TensorType_BOOL);
     ConfigureBuiltinOp(op);
-    BuildInterpreter({GetShape(input1_), GetShape(input2_)});
+    BuildInterpreter({GetShape(input1_), GetShape(input2_)}, /*num_threads=*/-1,
+                     /*allow_fp32_relax_to_fp16=*/false,
+                     /*apply_delegate=*/true,
+                     /*allocate_and_delegate=*/allocate);
   }
 
   int input1() { return input1_; }
@@ -94,28 +104,38 @@ class ComparisonOpModel : public SingleOpModel {
                      CreateLessEqualOptions(builder_).Union());
         break;
       }
-      default: { FAIL() << "We shouldn't get here."; }
+      default: {
+        FAIL() << "We shouldn't get here.";
+      }
     }
   }
 };
+
+template <typename T>
+class FloatComparisonTest : public ::testing::Test {};
+
+using FloatComparisonTestTypes = ::testing::Types<float, half, Eigen::bfloat16>;
+TYPED_TEST_SUITE(FloatComparisonTest, FloatComparisonTestTypes);
 
 TEST(ComparisonsTest, EqualBool) {
   ComparisonOpModel model({1, 1, 1, 4}, {1, 1, 1, 4}, TensorType_BOOL,
                           BuiltinOperator_EQUAL);
   model.PopulateTensor<bool>(model.input1(), {true, false, true, false});
   model.PopulateTensor<bool>(model.input2(), {true, true, false, false});
-  model.Invoke();
+  ASSERT_EQ(model.Invoke(), kTfLiteOk);
 
   EXPECT_THAT(model.GetOutput(), ElementsAre(true, false, false, true));
   EXPECT_THAT(model.GetOutputShape(), ElementsAre(1, 1, 1, 4));
 }
 
-TEST(ComparisonsTest, EqualFloat) {
-  ComparisonOpModel model({1, 1, 1, 4}, {1, 1, 1, 4}, TensorType_FLOAT32,
-                          BuiltinOperator_EQUAL);
-  model.PopulateTensor<float>(model.input1(), {0.1, 0.9, 0.7, 0.3});
-  model.PopulateTensor<float>(model.input2(), {0.1, 0.2, 0.6, 0.5});
-  model.Invoke();
+TYPED_TEST(FloatComparisonTest, Equal) {
+  using T = TypeParam;
+  ComparisonOpModel model({1, 1, 1, 4}, {1, 1, 1, 4}, GetTensorType<T>(),
+                          BuiltinOperator_EQUAL, /*allocate=*/false);
+  TFLITE_ALLOCATE_AND_CHECK(T, &model);
+  model.template PopulateTensor<T>(model.input1(), {0.1, 0.9, 0.7, 0.3});
+  model.template PopulateTensor<T>(model.input2(), {0.1, 0.2, 0.6, 0.5});
+  TFLITE_INVOKE_AND_CHECK(T, &model);
 
   EXPECT_THAT(model.GetOutput(), ElementsAre(true, false, false, false));
   EXPECT_THAT(model.GetOutputShape(), ElementsAre(1, 1, 1, 4));
@@ -126,7 +146,18 @@ TEST(ComparisonsTest, EqualInt) {
                           BuiltinOperator_EQUAL);
   model.PopulateTensor<int>(model.input1(), {-1, 9, 7, 3});
   model.PopulateTensor<int>(model.input2(), {1, 2, 7, 5});
-  model.Invoke();
+  ASSERT_EQ(model.Invoke(), kTfLiteOk);
+
+  EXPECT_THAT(model.GetOutput(), ElementsAre(false, false, true, false));
+  EXPECT_THAT(model.GetOutputShape(), ElementsAre(1, 1, 1, 4));
+}
+
+TEST(ComparisonsTest, EqualInt16) {
+  ComparisonOpModel model({1, 1, 1, 4}, {1, 1, 1, 4}, TensorType_INT16,
+                          BuiltinOperator_EQUAL);
+  model.PopulateTensor<int16_t>(model.input1(), {-1, 9, 7, 3});
+  model.PopulateTensor<int16_t>(model.input2(), {1, 2, 7, 5});
+  ASSERT_EQ(model.Invoke(), kTfLiteOk);
 
   EXPECT_THAT(model.GetOutput(), ElementsAre(false, false, true, false));
   EXPECT_THAT(model.GetOutputShape(), ElementsAre(1, 1, 1, 4));
@@ -140,7 +171,7 @@ TEST(ComparisonsTest, EqualString) {
                           BuiltinOperator_EQUAL);
   model.PopulateTensor<std::string>(model.input1(), {"A", "B", "C", "D"});
   model.PopulateTensor<std::string>(model.input2(), {"A", "C", "B", "D"});
-  model.Invoke();
+  ASSERT_EQ(model.Invoke(), kTfLiteOk);
 
   EXPECT_THAT(model.GetOutput(), ElementsAre(true, false, false, true));
   EXPECT_THAT(model.GetOutputShape(), ElementsAre(1, 1, 1, 4, 1));
@@ -151,7 +182,7 @@ TEST(ComparisonsTest, EqualBroadcast) {
                           BuiltinOperator_EQUAL);
   model.PopulateTensor<int>(model.input1(), {-1, 9, 7, 3});
   model.PopulateTensor<int>(model.input2(), {7});
-  model.Invoke();
+  ASSERT_EQ(model.Invoke(), kTfLiteOk);
 
   EXPECT_THAT(model.GetOutput(), ElementsAre(false, false, true, false));
   EXPECT_THAT(model.GetOutputShape(), ElementsAre(1, 1, 1, 4));
@@ -162,11 +193,23 @@ TEST(ComparisonsTest, EqualBroadcastTwoD) {
                           BuiltinOperator_EQUAL);
   model.PopulateTensor<int>(model.input1(), {-1, 9, 7, 3, 2, 4, 2, 8});
   model.PopulateTensor<int>(model.input2(), {7, 1, 2, 4});
-  model.Invoke();
+  ASSERT_EQ(model.Invoke(), kTfLiteOk);
 
   EXPECT_THAT(model.GetOutput(), ElementsAre(false, false, false, false, false,
                                              false, true, false));
   EXPECT_THAT(model.GetOutputShape(), ElementsAre(1, 1, 2, 4));
+}
+
+TEST(ComparisonsTest, EqualBroadcastRankFive) {
+  ComparisonOpModel model({1, 2, 1, 2, 2}, {1, 1, 2}, TensorType_INT32,
+                          BuiltinOperator_EQUAL);
+  model.PopulateTensor<int>(model.input1(), {1, 2, 3, 4, 5, 6, 7, 8});
+  model.PopulateTensor<int>(model.input2(), {3, 4});
+  ASSERT_EQ(model.Invoke(), kTfLiteOk);
+
+  EXPECT_THAT(model.GetOutput(), ElementsAre(false, false, true, true, false,
+                                             false, false, false));
+  EXPECT_THAT(model.GetOutputShape(), ElementsAre(1, 2, 1, 2, 2));
 }
 
 TEST(ComparisonsTest, EqualBroadcastString) {
@@ -177,10 +220,26 @@ TEST(ComparisonsTest, EqualBroadcastString) {
                           BuiltinOperator_EQUAL);
   model.PopulateTensor<std::string>(model.input1(), {"A", "B", "A", "B"});
   model.PopulateTensor<std::string>(model.input2(), {"A"});
-  model.Invoke();
+  ASSERT_EQ(model.Invoke(), kTfLiteOk);
 
   EXPECT_THAT(model.GetOutput(), ElementsAre(true, false, true, false));
   EXPECT_THAT(model.GetOutputShape(), ElementsAre(1, 1, 1, 4));
+}
+
+TEST(ComparisonsTest, EqualBroadcastStringRankFive) {
+  if (SingleOpModel::GetForceUseNnapi()) {
+    return;
+  }
+  ComparisonOpModel model({1, 2, 1, 2, 2}, {1, 1, 2}, TensorType_STRING,
+                          BuiltinOperator_EQUAL);
+  model.PopulateTensor<std::string>(model.input1(),
+                                    {"A", "B", "A", "C", "A", "B", "D", "C"});
+  model.PopulateTensor<std::string>(model.input2(), {"A", "C"});
+  ASSERT_EQ(model.Invoke(), kTfLiteOk);
+
+  EXPECT_THAT(model.GetOutput(),
+              ElementsAre(true, false, true, true, true, false, false, true));
+  EXPECT_THAT(model.GetOutputShape(), ElementsAre(1, 2, 1, 2, 2));
 }
 
 TEST(ComparisonsTest, NotEqualBool) {
@@ -188,18 +247,20 @@ TEST(ComparisonsTest, NotEqualBool) {
                           BuiltinOperator_NOT_EQUAL);
   model.PopulateTensor<bool>(model.input1(), {true, false, true, false});
   model.PopulateTensor<bool>(model.input2(), {true, true, false, false});
-  model.Invoke();
+  ASSERT_EQ(model.Invoke(), kTfLiteOk);
 
   EXPECT_THAT(model.GetOutput(), ElementsAre(false, true, true, false));
   EXPECT_THAT(model.GetOutputShape(), ElementsAre(1, 1, 1, 4));
 }
 
-TEST(ComparisonsTest, NotEqualFloat) {
-  ComparisonOpModel model({1, 1, 1, 4}, {1, 1, 1, 4}, TensorType_FLOAT32,
-                          BuiltinOperator_NOT_EQUAL);
-  model.PopulateTensor<float>(model.input1(), {0.1, 0.9, 0.7, 0.3});
-  model.PopulateTensor<float>(model.input2(), {0.1, 0.2, 0.6, 0.5});
-  model.Invoke();
+TYPED_TEST(FloatComparisonTest, NotEqual) {
+  using T = TypeParam;
+  ComparisonOpModel model({1, 1, 1, 4}, {1, 1, 1, 4}, GetTensorType<T>(),
+                          BuiltinOperator_NOT_EQUAL, /*allocate=*/false);
+  TFLITE_ALLOCATE_AND_CHECK(T, &model);
+  model.template PopulateTensor<T>(model.input1(), {0.1, 0.9, 0.7, 0.3});
+  model.template PopulateTensor<T>(model.input2(), {0.1, 0.2, 0.6, 0.5});
+  TFLITE_INVOKE_AND_CHECK(T, &model);
 
   EXPECT_THAT(model.GetOutput(), ElementsAre(false, true, true, true));
   EXPECT_THAT(model.GetOutputShape(), ElementsAre(1, 1, 1, 4));
@@ -210,7 +271,7 @@ TEST(ComparisonsTest, NotEqualInt) {
                           BuiltinOperator_NOT_EQUAL);
   model.PopulateTensor<int>(model.input1(), {-1, 9, 7, 3});
   model.PopulateTensor<int>(model.input2(), {1, 2, 7, 5});
-  model.Invoke();
+  ASSERT_EQ(model.Invoke(), kTfLiteOk);
 
   EXPECT_THAT(model.GetOutput(), ElementsAre(true, true, false, true));
   EXPECT_THAT(model.GetOutputShape(), ElementsAre(1, 1, 1, 4));
@@ -224,7 +285,7 @@ TEST(ComparisonsTest, NotEqualString) {
                           BuiltinOperator_NOT_EQUAL);
   model.PopulateTensor<std::string>(model.input1(), {"A", "B", "C", "D"});
   model.PopulateTensor<std::string>(model.input2(), {"A", "C", "B", "D"});
-  model.Invoke();
+  ASSERT_EQ(model.Invoke(), kTfLiteOk);
 
   EXPECT_THAT(model.GetOutput(), ElementsAre(false, true, true, false));
   EXPECT_THAT(model.GetOutputShape(), ElementsAre(1, 1, 1, 1, 4));
@@ -235,7 +296,7 @@ TEST(ComparisonsTest, NotEqualBroadcast) {
                           BuiltinOperator_NOT_EQUAL);
   model.PopulateTensor<int>(model.input1(), {-1, 9, 7, 3});
   model.PopulateTensor<int>(model.input2(), {7});
-  model.Invoke();
+  ASSERT_EQ(model.Invoke(), kTfLiteOk);
 
   EXPECT_THAT(model.GetOutput(), ElementsAre(true, true, false, true));
   EXPECT_THAT(model.GetOutputShape(), ElementsAre(1, 1, 1, 4));
@@ -246,7 +307,7 @@ TEST(ComparisonsTest, NotEqualBroadcastTwoD) {
                           BuiltinOperator_NOT_EQUAL);
   model.PopulateTensor<int>(model.input1(), {-1, 9, 7, 3, 2, 4, 2, 8});
   model.PopulateTensor<int>(model.input2(), {7, 1, 2, 4});
-  model.Invoke();
+  ASSERT_EQ(model.Invoke(), kTfLiteOk);
 
   EXPECT_THAT(model.GetOutput(),
               ElementsAre(true, true, true, true, true, true, false, true));
@@ -261,18 +322,20 @@ TEST(ComparisonsTest, NotEqualBroadcastString) {
                           BuiltinOperator_NOT_EQUAL);
   model.PopulateTensor<std::string>(model.input1(), {"A", "B", "A", "B"});
   model.PopulateTensor<std::string>(model.input2(), {"A"});
-  model.Invoke();
+  ASSERT_EQ(model.Invoke(), kTfLiteOk);
 
   EXPECT_THAT(model.GetOutput(), ElementsAre(false, true, false, true));
   EXPECT_THAT(model.GetOutputShape(), ElementsAre(1, 1, 1, 4));
 }
 
-TEST(ComparisonsTest, GreaterFloat) {
-  ComparisonOpModel model({1, 1, 1, 4}, {1, 1, 1, 4}, TensorType_FLOAT32,
-                          BuiltinOperator_GREATER);
-  model.PopulateTensor<float>(model.input1(), {0.1, 0.9, 0.7, 0.3});
-  model.PopulateTensor<float>(model.input2(), {0.1, 0.2, 0.6, 0.5});
-  model.Invoke();
+TYPED_TEST(FloatComparisonTest, Greater) {
+  using T = TypeParam;
+  ComparisonOpModel model({1, 1, 1, 4}, {1, 1, 1, 4}, GetTensorType<T>(),
+                          BuiltinOperator_GREATER, /*allocate=*/false);
+  TFLITE_ALLOCATE_AND_CHECK(T, &model);
+  model.template PopulateTensor<T>(model.input1(), {0.1, 0.9, 0.7, 0.3});
+  model.template PopulateTensor<T>(model.input2(), {0.1, 0.2, 0.6, 0.5});
+  TFLITE_INVOKE_AND_CHECK(T, &model);
 
   EXPECT_THAT(model.GetOutput(), ElementsAre(false, true, true, false));
   EXPECT_THAT(model.GetOutputShape(), ElementsAre(1, 1, 1, 4));
@@ -283,7 +346,7 @@ TEST(ComparisonsTest, GreaterInt) {
                           BuiltinOperator_GREATER);
   model.PopulateTensor<int>(model.input1(), {-1, 9, 7, 3});
   model.PopulateTensor<int>(model.input2(), {1, 2, 7, 5});
-  model.Invoke();
+  ASSERT_EQ(model.Invoke(), kTfLiteOk);
 
   EXPECT_THAT(model.GetOutput(), ElementsAre(false, true, false, false));
   EXPECT_THAT(model.GetOutputShape(), ElementsAre(1, 1, 1, 4));
@@ -294,7 +357,7 @@ TEST(ComparisonsTest, GreaterBroadcast) {
                           BuiltinOperator_GREATER);
   model.PopulateTensor<int>(model.input1(), {-1, 9, 7, 3});
   model.PopulateTensor<int>(model.input2(), {7});
-  model.Invoke();
+  ASSERT_EQ(model.Invoke(), kTfLiteOk);
 
   EXPECT_THAT(model.GetOutput(), ElementsAre(false, true, false, false));
   EXPECT_THAT(model.GetOutputShape(), ElementsAre(1, 1, 1, 4));
@@ -305,19 +368,21 @@ TEST(ComparisonsTest, GreaterBroadcastTwoD) {
                           BuiltinOperator_GREATER);
   model.PopulateTensor<int>(model.input1(), {-1, 9, 7, 3, 2, 4, 2, 8});
   model.PopulateTensor<int>(model.input2(), {7, 1, 2, 4});
-  model.Invoke();
+  ASSERT_EQ(model.Invoke(), kTfLiteOk);
 
   EXPECT_THAT(model.GetOutput(),
               ElementsAre(false, true, true, false, false, true, false, true));
   EXPECT_THAT(model.GetOutputShape(), ElementsAre(1, 1, 2, 4));
 }
 
-TEST(ComparisonsTest, GreaterEqualFloat) {
-  ComparisonOpModel model({1, 1, 1, 4}, {1, 1, 1, 4}, TensorType_FLOAT32,
-                          BuiltinOperator_GREATER_EQUAL);
-  model.PopulateTensor<float>(model.input1(), {0.1, 0.9, 0.7, 0.3});
-  model.PopulateTensor<float>(model.input2(), {0.1, 0.2, 0.6, 0.5});
-  model.Invoke();
+TYPED_TEST(FloatComparisonTest, GreaterEqual) {
+  using T = TypeParam;
+  ComparisonOpModel model({1, 1, 1, 4}, {1, 1, 1, 4}, GetTensorType<T>(),
+                          BuiltinOperator_GREATER_EQUAL, /*allocate=*/false);
+  TFLITE_ALLOCATE_AND_CHECK(T, &model);
+  model.template PopulateTensor<T>(model.input1(), {0.1, 0.9, 0.7, 0.3});
+  model.template PopulateTensor<T>(model.input2(), {0.1, 0.2, 0.6, 0.5});
+  TFLITE_INVOKE_AND_CHECK(T, &model);
 
   EXPECT_THAT(model.GetOutput(), ElementsAre(true, true, true, false));
   EXPECT_THAT(model.GetOutputShape(), ElementsAre(1, 1, 1, 4));
@@ -328,7 +393,18 @@ TEST(ComparisonsTest, GreaterEqualInt) {
                           BuiltinOperator_GREATER_EQUAL);
   model.PopulateTensor<int>(model.input1(), {-1, 9, 7, 3});
   model.PopulateTensor<int>(model.input2(), {1, 2, 7, 5});
-  model.Invoke();
+  ASSERT_EQ(model.Invoke(), kTfLiteOk);
+
+  EXPECT_THAT(model.GetOutput(), ElementsAre(false, true, true, false));
+  EXPECT_THAT(model.GetOutputShape(), ElementsAre(1, 1, 1, 4));
+}
+
+TEST(ComparisonsTest, GreaterEqualInt16) {
+  ComparisonOpModel model({1, 1, 1, 4}, {1, 1, 1, 4}, TensorType_INT16,
+                          BuiltinOperator_GREATER_EQUAL);
+  model.PopulateTensor<int16_t>(model.input1(), {-1, 9, 7, 3});
+  model.PopulateTensor<int16_t>(model.input2(), {1, 2, 7, 5});
+  ASSERT_EQ(model.Invoke(), kTfLiteOk);
 
   EXPECT_THAT(model.GetOutput(), ElementsAre(false, true, true, false));
   EXPECT_THAT(model.GetOutputShape(), ElementsAre(1, 1, 1, 4));
@@ -339,7 +415,7 @@ TEST(ComparisonsTest, GreaterEqualBroadcast) {
                           BuiltinOperator_GREATER_EQUAL);
   model.PopulateTensor<int>(model.input1(), {-1, 9, 7, 3});
   model.PopulateTensor<int>(model.input2(), {7});
-  model.Invoke();
+  ASSERT_EQ(model.Invoke(), kTfLiteOk);
 
   EXPECT_THAT(model.GetOutput(), ElementsAre(false, true, true, false));
   EXPECT_THAT(model.GetOutputShape(), ElementsAre(1, 1, 1, 4));
@@ -350,20 +426,21 @@ TEST(ComparisonsTest, GreaterEqualBroadcastTwoD) {
                           BuiltinOperator_GREATER_EQUAL);
   model.PopulateTensor<int>(model.input1(), {-1, 9, 7, 3, 2, 4, 2, 8});
   model.PopulateTensor<int>(model.input2(), {7, 1, 2, 4});
-  model.Invoke();
+  ASSERT_EQ(model.Invoke(), kTfLiteOk);
 
   EXPECT_THAT(model.GetOutput(),
               ElementsAre(false, true, true, false, false, true, true, true));
   EXPECT_THAT(model.GetOutputShape(), ElementsAre(1, 1, 2, 4));
 }
 
-
-TEST(ComparisonsTest, LessFloat) {
-  ComparisonOpModel model({1, 1, 1, 4}, {1, 1, 1, 4}, TensorType_FLOAT32,
-                          BuiltinOperator_LESS);
-  model.PopulateTensor<float>(model.input1(), {0.1, 0.9, 0.7, 0.3});
-  model.PopulateTensor<float>(model.input2(), {0.1, 0.2, 0.6, 0.5});
-  model.Invoke();
+TYPED_TEST(FloatComparisonTest, Less) {
+  using T = TypeParam;
+  ComparisonOpModel model({1, 1, 1, 4}, {1, 1, 1, 4}, GetTensorType<T>(),
+                          BuiltinOperator_LESS, /*allocate=*/false);
+  TFLITE_ALLOCATE_AND_CHECK(T, &model);
+  model.template PopulateTensor<T>(model.input1(), {0.1, 0.9, 0.7, 0.3});
+  model.template PopulateTensor<T>(model.input2(), {0.1, 0.2, 0.6, 0.5});
+  TFLITE_INVOKE_AND_CHECK(T, &model);
 
   EXPECT_THAT(model.GetOutput(), ElementsAre(false, false, false, true));
   EXPECT_THAT(model.GetOutputShape(), ElementsAre(1, 1, 1, 4));
@@ -374,7 +451,18 @@ TEST(ComparisonsTest, LessInt) {
                           BuiltinOperator_LESS);
   model.PopulateTensor<int>(model.input1(), {-1, 9, 7, 3});
   model.PopulateTensor<int>(model.input2(), {1, 2, 6, 5});
-  model.Invoke();
+  ASSERT_EQ(model.Invoke(), kTfLiteOk);
+
+  EXPECT_THAT(model.GetOutput(), ElementsAre(true, false, false, true));
+  EXPECT_THAT(model.GetOutputShape(), ElementsAre(1, 1, 1, 4));
+}
+
+TEST(ComparisonsTest, LessInt16) {
+  ComparisonOpModel model({1, 1, 1, 4}, {1, 1, 1, 4}, TensorType_INT16,
+                          BuiltinOperator_LESS);
+  model.PopulateTensor<int16_t>(model.input1(), {-1, 9, 7, 3});
+  model.PopulateTensor<int16_t>(model.input2(), {1, 2, 6, 5});
+  ASSERT_EQ(model.Invoke(), kTfLiteOk);
 
   EXPECT_THAT(model.GetOutput(), ElementsAre(true, false, false, true));
   EXPECT_THAT(model.GetOutputShape(), ElementsAre(1, 1, 1, 4));
@@ -385,7 +473,7 @@ TEST(ComparisonsTest, LessBroadcast) {
                           BuiltinOperator_LESS);
   model.PopulateTensor<int>(model.input1(), {-1, 9, 7, 3});
   model.PopulateTensor<int>(model.input2(), {7});
-  model.Invoke();
+  ASSERT_EQ(model.Invoke(), kTfLiteOk);
 
   EXPECT_THAT(model.GetOutput(), ElementsAre(true, false, false, true));
   EXPECT_THAT(model.GetOutputShape(), ElementsAre(1, 1, 1, 4));
@@ -396,19 +484,21 @@ TEST(ComparisonsTest, LessBroadcastTwoD) {
                           BuiltinOperator_LESS);
   model.PopulateTensor<int>(model.input1(), {-1, 9, 7, 3, 2, 4, 6, 8});
   model.PopulateTensor<int>(model.input2(), {7, 1, 2, 4});
-  model.Invoke();
+  ASSERT_EQ(model.Invoke(), kTfLiteOk);
 
   EXPECT_THAT(model.GetOutput(),
               ElementsAre(true, false, false, true, true, false, false, false));
   EXPECT_THAT(model.GetOutputShape(), ElementsAre(1, 1, 2, 4));
 }
 
-TEST(ComparisonsTest, LessEqualFloat) {
-  ComparisonOpModel model({1, 1, 1, 4}, {1, 1, 1, 4}, TensorType_FLOAT32,
-                          BuiltinOperator_LESS_EQUAL);
-  model.PopulateTensor<float>(model.input1(), {0.1, 0.9, 0.7, 0.3});
-  model.PopulateTensor<float>(model.input2(), {0.1, 0.2, 0.6, 0.5});
-  model.Invoke();
+TYPED_TEST(FloatComparisonTest, LessEqual) {
+  using T = TypeParam;
+  ComparisonOpModel model({1, 1, 1, 4}, {1, 1, 1, 4}, GetTensorType<T>(),
+                          BuiltinOperator_LESS_EQUAL, /*allocate=*/false);
+  TFLITE_ALLOCATE_AND_CHECK(T, &model);
+  model.template PopulateTensor<T>(model.input1(), {0.1, 0.9, 0.7, 0.3});
+  model.template PopulateTensor<T>(model.input2(), {0.1, 0.2, 0.6, 0.5});
+  TFLITE_INVOKE_AND_CHECK(T, &model);
 
   EXPECT_THAT(model.GetOutput(), ElementsAre(true, false, false, true));
   EXPECT_THAT(model.GetOutputShape(), ElementsAre(1, 1, 1, 4));
@@ -419,7 +509,7 @@ TEST(ComparisonsTest, LessEqualInt) {
                           BuiltinOperator_LESS_EQUAL);
   model.PopulateTensor<int>(model.input1(), {-1, 9, 7, 3});
   model.PopulateTensor<int>(model.input2(), {1, 2, 7, 5});
-  model.Invoke();
+  ASSERT_EQ(model.Invoke(), kTfLiteOk);
 
   EXPECT_THAT(model.GetOutput(), ElementsAre(true, false, true, true));
   EXPECT_THAT(model.GetOutputShape(), ElementsAre(1, 1, 1, 4));
@@ -430,7 +520,7 @@ TEST(ComparisonsTest, LessEqualBroadcast) {
                           BuiltinOperator_LESS_EQUAL);
   model.PopulateTensor<int>(model.input1(), {-1, 9, 7, 3});
   model.PopulateTensor<int>(model.input2(), {7});
-  model.Invoke();
+  ASSERT_EQ(model.Invoke(), kTfLiteOk);
 
   EXPECT_THAT(model.GetOutput(), ElementsAre(true, false, true, true));
   EXPECT_THAT(model.GetOutputShape(), ElementsAre(1, 1, 1, 4));
@@ -441,7 +531,7 @@ TEST(ComparisonsTest, LessEqualBroadcastTwoD) {
                           BuiltinOperator_LESS_EQUAL);
   model.PopulateTensor<int>(model.input1(), {-1, 9, 7, 3, 2, 4, 2, 8});
   model.PopulateTensor<int>(model.input2(), {7, 1, 2, 4});
-  model.Invoke();
+  ASSERT_EQ(model.Invoke(), kTfLiteOk);
 
   EXPECT_THAT(model.GetOutput(),
               ElementsAre(true, false, false, true, true, false, true, false));
@@ -456,7 +546,7 @@ TEST(QuantizedComparisonsTest, EqualUInt8Quantized) {
                           TensorType_UINT8, BuiltinOperator_EQUAL);
   model.QuantizeAndPopulate<uint8_t>(model.input1(), {1, 9, 7, 3});
   model.QuantizeAndPopulate<uint8_t>(model.input2(), {1, 2, 7, 5});
-  model.Invoke();
+  ASSERT_EQ(model.Invoke(), kTfLiteOk);
 
   EXPECT_THAT(model.GetOutput(), ElementsAre(true, false, true, false));
 }
@@ -469,9 +559,22 @@ TEST(QuantizedComparisonsTest, EqualInt8Quantized) {
                           TensorType_INT8, BuiltinOperator_EQUAL);
   model.QuantizeAndPopulate<int8_t>(model.input1(), {1, -9, 7, 3});
   model.QuantizeAndPopulate<int8_t>(model.input2(), {-1, 2, 7, 5});
-  model.Invoke();
+  ASSERT_EQ(model.Invoke(), kTfLiteOk);
 
   EXPECT_THAT(model.GetOutput(), ElementsAre(false, false, true, false));
+}
+
+TEST(QuantizedComparisonsTest, EqualInt16Quantized) {
+  const float kMin = std::numeric_limits<int16_t>::min() + 1;
+  const float kMax = std::numeric_limits<int16_t>::max();
+  ComparisonOpModel model({TensorType_INT16, {1, 2, 2, 1}, kMin, kMax},
+                          {TensorType_INT16, {1, 2, 2, 1}, kMin, kMax},
+                          TensorType_INT16, BuiltinOperator_EQUAL);
+  model.QuantizeAndPopulate<int16_t>(model.input1(), {10, -90, 70, kMin});
+  model.QuantizeAndPopulate<int16_t>(model.input2(), {10, 20, 71, kMin});
+  model.Invoke();
+
+  EXPECT_THAT(model.GetOutput(), ElementsAre(true, false, false, true));
 }
 
 TEST(QuantizedComparisonsTest, NotEqualUInt8Quantized) {
@@ -482,7 +585,7 @@ TEST(QuantizedComparisonsTest, NotEqualUInt8Quantized) {
                           TensorType_UINT8, BuiltinOperator_NOT_EQUAL);
   model.QuantizeAndPopulate<uint8_t>(model.input1(), {1, 9, 7, 3});
   model.QuantizeAndPopulate<uint8_t>(model.input2(), {1, 2, 7, 0});
-  model.Invoke();
+  ASSERT_EQ(model.Invoke(), kTfLiteOk);
 
   EXPECT_THAT(model.GetOutput(), ElementsAre(false, true, false, true));
 }
@@ -495,9 +598,22 @@ TEST(QuantizedComparisonsTest, NotEqualInt8Quantized) {
                           TensorType_INT8, BuiltinOperator_NOT_EQUAL);
   model.QuantizeAndPopulate<int8_t>(model.input1(), {1, -9, 7, 3});
   model.QuantizeAndPopulate<int8_t>(model.input2(), {1, 2, 7, 5});
-  model.Invoke();
+  ASSERT_EQ(model.Invoke(), kTfLiteOk);
 
   EXPECT_THAT(model.GetOutput(), ElementsAre(false, true, false, true));
+}
+
+TEST(QuantizedComparisonsTest, NotEqualInt16Quantized) {
+  const float kMin = std::numeric_limits<int16_t>::min() + 1;
+  const float kMax = std::numeric_limits<int16_t>::max();
+  ComparisonOpModel model({TensorType_INT16, {1, 2, 2, 1}, kMin, kMax},
+                          {TensorType_INT16, {1, 2, 2, 1}, kMin, kMax},
+                          TensorType_INT16, BuiltinOperator_NOT_EQUAL);
+  model.QuantizeAndPopulate<int16_t>(model.input1(), {10, -90, 70, kMin + 1});
+  model.QuantizeAndPopulate<int16_t>(model.input2(), {10, 20, 71, kMin + 2});
+  model.Invoke();
+
+  EXPECT_THAT(model.GetOutput(), ElementsAre(false, true, true, true));
 }
 
 TEST(ComparisonsTest, GreaterQuantized) {
@@ -508,7 +624,7 @@ TEST(ComparisonsTest, GreaterQuantized) {
                           TensorType_UINT8, BuiltinOperator_GREATER);
   model.QuantizeAndPopulate<uint8_t>(model.input1(), {1, 9, 7, 3});
   model.QuantizeAndPopulate<uint8_t>(model.input2(), {1, 2, 6, 5});
-  model.Invoke();
+  ASSERT_EQ(model.Invoke(), kTfLiteOk);
 
   EXPECT_THAT(model.GetOutput(), ElementsAre(false, true, true, false));
 }
@@ -519,7 +635,7 @@ TEST(ComparisonsTest, GreaterQuantizedSmallRange) {
                           TensorType_UINT8, BuiltinOperator_GREATER);
   model.QuantizeAndPopulate<uint8_t>(model.input1(), {1.0, 0.5, 0.35, 0.1});
   model.QuantizeAndPopulate<uint8_t>(model.input2(), {1.01, 0.25, 0.3, 0.4});
-  model.Invoke();
+  ASSERT_EQ(model.Invoke(), kTfLiteOk);
 
   EXPECT_THAT(model.GetOutput(), ElementsAre(false, true, true, false));
 }
@@ -532,7 +648,7 @@ TEST(ComparisonsTest, GreaterEqualQuantized) {
                           TensorType_UINT8, BuiltinOperator_GREATER_EQUAL);
   model.QuantizeAndPopulate<uint8_t>(model.input1(), {1, 9, 7, 3});
   model.QuantizeAndPopulate<uint8_t>(model.input2(), {1, 2, 6, 5});
-  model.Invoke();
+  ASSERT_EQ(model.Invoke(), kTfLiteOk);
 
   EXPECT_THAT(model.GetOutput(), ElementsAre(true, true, true, false));
 }
@@ -545,7 +661,7 @@ TEST(ComparisonsTest, LessQuantized) {
                           TensorType_UINT8, BuiltinOperator_LESS);
   model.QuantizeAndPopulate<uint8_t>(model.input1(), {1, 9, 7, 3});
   model.QuantizeAndPopulate<uint8_t>(model.input2(), {1, 2, 6, 5});
-  model.Invoke();
+  ASSERT_EQ(model.Invoke(), kTfLiteOk);
 
   EXPECT_THAT(model.GetOutput(), ElementsAre(false, false, false, true));
 }
@@ -558,7 +674,7 @@ TEST(ComparisonsTest, LessEqualQuantized) {
                           TensorType_UINT8, BuiltinOperator_LESS_EQUAL);
   model.QuantizeAndPopulate<uint8_t>(model.input1(), {1, 9, 7, 3});
   model.QuantizeAndPopulate<uint8_t>(model.input2(), {1, 2, 6, 5});
-  model.Invoke();
+  ASSERT_EQ(model.Invoke(), kTfLiteOk);
 
   EXPECT_THAT(model.GetOutput(), ElementsAre(true, false, false, true));
 }
@@ -574,7 +690,7 @@ TEST(ComparisonsTest, QuantizedEqualWithBroadcast) {
                             TensorType_UINT8, BuiltinOperator_EQUAL);
     model.QuantizeAndPopulate<uint8_t>(model.input1(), {20, 2, 7, 8, 11, 20});
     model.QuantizeAndPopulate<uint8_t>(model.input2(), {2});
-    model.Invoke();
+    ASSERT_EQ(model.Invoke(), kTfLiteOk);
     EXPECT_THAT(model.GetOutput(),
                 ElementsAre(false, true, false, false, false, false))
         << "With shape number " << i;
@@ -592,7 +708,7 @@ TEST(ComparisonsTest, QuantizedUInt8NotEqualWithBroadcast) {
                             TensorType_UINT8, BuiltinOperator_NOT_EQUAL);
     model.QuantizeAndPopulate<uint8_t>(model.input1(), {20, 2, 7, 8, 11, 20});
     model.QuantizeAndPopulate<uint8_t>(model.input2(), {2});
-    model.Invoke();
+    ASSERT_EQ(model.Invoke(), kTfLiteOk);
     EXPECT_THAT(model.GetOutput(),
                 ElementsAre(true, false, true, true, true, true))
         << "With shape number " << i;
@@ -610,7 +726,7 @@ TEST(ComparisonsTest, QuantizedInt8NotEqualWithBroadcast) {
                             BuiltinOperator_NOT_EQUAL);
     model.QuantizeAndPopulate<int8_t>(model.input1(), {-20, 2, 7, -8, 11, 20});
     model.QuantizeAndPopulate<int8_t>(model.input2(), {2});
-    model.Invoke();
+    ASSERT_EQ(model.Invoke(), kTfLiteOk);
     EXPECT_THAT(model.GetOutput(),
                 ElementsAre(true, false, true, true, true, true))
         << "With shape number " << i;
@@ -628,7 +744,7 @@ TEST(ComparisonsTest, QuantizedUInt8GreaterWithBroadcast) {
                             TensorType_UINT8, BuiltinOperator_GREATER);
     model.QuantizeAndPopulate<uint8_t>(model.input1(), {20, 2, 7, 8, 11, 20});
     model.QuantizeAndPopulate<uint8_t>(model.input2(), {8});
-    model.Invoke();
+    ASSERT_EQ(model.Invoke(), kTfLiteOk);
     EXPECT_THAT(model.GetOutput(),
                 ElementsAre(true, false, false, false, true, true))
         << "With shape number " << i;
@@ -646,7 +762,27 @@ TEST(ComparisonsTest, QuantizedInt8GreaterWithBroadcast) {
                             BuiltinOperator_GREATER);
     model.QuantizeAndPopulate<int8_t>(model.input1(), {20, -2, -71, 8, 11, 20});
     model.QuantizeAndPopulate<int8_t>(model.input2(), {8});
-    model.Invoke();
+    ASSERT_EQ(model.Invoke(), kTfLiteOk);
+    EXPECT_THAT(model.GetOutput(),
+                ElementsAre(true, false, false, false, true, true))
+        << "With shape number " << i;
+  }
+}
+
+TEST(ComparisonsTest,
+     QuantizedInt8GreaterWithBroadcastMultiplierGreaterThanOne) {
+  const float kMin = -127.f;
+  const float kMax = 127.f;
+  std::vector<std::vector<int>> test_shapes = {
+      {6}, {2, 3}, {2, 1, 3}, {1, 3, 1, 2}};
+  for (int i = 0; i < test_shapes.size(); ++i) {
+    ComparisonOpModel model({TensorType_INT8, test_shapes[i], kMin, kMax},
+                            {TensorType_INT8, {}, kMin, kMax}, TensorType_INT8,
+                            BuiltinOperator_GREATER);
+    model.QuantizeAndPopulate<int8_t>(model.input1(),
+                                      {572, -2, -71, 8, 11, 20});
+    model.QuantizeAndPopulate<int8_t>(model.input2(), {8});
+    ASSERT_EQ(model.Invoke(), kTfLiteOk);
     EXPECT_THAT(model.GetOutput(),
                 ElementsAre(true, false, false, false, true, true))
         << "With shape number " << i;
@@ -664,7 +800,7 @@ TEST(ComparisonsTest, QuantizedUInt8GreaterEqualWithBroadcast) {
                             TensorType_UINT8, BuiltinOperator_GREATER_EQUAL);
     model.QuantizeAndPopulate<uint8_t>(model.input1(), {20, 2, 7, 8, 11, 20});
     model.QuantizeAndPopulate<uint8_t>(model.input2(), {8});
-    model.Invoke();
+    ASSERT_EQ(model.Invoke(), kTfLiteOk);
     EXPECT_THAT(model.GetOutput(),
                 ElementsAre(true, false, false, true, true, true))
         << "With shape number " << i;
@@ -682,7 +818,7 @@ TEST(ComparisonsTest, QuantizedInt8GreaterEqualWithBroadcast) {
                             BuiltinOperator_GREATER_EQUAL);
     model.QuantizeAndPopulate<int8_t>(model.input1(), {20, -2, -71, 8, 11, 20});
     model.QuantizeAndPopulate<int8_t>(model.input2(), {8});
-    model.Invoke();
+    ASSERT_EQ(model.Invoke(), kTfLiteOk);
     EXPECT_THAT(model.GetOutput(),
                 ElementsAre(true, false, false, true, true, true))
         << "With shape number " << i;
@@ -700,7 +836,7 @@ TEST(ComparisonsTest, QuantizedUInt8LessWithBroadcast) {
                             TensorType_UINT8, BuiltinOperator_LESS);
     model.QuantizeAndPopulate<uint8_t>(model.input1(), {20, 2, 7, 8, 11, 20});
     model.QuantizeAndPopulate<uint8_t>(model.input2(), {8});
-    model.Invoke();
+    ASSERT_EQ(model.Invoke(), kTfLiteOk);
     EXPECT_THAT(model.GetOutput(),
                 ElementsAre(false, true, true, false, false, false))
         << "With shape number " << i;
@@ -718,7 +854,7 @@ TEST(ComparisonsTest, QuantizedInt8LessWithBroadcast) {
                             BuiltinOperator_LESS);
     model.QuantizeAndPopulate<int8_t>(model.input1(), {20, -2, -71, 8, 11, 20});
     model.QuantizeAndPopulate<int8_t>(model.input2(), {8});
-    model.Invoke();
+    ASSERT_EQ(model.Invoke(), kTfLiteOk);
     EXPECT_THAT(model.GetOutput(),
                 ElementsAre(false, true, true, false, false, false))
         << "With shape number " << i;
@@ -736,7 +872,7 @@ TEST(ComparisonsTest, QuantizedUInt8LessEqualWithBroadcast) {
                             TensorType_UINT8, BuiltinOperator_LESS_EQUAL);
     model.QuantizeAndPopulate<uint8_t>(model.input1(), {20, 2, 7, 8, 11, 20});
     model.QuantizeAndPopulate<uint8_t>(model.input2(), {8});
-    model.Invoke();
+    ASSERT_EQ(model.Invoke(), kTfLiteOk);
     EXPECT_THAT(model.GetOutput(),
                 ElementsAre(false, true, true, true, false, false))
         << "With shape number " << i;
@@ -754,7 +890,7 @@ TEST(ComparisonsTest, QuantizedInt8LessEqualWithBroadcast) {
                             BuiltinOperator_LESS_EQUAL);
     model.QuantizeAndPopulate<int8_t>(model.input1(), {20, -2, -71, 8, 11, 20});
     model.QuantizeAndPopulate<int8_t>(model.input2(), {8});
-    model.Invoke();
+    ASSERT_EQ(model.Invoke(), kTfLiteOk);
     EXPECT_THAT(model.GetOutput(),
                 ElementsAre(false, true, true, true, false, false))
         << "With shape number " << i;

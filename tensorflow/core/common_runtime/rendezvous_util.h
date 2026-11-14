@@ -17,23 +17,26 @@ limitations under the License.
 
 #include <map>
 
+#include "absl/status/status.h"
+#include "absl/types/span.h"
 #include "tensorflow/core/framework/rendezvous.h"
 #include "tensorflow/core/lib/core/status.h"
 
 namespace tensorflow {
 
-typedef std::map<string, Tensor> NamedTensors;
-typedef std::function<void(const Status&)> StatusCallback;
+typedef std::map<std::string, Tensor> NamedTensors;
+typedef std::function<void(const absl::Status&)> StatusCallback;
 
 // Uses `rendezvous` to send tensors in `tensors_to_send`. `device_context`
 // should be the DeviceContext associated with the source of the tensors.
 // `alloc_attrs` contains information about how the `tensors_to_send` are
 // allocated. `alloc_attrs` should either be {} or should match the length of
 // `keys`.
-Status SendTensorsToRendezvous(
+absl::Status SendTensorsToRendezvous(
     RendezvousInterface* rendezvous, DeviceContext* device_context,
     const std::vector<AllocatorAttributes>& alloc_attrs,
-    const std::vector<string>& keys, gtl::ArraySlice<Tensor> tensors_to_send);
+    const std::vector<std::string>& keys,
+    absl::Span<const Tensor> tensors_to_send);
 
 // Uses `rendezvous` to obtain tensors. `device_context` should be the
 // DeviceContext associated with the receiving device. `alloc_attrs` contains
@@ -42,12 +45,12 @@ Status SendTensorsToRendezvous(
 void RecvOutputsFromRendezvousAsync(
     RendezvousInterface* rendezvous, DeviceContext* device_context,
     const std::vector<AllocatorAttributes>& alloc_attrs,
-    const std::vector<string>& keys, std::vector<Tensor>* received_tensors,
+    const std::vector<std::string>& keys, std::vector<Tensor>* received_tensors,
     StatusCallback done);
 
-Status RecvOutputsFromRendezvous(RendezvousInterface* rendezvous,
-                                 NamedTensors* out,
-                                 const Rendezvous::Args& args);
+absl::Status RecvOutputsFromRendezvous(RendezvousInterface* rendezvous,
+                                       NamedTensors* out,
+                                       const Rendezvous::Args& args);
 
 }  // namespace tensorflow
 

@@ -17,9 +17,17 @@ limitations under the License.
 #include <stdlib.h>
 
 #include <atomic>
+#include <cstdint>
 #include <functional>
+#include <limits>
+#include <string>
 #include <utility>
 
+#include "absl/log/check.h"
+#include "absl/log/log.h"
+#include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
+#include "absl/synchronization/notification.h"
 #include "tensorflow/core/common_runtime/collective_rma_local.h"
 #include "tensorflow/core/common_runtime/collective_util.h"
 #include "tensorflow/core/common_runtime/copy_tensor.h"
@@ -33,7 +41,6 @@ limitations under the License.
 #include "tensorflow/core/framework/tensor.h"
 #include "tensorflow/core/framework/types.h"
 #include "tensorflow/core/lib/core/errors.h"
-#include "tensorflow/core/lib/core/notification.h"
 #include "tensorflow/core/lib/core/status.h"
 #include "tensorflow/core/lib/strings/str_util.h"
 #include "tensorflow/core/lib/strings/strcat.h"
@@ -45,7 +52,8 @@ namespace tensorflow {
 
 RingReducer::~RingReducer() { group_size_tensor_ready_.WaitForNotification(); }
 
-Status RingReducer::InitializeCollectiveParams(CollectiveParams* col_params) {
+absl::Status RingReducer::InitializeCollectiveParams(
+    CollectiveParams* col_params) {
   // TODO(b/113171733): change CHECKs to return errors.
   CHECK_EQ(col_params->instance.type, REDUCTION_COLLECTIVE);
   CHECK_EQ(col_params->instance.impl_details.collective_name, "RingReduce");
@@ -64,9 +72,15 @@ void RingReducer::Run(StatusCallback done) {
   num_subdivs_ = static_cast<int>(
       col_params_->instance.impl_details.subdiv_permutations.size());
   CHECK_GT(num_subdivs_, 0);
+  if (static_cast<int64_t>(group_size_) * static_cast<int64_t>(num_subdivs_) >
+      std::numeric_limits<int32_t>::max()) {
+    done_(absl::InvalidArgumentError(
+        "group_size * num_subdivs exceeds int32 limit"));
+    return;
+  }
 
   if (VLOG_IS_ON(1)) {
-    string buf;
+    std::string buf;
     for (int r = 0; r < col_params_->group.members.size(); ++r) {
       strings::StrAppend(&buf, "dev ", r, " : ",
                          col_params_->group.members[r].device.name(), "\n");
@@ -74,10 +88,10 @@ void RingReducer::Run(StatusCallback done) {
     for (int sd = 0;
          sd < col_params_->instance.impl_details.subdiv_permutations.size();
          ++sd) {
-      strings::StrAppend(&buf, "\nsubdiv ", sd, " perm: ");
+      absl::StrAppend(&buf, "\nsubdiv ", sd, " perm: ");
       for (auto x :
            col_params_->instance.impl_details.subdiv_permutations[sd]) {
-        strings::StrAppend(&buf, x, ", ");
+        absl::StrAppend(&buf, x, ", ");
       }
     }
     VLOG(1) << "RingReducer::Run for device " << col_ctx_->device_name
@@ -91,16 +105,17 @@ void RingReducer::Run(StatusCallback done) {
       (DMAHelper::base(col_ctx_->input) != DMAHelper::base(col_ctx_->output))) {
     // We are running in a blockable thread and the callback can't block so
     // just wait here on the copy.
-    Notification note;
-    Status status;
-    profiler::TraceMe activity("MemCpyAsync", profiler::TraceMeLevel::kInfo);
+    absl::Notification note;
+    absl::Status status;
+    tsl::profiler::TraceMe activity("MemCpyAsync",
+                                    tsl::profiler::TraceMeLevel::kInfo);
     CollectiveRemoteAccessLocal::MemCpyAsync(
         col_ctx_->op_ctx->op_device_context(),
         col_ctx_->op_ctx->op_device_context(), col_ctx_->device,
         col_ctx_->device, col_ctx_->op_ctx->input_alloc_attr(0),
         col_ctx_->op_ctx->output_alloc_attr(0), col_ctx_->input,
         col_ctx_->output, 0 /*dev_to_dev_stream_index*/,
-        [&note, &status](const Status& s) {
+        [&note, &status](const absl::Status& s) {
           status.Update(s);
           note.Notify();
         });
@@ -127,9 +142,9 @@ void RingReducer::ContinueAfterInputCopy() {
     // can be provided to the kernel in host memory?
     Tensor group_size_val = ca_->Scalar(group_size_);
     if (col_params_->group.device_type != "CPU") {
-      uint64 safe_alloc_frontier = col_ctx_->device->SafeAllocFrontier(0);
+      uint64_t safe_alloc_frontier = col_ctx_->device->SafeAllocFrontier(0);
       AllocationAttributes aa;
-      std::function<uint64()> freed_by_func = [this, &safe_alloc_frontier]() {
+      std::function<uint64_t()> freed_by_func = [this, &safe_alloc_frontier]() {
         safe_alloc_frontier =
             col_ctx_->device->SafeAllocFrontier(safe_alloc_frontier);
         return safe_alloc_frontier;
@@ -143,7 +158,7 @@ void RingReducer::ContinueAfterInputCopy() {
       DeviceContext* op_dev_ctx = col_ctx_->op_ctx->op_device_context();
       op_dev_ctx->CopyCPUTensorToDevice(
           &group_size_val, col_ctx_->device, &group_size_tensor_,
-          [this](const Status& s) {
+          [this](const absl::Status& s) {
             if (!s.ok()) {
               StartAbort(s);
             }
@@ -187,24 +202,24 @@ bool RingReducer::RunAsyncParts() {
       ready_queue.Enqueue(&rfv_[rf_index]);
     }
   }
-  const DeviceBase::GpuDeviceInfo* gpu_info =
-      col_ctx_->device->tensorflow_gpu_device_info();
+  const DeviceBase::AcceleratorDeviceInfo* gpu_info =
+      col_ctx_->device->tensorflow_accelerator_device_info();
   if (gpu_info) {
     // Wait for all currently queued events on the CPU compute stream to
     // complete before proceeding.  The previous InitRingField calls allocated
     // temp memory buffers that are not guaranteed to be valid (e.g. for RDMA
     // write) unless we do.
-    profiler::TraceMe activity("WaitForQueuedEvents",
-                               profiler::TraceMeLevel::kInfo);
-    Notification note;
-    Status s = gpu_info->default_context->ThenExecute(
+    tsl::profiler::TraceMe activity("WaitForQueuedEvents",
+                                    tsl::profiler::TraceMeLevel::kInfo);
+    absl::Notification note;
+    absl::Status s = gpu_info->default_context->ThenExecute(
         col_ctx_->device, gpu_info->stream, [&note]() { note.Notify(); });
     if (s.ok()) {
       note.WaitForNotification();
     } else {
       mutex_lock l(status_mu_);
       status_ =
-          errors::Internal("Failed to dispatch ThenExecute in RingReducer");
+          absl::InternalError("Failed to dispatch ThenExecute in RingReducer");
       return false;
     }
   }
@@ -215,7 +230,7 @@ bool RingReducer::RunAsyncParts() {
   std::atomic<bool> aborted(false);
 
   {
-    profiler::TraceMe activity("Loop", profiler::TraceMeLevel::kInfo);
+    tsl::profiler::TraceMe activity("Loop", tsl::profiler::TraceMeLevel::kInfo);
     // Loop until all RingFields have advanced to completion.
     while (field_done_count < rfv_.size()) {
       VLOG(4) << FieldState();
@@ -235,7 +250,8 @@ bool RingReducer::RunAsyncParts() {
           case RF_INIT:
             if (rf->do_recv) {
               rf->action = RF_RECV;
-              auto requeue = [this, rf, &ready_queue, &aborted](Status s) {
+              auto requeue = [this, rf, &ready_queue,
+                              &aborted](absl::Status s) {
                 if (!s.ok()) {
                   aborted = true;
                   StartAbort(s);
@@ -254,7 +270,7 @@ bool RingReducer::RunAsyncParts() {
             --recv_pending_count;
             if (!rf->second_pass) {
               rf->action = RF_REDUCE;
-              Status s = collective_util::ComputeBinOp(
+              absl::Status s = collective_util::ComputeBinOp(
                   col_ctx_->op_ctx, col_ctx_->op_params, col_ctx_->device,
                   col_params_->merge_op, &rf->chunk, &rf->tmp_chunk);
               if (!s.ok()) {
@@ -269,7 +285,7 @@ bool RingReducer::RunAsyncParts() {
             if (!rf->second_pass && col_params_->final_op && rf->is_final) {
               rf->action = RF_FINALIZE;
               group_size_tensor_ready_.WaitForNotification();
-              Status s = collective_util::ComputeBinOp(
+              absl::Status s = collective_util::ComputeBinOp(
                   col_ctx_->op_ctx, col_ctx_->op_params, col_ctx_->device,
                   col_params_->final_op, &rf->chunk, &group_size_tensor_);
               if (!s.ok()) {
@@ -287,7 +303,7 @@ bool RingReducer::RunAsyncParts() {
             if (rf->do_send) {
               rf->action = RF_SEND;
               auto send_complete = [this, rf, &ready_queue,
-                                    &aborted](Status s) {
+                                    &aborted](absl::Status s) {
                 if (!s.ok()) {
                   aborted = true;
                   StartAbort(s);

@@ -1,4 +1,3 @@
-# Lint as: python2, python3
 # Copyright 2015 The TensorFlow Authors. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -16,14 +15,10 @@
 # ==============================================================================
 """A visitor class that generates protobufs for each python object."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import enum
-import sys
-
-import six
+import functools
+import inspect
+import re
 
 from google.protobuf import message
 from tensorflow.python.platform import tf_logging as logging
@@ -49,66 +44,75 @@ _CORNER_CASES = {
         'isAlive': {},
         'join': {},
         'native_id': {}
-    }
+    },
+    'test.StubOutForTesting': {
+        '__del__': {},
+        '__enter__': {},
+        '__exit__': {}
+    },
 }
 
-# Python 2 vs. 3 differences
-if sys.version_info.major == 3:
-  _NORMALIZE_TYPE = {}
-  for t in ('property', 'object', 'getset_descriptor', 'int', 'str', 'type',
-            'tuple', 'module', 'collections.defaultdict', 'set', 'dict',
-            'NoneType', 'frozenset', 'member_descriptor'):
-    _NORMALIZE_TYPE["<class '%s'>" % t] = "<type '%s'>" % t
-  for e in 'Exception', 'RuntimeError':
-    _NORMALIZE_TYPE["<class '%s'>" % e] = "<type 'exceptions.%s'>" % e
-  _NORMALIZE_TYPE["<class 'abc.ABCMeta'>"] = "<type 'type'>"
-  _NORMALIZE_ISINSTANCE = {
-      "<class "
-      "'tensorflow.lite.python.op_hint.OpHint.OpHintArgumentTracker'>":  # pylint: disable=line-too-long
-          "<class "
-          "'tensorflow.lite.python.op_hint.OpHintArgumentTracker'>",
-      "<class "
-      "'tensorflow.python.training.monitored_session._MonitoredSession.StepContext'>":  # pylint: disable=line-too-long
-          "<class "
-          "'tensorflow.python.training.monitored_session.StepContext'>",
-      "<class "
-      "'tensorflow.python.ops.variables.Variable.SaveSliceInfo'>":
-          "<class "
-          "'tensorflow.python.ops.variables.SaveSliceInfo'>"
-  }
-
-  def _SkipMember(cls, member):
-    return (member == 'with_traceback' or member in ('name', 'value') and
-            isinstance(cls, type) and issubclass(cls, enum.Enum))
-else:
-  _NORMALIZE_TYPE = {
-      "<class 'abc.ABCMeta'>":
-          "<type 'type'>",
-      "<class 'pybind11_type'>":
-          "<class 'pybind11_builtins.pybind11_type'>",
-  }
-  _NORMALIZE_ISINSTANCE = {
-      "<class 'pybind11_object'>":
-          "<class 'pybind11_builtins.pybind11_object'>",
-  }
-
-  def _SkipMember(cls, member):  # pylint: disable=unused-argument
-    return False
+_NORMALIZE_TYPE = {
+    # Keep Union aliases stable across Python versions with different
+    # implementation types for typing.Union.
+    "<class 'typing._UnionGenericAlias'>": 'typing.Union',
+    "<class 'typing.Union'>": 'typing.Union',
+    "<class 'enum.EnumMeta'>": "<class 'enum.EnumType'>",
+}
+_NORMALIZE_ISINSTANCE = {
+    "<class "
+    "'tensorflow.lite.python.op_hint.OpHint.OpHintArgumentTracker'>":  # pylint: disable=line-too-long
+        "<class "
+        "'tensorflow.lite.python.op_hint.OpHintArgumentTracker'>",
+    "<class "
+    "'tensorflow.python.training.monitored_session._MonitoredSession.StepContext'>":  # pylint: disable=line-too-long
+        "<class "
+        "'tensorflow.python.training.monitored_session.StepContext'>",
+    "<class "
+    "'tensorflow.python.ops.variables.Variable.SaveSliceInfo'>":
+        '<class '
+        "'tensorflow.python.ops.variables.SaveSliceInfo'>"
+}
 
 
-# Differences created by typing implementations.
-_NORMALIZE_TYPE[(
-    'tensorflow.python.framework.ops.Tensor')] = (
-        "<class 'tensorflow.python.framework.ops.Tensor'>")
-_NORMALIZE_TYPE['typing.Generic'] = "<class 'typing.Generic'>"
-# TODO(mdan): Remove once the golden files are generated in Python 3.7.
-_NORMALIZE_TYPE["<class 'typing._GenericAlias'>"] = 'typing.Union'
-# TODO(mdan): Remove once the golden files are generated in Python 3.9.
-_NORMALIZE_TYPE["<class 'typing._UnionGenericAlias'>"] = 'typing.Union'
+def _SkipMember(cls, member):
+  return member == 'with_traceback' or (
+      member in ('name', 'value')
+      and isinstance(cls, type)
+      and issubclass(cls, enum.Enum)
+  )
 
 
-if sys.version_info.major == 3 and sys.version_info.minor >= 8:
-  _NORMALIZE_TYPE["<class '_collections._tuplegetter'>"] = "<type 'property'>"
+# CPython regularly adds public members to these bases. Inherited members from
+# them are runtime details rather than TensorFlow API.
+_SIGNATURE_CLASS = getattr(inspect, 'Signature', None)
+_UNSTABLE_EXTERNAL_BASE_CLASSES = tuple(
+    cls
+    for cls in (BaseException, enum.Enum, int, _SIGNATURE_CLASS)
+    if cls is not None
+)
+_TENSORFLOW_FAMILY_MARKERS = ('tensorflow', 'tf_keras', 'keras')
+_OWNERSHIP_IDENTIFIER_RE = re.compile(r'[A-Za-z_][A-Za-z0-9_]*')
+_EXCLUDED_DUNDERS = frozenset(vars(object)) - {
+    '__eq__',
+    '__ne__',
+    '__lt__',
+    '__le__',
+    '__gt__',
+    '__ge__',
+} | {
+    '__getstate__',
+    '__setstate__',
+    '__copy__',
+    '__deepcopy__',
+    # __round__ is dynamically attached to tf.Tensor at module import time
+    # in tensorflow/python/ops/numpy_ops/np_array_ops.py, so we exclude it
+    # to keep API generation deterministic.
+    '__round__',
+    # Python 3.14 deferred annotations
+    '__annotate__',
+    '__annotate_func__',
+}
 
 
 def _NormalizeType(ty):
@@ -117,6 +121,84 @@ def _NormalizeType(ty):
 
 def _NormalizeIsInstance(ty):
   return _NORMALIZE_ISINSTANCE.get(ty, ty)
+
+
+def _IsApiMethod(obj):
+  """Return whether obj should be serialized as a proto method."""
+  # Keep callable wrapper objects in the member field across Python versions.
+  if isinstance(obj, functools.partial):
+    return False
+  return tf_inspect.isroutine(obj)
+
+
+def _IsTensorFlowFamilySegment(segment):
+  return segment in _TENSORFLOW_FAMILY_MARKERS or segment.startswith(
+      'tensorflow_'
+  )
+
+
+def _HasTensorFlowFamilyMarker(value):
+  if not value:
+    return False
+  return any(
+      _IsTensorFlowFamilySegment(segment)
+      for segment in _OWNERSHIP_IDENTIFIER_RE.findall(str(value))
+  )
+
+
+def _ClassOwnershipEvidence(cls):
+  module = getattr(cls, '__module__', '')
+  if module:
+    yield module
+
+  try:
+    inspected_module = inspect.getmodule(cls)
+  except TypeError:
+    inspected_module = None
+  inspected_module_name = getattr(inspected_module, '__name__', '')
+  if inspected_module_name and inspected_module_name != module:
+    yield inspected_module_name
+
+  yield str(cls)
+  yield repr(cls)
+
+
+def _IsTensorFlowOwnedClass(cls):
+  return any(
+      _HasTensorFlowFamilyMarker(value)
+      for value in _ClassOwnershipEvidence(cls)
+  )
+
+
+def _IsUnstableExternalBase(cls):
+  if _IsTensorFlowOwnedClass(cls):
+    return False
+  return any(issubclass(cls, base) for base in _UNSTABLE_EXTERNAL_BASE_CLASSES)
+
+
+def _OwnerClass(cls, member):
+  try:
+    mro = tf_inspect.getmro(cls)
+  except TypeError:
+    return None
+
+  for base in mro:
+    if member in getattr(base, '__dict__', ()):
+      return base
+  return None
+
+
+def _IsUnstableExternalInheritedMember(cls, member):
+  if not tf_inspect.isclass(cls):
+    return False
+  owner = _OwnerClass(cls, member)
+  if owner is None or owner is cls:
+    return False
+  if owner is object and member == '__init__':
+    return any(
+        issubclass(cls, base) for base in _UNSTABLE_EXTERNAL_BASE_CLASSES
+    )
+  return _IsUnstableExternalBase(owner)
 
 
 def _SanitizedArgSpec(obj):
@@ -157,6 +239,51 @@ def _SanitizedArgSpec(obj):
   return output_string
 
 
+def _GenerateArgsSpec(doc):
+  """Generate args spec from a method docstring."""
+  args = []
+  varargs = None
+  keywords = None
+  doc = re.search(r'\((.*)\)', doc)
+  if not doc:
+    return None
+  for param in doc.group(1).split(','):
+    m = re.match(r'\s*(\*{0,2})(\w+)', param)
+    if not m:
+      return None
+    prefix, name = m.groups()
+    if prefix == '**':
+      keywords = name
+    elif prefix == '*':
+      varargs = name
+    else:
+      args.append(f"'{name}'")
+  return args, varargs, keywords
+
+
+def _ParseDocstringArgSpec(doc):
+  """Get an ArgSpec string from a pybind11-style docstring.
+
+  For example: `foo_function(a: int, *args, **kwargs) -> None`
+
+  Args:
+    doc: A python string which starts with function signature.
+
+  Returns:
+    string: an argspec string representation.
+
+  Raises:
+    ValueError: Raised when failed to parse the input docstring.
+  """
+  result = _GenerateArgsSpec(doc)
+  if result is None:
+    raise ValueError(f'Failed to parse argspec from docstring: {doc}')
+
+  args, varargs, keywords = result
+  return (f'args=[{", ".join(args)}], varargs={varargs},'
+          f' keywords={keywords}, defaults=None')
+
+
 def _SanitizedMRO(obj):
   """Get a list of superclasses with minimal amount of non-TF classes.
 
@@ -180,8 +307,7 @@ def _SanitizedMRO(obj):
     str_repr = _NormalizeType(str(cls))
     return_list.append(str_repr)
     # Class type that has keras in their name should also be monitored. This
-    # will cover any class that imported from third_party/py/keras or
-    # keras_preprocessing.
+    # will cover any class imported from third_party/py/keras.
     if 'tensorflow' not in str_repr and 'keras' not in str_repr:
       break
 
@@ -199,7 +325,7 @@ def _IsProtoClass(obj):
   return isinstance(obj, type) and issubclass(obj, message.Message)
 
 
-class PythonObjectToProtoVisitor(object):
+class PythonObjectToProtoVisitor:
   """A visitor that summarizes given python objects as protobufs."""
 
   def __init__(self, default_path='tensorflow'):
@@ -217,28 +343,71 @@ class PythonObjectToProtoVisitor(object):
     lib_path = self._default_path + '.' + path if path else self._default_path
     _, parent = tf_decorator.unwrap(parent)
 
+    if tf_inspect.isclass(parent):
+      children[:] = [
+          (name, child)
+          for name, child in children
+          if not _IsUnstableExternalInheritedMember(parent, name)
+      ]
+
     # A small helper method to construct members(children) protos.
     def _AddMember(member_name, member_obj, proto):
       """Add the child object to the object being constructed."""
       _, member_obj = tf_decorator.unwrap(member_obj)
-      if (_SkipMember(parent, member_name) or
-          isinstance(member_obj, deprecation.HiddenTfApiAttribute)):
+      if _SkipMember(parent, member_name) or isinstance(
+          member_obj, deprecation.HiddenTfApiAttribute
+      ):
         return
-      if member_name == '__init__' or not six.ensure_str(
-          member_name).startswith('_'):
-        if tf_inspect.isroutine(member_obj):
+      is_tuple_subclass = isinstance(parent, type) and issubclass(parent, tuple)
+      is_tf_defined_dunder_method = (
+          member_name.startswith('__')
+          and member_name.endswith('__')
+          # Exclude dunders that are only defined on object, e.g. __repr__,
+          # because they aren't really part of TensorFlow API.
+          and member_name not in _EXCLUDED_DUNDERS
+          and isinstance(parent, type)
+          and _IsApiMethod(member_obj)
+          and _IsTensorFlowOwnedClass(_OwnerClass(parent, member_name))
+      )
+      is_allowed_dunder = (
+          member_name == '__init__'
+          or (member_name == '__new__' and is_tuple_subclass)
+          or is_tf_defined_dunder_method
+      )
+      if is_allowed_dunder or not member_name.startswith('_'):
+        if _IsApiMethod(member_obj):
           new_method = proto.member_method.add()
           new_method.name = member_name
+          if isinstance(parent, type):
+            raw = inspect.getattr_static(parent, member_name, None)
+            if isinstance(raw, classmethod):
+              new_method.method_kind = (
+                  api_objects_pb2.TFAPIMethod.CLASS
+              )
+            elif isinstance(raw, staticmethod):
+              new_method.method_kind = (
+                  api_objects_pb2.TFAPIMethod.STATIC
+              )
           # If member_obj is a python builtin, there is no way to get its
           # argspec, because it is implemented on the C side. It also has no
           # func_code.
           if hasattr(member_obj, '__code__'):
             new_method.argspec = _SanitizedArgSpec(member_obj)
+          else:
+            # Try to parse argspec based on docstring for exposed C++ functions
+            if member_name != '__init__' and hasattr(member_obj, '__doc__'):
+              doc = member_obj.__doc__
+              try:
+                spec_str = _ParseDocstringArgSpec(doc)
+              except ValueError:
+                pass
+              else:
+                new_method.argspec = spec_str
         else:
           new_member = proto.member.add()
           new_member.name = member_name
           if tf_inspect.ismodule(member_obj):
-            new_member.mtype = "<type \'module\'>"
+            new_member.mtype = "<class 'module'>"
           else:
             new_member.mtype = _NormalizeType(str(type(member_obj)))
 
@@ -284,5 +453,6 @@ class PythonObjectToProtoVisitor(object):
         self._protos[lib_path] = api_objects_pb2.TFAPIObject(
             path=lib_path, tf_class=class_obj)
       else:
-        logging.error('Illegal call to ApiProtoDump::_py_obj_to_proto.'
-                      'Object is neither a module nor a class: %s', path)
+        logging.error(
+            'Illegal call to ApiProtoDump::_py_obj_to_proto.'
+            'Object is neither a module nor a class: %s', path)

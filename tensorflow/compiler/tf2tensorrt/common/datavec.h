@@ -19,19 +19,15 @@ limitations under the License.
 #include <vector>
 
 #include "tensorflow/core/framework/tensor.h"
+#include "tensorflow/core/platform/types.h"
 
 namespace tensorflow {
 namespace tensorrt {
 
 // Input/output data format for OpConverterTest::BuildAndRun().
 struct InputOutputData {
-  void* Buffer() const {
-    return const_cast<char*>(tensor.tensor_data().data());
-  }
-
   size_t TotalBytes() const { return tensor.TotalBytes(); }
-
-  string name;
+  std::string name;
   Tensor tensor;
 };
 

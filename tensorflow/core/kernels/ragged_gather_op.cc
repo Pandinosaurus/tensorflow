@@ -12,11 +12,14 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
+#include <cstdint>
 #include <limits>
 #include <memory>
 #include <string>
 #include <vector>
 
+#include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/register_types.h"
 #include "tensorflow/core/framework/tensor.h"
@@ -38,10 +41,10 @@ void WriteValueSlices(
   const auto& params_dense_values =
       params_dense_values_in.flat_outer_dims<VALUE_TYPE, 2>();
   auto values = values_out->flat_outer_dims<VALUE_TYPE, 2>();
-  int out_pos = 0;
+  SPLITS_TYPE out_pos = 0;
   for (const auto& slice : value_slices) {
-    for (int i = slice.first; i < slice.second; ++i) {
-      for (int j = 0; j < value_size; ++j) {
+    for (SPLITS_TYPE i = slice.first; i < slice.second; ++i) {
+      for (SPLITS_TYPE j = 0; j < value_size; ++j) {
         values(out_pos, j) = params_dense_values(i, j);
       }
       ++out_pos;
@@ -64,20 +67,21 @@ class RaggedGatherOpBase : public OpKernel {
                                                 &params_nested_splits_in));
     OP_REQUIRES(
         context, params_nested_splits_in.size() > 0,
-        errors::InvalidArgument("params_nested_splits must be non empty"));
+        absl::InvalidArgumentError("params_nested_splits must be non empty"));
 
     const Tensor& params_dense_values_in =
         context->input(params_nested_splits_in.size());
     const Tensor& indices_in =
         context->input(params_nested_splits_in.size() + 1);
 
-    OP_REQUIRES(context, params_nested_splits_in[0].dims() > 0,
-                errors::InvalidArgument("Split tensors must not be scalars"));
+    OP_REQUIRES(
+        context, params_nested_splits_in[0].dims() > 0,
+        absl::InvalidArgumentError("Split tensors must not be scalars"));
     SPLITS_TYPE num_params = params_nested_splits_in[0].dim_size(0) - 1;
     OP_REQUIRES_OK(context, ValidateIndices(indices_in, num_params));
 
     OP_REQUIRES(context, params_dense_values_in.dims() > 0,
-                errors::InvalidArgument("params.rank must be nonzero"));
+                absl::InvalidArgumentError("params.rank must be nonzero"));
     SPLITS_TYPE num_params_dense_values = params_dense_values_in.dim_size(0);
 
     // Calculate the `splits`, and store the value slices that we need to
@@ -100,31 +104,32 @@ class RaggedGatherOpBase : public OpKernel {
   using ConstFlatType = typename TTypes<SPLITS_TYPE>::ConstFlat;
 
   // Check if any indices are out-of-bounds.
-  ::tensorflow::Status ValidateIndices(const Tensor& indices_in,
-                                       SPLITS_TYPE num_params) {
+  absl::Status ValidateIndices(const Tensor& indices_in,
+                               SPLITS_TYPE num_params) {
     const auto& indices = indices_in.flat<INDEX_TYPE>();
     for (SPLITS_TYPE i = 0; i < indices.size(); ++i) {
       SPLITS_TYPE index = indices(i);
       if (index < 0 || index >= num_params) {
-        return errors::InvalidArgument(
-            "indices", SliceDebugString(indices_in.shape(), i), " = ", index,
-            " is not in [0, ", num_params, ")");
+        return absl::InvalidArgumentError(
+            absl::StrCat("indices", SliceDebugString(indices_in.shape(), i),
+                         " = ", index, " is not in [0, ", num_params, ")"));
       }
     }
-    return ::tensorflow::Status::OK();
+    return absl::OkStatus();
   }
 
   // Construct the `splits` output tensors, encoded using a nested vector.
   // Also find the slices of values that need to be copied, and store them
   // in `value_slices`.  The total number of values that will be copied (which
   // we need for allocating the output values tensor) is stored in `num_values`.
-  ::tensorflow::Status MakeSplits(
+  absl::Status MakeSplits(
       const Tensor& indices_in, const OpInputList& params_nested_splits_in,
       SPLITS_TYPE num_params_dense_values,
       std::vector<std::vector<SPLITS_TYPE>>* out_splits,
       std::vector<std::pair<SPLITS_TYPE, SPLITS_TYPE>>* value_slices,
       SPLITS_TYPE* num_values) {
     *num_values = 0;
+    int64_t total_values = 0;
     value_slices->clear();
 
     int num_splits = indices_in.dims() - 1 + params_nested_splits_in.size();
@@ -167,17 +172,25 @@ class RaggedGatherOpBase : public OpKernel {
     // should add a new split point to out_splits that is 4 greater than the
     // previous split point in out_splits.
     for (int i = 0; i < indices.size(); ++i) {
-      int start = indices(i);
-      int limit = indices(i) + 1;
+      SPLITS_TYPE start = indices(i);
+      SPLITS_TYPE limit = indices(i) + 1;
 
       // Copy splits.
       for (int dim = 0; dim < params_nested_splits.size(); ++dim) {
         const auto& splits = params_nested_splits[dim];
         int out_dim = dim + indices_in.dims() - 1;
         if (out_dim >= 0) {
-          SPLITS_TYPE delta = out_splits->at(out_dim).back() - splits(start);
-          for (int j = start; j < limit; ++j) {
-            out_splits->at(out_dim).push_back(splits(j + 1) + delta);
+          // Splits are validated to be non-negative and sorted, so `length` is
+          // in [0, max]. Check before adding so neither int32 nor int64 Tsplits
+          // can overflow.
+          const SPLITS_TYPE last = out_splits->at(out_dim).back();
+          for (SPLITS_TYPE j = start; j < limit; ++j) {
+            const SPLITS_TYPE length = splits(j + 1) - splits(start);
+            if (length > std::numeric_limits<SPLITS_TYPE>::max() - last) {
+              return absl::InvalidArgumentError(
+                  "Output splits value exceeds limits of Tsplits");
+            }
+            out_splits->at(out_dim).push_back(last + length);
           }
         }
         start = splits(start);
@@ -185,41 +198,53 @@ class RaggedGatherOpBase : public OpKernel {
       }
       if (limit != start) {
         value_slices->emplace_back(start, limit);
-        *num_values += limit - start;
+        total_values += limit - start;
       }
     }
-    return ::tensorflow::Status::OK();
+    // The value count is accumulated in a wide type and validated before it is
+    // narrowed to SPLITS_TYPE, so an int32 Tsplits cannot silently wrap and
+    // drive an undersized output allocation in WriteValues.
+    if (total_values > std::numeric_limits<SPLITS_TYPE>::max()) {
+      return absl::InvalidArgumentError(absl::StrCat(
+          "Number of values ", total_values, " exceeds limits of Tsplits"));
+    }
+    *num_values = static_cast<SPLITS_TYPE>(total_values);
+    return absl::OkStatus();
   }
 
-  ::tensorflow::Status ValidateSplits(
+  absl::Status ValidateSplits(
       const std::vector<ConstFlatType>& params_nested_splits,
       SPLITS_TYPE num_params_dense_values) {
     // Validate
     for (int dim = 0; dim < params_nested_splits.size(); ++dim) {
       const auto& splits = params_nested_splits[dim];
+      // For an intermediate ragged dimension, the split values are used as
+      // indices into the next dimension's splits tensor by MakeSplits, so the
+      // largest valid value is one less than that tensor's length. Only the
+      // innermost dimension may reference num_params_dense_values directly.
       SPLITS_TYPE last_split = (dim == params_nested_splits.size() - 1)
                                    ? num_params_dense_values
-                                   : params_nested_splits[dim + 1].size();
+                                   : params_nested_splits[dim + 1].size() - 1;
       if (splits.size() == 0) {
-        return errors::InvalidArgument("Ragged splits may not be empty");
+        return absl::InvalidArgumentError("Ragged splits may not be empty");
       }
       if (splits(0) < 0) {
-        return errors::InvalidArgument("Ragged splits must be non-negative");
+        return absl::InvalidArgumentError("Ragged splits must be non-negative");
       }
       if (splits(splits.size() - 1) > last_split) {
-        return errors::InvalidArgument(
+        return absl::InvalidArgumentError(
             "Ragged splits must not point past values");
       }
       for (int i = 1; i < splits.size(); ++i) {
         if (splits(i - 1) > splits(i)) {
-          return errors::InvalidArgument("Ragged splits must be sorted");
+          return absl::InvalidArgumentError("Ragged splits must be sorted");
         }
       }
     }
-    return ::tensorflow::Status::OK();
+    return absl::OkStatus();
   }
 
-  ::tensorflow::Status WriteSplits(
+  absl::Status WriteSplits(
       const std::vector<std::vector<SPLITS_TYPE>>& out_splits,
       OpKernelContext* context) {
     OpOutputList splits_out;
@@ -234,10 +259,10 @@ class RaggedGatherOpBase : public OpKernel {
       std::copy_n(out_splits[i].data(), out_splits[i].size(),
                   splits_flat.data());
     }
-    return ::tensorflow::Status::OK();
+    return absl::OkStatus();
   }
 
-  ::tensorflow::Status WriteValues(
+  absl::Status WriteValues(
       const Tensor& params_dense_values_in,
       const std::vector<std::pair<SPLITS_TYPE, SPLITS_TYPE>>& value_slices,
       int values_index, SPLITS_TYPE num_values,
@@ -253,7 +278,7 @@ class RaggedGatherOpBase : public OpKernel {
                           : (num_elements / params_dense_values_in.dim_size(0));
     CallWriteValueSlices(params_dense_values_in, value_slices, value_size,
                          values_out);
-    return ::tensorflow::Status::OK();
+    return absl::OkStatus();
   }
 
  protected:

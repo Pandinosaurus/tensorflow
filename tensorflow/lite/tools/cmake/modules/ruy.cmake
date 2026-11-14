@@ -22,8 +22,14 @@ include(OverridableFetchContent)
 OverridableFetchContent_Declare(
   ruy
   GIT_REPOSITORY https://github.com/google/ruy
-  # Sync with tensorflow/third_party/ruy/workspace.bzl
-  GIT_TAG e6c1b8dc8a8b00ee74e7268aac8b18d7260ab1ce
+  # Sync with tensorflow/third_party/ruy/workspace.bzl and LiteRT's
+  # litert_workspace.bzl.
+  # LINT.IfChange
+  GIT_TAG 2af88863614a8298689cc52b1a47b3fcad7be835
+  # LINT.ThenChange(
+  #   //third_party/ruy/workspace.bzl,
+  #   ../../../../../odml/litert/opensource_only/litert_workspace.bzl
+  # )
   GIT_PROGRESS TRUE
   SOURCE_DIR "${CMAKE_BINARY_DIR}/ruy"
 )
@@ -35,7 +41,7 @@ endif()
 set(RUY_SOURCE_DIR "${ruy_SOURCE_DIR}" CACHE PATH "RUY source directory")
 
 add_subdirectory(
-  "${CMAKE_CURRENT_LIST_DIR}/ruy"
+  "${ruy_SOURCE_DIR}"
   "${ruy_BINARY_DIR}"
   EXCLUDE_FROM_ALL
 )

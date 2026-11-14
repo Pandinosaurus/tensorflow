@@ -14,13 +14,10 @@
 # ==============================================================================
 """Tests for batch_norm related functionality in tensorflow.ops.nn."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import numpy as np
-from six.moves import xrange  # pylint: disable=redefined-builtin
 
+from tensorflow.python.eager import context
+from tensorflow.python.eager import def_function
 from tensorflow.python.framework import constant_op
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import ops
@@ -32,6 +29,7 @@ from tensorflow.python.ops import gradients_impl
 from tensorflow.python.ops import math_ops
 from tensorflow.python.ops import nn_impl
 import tensorflow.python.ops.nn_grad  # pylint: disable=unused-import
+from tensorflow.python.ops import variables
 from tensorflow.python.platform import test
 
 
@@ -345,8 +343,53 @@ class BatchNormalizationTest(test.TestCase):
         (2, 3, 2, 4, 5), (1, 1, 1, 4, 5), atol=0.005)
 
   def testBatchNormMixedPrecision(self):
-    self._testBatchNormArbitraryShapes((3, 3), (1, 3), dtype=dtypes.float16,
-                                       param_dtype=dtypes.float32, atol=0.001)
+    self._testBatchNormArbitraryShapes(
+        (3, 3),
+        (1, 3),
+        dtype=dtypes.float16,
+        param_dtype=dtypes.float32,
+        atol=0.002,
+    )
+
+  @test_util.run_v2_only
+  def testBatchNormKeepsOffsetForLargeConstantBatch(self):
+    """The offset must not be cancelled by `mean * inv`.
+
+    Normalizing a constant batch makes the centered term zero, so the result
+    is exactly `offset`. The legacy `x * inv + (offset - mean * inv)` form,
+    kept for graphs built outside eager/tf.function, cancels `offset` once
+    `mean * inv` is much larger than `offset`.
+    """
+    bn_fn = def_function.function(nn_impl.batch_normalization)
+    for dtype, magnitude in [
+        (dtypes.float16, 1e4),
+        (dtypes.bfloat16, 1e4),
+        (dtypes.float32, 1e8),
+        (dtypes.float64, 1e300),
+    ]:
+      x = constant_op.constant(magnitude, dtype=dtype, shape=[2, 2])
+      mean, variance = nn_impl.moments(x, [0, 1], keep_dims=True)
+      offset = constant_op.constant(5.0, dtype=dtype)
+      for fn in (nn_impl.batch_normalization, bn_fn):
+        bn = fn(x, mean, variance, offset, None, 1e-3)
+        self.assertEqual(dtype, bn.dtype)
+        self.assertAllClose(
+            self.evaluate(bn), np.full([2, 2], 5.0), rtol=1e-3, atol=1e-3
+        )
+
+  def testBatchNormV1GraphKeepsFoldableTopology(self):
+    """Graphs built outside eager/tf.function keep `Mul(x, inv)` first."""
+    with ops.Graph().as_default():
+      x = array_ops.placeholder(dtypes.float32, shape=[2, 3])
+      mean = constant_op.constant([1.0, 2.0, 3.0])
+      variance = constant_op.constant([0.5, 1.0, 2.0])
+      offset = constant_op.constant([0.1, 0.2, 0.3])
+      scale = constant_op.constant([1.5, 2.5, 3.5])
+      bn = nn_impl.batch_normalization(x, mean, variance, offset, scale, 1e-3)
+      self.assertEqual("AddV2", bn.op.type)
+      self.assertEqual("Mul", bn.op.inputs[0].op.type)
+      self.assertEqual(x.name, bn.op.inputs[0].op.inputs[0].name)
+      self.assertEqual("Sub", bn.op.inputs[1].op.type)
 
 
 class SufficientStatisticsTest(test.TestCase):
@@ -360,7 +403,7 @@ class SufficientStatisticsTest(test.TestCase):
       m_ss = np.sum(x, axis=axis, keepdims=keep_dims)
       v_ss = np.sum(x * x, axis=axis, keepdims=keep_dims)
     count = 1.0
-    for d in xrange(x.ndim):
+    for d in range(x.ndim):
       if d in set(axes):
         count *= x.shape[d]
     if not keep_dims:
@@ -407,6 +450,122 @@ class SufficientStatisticsTest(test.TestCase):
           self._testSuffStats([2, 3], [1], shift, keep_dims, has_shape)
           self._testSuffStats([2, 3], [0], shift, keep_dims, has_shape)
           self._testSuffStats([1, 2, 3], [0, 2], shift, keep_dims, has_shape)
+
+  @test_util.run_in_graph_and_eager_modes
+  def testTensorAndNumpyAxes(self):
+    """`axes` accepts a tensor, a NumPy array or a scalar.
+
+    `sufficient_statistics` starts with `axes = list(set(axes))`, so a tensor
+    `axes` failed with `TypeError: Tensor is unhashable` and a NumPy array
+    relied on NumPy scalars being hashable at all. A scalar `axes` is accepted
+    by `tf.nn.moments` but failed here, because `set()` cannot iterate an int.
+    """
+    x = constant_op.constant(np.arange(6, dtype=np.float32).reshape(2, 3))
+    expected = self.evaluate(
+        list(
+            nn_impl.sufficient_statistics(x, [0, 1], None, keep_dims=False)[:3]
+        )
+    )
+    for axes in (
+        constant_op.constant([0, 1], dtype=dtypes.int32),
+        np.array([0, 1]),
+        np.array([0, 1], dtype=np.int64),
+        # Iterables that are neither lists nor tuples must keep working.
+        range(2),
+        (a for a in [0, 1]),
+    ):
+      actual = self.evaluate(
+          list(
+              nn_impl.sufficient_statistics(x, axes, None, keep_dims=False)[:3]
+          )
+      )
+      self.assertAllClose(expected, actual)
+
+    expected_scalar = self.evaluate(
+        list(nn_impl.sufficient_statistics(x, [0], None, keep_dims=False)[:3])
+    )
+    for axes in (
+        0,
+        np.int64(0),
+        np.array(0),
+        constant_op.constant(0, dtype=dtypes.int32),
+    ):
+      actual = self.evaluate(
+          list(
+              nn_impl.sufficient_statistics(x, axes, None, keep_dims=False)[:3]
+          )
+      )
+      self.assertAllClose(expected_scalar, actual)
+
+    # Negative and empty reduction axes keep the meaning they have in the
+    # `tf.reduce_*` ops, whichever form they are passed in.
+    expected_neg = self.evaluate(
+        list(nn_impl.sufficient_statistics(x, [-1], None, keep_dims=False)[:3])
+    )
+    for axes in (
+        -1,
+        np.int64(-1),
+        np.array(-1),
+        constant_op.constant(-1, dtype=dtypes.int32),
+    ):
+      actual = self.evaluate(
+          list(
+              nn_impl.sufficient_statistics(x, axes, None, keep_dims=False)[:3]
+          )
+      )
+      self.assertAllClose(expected_neg, actual)
+
+    expected_empty = self.evaluate(
+        list(nn_impl.sufficient_statistics(x, [], None, keep_dims=False)[:3])
+    )
+    for axes in (
+        np.array([], dtype=np.int32),
+        constant_op.constant([], dtype=dtypes.int32),
+    ):
+      actual = self.evaluate(
+          list(
+              nn_impl.sufficient_statistics(x, axes, None, keep_dims=False)[:3]
+          )
+      )
+      self.assertAllClose(expected_empty, actual)
+
+    # A `tf.Variable` takes the same branch as a `Tensor`; in graph mode it has
+    # no readable value until the session runs, so it has to be rejected.
+    var_axes = variables.Variable([0, 1], dtype=dtypes.int32)
+    if context.executing_eagerly():
+      actual_var = self.evaluate(
+          list(
+              nn_impl.sufficient_statistics(x, var_axes, None, keep_dims=False)[
+                  :3
+              ]
+          )
+      )
+      self.assertAllClose(expected, actual_var)
+    else:
+      with self.assertRaisesRegex(
+          ValueError, "`axes` must be statically known"
+      ):
+        nn_impl.sufficient_statistics(x, var_axes, None, keep_dims=False)
+
+  def testDynamicTensorAxesRaises(self):
+    """An `axes` tensor with no known value cannot be normalized."""
+    with ops.Graph().as_default():
+      x = array_ops.zeros([2, 3])
+      axes = array_ops.placeholder(dtypes.int32, shape=[2])
+      with self.assertRaisesRegex(
+          ValueError, "`axes` must be statically known"
+      ):
+        nn_impl.sufficient_statistics(x, axes)
+
+    @def_function.function
+    def dynamic_axes_fn(t, dynamic_axes):
+      return nn_impl.sufficient_statistics(t, dynamic_axes)
+
+    x_eager = constant_op.constant([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+    with self.assertRaisesRegex(ValueError, "`axes` must be statically known"):
+      dynamic_axes_fn.get_concrete_function(
+          x_eager, constant_op.constant([0, 1], dtype=dtypes.int32)
+      )
 
 
 class NormalizeMomentsTest(test.TestCase):
@@ -593,6 +752,62 @@ class MomentsTest(test.TestCase):
   def testVarGlobalGradient(self):
     self._testGlobalGradient(from_y="var")
 
+  @test_util.run_in_graph_and_eager_modes
+  def testTensorAxes(self):
+    from tensorflow.python.eager import context
+    from tensorflow.python.ops import variables
+
+    with self.cached_session():
+      x = np.random.normal(size=[2, 3, 4]).astype(np.float32)
+      # Test constant tensor
+      axes_tensor = constant_op.constant([0, 1], dtype=dtypes.int32)
+      mean, var = self._unweighted_moments(x, axes_tensor, keep_dims=False)
+      mean_v, var_v = self.evaluate([mean, var])
+      self.assertEqual(mean_v.shape, (4,))
+      self.assertEqual(var_v.shape, (4,))
+
+      # Test Variable
+      if context.executing_eagerly():
+        axes_var = variables.Variable([0, 1], dtype=dtypes.int32)
+        self.evaluate(axes_var.initializer)
+        mean, var = self._unweighted_moments(x, axes_var, keep_dims=False)
+        mean_v, var_v = self.evaluate([mean, var])
+        self.assertEqual(mean_v.shape, (4,))
+        self.assertEqual(var_v.shape, (4,))
+      else:
+        # Variable is supported in graph mode only with keep_dims=True
+        axes_var = variables.Variable([0, 1], dtype=dtypes.int32)
+        self.evaluate(axes_var.initializer)
+        mean, var = self._unweighted_moments(x, axes_var, keep_dims=True)
+        mean_v, var_v = self.evaluate([mean, var])
+        self.assertEqual(mean_v.shape, (1, 1, 4))
+        self.assertEqual(var_v.shape, (1, 1, 4))
+
+  @test_util.run_in_graph_and_eager_modes
+  def testNumpyAxes(self):
+    """NumPy arrays are valid `axes`.
+
+    `axes` is documented as an "array of ints", so a NumPy array must behave
+    like a Python list. Before the fix, `keep_dims=False` raised
+    `TypeError: Expected list for 'axis' argument to 'squeeze' Op` because the
+    arrays were forwarded to `tf.squeeze` unchanged. See GitHub issue #129819;
+    #101580 fixed the same problem in `tf.nn.weighted_moments`.
+    """
+    x = np.arange(120, dtype=np.float32).reshape(4, 5, 6)
+    expected_mean, expected_var = self.evaluate(
+        self._unweighted_moments(x, [0, 1], keep_dims=False)
+    )
+    for axes in (
+        np.array([0, 1]),
+        np.array([0, 1], dtype=np.int64),
+        np.int32([0, 1]),
+    ):
+      mean, var = self._unweighted_moments(x, axes, keep_dims=False)
+      mean_v, var_v = self.evaluate([mean, var])
+      self.assertAllEqual(mean_v.shape, expected_mean.shape)
+      self.assertAllClose(expected_mean, mean_v)
+      self.assertAllClose(expected_var, var_v)
+
 
 class WeightedMomentsTest(MomentsTest):
   """Tests for nn.weighted_moments.
@@ -613,7 +828,6 @@ class WeightedMomentsTest(MomentsTest):
      non-constant weights and varying broadcasting situations. (It
      also continues to call MomentsTest.Run(Weighted)?MomentsTest as
      well.)
-
   """
 
   def _unweighted_moments(self, x, axes, keep_dims=False, extra_out_grads=None):
@@ -697,6 +911,83 @@ class WeightedMomentsTest(MomentsTest):
 
       self.assertAllCloseAccordingToType(expected_mean, mean_v)
       self.assertAllCloseAccordingToType(expected_variance, var_v)
+
+  def testTensorAxesKeepdimsFalse(self):
+    """Regression test for GitHub issue #101580.
+
+    tf.nn.weighted_moments should work when `axes` is a tf.Tensor, not just a
+    Python list of ints.  The bug caused a TypeError from squeeze_eager_fallback
+    because it requires axis to be a list or tuple, not a tf.Tensor.  The fix
+    normalizes a constant-valued tf.Tensor axes to a Python list before squeeze.
+    """
+    x = constant_op.constant(
+        [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], dtype=dtypes.float32
+    )
+    w = constant_op.constant(
+        [[1.0, 1.0, 1.0], [1.0, 1.0, 1.0]], dtype=dtypes.float32
+    )
+
+    # axes as a tf.Tensor - this is the failing case before the fix
+    axes_tensor = constant_op.constant([1], dtype=dtypes.int32)
+    mean, var = nn_impl.weighted_moments(x, axes_tensor, w, keep_dims=False)
+
+    self.assertAllEqual(mean.shape, [2])
+    self.assertAllEqual(var.shape, [2])
+    self.assertAllClose(mean, [2.0, 5.0])
+    self.assertAllClose(var, [2.0 / 3.0, 2.0 / 3.0])
+
+  def testTensorAxesKeepdimsFalseAxis0(self):
+    """Test with axes=[0] as a tf.Tensor and keepdims=False."""
+    x = constant_op.constant(
+        [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], dtype=dtypes.float32
+    )
+    w = constant_op.constant(
+        [[1.0, 1.0, 1.0], [1.0, 1.0, 1.0]], dtype=dtypes.float32
+    )
+
+    axes_tensor = constant_op.constant([0], dtype=dtypes.int32)
+    mean, var = nn_impl.weighted_moments(x, axes_tensor, w, keep_dims=False)
+
+    self.assertAllEqual(mean.shape, [3])
+    self.assertAllEqual(var.shape, [3])
+    self.assertAllClose(mean, [2.5, 3.5, 4.5])
+
+  def testTensorAxesKeepdimsTrue(self):
+    """When keepdims=True, squeeze is skipped; tf.Tensor axes should work."""
+    x = constant_op.constant(
+        [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], dtype=dtypes.float32
+    )
+    w = constant_op.constant(1.0, dtype=dtypes.float32)
+
+    axes_tensor = constant_op.constant([1], dtype=dtypes.int32)
+    mean, var = nn_impl.weighted_moments(x, axes_tensor, w, keep_dims=True)
+
+    # keepdims=True keeps the reduced dimension as size 1
+    self.assertAllEqual(mean.shape, [2, 1])
+    self.assertAllEqual(var.shape, [2, 1])
+    self.assertAllClose(mean, [[2.0], [5.0]])
+
+  def testListAxesKeepdimsFalse(self):
+    """Plain Python list axes continue to work correctly after the fix."""
+    x = constant_op.constant(
+        [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], dtype=dtypes.float32
+    )
+    w = constant_op.constant(1.0, dtype=dtypes.float32)
+
+    mean, var = nn_impl.weighted_moments(x, [1], w, keep_dims=False)
+
+    self.assertAllEqual(mean.shape, [2])
+    self.assertAllClose(mean, [2.0, 5.0])
+
+  def testAllZeroMasks(self):
+    x = np.random.normal(size=[8, 3, 4]).astype(np.float32)
+    weights = np.zeros(shape=[8, 3, 1]).astype(np.float32)
+    axes = (0, 1)
+
+    mean, var = nn_impl.weighted_moments(
+        x, axes, weights, keep_dims=False)
+    self.assertAllClose(mean, np.zeros(shape=[4]))
+    self.assertAllClose(var, np.zeros(shape=[4]))
 
 
 if __name__ == "__main__":

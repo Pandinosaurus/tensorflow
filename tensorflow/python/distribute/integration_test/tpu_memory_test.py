@@ -14,11 +14,6 @@
 # ==============================================================================
 """This file contains integration test for TPUStrategy in regards to memory."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import google_type_annotations
-from __future__ import print_function
-
 import gc
 
 import tensorflow as tf
@@ -139,7 +134,7 @@ class TpuMemoryTest(tf.test.TestCase):
           kernel_initializer=tf.random_normal_initializer(stddev=0.01))(
               y)
       model = tf.keras.Model(x, y)
-      optimizer = tf.keras.optimizers.SGD(learning_rate=0.1)
+      optimizer = tf.keras.optimizers.legacy.SGD(learning_rate=0.1)
       loss_obj = tf.keras.losses.CategoricalCrossentropy(
           label_smoothing=0.0, reduction=tf.keras.losses.Reduction.NONE)
       model.compile(optimizer=optimizer, loss=loss_obj)
@@ -175,20 +170,11 @@ class TpuMemoryTest(tf.test.TestCase):
       # A dummy result to indicate this @tf.function has finished.
       return 1.0
 
-    if FLAGS.tpu_use_tfrt:
-      result = train_step(iterator)
-
-      self.assertAllClose(1.0, result, atol=1e-07)
-    else:
-      # TPU StreamExecutor does not support auto-defrag in program loading. So
-      # it will return a ResourceExhaustedError.
-      with self.assertRaises(tf.errors.ResourceExhaustedError):
-        _ = train_step(iterator)
+    result = train_step(iterator)
+    self.assertAllClose(1.0, result, atol=1e-07)
 
   def testAutoDefragInBufferAllocation(self):
-    if not FLAGS.tpu_use_tfrt:
-      self.skipTest(
-          "TPU StreamExecutor does not support auto-defrag in allocation.")
+
     with tf.device("TPU:0"):
       # DF has ~15G HBM. Following 7 buffers will consume most HBM.
       # pylint: disable=unused-variable

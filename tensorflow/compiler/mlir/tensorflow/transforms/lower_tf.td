@@ -13,13 +13,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 include "mlir/IR/OpBase.td"
-include "mlir/Dialect/StandardOps/IR/Ops.td"
+include "mlir/Dialect/Func/IR/FuncOps.td"
 include "tensorflow/compiler/mlir/tensorflow/ir/tf_ops.td"
-
-// Here, the element type can be any integer or float type. But, note that only
-// 32 bit integers are supported for the values.
-class GetScalarOfType<int value> : NativeCodeCall<
-  "GetScalarOfType(getElementTypeOrSelf($0)," # value # ")">;
+include "tensorflow/compiler/mlir/tensorflow/transforms/rewrite_util.td"
 
 class GetScalarOfFloatType<string value> : NativeCodeCall<
   "GetScalarOfType(getElementTypeOrSelf($0)," # value # ")">;
@@ -38,10 +34,10 @@ class GetI64ScalarElementsAttr<int value> :
 class GetF32Scalar<int value> :
   NativeCodeCall<"GetF32Scalar(&$_builder, " # value # ")">;
 
-def TrueBoolAttr : AttrConstraint<CPred<"$_self.getValue()">>;
+def TrueBoolAttr : AttrConstraint<CPred<"llvm::cast<::mlir::BoolAttr>($_self).getValue()">>;
 
 def CreateTFShapeOp : NativeCodeCall<
-    "$_builder.create<TF::ShapeOp>($0.getLoc(), $1, $2)">;
+    "TF::ShapeOp::create($_builder, $0.getLoc(), $1, $2)">;
 
 def IsI32 : NativeCodeCall<
     "$_builder.getBoolAttr(getElementTypeOrSelf($0.getType()).isInteger(32))">;
@@ -53,7 +49,24 @@ def CreateTFCastOpI32 : NativeCodeCall<
     "CreateTFCastOpI32(&$_builder, $0.getLoc(), $1, $2)">;
 
 def CreateTensorScatterNdOp : NativeCodeCall<
-    "$_builder.create<TF::ScatterNdOp>($0.getLoc(), $0.getType(), $1, $2, $3)">;
+    "TF::ScatterNdOp::create($_builder, "
+    "$0.getLoc(), $0.getType(), $1, $2, $3, $4)">;
+
+def CreateTensorScatterUpdateOp : NativeCodeCall<
+    "TF::TensorScatterUpdateOp::create($_builder, "
+    "$0.getLoc(), $0.getType(), $0, $1, $2, $3)">;
+
+//===----------------------------------------------------------------------===//
+// Add op patterns.
+//===----------------------------------------------------------------------===//
+
+// We can lower AddOp to AddV2Op, except for string type. AddOp is defined for
+// TF_NumberNotQuantizedOrStrTensor tensor types. TF_NumberNotQuantizedTensor
+// is the same, except not containing TF_Str.
+
+def LowerAddOp : Pat<(TF_AddOp TF_NumberNotQuantizedTensor:$x,
+                               TF_NumberNotQuantizedTensor:$y),
+                     (TF_AddV2Op $x, $y)>;
 
 //===----------------------------------------------------------------------===//
 // BiasAddGrad op patterns.
@@ -61,7 +74,7 @@ def CreateTensorScatterNdOp : NativeCodeCall<
 
 def GetBiasAddGradReductionIndices : NativeCodeCall<
   "GetBiasAddGradReductionIndices("
-  "$0.getType().cast<RankedTensorType>().getRank(), $1, &$_builder)">;
+  "llvm::cast<RankedTensorType>($0.getType()).getRank(), $1, &$_builder)">;
 
 def LowerBiasAddGradOp :
   Pat<(TF_BiasAddGradOp AnyRankedTensor:$out_backprop, $data_format),
@@ -107,12 +120,12 @@ def LowerSoftmaxCrossEntropyWithLogitsOp : Pattern<
 // dimension should be known.
 class GetDimSizeOfType<int dim> : NativeCodeCall<
   "GetScalarOfType(getElementTypeOrSelf($1), "
-  "$0.getType().cast<RankedTensorType>().getDimSize(" # dim # "))">;
+  "llvm::cast<RankedTensorType>($0.getType()).getDimSize(" # dim # "))">;
 
 // Same as the above with i32 element type.
 class GetDimSizeAsI32<int dim> : NativeCodeCall<
   "GetScalarOfType($_builder.getIntegerType(32), "
-  "$0.getType().cast<RankedTensorType>().getDimSize(" # dim # "))">;
+  "llvm::cast<RankedTensorType>($0.getType()).getDimSize(" # dim # "))">;
 
 // Sparse version of SoftmaxCrossEntropyWithLogits is lowered to dense by
 // expanding the sparse labels using:
@@ -207,6 +220,27 @@ def LowerDivNoNanOp : BinaryNoNanPat<TF_DivNoNanOp, TF_DivOp>;
 def LowerMulNoNanOp : BinaryNoNanPat<TF_MulNoNanOp, TF_MulOp>;
 
 //===----------------------------------------------------------------------===//
+// TruncateDiv op patterns.
+//===----------------------------------------------------------------------===//
+
+def LowerTruncateDivOpOnIntTensors : Pat<
+  (TF_TruncateDivOp TF_IntTensor:$lhs, $rhs),
+  (TF_DivOp $lhs, $rhs)>;
+
+// Note: truncation could also be implemented as sign(x) * floor(abs(x)) or
+//       (-1 & x) || floor(abs(x)), based on performance benchmarks.
+def LowerTruncateDivOpOnFloatTensors : Pat<
+  (TF_TruncateDivOp TF_FloatTensor:$lhs, $rhs),
+  (TF_SelectV2Op
+    (TF_LessOp
+      (TF_DivOp:$div $lhs, $rhs),
+      (TF_ConstOp:$zero (GetScalarOfFloatType<"0.0"> $lhs))
+    ),
+    (TF_CeilOp $div),
+    (TF_FloorOp $div)
+  )>;
+
+//===----------------------------------------------------------------------===//
 // Fill op patterns.
 //===----------------------------------------------------------------------===//
 
@@ -251,7 +285,7 @@ def LowerIsNanOp : Pat<(TF_IsNanOp $x),
 
 def GetAllAxes : NativeCodeCall<
   "GetI64ElementsAttrForSeq("
-  "0, $0.getType().cast<RankedTensorType>().getRank(), &$_builder)">;
+  "0, llvm::cast<RankedTensorType>($0.getType()).getRank(), &$_builder)">;
 
 // L2Loss is lowered using the formula,
 // L2Loss(input) = Sum(input * input) / 2
@@ -433,26 +467,32 @@ def LowerOnesLikeOp : LowerInitializationOp<TF_OnesLikeOp, 1>;
 
 def LowerScatterNdOp :
   Pat<(TF_ScatterNdOp $indices,
-       TensorOf<[AnyInteger, AnyFloat, AnyComplex]>:$updates, $shape),
+       TensorOf<[AnyInteger, AnyFloat, AnyComplex]>:
+       $updates,
+       $shape,
+       $bad_indices_policy),
       (TF_TensorScatterAddOp
        (TF_FillOp $shape, (TF_ConstOp (GetScalarOfType<0> $updates))),
-       $indices, $updates)>;
+       $indices, $updates, $bad_indices_policy)>;
 
 //===----------------------------------------------------------------------===//
 // Xdivy, Xlog1p and Xlogy op patterns.
 //===----------------------------------------------------------------------===//
 
+// Selects zero rather than $x when $x == 0, like BinaryNoNanPat above: $x can
+// compare equal to zero without being +0, as -0 does and as a subnormal does
+// when denormals are flushed.
 class BinaryXopyPat<dag From, dag To> : Pat<
   From,
   (TF_SelectV2Op
     (TF_EqualOp
       $x,
-      (TF_ConstOp
+      (TF_ConstOp:$zero
         (GetScalarOfType<0> $x)
       ),
       /*incompatible_shape_error*/ConstBoolAttrTrue
     ),
-    $x,
+    $zero,
     To
   )>;
 
@@ -482,9 +522,9 @@ def LowerIsFiniteOp : Pat<(TF_IsFiniteOp $x),
 // TensorScatterUpdate op patterns.
 //===----------------------------------------------------------------------===//
 
-def : Pat<(TF_TensorScatterUpdateOp $input, $indices, $updates),
+def LowerTensorScatterUpdate_1 : Pat<(TF_TensorScatterUpdateOp$input, $indices, $updates, $bad_indices_policy),
           (TF_CastOp
-            (TF_TensorScatterUpdateOp
+            (CreateTensorScatterUpdateOp
               (CreateTFCastOpI32
                 $input,
                 $input,
@@ -493,20 +533,30 @@ def : Pat<(TF_TensorScatterUpdateOp $input, $indices, $updates),
               (CreateTFCastOpI32
                 $updates,
                 $updates,
-                /*truncate=*/ConstBoolAttrFalse)),
+                /*truncate=*/ConstBoolAttrFalse),
+              $bad_indices_policy),
              /*truncate=*/ConstBoolAttrFalse),
           [(TensorOf<[TF_Bool]> $input), (TensorOf<[TF_Bool]> $updates)] >;
 
-def : Pat<(TF_TensorScatterUpdateOp $input, $indices, $updates),
-          (TF_AddOp
+def LowerTensorScatterUpdate_2 : Pat<(TF_TensorScatterUpdateOp $input, $indices, $updates, $bad_indices_policy),
+          (TF_AddV2Op
              (TF_MulOp
                 (TF_SubOp (TF_ConstOp (GetScalarOfType<1> $updates)),
                    (CreateTensorScatterNdOp $input, $indices,
                       (TF_OnesLikeOp $updates),
-                   (CreateTFShapeOp $input, $input, ConstBoolAttrTrue))),
+                   (CreateTFShapeOp
+                     $input,
+                     $input,
+                     ConstBoolAttrTrue),
+                     $bad_indices_policy)),
              $input),
            (CreateTensorScatterNdOp $input, $indices, $updates,
-              (CreateTFShapeOp $input, $input, ConstBoolAttrTrue)))>;
+              (CreateTFShapeOp
+              $input,
+              $input,
+              ConstBoolAttrTrue),
+              $bad_indices_policy)),
+          [(TensorOf<[TF_Int, TF_Float, TF_Complex]> $updates)]>;
 
 //===----------------------------------------------------------------------===//
 // Selu op patterns.
@@ -552,6 +602,55 @@ def LowerSeluGradOp : Pat<(TF_SeluGradOp AnyStaticShapeTensor:$gradients,
                           (TF_ConstOp (getScale $features))),
                         (TF_MulOp
                           $gradients,
-                          (TF_AddOp
+                          (TF_AddV2Op
                             $features,
                             (TF_ConstOp (getScaledAlpha $features)))))>;
+
+
+
+//===----------------------------------------------------------------------===//
+// Expm1 op patterns.
+//===----------------------------------------------------------------------===//
+
+// Expm1(x) = Exp(x) - 1
+def LowerExp1mOp : Pat<
+  (TF_Expm1Op $x),
+  (TF_SubOp
+    (TF_ExpOp $x),
+    (TF_ConstOp (GetScalarOfType<1> $x))
+  )>;
+
+//===----------------------------------------------------------------------===//
+// MatrixBandPart op patterns.
+//===----------------------------------------------------------------------===//
+
+class GetDimensionSize<int idx> : NativeCodeCall<
+  "GetDimensionSize(&$_builder, $_loc, $0, " # idx # ", $1)">;
+
+// MatrixBandPart(input, num_lower, num_upper) {
+//   m = Shape(input)[-2]
+//   n = Shape(input)[-1]
+//   num_lower_or_m = Select(num_lower < 0, m, num_lower)
+//   num_upper_or_n = Select(num_upper < 0, n, num_upper)
+//   offset = ExpandDims(Range(0, m), -1) - Range(0, n)
+//   indicator = LogicalAnd(offset <= num_lower_or_m, offset >= -num_upper_or_n)
+//   return Select(indicator, input, ZerosLike(Input))
+// }
+def LowerMatrixBandPartOp : Pattern<
+  (TF_MatrixBandPartOp $input, $num_lower, $num_upper),
+  [(TF_ConstOp:$zero (GetScalarOfType<0> $num_lower)),
+   (TF_ConstOp:$one (GetScalarOfType<1> $num_lower)),
+   (TF_ConstOp:$neg_one (GetScalarOfType<-1> $num_lower)),
+   (GetDimensionSize<-2>:$m $input, (IsI32 $num_lower)),
+   (GetDimensionSize<-1>:$n $input, (IsI32 $num_upper)),
+   (TF_SelectV2Op:$num_lower_or_m (TF_LessOp $num_lower, $zero),
+                                  $m, $num_lower),
+   (TF_SelectV2Op:$num_upper_or_n (TF_LessOp $num_upper, $zero),
+                                  $n, $num_upper),
+   (TF_RangeOp:$range_m $zero, $m, $one),
+   (TF_RangeOp:$range_n $zero, $n, $one),
+   (TF_SubOp:$offset (TF_ExpandDimsOp $range_m, $neg_one), $range_n),
+   (TF_LogicalAndOp:$indicator (TF_LessEqualOp $offset, $num_lower_or_m),
+                               (TF_GreaterEqualOp $offset,
+                                                  (TF_NegOp $num_upper_or_n))),
+   (TF_SelectV2Op $indicator, $input, (TF_ZerosLikeOp $input))]>;

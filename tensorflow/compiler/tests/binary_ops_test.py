@@ -14,26 +14,25 @@
 # ==============================================================================
 """Test cases for binary operators."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import itertools
 
 import numpy as np
 
 from tensorflow.compiler.tests import xla_test
+from tensorflow.python.eager import def_function
+from tensorflow.python.framework import constant_op
 from tensorflow.python.framework import dtypes
+from tensorflow.python.framework import errors
 from tensorflow.python.framework import test_util
 from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import bitwise_ops
 from tensorflow.python.ops import gen_array_ops
 from tensorflow.python.ops import gen_math_ops
 from tensorflow.python.ops import gen_nn_ops
+from tensorflow.python.ops import gradients_impl
 from tensorflow.python.ops import math_ops
 from tensorflow.python.ops import nn_ops
 from tensorflow.python.platform import googletest
-from tensorflow.python.platform import test as test_lib
 
 
 class BinaryOpsTest(xla_test.XLATestCase):
@@ -100,8 +99,8 @@ class BinaryOpsTest(xla_test.XLATestCase):
           math_ops.atan2,
           np.array([0, np.sqrt(2), 1, np.sqrt(2), 0], dtype),
           np.array([1, np.sqrt(2), 0, -np.sqrt(2), -1], dtype),
-          expected=np.array(
-              [0, np.pi / 4, np.pi / 2, np.pi * 3 / 4, np.pi], dtype=dtype))
+          expected=np.array([0, np.pi / 4, np.pi / 2, np.pi * 3 / 4, np.pi],
+                            dtype=dtype))
 
       self._testBinary(
           gen_math_ops.reciprocal_grad,
@@ -153,21 +152,49 @@ class BinaryOpsTest(xla_test.XLATestCase):
 
       self._testBinary(
           gen_nn_ops.elu_grad,
-          np.array([1, 2, 3, 4, 5, 6], dtype=dtype),
-          np.array([-.6, -.4, -.2, 0, .2, .4], dtype=dtype),
-          expected=np.array([0.4, 1.2, 2.4, 4, 5, 6], dtype=dtype))
+          np.array([1, 2, 3, 4, 5, 6, 1], dtype=dtype),
+          np.array([-0.6, -0.4, -0.2, 0, 0.2, 0.4, np.nan], dtype=dtype),
+          expected=np.array([0.4, 1.2, 2.4, 4, 5, 6, np.nan], dtype=dtype),
+      )
 
       self._testBinary(
           gen_nn_ops.selu_grad,
-          np.array([1, 2, 3, 4, 5, 6], dtype=dtype),
-          np.array([-.6, -.4, -.2, .2, .4, .6], dtype=dtype),
-          expected=np.array([
-              1.158099340847, 2.7161986816948, 4.67429802254, 4.202803949422,
-              5.2535049367774, 6.30420592413
-          ],
-                            dtype=dtype),
+          np.array([1, 2, 3, 4, 5, 6, 1], dtype=dtype),
+          np.array([-0.6, -0.4, -0.2, 0.2, 0.4, 0.6, np.nan], dtype=dtype),
+          expected=np.array(
+              [
+                  1.158099340847,
+                  2.7161986816948,
+                  4.67429802254,
+                  4.202803949422,
+                  5.2535049367774,
+                  6.30420592413,
+                  np.nan,
+              ],
+              dtype=dtype,
+          ),
           rtol=1e-10,
-          atol=1e-10)
+          atol=1e-10,
+      )
+
+      self._testBinary(
+          gen_nn_ops.relu6_grad,
+          np.array([1, 2, 3, 4, 5, 6, 1], dtype=dtype),
+          np.array([-1, 0, 2, 5, 6, 8, np.nan], dtype=dtype),
+          expected=np.array([0, 0, 3, 4, 0, 0, np.nan], dtype=dtype),
+      )
+
+      def leaky_relu_grad_fn(grad, feat):
+        return gen_nn_ops.leaky_relu_grad(grad, feat, alpha=0.2)
+
+      self._testBinary(
+          leaky_relu_grad_fn,
+          np.array([1, 2, 3, 4, 1], dtype=dtype),
+          np.array([-2, 0, 3, 5, np.nan], dtype=dtype),
+          expected=np.array([0.2, 0.4, 3, 4, np.nan], dtype=dtype),
+          rtol=1e-8,
+          atol=1e-8,
+      )
 
       self._testBinary(
           gen_nn_ops.relu_grad,
@@ -178,8 +205,8 @@ class BinaryOpsTest(xla_test.XLATestCase):
       self._testBinary(
           gen_nn_ops.relu6_grad,
           np.array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12], dtype=dtype),
-          np.array(
-              [0, 0, 0, 0, 0, 0.1, 0.3, 0.5, 0.7, 0.9, 6.1, 10.0], dtype=dtype),
+          np.array([0, 0, 0, 0, 0, 0.1, 0.3, 0.5, 0.7, 0.9, 6.1, 10.0],
+                   dtype=dtype),
           expected=np.array([0, 0, 0, 0, 0, 6, 7, 8, 9, 10, 0, 0], dtype=dtype))
 
       self._testBinary(
@@ -212,7 +239,8 @@ class BinaryOpsTest(xla_test.XLATestCase):
           np.array([1], dtype=np.int32),
           expected=[
               np.array([0.], dtype=dtype),
-              np.array([[0., 0.]], dtype=dtype)],
+              np.array([[0., 0.]], dtype=dtype)
+          ],
           equality_test=self.ListsAreClose,
           rtol=1e-4,
           atol=1e-8)
@@ -264,6 +292,29 @@ class BinaryOpsTest(xla_test.XLATestCase):
             rtol=1e-4,
             atol=1e-6)
 
+  def testUnaryGradOpsWithZeroUpstreamGradient(self):
+    for dtype in self.float_types | self.complex_types:
+      y = np.array([0, np.inf, np.nan, 4], dtype=dtype)
+      dy = np.array([0, 0, 0, 5], dtype=dtype)
+      self._testBinary(
+          gen_math_ops.reciprocal_grad,
+          y,
+          dy,
+          expected=np.array([0, 0, 0, -80], dtype=dtype),
+      )
+      self._testBinary(
+          gen_math_ops.rsqrt_grad,
+          y,
+          dy,
+          expected=np.array([0, 0, 0, -160], dtype=dtype),
+      )
+      self._testBinary(
+          gen_math_ops.sqrt_grad,
+          y,
+          dy,
+          expected=np.array([0, 0, 0, 0.625], dtype=dtype),
+      )
+
   def testIntOps(self):
     for dtype in self.signed_int_types:
       self._testBinary(
@@ -290,11 +341,9 @@ class BinaryOpsTest(xla_test.XLATestCase):
       lhs = np.array([0, 5, 3, 14], dtype=dtype)
       rhs = np.array([5, 0, 7, 11], dtype=dtype)
       self._testBinary(
-          bitwise_ops.left_shift, lhs, rhs,
-          expected=np.left_shift(lhs, rhs))
+          bitwise_ops.left_shift, lhs, rhs, expected=np.left_shift(lhs, rhs))
       self._testBinary(
-          bitwise_ops.right_shift, lhs, rhs,
-          expected=np.right_shift(lhs, rhs))
+          bitwise_ops.right_shift, lhs, rhs, expected=np.right_shift(lhs, rhs))
 
       if dtype in [np.int8, np.int16, np.int32, np.int64]:
         lhs = np.array([-1, -5, -3, -14, -2], dtype=dtype)
@@ -366,11 +415,7 @@ class BinaryOpsTest(xla_test.XLATestCase):
       rtol = 1e-14 if dtype == np.float64 else None
 
       self._testBinary(
-          math_ops.pow,
-          dtype(3),
-          dtype(4),
-          expected=dtype(81),
-          rtol=rtol)
+          math_ops.pow, dtype(3), dtype(4), expected=dtype(81), rtol=rtol)
 
       self._testBinary(
           math_ops.pow,
@@ -397,13 +442,75 @@ class BinaryOpsTest(xla_test.XLATestCase):
           expected=np.array([[16], [81]], dtype=dtype),
           rtol=rtol)
 
+  def testIntegerPowWithConstantExponent(self):
+    for dtype in self.signed_int_types:
+
+      def run_pow(x, exponent, shape=None, dtype=dtype):
+
+        @def_function.function(jit_compile=True)
+        def pow_with_exponent(x):
+          return math_ops.pow(x, constant_op.constant(exponent, dtype=dtype))
+
+        with self.session() as sess:
+          with self.device_scope():
+            px = array_ops.placeholder(
+                dtype, shape=np.shape(x) if shape is None else shape
+            )
+            output = pow_with_exponent(px)
+          return sess.run(output, {px: np.array(x, dtype=dtype)})
+
+      with self.subTest(dtype=dtype):
+        x = [-2, 3, 1, -1]
+        for base in (x, 2):
+          for exponent in (-1, -3, [2, -1, 2, 2]):
+            with self.assertRaisesRegex(
+                errors.InvalidArgumentError,
+                "Integers to negative integer powers are not allowed",
+            ):
+              run_pow(base, exponent)
+
+        with self.assertRaisesRegex(
+            errors.InvalidArgumentError,
+            r"Incompatible shapes: \[2\] vs\. \[3\]",
+        ):
+          run_pow([2, 3], [-1, -1, -1], shape=[None])
+
+        self.assertAllEqual(run_pow(x, [0, 1, 2, 3]), [1, 3, 1, -1])
+        self.assertAllEqual(run_pow(x, 2), [4, 9, 1, 1])
+        # Like the TF kernels, an empty result doesn't check the exponent.
+        self.assertAllEqual(run_pow(np.zeros([0]), -1), np.zeros([0]))
+        self.assertAllEqual(run_pow(np.zeros([3, 0]), [[-1]]), np.zeros([3, 0]))
+
+        if "GPU" not in self.device and "TPU" not in self.device:
+
+          @def_function.function(jit_compile=True)
+          def pow_dynamic_empty(a, mask):
+            empty = array_ops.boolean_mask(a, mask)
+            return math_ops.pow(empty, constant_op.constant(-1, dtype=dtype))
+
+          with self.session() as sess:
+            with self.device_scope():
+              pa = array_ops.placeholder(dtype, shape=[2])
+              pmask = array_ops.placeholder(dtypes.bool, shape=[2])
+              dyn_out = pow_dynamic_empty(pa, pmask)
+            self.assertAllEqual(
+                sess.run(
+                    dyn_out,
+                    {
+                        pa: np.array([2, 3], dtype=dtype),
+                        pmask: np.array([False, False]),
+                    },
+                ),
+                np.zeros([0], dtype=dtype),
+            )
+
   def testNumericOps(self):
     for dtype in self.numeric_types:
       self._testBinary(
           math_ops.subtract,
-          np.array([1, 2, 100], dtype=dtype),
-          np.array([10, 20, -1], dtype=dtype),
-          expected=np.array([-9, -18, 101], dtype=dtype))
+          np.array([1, 20, 100], dtype=dtype),
+          np.array([1, 2, 1], dtype=dtype),
+          expected=np.array([0, 18, 99], dtype=dtype))
       self._testBinary(
           math_ops.subtract,
           dtype(5),
@@ -411,9 +518,9 @@ class BinaryOpsTest(xla_test.XLATestCase):
           expected=np.array([4, 3], dtype=dtype))
       self._testBinary(
           math_ops.subtract,
-          np.array([[1], [2]], dtype=dtype),
+          np.array([[7], [10]], dtype=dtype),
           dtype(7),
-          expected=np.array([[-6], [-5]], dtype=dtype))
+          expected=np.array([[0], [3]], dtype=dtype))
 
       # min/max not supported for complex
       if dtype not in self.complex_types | {np.uint8, np.int8}:
@@ -470,13 +577,13 @@ class BinaryOpsTest(xla_test.XLATestCase):
       self._testBinary(
           nn_ops.bias_add,
           np.array([[1, 2], [3, 4]], dtype=dtype),
-          np.array([2, -1], dtype=dtype),
-          expected=np.array([[3, 1], [5, 3]], dtype=dtype))
+          np.array([2, 0], dtype=dtype),
+          expected=np.array([[3, 2], [5, 4]], dtype=dtype))
       self._testBinary(
           nn_ops.bias_add,
           np.array([[[[1, 2], [3, 4]]]], dtype=dtype),
-          np.array([2, -1], dtype=dtype),
-          expected=np.array([[[[3, 1], [5, 3]]]], dtype=dtype))
+          np.array([2, 0], dtype=dtype),
+          expected=np.array([[[[3, 2], [5, 4]]]], dtype=dtype))
 
     if np.int64 in self.numeric_types:
       self._testBinary(
@@ -524,11 +631,10 @@ class BinaryOpsTest(xla_test.XLATestCase):
 
       self._testBinary(
           lambda x, y: math_ops.approximate_equal(x, y, tolerance=0.0001),
-          np.array(
-              [[[[-1 + 2j, 2.00009999 - 3j], [2 - 3j, 3 + 4.01j]]]],
-              dtype=dtype),
-          np.array(
-              [[[[-1.001 + 2j, 2 - 3j], [2 - 3.00009j, 3 + 4j]]]], dtype=dtype),
+          np.array([[[[-1 + 2j, 2.00009999 - 3j], [2 - 3j, 3 + 4.01j]]]],
+                   dtype=dtype),
+          np.array([[[[-1.001 + 2j, 2 - 3j], [2 - 3.00009j, 3 + 4j]]]],
+                   dtype=dtype),
           expected=np.array([[[[False, True], [True, False]]]], dtype=dtype))
 
       self._testBinary(
@@ -625,39 +731,39 @@ class BinaryOpsTest(xla_test.XLATestCase):
           math_ops.multiply,
           np.array([1 + 3j, 2 + 7j], dtype=dtype),
           np.array([10 - 4j, 20 + 17j], dtype=dtype),
-          expected=np.array(
-              [(1 + 3j) * (10 - 4j), (2 + 7j) * (20 + 17j)], dtype=dtype))
+          expected=np.array([(1 + 3j) * (10 - 4j), (2 + 7j) * (20 + 17j)],
+                            dtype=dtype))
       self._testBinary(
           math_ops.multiply,
           dtype(5 - 7j),
           np.array([1 + 2j, 2 + 4j], dtype=dtype),
-          expected=np.array(
-              [(5 - 7j) * (1 + 2j), (5 - 7j) * (2 + 4j)], dtype=dtype))
+          expected=np.array([(5 - 7j) * (1 + 2j), (5 - 7j) * (2 + 4j)],
+                            dtype=dtype))
       self._testBinary(
           math_ops.multiply,
           np.array([[1 - 2j], [2 + 1j]], dtype=dtype),
           dtype(7 + 5j),
-          expected=np.array(
-              [[(7 + 5j) * (1 - 2j)], [(7 + 5j) * (2 + 1j)]], dtype=dtype))
+          expected=np.array([[(7 + 5j) * (1 - 2j)], [(7 + 5j) * (2 + 1j)]],
+                            dtype=dtype))
 
       self._testBinary(
           math_ops.div,
           np.array([8 - 1j, 2 + 16j], dtype=dtype),
           np.array([2 + 4j, 4 - 8j], dtype=dtype),
-          expected=np.array(
-              [(8 - 1j) / (2 + 4j), (2 + 16j) / (4 - 8j)], dtype=dtype))
+          expected=np.array([(8 - 1j) / (2 + 4j), (2 + 16j) / (4 - 8j)],
+                            dtype=dtype))
       self._testBinary(
           math_ops.div,
           dtype(1 + 2j),
           np.array([2 + 4j, 4 - 8j], dtype=dtype),
-          expected=np.array(
-              [(1 + 2j) / (2 + 4j), (1 + 2j) / (4 - 8j)], dtype=dtype))
+          expected=np.array([(1 + 2j) / (2 + 4j), (1 + 2j) / (4 - 8j)],
+                            dtype=dtype))
       self._testBinary(
           math_ops.div,
           np.array([2 + 4j, 4 - 8j], dtype=dtype),
           dtype(1 + 2j),
-          expected=np.array(
-              [(2 + 4j) / (1 + 2j), (4 - 8j) / (1 + 2j)], dtype=dtype))
+          expected=np.array([(2 + 4j) / (1 + 2j), (4 - 8j) / (1 + 2j)],
+                            dtype=dtype))
 
       # TODO(b/68205550): math_ops.squared_difference shouldn't be supported.
 
@@ -670,8 +776,8 @@ class BinaryOpsTest(xla_test.XLATestCase):
           nn_ops.bias_add,
           np.array([[[[1 + 4j, 2 - 1j], [3 + 7j, 4]]]], dtype=dtype),
           np.array([2 + 1j, -1 + 2j], dtype=dtype),
-          expected=np.array(
-              [[[[3 + 5j, 1 + 1j], [5 + 8j, 3 + 2j]]]], dtype=dtype))
+          expected=np.array([[[[3 + 5j, 1 + 1j], [5 + 8j, 3 + 2j]]]],
+                            dtype=dtype))
 
   def _testDivision(self, dtype):
     """Test cases for division operators."""
@@ -704,12 +810,20 @@ class BinaryOpsTest(xla_test.XLATestCase):
           rtol=7e-15 if dtype == np.float64 else None,
           atol=3.9e-15 if dtype == np.float64 else None)
 
-    if dtype not in self.complex_types:  # floordiv unsupported for complex.
+    # floordiv/truncatediv unsupported for complex.
+    if dtype not in self.complex_types:
       self._testBinary(
           gen_math_ops.floor_div,
           np.array([3, 3, -1, -9, -8], dtype=dtype),
           np.array([2, -2, 7, 2, -4], dtype=dtype),
           expected=np.array([1, -2, -1, -5, 2], dtype=dtype))
+
+      self._testBinary(
+          gen_math_ops.truncate_div,
+          np.array([3, 3, -1, -9, -8.1], dtype=dtype),
+          np.array([2, -2, 7, 2, -4], dtype=dtype),
+          expected=np.array([1, -1, 0, -4, 2], dtype=dtype))
+
     if dtype in self.signed_int_types:
       # Overflow cases.
       int_min = np.iinfo(dtype).min
@@ -893,74 +1007,72 @@ class BinaryOpsTest(xla_test.XLATestCase):
   def testS64Comparisons(self):
     for op in [(lambda x, y: x < y), (lambda x, y: x <= y),
                (lambda x, y: x >= y), (lambda x, y: x > y)]:
-      lhs = np.array(
-          [
-              np.int64(0x000000007FFFFFFF),
-              np.int64(0x000000007FFFFFFF),
-              np.int64(0x0000000080000000),
-              np.int64(0x0000000080000000),
-              np.int64(0x0000000080000001),
-              np.int64(0x00000000FFFF0000),
-              np.int64(0x00000000FFFF0000),
-              np.int64(0x00000000FFFFFFFE),
-              np.int64(0x00000000FFFFFFFF),
-              np.int64(0x00000000FFFFFFFF),
-              np.int64(0x0000000100000000),
-              np.int64(0x0000000200000002),
-              np.int64(0x0000000200000002),
-              np.int64(0x0000000200000002),
-              np.int64(0x0000000200000002),
-              np.int64(0x0000000200000002),
-              np.int64(0x0000000200000002),
-              np.int64(0x0000000200000002),
-              np.int64(0x0000000200000002),
-              np.int64(0x0000000200000002),
-              np.int64(-0x7FFFFFFF00000002),
-              np.int64(-0x7FFFFFFF00000002),
-              np.int64(-0x7FFFFFFF00000001),
-              np.int64(-0x7FFFFFFF00000001),
-              np.int64(-0x7FFFFFFF00000001),
-              np.int64(-0x7FFFFFFF00000001),
-              np.int64(0x7ffffffefff00010),
-              np.int64(0x7ffffffefff00010),
-              np.int64(-1),
-              np.int64(-1)
-          ],
-          dtype=np.int64)
-      rhs = np.array(
-          [
-              np.int64(0x000000007FFFFFFE),
-              np.int64(0x000000007FFFFFFF),
-              np.int64(0x000000007FFFFFFF),
-              np.int64(0x0000000080000000),
-              np.int64(0x0000000080000001),
-              np.int64(0x00000000FFFF0000),
-              np.int64(0x00000000FFFF0001),
-              np.int64(0x00000000FFFFFFFF),
-              np.int64(0x00000000FFFFFFFE),
-              np.int64(0x00000000FFFFFFFF),
-              np.int64(0x00000000FFFFFFFF),
-              np.int64(0x0000000100000001),
-              np.int64(0x0000000100000002),
-              np.int64(0x0000000100000003),
-              np.int64(0x0000000200000001),
-              np.int64(0x0000000200000002),
-              np.int64(0x0000000200000003),
-              np.int64(0x0000000300000001),
-              np.int64(0x0000000300000002),
-              np.int64(0x0000000300000003),
-              np.int64(0x00000000FFFFFFFF),
-              np.int64(-0x7FFFFFFF00000001),
-              np.int64(0x00000000FFFFFFFE),
-              np.int64(0x00000000FFFFFFFF),
-              np.int64(-0x7FFFFFFF00000002),
-              np.int64(-0x7FFFFFFF00000001),
-              np.int64(0x00000000FFFFFFFF),
-              np.int64(-0x7FFFFFFF00000001),
-              np.int64(-2),
-              np.int64(-1)
-          ],
-          dtype=np.int64)
+      lhs = np.array([
+          np.int64(0x000000007FFFFFFF),
+          np.int64(0x000000007FFFFFFF),
+          np.int64(0x0000000080000000),
+          np.int64(0x0000000080000000),
+          np.int64(0x0000000080000001),
+          np.int64(0x00000000FFFF0000),
+          np.int64(0x00000000FFFF0000),
+          np.int64(0x00000000FFFFFFFE),
+          np.int64(0x00000000FFFFFFFF),
+          np.int64(0x00000000FFFFFFFF),
+          np.int64(0x0000000100000000),
+          np.int64(0x0000000200000002),
+          np.int64(0x0000000200000002),
+          np.int64(0x0000000200000002),
+          np.int64(0x0000000200000002),
+          np.int64(0x0000000200000002),
+          np.int64(0x0000000200000002),
+          np.int64(0x0000000200000002),
+          np.int64(0x0000000200000002),
+          np.int64(0x0000000200000002),
+          np.int64(-0x7FFFFFFF00000002),
+          np.int64(-0x7FFFFFFF00000002),
+          np.int64(-0x7FFFFFFF00000001),
+          np.int64(-0x7FFFFFFF00000001),
+          np.int64(-0x7FFFFFFF00000001),
+          np.int64(-0x7FFFFFFF00000001),
+          np.int64(0x7ffffffefff00010),
+          np.int64(0x7ffffffefff00010),
+          np.int64(-1),
+          np.int64(-1)
+      ],
+                     dtype=np.int64)
+      rhs = np.array([
+          np.int64(0x000000007FFFFFFE),
+          np.int64(0x000000007FFFFFFF),
+          np.int64(0x000000007FFFFFFF),
+          np.int64(0x0000000080000000),
+          np.int64(0x0000000080000001),
+          np.int64(0x00000000FFFF0000),
+          np.int64(0x00000000FFFF0001),
+          np.int64(0x00000000FFFFFFFF),
+          np.int64(0x00000000FFFFFFFE),
+          np.int64(0x00000000FFFFFFFF),
+          np.int64(0x00000000FFFFFFFF),
+          np.int64(0x0000000100000001),
+          np.int64(0x0000000100000002),
+          np.int64(0x0000000100000003),
+          np.int64(0x0000000200000001),
+          np.int64(0x0000000200000002),
+          np.int64(0x0000000200000003),
+          np.int64(0x0000000300000001),
+          np.int64(0x0000000300000002),
+          np.int64(0x0000000300000003),
+          np.int64(0x00000000FFFFFFFF),
+          np.int64(-0x7FFFFFFF00000001),
+          np.int64(0x00000000FFFFFFFE),
+          np.int64(0x00000000FFFFFFFF),
+          np.int64(-0x7FFFFFFF00000002),
+          np.int64(-0x7FFFFFFF00000001),
+          np.int64(0x00000000FFFFFFFF),
+          np.int64(-0x7FFFFFFF00000001),
+          np.int64(-2),
+          np.int64(-1)
+      ],
+                     dtype=np.int64)
       expected = np.array([op(l, r) for l, r in zip(lhs, rhs)], dtype=np.bool_)
       self._testBinary(op, lhs, rhs, expected=expected)
 
@@ -1002,8 +1114,8 @@ class BinaryOpsTest(xla_test.XLATestCase):
       self._testBinary(
           array_ops.fill,
           np.array([], dtype=np.int32),
-          dtype(-42),
-          expected=dtype(-42))
+          dtype(42),
+          expected=dtype(42))
       self._testBinary(
           array_ops.fill,
           np.array([1, 2], dtype=np.int32),
@@ -1065,8 +1177,7 @@ class BinaryOpsTest(xla_test.XLATestCase):
             expected=np.array([[4.2384180773686798]], dtype=dtype),
             rtol=1e-14)
 
-  # TODO(phawkins): failing on GPU, no registered kernel.
-  def DISABLED_testSparseMatMul(self):
+  def testSparseMatMul(self):
     # Binary wrappers for sparse_matmul with different hints
     def SparseMatmulWrapperTF(a, b):
       return math_ops.sparse_matmul(a, b, a_is_sparse=True)
@@ -1077,10 +1188,13 @@ class BinaryOpsTest(xla_test.XLATestCase):
     def SparseMatmulWrapperTT(a, b):
       return math_ops.sparse_matmul(a, b, a_is_sparse=True, b_is_sparse=True)
 
-    self._testMatMul(math_ops.sparse_matmul, self.float_types)
-    self._testMatMul(SparseMatmulWrapperTF, self.float_types)
-    self._testMatMul(SparseMatmulWrapperFT, self.float_types)
-    self._testMatMul(SparseMatmulWrapperTT, self.float_types)
+    # TODO(b/314165739): SparseMatmul XlaBuilder lowering does not support
+    # float16 and float64.
+    float_types = self.float_types - {np.float16, np.float64}
+    self._testMatMul(math_ops.sparse_matmul, float_types)
+    self._testMatMul(SparseMatmulWrapperTF, float_types)
+    self._testMatMul(SparseMatmulWrapperFT, float_types)
+    self._testMatMul(SparseMatmulWrapperTT, float_types)
 
   def testBatchMatMul(self):
     # Tests with batches of matrices.
@@ -1122,10 +1236,6 @@ class BinaryOpsTest(xla_test.XLATestCase):
 
       # Regression test for b/31472796.
       if dtype != np.float16 and hasattr(np, "matmul"):
-        # Skipping bfloat16 as ROCM doesn't support bfloat16 GEMM yet.
-        if (test_lib.is_built_with_rocm() and
-            dtype == dtypes.bfloat16.as_numpy_dtype):
-          return
         x = np.arange(0, 3 * 5 * 2 * 7, dtype=dtype).reshape((3, 5, 2, 7))
         self._testBinary(
             lambda x, y: math_ops.matmul(x, y, adjoint_b=True),
@@ -1239,36 +1349,200 @@ class BinaryOpsTest(xla_test.XLATestCase):
         np.full([1, 1, 3, 5], 3., dtype=np.float32),
         expected=np.full([4, 5, 1, 2, 5], 18., dtype=np.float32))
 
+  def testBatchMatMulRejectsMismatchedInnerDimensions(self):
+    # xla::BatchDot broadcasts an inner dimension of size 1, but TensorFlow's
+    # BatchMatMul requires the inner dimensions to match. With unknown shapes,
+    # shape inference doesn't reject them first, and matmul emits
+    # BatchMatMulV2.
+    for x_shape, y_shape, adjoint_a, adjoint_b in (
+        ([1, 4], [1, 1], False, False),
+        ([2, 3, 4], [2, 1, 5], False, False),
+        ([4, 1], [1, 1], True, False),
+        ([1, 4], [4, 1], False, True),
+        ([4, 1], [4, 1], True, True),
+    ):
+      with self.subTest(
+          x_shape=x_shape,
+          y_shape=y_shape,
+          adjoint_a=adjoint_a,
+          adjoint_b=adjoint_b,
+      ), self.session():
+        with self.test_scope():
+          x = array_ops.placeholder(dtypes.float32)
+          y = array_ops.placeholder(dtypes.float32)
+          output = math_ops.matmul(
+              x, y, adjoint_a=adjoint_a, adjoint_b=adjoint_b
+          )
+        with self.assertRaisesRegex(
+            errors.InvalidArgumentError, "Matrix size-incompatible"
+        ):
+          output.eval({
+              x: np.ones(x_shape, dtype=np.float32),
+              y: np.ones(y_shape, dtype=np.float32),
+          })
+
+  def testBatchMatMulAcceptsMatchingInnerDimensions(self):
+    # The checks must let valid operands of unknown shape through, including
+    # ones whose batch dimensions broadcast.
+    for x_shape, y_shape, adjoint_a, adjoint_b, out_shape in (
+        ([2, 3, 4], [4, 5], False, False, [2, 3, 5]),
+        ([2, 4, 3], [4, 5], True, False, [2, 3, 5]),
+        ([2, 3, 4], [5, 4], False, True, [2, 3, 5]),
+        ([2, 4, 3], [5, 4], True, True, [2, 3, 5]),
+    ):
+      with self.subTest(
+          x_shape=x_shape,
+          y_shape=y_shape,
+          adjoint_a=adjoint_a,
+          adjoint_b=adjoint_b,
+      ), self.session() as sess:
+        with self.test_scope():
+          x = array_ops.placeholder(dtypes.float32)
+          y = array_ops.placeholder(dtypes.float32)
+          output = math_ops.matmul(
+              x, y, adjoint_a=adjoint_a, adjoint_b=adjoint_b
+          )
+        result = sess.run(
+            output,
+            {
+                x: np.ones(x_shape, dtype=np.float32),
+                y: np.ones(y_shape, dtype=np.float32),
+            },
+        )
+        self.assertAllEqual(np.full(out_shape, 4.0, dtype=np.float32), result)
+
+  def testBatchMatMulV1AndV3RejectMismatchedInnerDimensions(self):
+    # BatchMatMul and BatchMatMulV3 share the XLA kernel with BatchMatMulV2.
+    for name, op in (
+        ("BatchMatMul", gen_math_ops.batch_mat_mul),
+        (
+            "BatchMatMulV3",
+            lambda x, y: gen_math_ops.batch_mat_mul_v3(
+                x, y, Tout=dtypes.float32
+            ),
+        ),
+    ):
+      with self.subTest(op=name), self.session():
+        with self.test_scope():
+          x = array_ops.placeholder(dtypes.float32)
+          y = array_ops.placeholder(dtypes.float32)
+          output = op(x, y)
+        with self.assertRaisesRegex(
+            errors.InvalidArgumentError, "Matrix size-incompatible"
+        ):
+          output.eval({
+              x: np.ones([1, 4], dtype=np.float32),
+              y: np.ones([1, 1], dtype=np.float32),
+          })
+
+  def testBatchMatMulRejectsRankBelowTwo(self):
+    # With unknown shapes, shape inference can't reject rank-1 operands, so
+    # the XLA kernel has to.
+    for x_shape, y_shape in (([4], [4, 1]), ([1, 4], [4])):
+      with self.subTest(x_shape=x_shape, y_shape=y_shape), self.session():
+        with self.test_scope():
+          x = array_ops.placeholder(dtypes.float32)
+          y = array_ops.placeholder(dtypes.float32)
+          output = math_ops.matmul(x, y)
+        with self.assertRaisesRegex(
+            errors.InvalidArgumentError, "ndims must be >= 2"
+        ):
+          output.eval({
+              x: np.ones(x_shape, dtype=np.float32),
+              y: np.ones(y_shape, dtype=np.float32),
+          })
+
   def testPad(self):
-    for dtype, pad_type in itertools.product(
-        self.numeric_types, [np.int32, np.int64]):
+    for dtype, pad_type in itertools.product(self.numeric_types,
+                                             [np.int32, np.int64]):
       self._testBinary(
           array_ops.pad,
-          np.array(
-              [[1, 2, 3], [4, 5, 6]], dtype=dtype),
-          np.array(
-              [[1, 2], [2, 1]], dtype=pad_type),
+          np.array([[1, 2, 3], [4, 5, 6]], dtype=dtype),
+          np.array([[1, 2], [2, 1]], dtype=pad_type),
           expected=np.array(
-              [[0, 0, 0, 0, 0, 0],
-               [0, 0, 1, 2, 3, 0],
-               [0, 0, 4, 5, 6, 0],
-               [0, 0, 0, 0, 0, 0],
-               [0, 0, 0, 0, 0, 0]],
+              [[0, 0, 0, 0, 0, 0], [0, 0, 1, 2, 3, 0], [0, 0, 4, 5, 6, 0],
+               [0, 0, 0, 0, 0, 0], [0, 0, 0, 0, 0, 0]],
               dtype=dtype))
 
       self._testBinary(
           lambda x, y: array_ops.pad(x, y, constant_values=7),
-          np.array(
-              [[1, 2, 3], [4, 5, 6]], dtype=dtype),
-          np.array(
-              [[0, 3], [2, 1]], dtype=pad_type),
+          np.array([[1, 2, 3], [4, 5, 6]], dtype=dtype),
+          np.array([[0, 3], [2, 1]], dtype=pad_type),
           expected=np.array(
-              [[7, 7, 1, 2, 3, 7],
-               [7, 7, 4, 5, 6, 7],
-               [7, 7, 7, 7, 7, 7],
-               [7, 7, 7, 7, 7, 7],
-               [7, 7, 7, 7, 7, 7]],
+              [[7, 7, 1, 2, 3, 7], [7, 7, 4, 5, 6, 7], [7, 7, 7, 7, 7, 7],
+               [7, 7, 7, 7, 7, 7], [7, 7, 7, 7, 7, 7]],
               dtype=dtype))
+
+  def testPadWithPaddingAboveInt32Max(self):
+    # Zero elements, so the padded shape can exceed int32 without allocating.
+    for pad in (
+        array_ops.pad,
+        lambda x, y: array_ops.pad(x, y, constant_values=7),
+    ):
+      self._testBinary(
+          pad,
+          np.zeros([0, 2], dtype=np.float32),
+          np.array([[0, 0], [2**32 + 1, 0]], dtype=np.int64),
+          expected=np.zeros([0, 2**32 + 3], dtype=np.float32),
+      )
+
+  def testPadRejectsOverflowingPaddedShape(self):
+    with self.assertRaisesRegex(
+        errors.InvalidArgumentError,
+        "Padded size of dimension 1 overflows int64",
+    ):
+      self._testBinary(
+          array_ops.pad,
+          np.ones([1, 2], dtype=np.float32),
+          np.array([[0, 0], [2**62, 2**62]], dtype=np.int64),
+          expected=None,
+      )
+
+    # Zero elements, but the size in bytes overflows int64.
+    with self.assertRaisesRegex(
+        errors.InvalidArgumentError,
+        r"overflow in static extent product: "
+        r"dimensions=\[2147483648, 2147483648, 0\]",
+    ):
+      self._testBinary(
+          array_ops.pad,
+          np.zeros([1, 1, 0], dtype=np.float32),
+          np.array([[2**31 - 1, 0], [2**31 - 1, 0], [0, 0]], dtype=np.int64),
+          expected=None,
+      )
+
+  def testPadDynamicHighPaddingAboveInt32Max(self):
+
+    def pad_selected_indices(low, high):
+
+      @def_function.function(jit_compile=True)
+      def f(mask):
+        # The size of `indices` is dynamic, so the high padding is too.
+        indices = array_ops.where_v2(mask)[:, 0]
+        n = array_ops.shape(indices, out_type=dtypes.int64)[0]
+        paddings = array_ops.concat(
+            [
+                constant_op.constant([[low]], dtype=dtypes.int64),
+                array_ops.reshape(high - n, [1, 1]),
+            ],
+            axis=1,
+        )
+        return array_ops.pad(indices, paddings)
+
+      return f
+
+    with self.session():
+      with self.test_scope():
+        mask = constant_op.constant([True, False, True, True])
+        self.assertAllEqual(
+            self.evaluate(pad_selected_indices(1, 8)(mask)),
+            [0, 0, 2, 3, 0, 0, 0, 0, 0],
+        )
+        with self.assertRaisesRegex(
+            errors.InvalidArgumentError,
+            "must fit in int32 when its high padding is dynamic",
+        ):
+          self.evaluate(pad_selected_indices(0, 2**31)(mask))
 
   def testSymmetricMirrorPad(self):
     mirror_pad = lambda t, paddings: array_ops.pad(t, paddings, "SYMMETRIC")
@@ -1352,11 +1626,11 @@ class BinaryOpsTest(xla_test.XLATestCase):
               dtype=dtype))
       self._testBinary(
           mirror_pad,
-          np.array(
-              [
-                  [[1, 2, 3], [4, 5, 6]],
-                  [[7, 8, 9], [10, 11, 12]],
-              ], dtype=dtype),
+          np.array([
+              [[1, 2, 3], [4, 5, 6]],
+              [[7, 8, 9], [10, 11, 12]],
+          ],
+                   dtype=dtype),
           np.array([[0, 0], [1, 1], [1, 1]], dtype=np.int32),
           expected=np.array(
               [
@@ -1453,8 +1727,7 @@ class BinaryOpsTest(xla_test.XLATestCase):
         self._testBinary(
             lambda x, y: array_ops.split(value=y, num_or_size_splits=3, axis=x),
             np.int32(axis),
-            np.array([[[1], [2]], [[3], [4]], [[5], [6]]],
-                     dtype=dtype),
+            np.array([[[1], [2]], [[3], [4]], [[5], [6]]], dtype=dtype),
             expected=[
                 np.array([[[1], [2]]], dtype=dtype),
                 np.array([[[3], [4]]], dtype=dtype),
@@ -1466,8 +1739,7 @@ class BinaryOpsTest(xla_test.XLATestCase):
         self._testBinary(
             lambda x, y: array_ops.split(value=y, num_or_size_splits=2, axis=x),
             np.int32(axis),
-            np.array([[[1], [2]], [[3], [4]], [[5], [6]]],
-                     dtype=dtype),
+            np.array([[[1], [2]], [[3], [4]], [[5], [6]]], dtype=dtype),
             expected=[
                 np.array([[[1]], [[3]], [[5]]], dtype=dtype),
                 np.array([[[2]], [[4]], [[6]]], dtype=dtype),
@@ -1476,12 +1748,12 @@ class BinaryOpsTest(xla_test.XLATestCase):
 
       def splitvOp(x, y):  # pylint: disable=invalid-name
         return array_ops.split(value=y, num_or_size_splits=[2, 3], axis=x)
+
       for axis in [1, -1]:
         self._testBinary(
             splitvOp,
             np.int32(axis),
-            np.array([[0, 1, 2, 3, 4], [5, 6, 7, 8, 9]],
-                     dtype=dtype),
+            np.array([[0, 1, 2, 3, 4], [5, 6, 7, 8, 9]], dtype=dtype),
             expected=[
                 np.array([[0, 1], [5, 6]], dtype=dtype),
                 np.array([[2, 3, 4], [7, 8, 9]], dtype=dtype),
@@ -1514,31 +1786,19 @@ class BinaryOpsTest(xla_test.XLATestCase):
           array_ops.tile,
           np.array([[1, 2], [3, 4]], dtype=dtype),
           np.array([3, 2], dtype=np.int32),
-          expected=np.array(
-              [[1, 2, 1, 2],
-               [3, 4, 3, 4],
-               [1, 2, 1, 2],
-               [3, 4, 3, 4],
-               [1, 2, 1, 2],
-               [3, 4, 3, 4]],
-              dtype=dtype))
+          expected=np.array([[1, 2, 1, 2], [3, 4, 3, 4], [1, 2, 1, 2],
+                             [3, 4, 3, 4], [1, 2, 1, 2], [3, 4, 3, 4]],
+                            dtype=dtype))
       self._testBinary(
           array_ops.tile,
           np.array([[1, 2], [3, 4]], dtype=dtype),
           np.array([1, 1], dtype=np.int32),
-          expected=np.array(
-              [[1, 2],
-               [3, 4]],
-              dtype=dtype))
+          expected=np.array([[1, 2], [3, 4]], dtype=dtype))
       self._testBinary(
           array_ops.tile,
           np.array([[1, 2]], dtype=dtype),
           np.array([3, 1], dtype=np.int32),
-          expected=np.array(
-              [[1, 2],
-               [1, 2],
-               [1, 2]],
-              dtype=dtype))
+          expected=np.array([[1, 2], [1, 2], [1, 2]], dtype=dtype))
 
   def testTranspose(self):
     for dtype in self.numeric_types:
@@ -1557,6 +1817,18 @@ class BinaryOpsTest(xla_test.XLATestCase):
           np.array([[1, 2], [3, 4]], dtype=dtype),
           np.array([1, 0], dtype=np.int32),
           expected=np.array([[1, 3], [2, 4]], dtype=dtype))
+      self._testBinary(
+          array_ops.transpose,
+          np.array([[1, 2], [3, 4]], dtype=dtype),
+          np.array([-1, 0], dtype=np.int32),
+          expected=np.array([[1, 3], [2, 4]], dtype=dtype),
+      )
+      self._testBinary(
+          array_ops.transpose,
+          np.zeros(shape=[1, 0, 4], dtype=dtype),
+          np.array([-2, -1, -3], dtype=np.int32),
+          expected=np.zeros(shape=[0, 4, 1], dtype=dtype),
+      )
 
   def testConjugateTranspose(self):
     for dtype in self.complex_types:
@@ -1574,7 +1846,14 @@ class BinaryOpsTest(xla_test.XLATestCase):
           array_ops.conjugate_transpose,
           np.array([[1 - 1j, 2 + 2j], [3 - 3j, 4 + 4j]], dtype=dtype),
           np.array([1, 0], dtype=np.int32),
-          expected=np.array([[1 + 1j, 3 + 3j], [2 - 2j, 4 - 4j]], dtype=dtype))
+          expected=np.array([[1 + 1j, 3 + 3j], [2 - 2j, 4 - 4j]], dtype=dtype),
+      )
+      self._testBinary(
+          array_ops.conjugate_transpose,
+          np.array([[1 - 1j, 2 + 2j], [3 - 3j, 4 + 4j]], dtype=dtype),
+          np.array([-1, 0], dtype=np.int32),
+          expected=np.array([[1 + 1j, 3 + 3j], [2 - 2j, 4 - 4j]], dtype=dtype),
+      )
 
   def testCross(self):
     for dtype in self.float_types:
@@ -1595,63 +1874,80 @@ class BinaryOpsTest(xla_test.XLATestCase):
           expected=np.array([[-3, 6, -3], [60, -120, 60]], dtype=dtype))
 
   def testBroadcastArgs(self):
-    self._testBinary(array_ops.broadcast_dynamic_shape,
-                     np.array([2, 3, 5], dtype=np.int32),
-                     np.array([1], dtype=np.int32),
-                     expected=np.array([2, 3, 5], dtype=np.int32))
+    self._testBinary(
+        array_ops.broadcast_dynamic_shape,
+        np.array([2, 3, 5], dtype=np.int32),
+        np.array([1], dtype=np.int32),
+        expected=np.array([2, 3, 5], dtype=np.int32))
 
-    self._testBinary(array_ops.broadcast_dynamic_shape,
-                     np.array([1], dtype=np.int32),
-                     np.array([2, 3, 5], dtype=np.int32),
-                     expected=np.array([2, 3, 5], dtype=np.int32))
+    self._testBinary(
+        array_ops.broadcast_dynamic_shape,
+        np.array([1], dtype=np.int32),
+        np.array([2, 3, 5], dtype=np.int32),
+        expected=np.array([2, 3, 5], dtype=np.int32))
 
-    self._testBinary(array_ops.broadcast_dynamic_shape,
-                     np.array([2, 3, 5], dtype=np.int32),
-                     np.array([5], dtype=np.int32),
-                     expected=np.array([2, 3, 5], dtype=np.int32))
+    self._testBinary(
+        array_ops.broadcast_dynamic_shape,
+        np.array([2, 3, 5], dtype=np.int32),
+        np.array([5], dtype=np.int32),
+        expected=np.array([2, 3, 5], dtype=np.int32))
 
-    self._testBinary(array_ops.broadcast_dynamic_shape,
-                     np.array([5], dtype=np.int32),
-                     np.array([2, 3, 5], dtype=np.int32),
-                     expected=np.array([2, 3, 5], dtype=np.int32))
+    self._testBinary(
+        array_ops.broadcast_dynamic_shape,
+        np.array([5], dtype=np.int32),
+        np.array([2, 3, 5], dtype=np.int32),
+        expected=np.array([2, 3, 5], dtype=np.int32))
 
-    self._testBinary(array_ops.broadcast_dynamic_shape,
-                     np.array([2, 3, 5], dtype=np.int32),
-                     np.array([3, 5], dtype=np.int32),
-                     expected=np.array([2, 3, 5], dtype=np.int32))
+    self._testBinary(
+        array_ops.broadcast_dynamic_shape,
+        np.array([2, 3, 5], dtype=np.int32),
+        np.array([3, 5], dtype=np.int32),
+        expected=np.array([2, 3, 5], dtype=np.int32))
 
-    self._testBinary(array_ops.broadcast_dynamic_shape,
-                     np.array([3, 5], dtype=np.int32),
-                     np.array([2, 3, 5], dtype=np.int32),
-                     expected=np.array([2, 3, 5], dtype=np.int32))
+    self._testBinary(
+        array_ops.broadcast_dynamic_shape,
+        np.array([3, 5], dtype=np.int32),
+        np.array([2, 3, 5], dtype=np.int32),
+        expected=np.array([2, 3, 5], dtype=np.int32))
 
-    self._testBinary(array_ops.broadcast_dynamic_shape,
-                     np.array([2, 3, 5], dtype=np.int32),
-                     np.array([3, 1], dtype=np.int32),
-                     expected=np.array([2, 3, 5], dtype=np.int32))
+    self._testBinary(
+        array_ops.broadcast_dynamic_shape,
+        np.array([2, 3, 5], dtype=np.int32),
+        np.array([3, 1], dtype=np.int32),
+        expected=np.array([2, 3, 5], dtype=np.int32))
 
-    self._testBinary(array_ops.broadcast_dynamic_shape,
-                     np.array([3, 1], dtype=np.int32),
-                     np.array([2, 3, 5], dtype=np.int32),
-                     expected=np.array([2, 3, 5], dtype=np.int32))
+    self._testBinary(
+        array_ops.broadcast_dynamic_shape,
+        np.array([3, 1], dtype=np.int32),
+        np.array([2, 3, 5], dtype=np.int32),
+        expected=np.array([2, 3, 5], dtype=np.int32))
 
-    self._testBinary(array_ops.broadcast_dynamic_shape,
-                     np.array([2, 1, 5], dtype=np.int32),
-                     np.array([3, 1], dtype=np.int32),
-                     expected=np.array([2, 3, 5], dtype=np.int32))
+    self._testBinary(
+        array_ops.broadcast_dynamic_shape,
+        np.array([2, 1, 5], dtype=np.int32),
+        np.array([3, 1], dtype=np.int32),
+        expected=np.array([2, 3, 5], dtype=np.int32))
 
-    self._testBinary(array_ops.broadcast_dynamic_shape,
-                     np.array([3, 1], dtype=np.int32),
-                     np.array([2, 1, 5], dtype=np.int32),
-                     expected=np.array([2, 3, 5], dtype=np.int32))
+    self._testBinary(
+        array_ops.broadcast_dynamic_shape,
+        np.array([3, 1], dtype=np.int32),
+        np.array([2, 1, 5], dtype=np.int32),
+        expected=np.array([2, 3, 5], dtype=np.int32))
+
+    self._testBinary(
+        array_ops.broadcast_dynamic_shape,
+        np.array([2, 3, 5], dtype=np.int64),
+        np.array([1], dtype=np.int64),
+        expected=np.array([2, 3, 5], dtype=np.int64))
 
   @test_util.disable_mlir_bridge("Error handling")
   def testBroadcastArgsError(self):
     with self.assertRaisesIncompatibleShapesError():
-      self._testBinary(array_ops.broadcast_dynamic_shape,
-                       np.array([1, 2, 3], dtype=np.int32),
-                       np.array([4, 5, 6], dtype=np.int32),
-                       expected=None)
+      self._testBinary(
+          array_ops.broadcast_dynamic_shape,
+          np.array([1, 2, 3], dtype=np.int32),
+          np.array([4, 5, 6], dtype=np.int32),
+          expected=None)
 
   def testBroadcastTo(self):
     for dtype in self.all_types:
@@ -1680,6 +1976,185 @@ class BinaryOpsTest(xla_test.XLATestCase):
           x,
           np.array((3, 7, 8, 9), dtype=np.int32),
           expected=np.tile(x, (1, 7, 8, 9)))
+
+  def testBroadcastToRejectsIncompatibleShapes(self):
+    # xla::BroadcastTo tiles an input dimension into an output dimension that
+    # is a multiple of it, but TensorFlow only broadcasts dimensions of size 1.
+    for shape in ([2, 6], [2, 4]):
+      with self.subTest(shape=shape):
+        with self.assertRaisesRegex(
+            errors.InvalidArgumentError,
+            r"Incompatible shapes: \[1,2\] vs\. \[%d,%d\]" % tuple(shape),
+        ):
+          self._testBinary(
+              array_ops.broadcast_to,
+              np.array([[1, 2]], dtype=np.float32),
+              np.array(shape, dtype=np.int32),
+              expected=None,
+          )
+    # A shape of unknown length keeps graph shape inference from checking the
+    # ranks first.
+    with self.session() as session:
+      with self.test_scope():
+        x = array_ops.placeholder(dtypes.float32, [2, 2, 3])
+        shape = array_ops.placeholder(dtypes.int32, [None])
+        output = array_ops.broadcast_to(x, shape)
+      with self.assertRaisesRegex(
+          errors.InvalidArgumentError,
+          r"Rank of input \(3\) must be no greater than rank of output "
+          r"shape \(2\)",
+      ):
+        session.run(
+            output,
+            {
+                x: np.ones([2, 2, 3], dtype=np.float32),
+                shape: np.array([2, 3], dtype=np.int32),
+            },
+        )
+
+  def testBroadcastToEmptyOutput(self):
+    # Only a dimension of size 1 can be broadcast to size 0.
+    with self.assertRaisesRegex(
+        errors.InvalidArgumentError, r"Incompatible shapes: \[2\] vs\. \[0\]"
+    ):
+      self._testBinary(
+          array_ops.broadcast_to,
+          np.array([1, 2], dtype=np.float32),
+          np.array([0], dtype=np.int32),
+          expected=None,
+      )
+    self._testBinary(
+        array_ops.broadcast_to,
+        np.array([7], dtype=np.float32),
+        np.array([0], dtype=np.int32),
+        expected=np.zeros([0], dtype=np.float32),
+    )
+    self._testBinary(
+        array_ops.broadcast_to,
+        np.zeros([0], dtype=np.float32),
+        np.array([2, 0], dtype=np.int32),
+        expected=np.zeros([2, 0], dtype=np.float32),
+    )
+
+  def testBroadcastToDynamicOutputDimension(self):
+    if "GPU" in self.device:
+      self.skipTest(
+          "XLA:GPU's dynamic padder doesn't support the dynamic "
+          "select that boolean_mask produces."
+      )
+
+    # n is only known at run time, where it equals the input dimension 2, but
+    # its bound is 4, so comparing bounds would wrongly reject this broadcast.
+    # Taking n from a shape keeps XLA from compiling mask as a constant.
+    @def_function.function(jit_compile=True)
+    def f(x, mask):
+      n = array_ops.shape(array_ops.boolean_mask(mask, mask))[0]
+      return array_ops.broadcast_to(
+          x, array_ops.concat([[3], array_ops.reshape(n, [1])], 0)
+      )
+
+    with self.session() as session:
+      with self.test_scope():
+        x = array_ops.placeholder(dtypes.float32, shape=[2])
+        mask = array_ops.placeholder(dtypes.bool, shape=[4])
+        output = f(x, mask)
+      result = session.run(
+          output, {x: [1.0, 2.0], mask: [True, False, True, False]}
+      )
+    self.assertAllClose(result, [[1.0, 2.0]] * 3)
+
+  def testDynamicDimensionLongerThanStaticOne(self):
+    # TensorFlow rejects these shapes, but XLA can't check them at run time,
+    # so the dynamic dimension is cut to the static size of the other operand.
+    @def_function.function(jit_compile=True)
+    def f(x, y):
+      y = array_ops.boolean_mask(y, y > 0)
+      return math_ops.subtract(x, y), math_ops.subtract(y, x)
+
+    with self.session() as session:
+      with self.device_scope():
+        x = array_ops.placeholder(dtypes.float32, shape=[4])
+        y = array_ops.placeholder(dtypes.float32, shape=[4096])
+        output = f(x, y)
+      # Run it several times, since writing past an output's buffer may only
+      # corrupt later allocations.
+      for _ in range(10):
+        result = session.run(
+            output,
+            {
+                x: [10.0, 20.0, 30.0, 40.0],
+                y: np.arange(1, 4097, dtype=np.float32),
+            },
+        )
+        self.assertAllClose(
+            result,
+            ([9.0, 18.0, 27.0, 36.0], [-9.0, -18.0, -27.0, -36.0]),
+        )
+
+  def testMulGradientOnBoundedDynamicDimension(self):
+    # tf.slice(x, [0], [n]), where n is itself only known at runtime, has an
+    # output size that's bounded by x's static shape but not statically
+    # known. Multiplying that result against a differently-shaped static
+    # tensor and differentiating used to fail XLA compilation in
+    # BroadcastGradientArgs, which resolved the dynamic dimension to its
+    # upper bound and rejected it as incompatible with the static side even
+    # though the two are equal at runtime (see GitHub issue #119382).
+    with self.session() as sess:
+      with self.test_scope():
+        x = array_ops.placeholder(dtypes.float32, shape=[5])
+        mask = array_ops.placeholder(dtypes.bool, shape=[3])
+        weights = constant_op.constant([1.0, -2.0], dtype=dtypes.float32)
+        n = math_ops.reduce_sum(math_ops.cast(mask, dtypes.int32))
+        sliced = array_ops.slice(x, [0], [n])
+        out = math_ops.reduce_sum(sliced * weights)
+        grad = gradients_impl.gradients(out, x)[0]
+      result = sess.run(
+          grad,
+          feed_dict={
+              x: [-2.0, -1.0, 0.0, 1.0, 2.0],
+              mask: [True, False, True],
+          },
+      )
+    self.assertAllClose(result, [1.0, -2.0, 0.0, 0.0, 0.0])
+
+  def testRealDivRejectsIntTypes(self):
+    jit_real_div = def_function.function(
+        gen_math_ops.real_div, jit_compile=True
+    )
+
+    for dtype in self.int_types:
+      with self.subTest(dtype=dtype):
+        with self.session() as sess, self.device_scope():
+          x = array_ops.placeholder(dtype, shape=[2])
+          y = array_ops.placeholder(dtype, shape=[2])
+          out = gen_math_ops.real_div(x, y)
+          with self.assertRaisesRegex(
+              errors.InvalidArgumentError,
+              "No OpKernel was registered to support Op 'RealDiv'",
+          ):
+            sess.run(
+                out,
+                feed_dict={
+                    x: np.array([3, 5], dtype=dtype),
+                    y: np.array([2, 2], dtype=dtype),
+                },
+            )
+
+        with self.session() as sess, self.device_scope():
+          x = array_ops.placeholder(dtype, shape=[2])
+          y = array_ops.placeholder(dtype, shape=[2])
+          out = jit_real_div(x, y)
+          with self.assertRaisesRegex(
+              errors.InvalidArgumentError,
+              r"No registered 'RealDiv' OpKernel",
+          ):
+            sess.run(
+                out,
+                feed_dict={
+                    x: np.array([3, 5], dtype=dtype),
+                    y: np.array([2, 2], dtype=dtype),
+                },
+            )
 
 
 if __name__ == "__main__":

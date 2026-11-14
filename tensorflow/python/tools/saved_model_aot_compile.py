@@ -14,23 +14,17 @@
 # ==============================================================================
 """Helper utilities for AOT compilation."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import collections
 import copy
 import os
-import pipes
 import re
 import shlex
-
-import six
+from typing import List, Tuple
 
 from tensorflow.core.protobuf import config_pb2
 from tensorflow.core.protobuf import meta_graph_pb2
 from tensorflow.python.client import session
-from tensorflow.python.framework import graph_util
+from tensorflow.python.framework import convert_to_constants
 from tensorflow.python.framework import ops as ops_lib
 from tensorflow.python.framework import tensor_shape
 from tensorflow.python.framework import versions
@@ -65,10 +59,7 @@ _PASS_THROUGH_VARIABLE_OPS = ('Identity', 'IdentityN')
 
 
 def _shlex_quote(s):
-  if six.PY2:
-    return pipes.quote(s)
-  else:
-    return shlex.quote(s)
+  return shlex.quote(s)
 
 
 def _sysconfig_module():
@@ -210,46 +201,26 @@ def _prune_removed_feed_nodes(signature_def, graph_def):
   return new_signature_def
 
 
-def aot_compile_cpu_meta_graph_def(checkpoint_path,
-                                   meta_graph_def,
-                                   output_prefix,
-                                   signature_def_key,
-                                   cpp_class,
-                                   target_triple,
-                                   target_cpu,
-                                   variables_to_feed=(),
-                                   multithreading=False):
-  """Compile a `MetaGraphDef` to header+object files in `output_prefix`.
-
-  Use XLA AOT (`tfcompile`) to convert the given meta graph and
-  signature into a header + object files.  Also create an include makefile
-  that helps identify the appropriate necessary include and library paths
-  to incorporate these files into your C++ program.
+def freeze_model(checkpoint_path: str,
+                 meta_graph_def: meta_graph_pb2.MetaGraphDef,
+                 output_prefix: str, signature_def_key: str,
+                 variables_to_feed: List[str]) -> Tuple[str, str]:
+  """Freeze a `MetaGraphDef` in preparation for tfcompile`.
 
   The graph is always optimized with grappler, and optionally (by default)
   variables are frozen as constants, before compilation happens.
-
-  If the `freeze_graph` is `True`, all variables are embedded as constants
-  into the graph and binary objects.  If it is `False`, then the variable
-  values become inputs and outputs of the compiled class and the C++
-  caller must set these values manually.
 
   Args:
     checkpoint_path: Python string.  Path to checkpoints/variables.
     meta_graph_def: Instance of `MetaGraphDef`.
     output_prefix: Python string.  Path prefix for outputs.
     signature_def_key: String, the signature_def to use in the SavedModel.
-    cpp_class: String, Name of output C++ class.
-    target_triple: String, LLVM target triple.
-    target_cpu: String, LLVM target cpu name.
     variables_to_feed: A list of strings, the variables that will be fed by the
       user; these won't be frozen.  If `None`, then we will extract all the
       variables in the graph and mark them as to-feed.  The default behavior is
       an empty tuple: all variables must be frozen.
-    multithreading: Whether to enable multithreading in the compiled
-      computation.  Note that if using this option, the resulting object files
-      may have external dependencies on multithreading libraries like nsync.
-
+  Returns:
+    a pair containing the path to the frozen model and the path to the config.
   Raises:
     RuntimeError: If tensorflow was not built with XLA.
     ImportError: If tensorflow was built with XLA but there was another
@@ -257,21 +228,6 @@ def aot_compile_cpu_meta_graph_def(checkpoint_path,
     ValueError: If `meta_graph_def.signature_def[signature_def_key]` is
       missing or has empty outputs.
   """
-  if _pywrap_tfcompile_import_error:
-    raise _pywrap_tfcompile_import_error  # pylint: disable=raising-bad-type
-
-  else:
-    # TODO(ebrevdo): Pipe DebugOptions through tfcompile::Main and pywrap
-    # so that we can set these directly instead of relying on env vars.
-    xla_flags = os.environ.get('XLA_FLAGS')
-    if not xla_flags:
-      xla_flags = '--xla_cpu_multi_thread_eigen={}'.format(
-          'true' if multithreading else 'false')
-    else:
-      xla_flags += ' --xla_cpu_multi_thread_eigen={}'.format(
-          'true' if multithreading else 'false')
-    os.environ['XLA_FLAGS'] = xla_flags
-
   signature_def_map = meta_graph_def.signature_def
   if signature_def_key not in signature_def_map:
     raise ValueError(
@@ -284,10 +240,10 @@ def aot_compile_cpu_meta_graph_def(checkpoint_path,
         f'Signature key {signature_def_key} must have outputs, but saw none:\n'
         f'{str(signature_def)}')
 
-  temp_dir = test.get_temp_dir()
-  file_io.recursive_create_dir(temp_dir)
+  file_io.recursive_create_dir(output_prefix)
   if logging.get_verbosity() >= logging.INFO:
-    original_graph_def_location = os.path.join(temp_dir, 'original_graph.pb')
+    original_graph_def_location = os.path.join(output_prefix,
+                                               'original_graph.pb')
     with file_io.FileIO(original_graph_def_location, 'wb') as graph_writer:
       graph_writer.write(meta_graph_def.graph_def.SerializeToString())
 
@@ -311,7 +267,8 @@ def aot_compile_cpu_meta_graph_def(checkpoint_path,
     ]
 
   if logging.get_verbosity() >= logging.INFO:
-    prefrozen_graph_def_location = os.path.join(temp_dir, 'prefrozen_graph.pb')
+    prefrozen_graph_def_location = os.path.join(output_prefix,
+                                                'prefrozen_graph.pb')
     with file_io.FileIO(prefrozen_graph_def_location, 'wb') as graph_writer:
       graph_writer.write(graph_def.SerializeToString())
 
@@ -321,7 +278,7 @@ def aot_compile_cpu_meta_graph_def(checkpoint_path,
     if restorer is not None:
       restorer.restore(sess, checkpoint_path)
     graph_def.CopyFrom(
-        graph_util.convert_variables_to_constants(
+        convert_to_constants.convert_variables_to_constants(
             sess,
             graph_def,
             output_node_names=[
@@ -335,8 +292,8 @@ def aot_compile_cpu_meta_graph_def(checkpoint_path,
 
   signature_def = _prune_removed_feed_nodes(signature_def, graph_def)
 
-  frozen_graph_def_location = os.path.join(temp_dir, 'frozen_graph.pb')
-  config_pbtxt_location = os.path.join(temp_dir, 'config.pbtxt')
+  frozen_graph_def_location = os.path.join(output_prefix, 'frozen_graph.pb')
+  config_pbtxt_location = os.path.join(output_prefix, 'config.pbtxt')
   logging.info('Writing graph def to: {}'.format(frozen_graph_def_location))
   with file_io.FileIO(frozen_graph_def_location, 'wb') as graph_writer:
     graph_writer.write(graph_def.SerializeToString())
@@ -345,7 +302,84 @@ def aot_compile_cpu_meta_graph_def(checkpoint_path,
   logging.info('Writing config_pbtxt to: {}'.format(config_pbtxt_location))
   with file_io.FileIO(config_pbtxt_location, mode='w') as config_writer:
     config_writer.write(str(config))
+  return frozen_graph_def_location, config_pbtxt_location
 
+
+def aot_compile_cpu_meta_graph_def(checkpoint_path,
+                                   meta_graph_def,
+                                   output_prefix,
+                                   signature_def_key,
+                                   cpp_class,
+                                   target_triple,
+                                   target_cpu,
+                                   variables_to_feed=(),
+                                   multithreading=False):
+  """Compile a `MetaGraphDef` to header+object files in `output_prefix`.
+
+  Use XLA AOT (`tfcompile`) to convert the given meta graph and
+  signature into a header + object files.  Also create an include makefile
+  that helps identify the appropriate necessary include and library paths
+  to incorporate these files into your C++ program.
+
+  Freezing a graph entails restoring the checkpoint and replacing any inputs and
+  variables with constants. If values are feed, those are used, else inputs are
+  replaced with default all-zero constants. Finally, the graph is pruned and
+  then optimized with grappler.
+
+  If the `freeze_graph` is `True`, all variables are embedded as constants
+  into the graph and binary objects.  If it is `False`, then the variable
+  values become inputs and outputs of the compiled class and the C++
+  caller must set these values manually.
+
+  Args:
+    checkpoint_path: Python string.  Path to checkpoints/variables.
+    meta_graph_def: Instance of `MetaGraphDef`.
+    output_prefix: Python string.  Path prefix for outputs.
+    signature_def_key: String, the signature_def to use in the SavedModel.
+    cpp_class: String, Name of output C++ class.
+    target_triple: String, LLVM target triple.
+    target_cpu: String, LLVM target cpu name.
+    variables_to_feed: A list of strings, the variables that will be fed by the
+      user; these won't be frozen.  If `None`, then we will extract all the
+      variables in the graph and mark them as to-feed.  The default behavior is
+      an empty tuple: all variables must be frozen.
+    multithreading: Whether to enable multithreading in the compiled
+      computation.  Note that if using this option, the resulting object files
+      may have external dependencies on multithreading libraries like Abseil.
+
+  Raises:
+    RuntimeError: If tensorflow was not built with XLA.
+    ImportError: If tensorflow was built with XLA but there was another
+      issue importing the tfcompile python wrapper.
+    ValueError: If `meta_graph_def.signature_def[signature_def_key]` is
+      missing or has empty outputs.
+  """
+  if _pywrap_tfcompile_import_error:
+    raise _pywrap_tfcompile_import_error  # pylint: disable=raising-bad-type
+
+  else:
+    # TODO(ebrevdo): Pipe DebugOptions through tfcompile::Main and pywrap
+    # so that we can set these directly instead of relying on env vars.
+    xla_flags = os.environ.get('XLA_FLAGS')
+    if not xla_flags:
+      xla_flags = '--xla_cpu_multi_thread_eigen={}'.format(
+          'true' if multithreading else 'false')
+    else:
+      xla_flags += ' --xla_cpu_multi_thread_eigen={}'.format(
+          'true' if multithreading else 'false')
+    # Disable YNNPACK fusions for tfcompile, which does not support ynn-fusion
+    # thunks (b/452693819, b/573087829).
+    xla_flags += ' --xla_cpu_experimental_ynn_fusion_type= '
+    os.environ['XLA_FLAGS'] = xla_flags
+
+  temp_dir = test.get_temp_dir()
+  file_io.recursive_create_dir(temp_dir)
+  frozen_graph_def_location, config_pbtxt_location = freeze_model(
+      checkpoint_path=checkpoint_path,
+      meta_graph_def=meta_graph_def,
+      output_prefix=temp_dir,
+      signature_def_key=signature_def_key,
+      variables_to_feed=variables_to_feed)
   output_dir = os.path.dirname(output_prefix)
   file_io.recursive_create_dir(output_dir)
 
@@ -371,9 +405,11 @@ def aot_compile_cpu_meta_graph_def(checkpoint_path,
       out_function_object='{}.o'.format(output_prefix),
       out_header='{}.h'.format(output_prefix),
       out_metadata_object='{}_metadata.o'.format(output_prefix),
+      out_constant_buffers_object='{}_constants.o'.format(output_prefix),
       gen_name_to_index=True,
       # ProgramShape isn't uniquefied by entry_point.
-      gen_program_shape=False)
+      gen_program_shape=False,
+  )
 
 
 def _optimize_graph(meta_graph_def, signature_def):
@@ -388,7 +424,8 @@ def _optimize_graph(meta_graph_def, signature_def):
     fetch_collection.node_list.value.append(tensor_info.name)
 
   new_meta_graph_def.collection_def['train_op'].CopyFrom(fetch_collection)
-
+  # We freeze the graph, so consider all variables to be readonly.
+  new_meta_graph_def.ClearField('saver_def')
   config = config_pb2.ConfigProto()
   rewrite_options = config.graph_options.rewrite_options
   rewrite_options.min_graph_nodes = -1  # do not skip small graphs

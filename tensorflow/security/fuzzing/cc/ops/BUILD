@@ -1,0 +1,157 @@
+# Copyright 2026 Google LLC. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
+# Fuzzing TensorFlow ops with GFT
+# Most ops have a similar set of dependencies and a similar fuzzing
+# infrastructure. Hence, we gather everything in one single place.
+# Note that these fuzzers cover a large part of TF, they are not granular.
+
+load(
+    "//tensorflow/security/fuzzing:tf_fuzzing.bzl",
+    "tf_cc_fuzz_test",
+)
+
+# copybara:uncomment package(default_applicable_licenses = ["//tensorflow:license"])
+
+# A trivial fuzzer with no pre-specified corpus.
+tf_cc_fuzz_test(
+    name = "identity_fuzz",
+    srcs = ["identity_fuzz.cc"],
+    tags = ["no_oss"],
+    deps = [
+        "//tensorflow/cc:cc_ops",
+        "//tensorflow/core/framework:types_proto_cc",
+        "//tensorflow/core/kernels:array",
+        "//tensorflow/security/fuzzing/cc:fuzz_session",
+        "//tensorflow/security/fuzzing/cc/core/framework:tensor_domains",
+        "//tensorflow/security/fuzzing/cc/core/framework:tensor_shape_domains",
+        "@com_google_absl//absl/log",
+        "@com_google_absl//absl/status",
+    ],
+)
+
+tf_cc_fuzz_test(
+    name = "concat_fuzz",
+    srcs = ["concat_fuzz.cc"],
+    tags = ["no_oss"],
+    deps = [
+        "//tensorflow/cc:cc_ops",
+        "//tensorflow/core/framework:types_proto_cc",
+        "//tensorflow/core/kernels:array",
+        "//tensorflow/security/fuzzing/cc:fuzz_session",
+        "//tensorflow/security/fuzzing/cc/core/framework:tensor_domains",
+        "//tensorflow/security/fuzzing/cc/core/framework:tensor_shape_domains",
+        "@com_google_absl//absl/log",
+        "@com_google_absl//absl/status",
+    ],
+)
+
+tf_cc_fuzz_test(
+    name = "add_fuzz",
+    srcs = ["add_fuzz.cc"],
+    tags = ["no_oss"],
+    deps = [
+        "//tensorflow/cc:cc_ops",
+        "//tensorflow/core/framework:types_proto_cc",
+        "//tensorflow/core/kernels:array",
+        "//tensorflow/security/fuzzing/cc:fuzz_session",
+        "//tensorflow/security/fuzzing/cc/core/framework:datatype_domains",
+        "//tensorflow/security/fuzzing/cc/core/framework:tensor_domains",
+        "//tensorflow/security/fuzzing/cc/core/framework:tensor_shape_domains",
+    ],
+)
+
+tf_cc_fuzz_test(
+    name = "matmul_fuzz",
+    srcs = ["matmul_fuzz.cc"],
+    tags = [
+        "no_oss",
+        "noasan",  # b/283972985
+    ],
+    deps = [
+        "//tensorflow/cc:cc_ops",
+        "//tensorflow/core/framework:types_proto_cc",
+        "//tensorflow/core/kernels:array",
+        "//tensorflow/core/kernels:matmul_op",
+        "//tensorflow/security/fuzzing/cc:fuzz_session",
+        "//tensorflow/security/fuzzing/cc/core/framework:tensor_domains",
+    ],
+)
+
+tf_cc_fuzz_test(
+    name = "bincount_fuzz",
+    srcs = ["bincount_fuzz.cc"],
+    tags = ["no_oss"],
+    deps = [
+        "//tensorflow/cc:cc_ops",
+        "//tensorflow/core/framework:types_proto_cc",
+        "//tensorflow/core/kernels:array",
+        "//tensorflow/core/kernels:bincount_op",
+        "//tensorflow/security/fuzzing/cc:fuzz_session",
+        "//tensorflow/security/fuzzing/cc/core/framework:tensor_domains",
+        "//tensorflow/security/fuzzing/cc/core/framework:tensor_shape_domains",
+        "@com_google_absl//absl/log",
+        "@com_google_absl//absl/status",
+    ],
+)
+
+tf_cc_fuzz_test(
+    name = "string_to_number_fuzz",
+    srcs = ["string_to_number_fuzz.cc"],
+    tags = ["no_oss"],
+    deps = [
+        "//tensorflow/cc:cc_ops",
+        "//tensorflow/core/framework:types_proto_cc",
+        "//tensorflow/core/kernels:array",
+        "//tensorflow/core/kernels:string_to_number_op",
+        "//tensorflow/security/fuzzing/cc:fuzz_session",
+        "@com_google_absl//absl/log",
+        "@com_google_absl//absl/status",
+    ],
+)
+
+tf_cc_fuzz_test(
+    name = "string_ops_fuzz",
+    srcs = ["string_ops_fuzz.cc"],
+    tags = ["no_oss"],
+    deps = [
+        "//tensorflow/cc:cc_ops",
+        "//tensorflow/core/framework:types_proto_cc",
+        "//tensorflow/core/kernels:array",
+        "//tensorflow/core/kernels:string",
+        "//tensorflow/core/kernels:string_split_op",
+        "//tensorflow/security/fuzzing/cc:fuzz_session",
+        "@com_google_absl//absl/log",
+        "@com_google_absl//absl/status",
+    ],
+)
+
+tf_cc_fuzz_test(
+    name = "general_ops_fuzz",
+    srcs = ["general_ops_fuzz.cc"],
+    shard_count = 5,
+    deps = [
+        "//tensorflow/cc:cc_ops",
+        "//tensorflow/core/framework:tensor",
+        "//tensorflow/core/framework:types_proto_cc",
+        "//tensorflow/core/kernels:array",
+        "//tensorflow/core/kernels:decode_wav_op",
+        "//tensorflow/core/kernels/image",
+        "//tensorflow/core/kernels/image:decode_image_op",
+        "//tensorflow/core/ops:audio_ops_op_lib",
+        "//tensorflow/security/fuzzing/cc:fuzz_session",
+        "//tensorflow/security/fuzzing/cc/core/framework:tensor_domains",
+    ],
+)

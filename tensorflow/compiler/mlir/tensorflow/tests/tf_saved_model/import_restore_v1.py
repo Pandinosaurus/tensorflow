@@ -16,10 +16,6 @@
 # RUN: %p/import_restore_v1 | FileCheck %s
 
 # pylint: disable=missing-docstring,line-too-long
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import tensorflow.compat.v1 as tf
 from tensorflow.compiler.mlir.tensorflow.tests.tf_saved_model import common_v1
 
@@ -37,15 +33,16 @@ from tensorflow.compiler.mlir.tensorflow.tests.tf_saved_model import common_v1
 # CHECK-SAME: initializers = [@[[restore:.*]]]
 
 # CHECK: "tf_saved_model.asset"()
-# CHECK-SAME: {filename = [[filename:.*]], sym_name = "[[sym_name:.*]]"} : () -> ()
+# CHECK-SAME: <{filename = [[filename:.*]], sym_name = "[[sym_name:.*]]"}> : () -> ()
 
 # CHECK:      func @[[restore]](
 # CHECK-SAME:   [[variable_path:%.*]]: tensor<!tf_type.string> {tf_saved_model.bound_input = @[[sym_name]]}
 # CHECK-SAME: tf_saved_model.exported_names = ["{{__tf_saved_model_session_initializer.*}}"]
-# CHECK: [[v0:%.*]] = "tf.RestoreV2"([[variable_path]]
-# CHECK: [[v1:%.*]] = "tf.Identity"([[v0]])
+# CHECK-SAME: tf_saved_model.initializer_type = "restore_op"
 # CHECK: [[handle:%.*]] = "tf.VarHandleOp"
 # CHECK-SAME: shared_name = [[shared_name:".*"]]
+# CHECK: [[v0:%.*]] = "tf.RestoreV2"([[variable_path]]
+# CHECK: [[v1:%.*]] = "tf.Identity"([[v0]])
 # CHECK: "tf.AssignVariableOp"([[handle]], [[v1]])
 
 # CHECK:      func {{@[a-zA-Z_0-9]+}}(

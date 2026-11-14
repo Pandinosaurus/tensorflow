@@ -64,14 +64,16 @@ namespace tensorflow {
 class Edge;
 class EdgeSetTest;
 class Graph;
+class GraphDebugInfo;
 class GraphDef;
+class GraphTest;
 class Node;
 struct OutputTensor;
 class VersionDef;
 class WhileContext;
 
-class NeighborIter;     // Declared below
-class NodeIter;         // Declared below
+class NeighborIter;  // Declared below
+class NodeIter;      // Declared below
 
 // Indicates where the graph instance is originated from.
 enum class ConstructionContext {
@@ -102,15 +104,14 @@ class Node {
   const NodeDef& def() const;
   const OpDef& op_def() const;
 
-  // TODO(mdan): This is only used by control_flow_deps_o_chains. Remove?
   NodeDef* mutable_def();
 
   // input and output types
-  int32 num_inputs() const;
+  int32_t num_inputs() const;
   DataType input_type(int32_t i) const;
   const DataTypeVector& input_types() const;
 
-  int32 num_outputs() const;
+  int32_t num_outputs() const;
   DataType output_type(int32_t o) const;
   const DataTypeVector& output_types() const;
 
@@ -138,14 +139,14 @@ class Node {
 
   // Sets 'original_node_names' field of this node's DebugInfo proto to
   // 'names'.
-  void set_original_node_names(const std::vector<string>& names);
-  void set_original_func_names(const std::vector<string>& names);
+  void set_original_node_names(const std::vector<std::string>& names);
+  void set_original_func_names(const std::vector<std::string>& names);
 
   // Read only access to attributes
   AttrSlice attrs() const;
 
   // Inputs requested by the NodeDef.  For the actual inputs, use in_edges.
-  const protobuf::RepeatedPtrField<string>& requested_inputs() const;
+  const protobuf::RepeatedPtrField<std::string>& requested_inputs() const;
 
   // Get the neighboring nodes via edges either in or out of this node.  This
   // includes control edges.
@@ -219,7 +220,7 @@ class Node {
     UpdateProperties();
   }
 
-  void AddAttr(const std::string& name, std::vector<string>&& val) {
+  void AddAttr(const std::string& name, std::vector<std::string>&& val) {
     MoveAttrValue(std::move(val), AddAttrHelper(name));
     UpdateProperties();
   }
@@ -227,20 +228,20 @@ class Node {
   void ClearAttr(const std::string& name);
 
   // Returns into '*e' the edge connecting to the 'idx' input of this Node.
-  Status input_edge(int idx, const Edge** e) const;
+  absl::Status input_edge(int idx, const Edge** e) const;
 
   // Returns into '*edges' the input data edges of this Node, indexed by input
   // number. Does not return control edges.
-  Status input_edges(std::vector<const Edge*>* edges) const;
+  absl::Status input_edges(std::vector<const Edge*>* edges) const;
 
   // Returns into '*n' the node that has an output connected to the
   // 'idx' input of this Node.
-  Status input_node(int idx, const Node** n) const;
-  Status input_node(int idx, Node** n) const;
+  absl::Status input_node(int idx, const Node** n) const;
+  absl::Status input_node(int idx, Node** n) const;
 
   // Returns into '*t' the idx-th input tensor of this node, represented as the
   // output tensor of input_node(idx).
-  Status input_tensor(int idx, OutputTensor* t) const;
+  absl::Status input_tensor(int idx, OutputTensor* t) const;
 
   WhileContext* while_ctx() const { return while_ctx_; }
   void set_while_ctx(WhileContext* while_ctx) {
@@ -266,7 +267,25 @@ class Node {
   // property of the node (stored in props_).
   void UpdateProperties();
 
+  // Erases type information from the node.
+  void ClearTypeInfo();
+
+  // Update type information for a node with a list of inputs and/or outputs
+  // described by its TYPE_ATTR_NAME attr when removing some of these. The keys
+  // of INDEX_MAPPING are the indexes of the inputs/outputs that are not
+  // removed. dtype information in the TYPE_ATTR_NAME attr is always updated.
+  // Use UPDATE_FULL_TYPE=true when this changes the node's outputs to also
+  // update the node's full type information (if present).
+  absl::Status ShrinkTypeInfo(
+      const absl::flat_hash_map<int, int>& index_mapping,
+      const std::string& type_attr_name, bool update_full_type);
+
+  // Called after an incident non-control edge has changed. Does nothing if not
+  // all input edges are defined.
+  void RunForwardTypeInference();
+
  private:
+  // TODO(mdan): Drop this.
   friend class Graph;
   Node();
 
@@ -357,18 +376,19 @@ class Node {
   // this set.)
   WhileContext* while_ctx_;
 
-  TF_DISALLOW_COPY_AND_ASSIGN(Node);
+  Node(const Node&) = delete;
+  void operator=(const Node&) = delete;
 };
 
 // Stores debug information associated with the Node.
 struct NodeDebugInfo {
   const std::string name;
-  std::vector<string> original_node_names;
-  std::vector<string> original_func_names;
+  std::vector<std::string> original_node_names;
+  std::vector<std::string> original_func_names;
 
   NodeDebugInfo(const Node& n);
   NodeDebugInfo(const NodeDef& ndef);
-  NodeDebugInfo(StringPiece node_name, bool has_experimental_debug_info,
+  NodeDebugInfo(absl::string_view node_name, bool has_experimental_debug_info,
                 const NodeDef_ExperimentalDebugInfo& experimental_debug_info);
 };
 
@@ -387,7 +407,7 @@ struct InputTensor {
   // A hash function for InputTensors. Nodes are hashed based on their pointer
   // value.
   struct Hash {
-    uint64 operator()(InputTensor const& s) const;
+    uint64_t operator()(InputTensor const& s) const;
   };
 };
 
@@ -408,7 +428,7 @@ struct OutputTensor {
   // A hash function for OutputTensors. Nodes are hashed based on their pointer
   // value.
   struct Hash {
-    uint64 operator()(OutputTensor const& s) const;
+    uint64_t operator()(OutputTensor const& s) const;
   };
 };
 
@@ -435,9 +455,10 @@ class Edge {
   std::string DebugString() const;
 
  private:
-  Edge() {}
+  Edge() = default;
 
   friend class EdgeSetTest;
+  friend class GraphTest;
   friend class Graph;
   Node* src_;
   Node* dst_;
@@ -531,7 +552,7 @@ class Graph {
   // Clone the current graph into a new one.
   std::unique_ptr<Graph> Clone();
 
-  static const int kControlSlot;
+  static constexpr int kControlSlot = -1;
 
   // The GraphDef version range of this graph (see graph.proto).
   const VersionDef& versions() const;
@@ -540,7 +561,10 @@ class Graph {
   // Adds a new node to this graph, and returns it. Infers the Op and
   // input/output types for the node. *this owns the returned instance.
   // Returns nullptr and sets *status on error.
-  Node* AddNode(NodeDef node_def, Status* status);
+  Node* AddNode(NodeDef node_def, absl::Status* status);
+
+  // Same as above, but using StatusOr. This method is always preferred.
+  absl::StatusOr<Node*> AddNode(NodeDef node_def);
 
   // Copies *node, which may belong to another graph, to a new node,
   // which is returned.  Does not copy any edges.  *this owns the
@@ -553,6 +577,10 @@ class Graph {
   void RemoveNode(Node* node);
 
   void Copy(const Graph& src);
+
+  // Removes all nodes from this graph, including all edges from or to them.
+  // No Node* references to the Graph are valid post.
+  void Clear();
 
   // Adds an edge that connects the xth output of `source` to the yth input of
   // `dest` and returns it. Does not update dest's NodeDef.
@@ -572,7 +600,9 @@ class Graph {
                              bool allow_duplicates = false);
 
   // Removes edge from the graph. Does not update the destination node's
-  // NodeDef.
+  // NodeDef. Does not update the full type information of the source node's
+  // NodeDef. (See ShrinkTypeInfo for an example of updating full type
+  // information when removing some outputs from a node.)
   // REQUIRES: The edge must exist.
   void RemoveEdge(const Edge* edge);
 
@@ -584,18 +614,47 @@ class Graph {
   // Updates the input to a node.  The existing edge to `dst` is removed and an
   // edge from `new_src` to `dst` is created. The NodeDef associated with `dst`
   // is also updated.
-  Status UpdateEdge(Node* new_src, int new_src_index, Node* dst, int dst_index);
+  absl::Status UpdateEdge(Node* new_src, int new_src_index, Node* dst,
+                          int dst_index);
+
+  // Add an input to dst that comes from the "src_slot" output of the
+  // node named by "src_name".
+  static void AddInput(NodeDef* dst, absl::string_view src_name, int src_slot);
 
   // Like AddEdge but updates dst's NodeDef. Used to add an input edge to a
   // "While" op during gradient construction, see AddInputWhileHack in
   // python_api.h for more details.
-  Status AddWhileInputHack(Node* new_src, int new_src_index, Node* dst);
+  absl::Status AddWhileInputHack(Node* new_src, int new_src_index, Node* dst);
+
+  // Adds the function and gradient definitions in `fdef_lib` to this graph's op
+  // registry. Ignores duplicate functions, and returns a bad status if an
+  // imported function differs from an existing function or op with the same
+  // name. This overload adds the function definitions with no stack traces.
+  absl::Status AddFunctionLibrary(const FunctionDefLibrary& fdef_lib);
+  absl::Status AddFunctionLibrary(FunctionDefLibrary&& fdef_lib);
 
   // Adds the function and gradient definitions in `fdef_lib` to this graph's op
   // registry. Ignores duplicate functions, and returns a bad status if an
   // imported function differs from an existing function or op with the same
   // name.
-  Status AddFunctionLibrary(const FunctionDefLibrary& fdef_lib);
+  absl::Status AddFunctionLibrary(
+      const FunctionDefLibrary& fdef_lib,
+      const FunctionDefLibraryStackTraces& stack_traces);
+  absl::Status AddFunctionLibrary(
+      FunctionDefLibrary&& fdef_lib,
+      const FunctionDefLibraryStackTraces& stack_traces);
+
+  // Adds the function definition and its stacktraces to this graph's op
+  // registry. Ignores duplicate functions, and returns a bad status if an
+  // imported function differs from an existing function or op with the same
+  // name.
+  absl::Status AddFunctionDef(const FunctionDef& fdef,
+                              const StackTracesMap& stack_traces);
+
+  // Adds the gradient definition to this graph's op registry. Ignores duplicate
+  // gradients of the same function, and returns a bad status if an imported
+  // gradient differs from an existing gradient of the same function name.
+  absl::Status AddGradientDef(const GradientDef& gdef);
 
   // The number of live nodes in the graph.
   //
@@ -620,10 +679,36 @@ class Graph {
   int num_edges() const { return num_edges_; }
 
   // Serialize the nodes starting at `from_node_id` to a GraphDef.
-  void ToGraphDefSubRange(GraphDef* graph_def, int from_node_id) const;
+  // `include_flib_def` indicates whether the function library will be populated
+  // in the `graph_def`. `include_flib_def` should be usually set to true so
+  // that the populated `graph_def` will be complete. Setting `include_flib_def`
+  // to false would mean that the returned `graph_def` is incomplete and may
+  // contain references to functions whose definition is not included. It can
+  // make sense to do this in cases where the caller already has a copy of the
+  // function library.
+  // If `include_debug_info` is true, the `debug_info` field of the GraphDef
+  // will be populated with stack traces from the nodes and the function
+  // library. Note that if `include_debug_info` is true and `include_flib_def`
+  // is false, then `debug_info` will contain stack traces for nodes in the
+  // function library, which will not itself be included in the GraphDef.
+  void ToGraphDefSubRange(GraphDef* graph_def, int from_node_id,
+                          bool include_flib_def = true,
+                          bool include_debug_info = false) const;
 
-  // Serialize to a GraphDef.
-  void ToGraphDef(GraphDef* graph_def) const;
+  // Serialize to a GraphDef. `include_flib_def` indicates whether the function
+  // library will be populated in the `graph_def`. `include_flib_def` should be
+  // usually set to true so that the populated `graph_def` will be complete.
+  // Setting `include_flib_def` to false would mean that the returned
+  // `graph_def` is incomplete and may contain references to functions whose
+  // definition is not included. It can make sense to do this in cases where the
+  // caller already has a copy of the function library.
+  // If `include_debug_info` is true, the `debug_info` field of the GraphDef
+  // will be populated with stack traces from the nodes and the function
+  // library. Note that if `include_debug_info` is true and `include_flib_def`
+  // is false, then `debug_info` will contain stack traces for nodes in the
+  // function library, which will not itself be included in the GraphDef.
+  void ToGraphDef(GraphDef* graph_def, bool include_flib_def = true,
+                  bool include_debug_info = false) const;
 
   // This version can be called from debugger to inspect the graph content.
   // Use the previous version outside debug context for efficiency reasons.
@@ -634,7 +719,7 @@ class Graph {
 
   // Generate new node name with the specified prefix that is unique
   // across this graph.
-  std::string NewName(StringPiece prefix);
+  std::string NewName(absl::string_view prefix);
 
   // Access to the list of all nodes.  Example usage:
   //   for (Node* node : graph.nodes()) { ... }
@@ -673,7 +758,6 @@ class Graph {
   const OpRegistryInterface* op_registry() const { return &ops_; }
   const FunctionLibraryDefinition& flib_def() const { return ops_; }
 
-  // TODO(mdan): This is only used by control_flow_deps_o_chains. Remove?
   FunctionLibraryDefinition* mutable_flib_def() { return &ops_; }
 
   void CheckDeviceNameIndex(int index) {
@@ -697,28 +781,29 @@ class Graph {
   }
 
   // Returns OK if `node` is non-null and belongs to this graph
-  Status IsValidNode(const Node* node) const;
+  absl::Status IsValidNode(const Node* node) const;
 
   // Returns OK if IsValidNode(`node`) and `idx` is a valid output.  Does not
   // accept control outputs.
-  Status IsValidOutputTensor(const Node* node, int idx) const;
+  absl::Status IsValidOutputTensor(const Node* node, int idx) const;
 
   // Returns OK if IsValidNode(`node`) and `idx` a valid input.  Does not accept
   // control inputs.
-  Status IsValidInputTensor(const Node* node, int idx) const;
+  absl::Status IsValidInputTensor(const Node* node, int idx) const;
 
   // Create and return a new WhileContext owned by this graph. This is called
   // when a new while loop is created. `frame_name` must be unique among
   // WhileContexts in this graph.
-  Status AddWhileContext(StringPiece frame_name, std::vector<Node*> enter_nodes,
-                         std::vector<Node*> exit_nodes,
-                         OutputTensor cond_output,
-                         std::vector<OutputTensor> body_inputs,
-                         std::vector<OutputTensor> body_outputs,
-                         WhileContext** result);
+  absl::Status AddWhileContext(absl::string_view frame_name,
+                               std::vector<Node*> enter_nodes,
+                               std::vector<Node*> exit_nodes,
+                               OutputTensor cond_output,
+                               std::vector<OutputTensor> body_inputs,
+                               std::vector<OutputTensor> body_outputs,
+                               WhileContext** result);
 
   // Builds a node name to node pointer index for all nodes in the graph.
-  std::unordered_map<string, Node*> BuildNodeNameIndex() const;
+  std::unordered_map<std::string, Node*> BuildNodeNameIndex() const;
 
   absl::optional<std::vector<bool>>& GetConstArgIndicesCache() const {
     return const_arg_indices_cache_;
@@ -736,6 +821,28 @@ class Graph {
   ConstructionContext GetConstructionContextInternal() const {
     return construction_context_;
   }
+
+  // Set full type information for a node given its name.
+  // Note that if this is called in a loop iterating over all the nodes
+  // elsewhere it would be O(n^2) complexity. If this case was important in the
+  // future, an alternative method could be added that takes in a flat_hash_map
+  // of name: type and simply iterates through the graph once and annotates all
+  // nodes.
+  void SetNodeType(absl::string_view name, const FullTypeDef& type);
+
+  // Get full type information for a node given its name.
+  // Note that if this is called in a loop iterating over all the nodes
+  // elsewhere it would be O(n^2) complexity. If this case was important in the
+  // future, an alternative method could be added that takes in flat_hash_map of
+  // name: type and simply iterates through the graph once and stores all the
+  // information in the map.
+  void NodeType(absl::string_view name, const FullTypeDef** result);
+
+  // Builds a GraphDebugInfo from the functions and nodes in this graph. Stack
+  // traces associated with function definitions will have a key of the form
+  // <node_name> '@' <function_name>. Stack traces associated with other Nodes
+  // will use the node name as the key.
+  GraphDebugInfo BuildDebugInfo() const;
 
   // TODO(josh11b): uint64 hash() const;
 
@@ -799,16 +906,16 @@ class Graph {
 
   // A table of the unique assigned device names.  Indices do NOT correspond
   // to node IDs.  Index 0 is always the empty string.
-  std::vector<string> device_names_;
+  std::vector<std::string> device_names_;
 
   // Maps unique device names to indices within device_names_[i].
-  std::unordered_map<string, int> device_names_map_;
+  std::unordered_map<std::string, int> device_names_map_;
 
   // All the while contexts owned by this graph, keyed by frame name,
   // corresponding to all the while loops contained in this graph (including
   // nested loops). The stored contexts are usually accessed via
   // AddWhileContext() or Node::while_ctx(), but this manages the lifetime.
-  std::map<string, WhileContext> while_ctxs_;
+  std::map<std::string, WhileContext> while_ctxs_;
 
   // Cache of the indices of the arguments which need to be constant for the XLA
   // compilation.
@@ -817,7 +924,8 @@ class Graph {
   // Indicates the context that this Graph instance is constructed.
   ConstructionContext construction_context_ = ConstructionContext::kNotTracked;
 
-  TF_DISALLOW_COPY_AND_ASSIGN(Graph);
+  Graph(const Graph&) = delete;
+  void operator=(const Graph&) = delete;
 };
 
 // TODO(josh11b): We may want to support keeping an index on various
@@ -867,10 +975,14 @@ inline bool IsDistributedCommunication(const Node* n) {
 // https://en.cppreference.com/w/cpp/iterator/iterator).
 
 // Iterator for stepping through the nodes of a graph.
-class NodeIter
-    : public std::iterator<std::forward_iterator_tag, Node, std::ptrdiff_t,
-                           /*Pointer*/ Node*, /*Reference*/ Node*> {
+class NodeIter {
  public:
+  using iterator_category = std::forward_iterator_tag;
+  using value_type = Node;
+  using difference_type = std::ptrdiff_t;
+  using pointer = Node*;
+  using reference = Node*;
+
   NodeIter(const Graph* graph, int id);
   bool operator==(const NodeIter& rhs) const;
   bool operator!=(const NodeIter& rhs) const;
@@ -885,10 +997,14 @@ class NodeIter
 };
 
 // Iterator for stepping through the neighbors of a node.
-class NeighborIter
-    : public std::iterator<std::forward_iterator_tag, Node, std::ptrdiff_t,
-                           /*Pointer*/ Node*, /*Reference*/ Node*> {
+class NeighborIter {
  public:
+  using iterator_category = std::forward_iterator_tag;
+  using value_type = Node;
+  using difference_type = std::ptrdiff_t;
+  using pointer = Node*;
+  using reference = Node*;
+
   NeighborIter(EdgeSet::const_iterator iter, bool incoming);
   bool operator==(const NeighborIter& rhs) const;
   bool operator!=(const NeighborIter& rhs) const;
@@ -916,7 +1032,7 @@ inline bool NodeIter::operator!=(const NodeIter& rhs) const {
 }
 
 inline void NodeIter::operator++() {
-  while (1) {
+  while (true) {
     DCHECK_LE(id_, graph_->num_node_ids());
     ++id_;
     if (id_ >= graph_->num_node_ids() || graph_->FindNodeId(id_) != nullptr) {

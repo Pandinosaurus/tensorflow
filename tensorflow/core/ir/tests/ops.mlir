@@ -1,3 +1,17 @@
+// Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+// ==============================================================================
 // RUN: tfg-opt-no-passes %s | tfg-opt-no-passes | FileCheck %s
 
 // Exercise some basic custom syntax
@@ -70,3 +84,30 @@ tfg.func generic @gfoo(%arg0 : !tf_type.tensor {tfg.name = "input"},
 // CHECK: return(%AddV2, %AddV2_1) [%ctl] : !tf_type.tensor, !tf_type.tensor
   return(%add, %add_1) [%ctl0] : !tf_type.tensor, !tf_type.tensor
 }
+
+// CHECK-LABEL: tfg.func @many_args
+// CHECK-SAME: %[[A0:.*]]: !tf_type.tensor {tfg.name = "[[A0]]"},
+// CHECK-NEXT: %[[A1:.*]]: !tf_type.tensor {tfg.name = "[[A1]]"},
+// CHECK-NEXT: %[[A2:.*]]: !tf_type.tensor {tfg.name = "[[A2]]"},
+// CHECK-NEXT: %[[A3:.*]]: !tf_type.tensor {tfg.name = "[[A3]]"},
+// CHECK-NEXT: %[[A4:.*]]: !tf_type.tensor {tfg.name = "[[A4]]"})
+tfg.func @many_args(%a0: !tf_type.tensor {tfg.name = "a0"},
+                    %a1: !tf_type.tensor {tfg.name = "a1"},
+                    %a2: !tf_type.tensor {tfg.name = "a2"},
+                    %a3: !tf_type.tensor {tfg.name = "a3"},
+                    %a4: !tf_type.tensor {tfg.name = "a4"})
+    -> (!tf_type.tensor) {
+  return(%a0) : !tf_type.tensor
+}
+
+// CHECK-LABEL: tfg.func private @vis(%arg0: tensor<*xi32>,
+// CHECK-NEXT:                        %arg2: tensor<*xi32>)
+// CHECK-NEXT:      -> (tensor<*xi32> {tfg.name = "result1"})
+// CHECK-NEXT: {
+// CHECK-NEXT:   return(%arg0) : tensor<*xi32>
+// CHECK-NEXT: }
+"tfg.func"() ({
+^bb0(%arg0: tensor<*xi32>, %arg1: !tf_type.control, %arg2: tensor<*xi32>, %arg3: !tf_type.control):
+  "tfg.return"(%arg0) {control_ret_attrs = []} : (tensor<*xi32>) -> ()
+}) {arg_attrs = [{}, {}, {}, {}], res_attrs = [{tfg.name = "result1"}], sym_name = "vis", sym_visibility = "private", function_type = (tensor<*xi32>, !tf_type.control, tensor<*xi32>, !tf_type.control) -> tensor<*xi32>} : () -> ()
+

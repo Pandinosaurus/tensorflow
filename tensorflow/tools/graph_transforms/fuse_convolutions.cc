@@ -25,9 +25,9 @@ limitations under the License.
 namespace tensorflow {
 namespace graph_transforms {
 
-Status FuseResizePadAndConv(const GraphDef& input_graph_def,
-                            const TransformFuncContext& context,
-                            GraphDef* output_graph_def) {
+absl::Status FuseResizePadAndConv(const GraphDef& input_graph_def,
+                                  const TransformFuncContext& context,
+                                  GraphDef* output_graph_def) {
   GraphDef replaced_graph_def;
   TF_RETURN_IF_ERROR(ReplaceMatchingOpTypes(
       input_graph_def,  // clang-format off
@@ -42,8 +42,8 @@ Status FuseResizePadAndConv(const GraphDef& input_graph_def,
               {"*"}
           }
       },  // clang-format on
-      [](const NodeMatch& match, const std::set<string>& input_nodes,
-         const std::set<string>& output_nodes,
+      [](const NodeMatch& match, const std::set<std::string>& input_nodes,
+         const std::set<std::string>& output_nodes,
          std::vector<NodeDef>* new_nodes) {
         // Find all the nodes we expect in the subgraph.
         const NodeDef& conv_node = match.node;
@@ -72,16 +72,16 @@ Status FuseResizePadAndConv(const GraphDef& input_graph_def,
         CopyNodeAttr(conv_node, "strides", "strides", &fused_conv);
         new_nodes->push_back(fused_conv);
 
-        return Status::OK();
+        return absl::OkStatus();
       },
       {}, &replaced_graph_def));
   *output_graph_def = replaced_graph_def;
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-Status FuseResizeAndConv(const GraphDef& input_graph_def,
-                         const TransformFuncContext& context,
-                         GraphDef* output_graph_def) {
+absl::Status FuseResizeAndConv(const GraphDef& input_graph_def,
+                               const TransformFuncContext& context,
+                               GraphDef* output_graph_def) {
   GraphDef replaced_graph_def;
   TF_RETURN_IF_ERROR(ReplaceMatchingOpTypes(
       input_graph_def,  // clang-format off
@@ -91,8 +91,8 @@ Status FuseResizeAndConv(const GraphDef& input_graph_def,
               {"*"}
           }
       },  // clang-format on
-      [](const NodeMatch& match, const std::set<string>& input_nodes,
-         const std::set<string>& output_nodes,
+      [](const NodeMatch& match, const std::set<std::string>& input_nodes,
+         const std::set<std::string>& output_nodes,
          std::vector<NodeDef>* new_nodes) {
         // Find all the nodes we expect in the subgraph.
         const NodeDef& conv_node = match.node;
@@ -107,8 +107,8 @@ Status FuseResizeAndConv(const GraphDef& input_graph_def,
         pad_dims_node.set_op("Const");
         pad_dims_node.set_name(conv_node.name() + "_dummy_paddings");
         SetNodeAttr("dtype", DT_INT32, &pad_dims_node);
-        SetNodeTensorAttr<int32>("value", {4, 2}, {0, 0, 0, 0, 0, 0, 0, 0},
-                                 &pad_dims_node);
+        SetNodeTensorAttr<int32_t>("value", {4, 2}, {0, 0, 0, 0, 0, 0, 0, 0},
+                                   &pad_dims_node);
         new_nodes->push_back(pad_dims_node);
 
         // Set up the new fused version of the convolution op.
@@ -127,16 +127,16 @@ Status FuseResizeAndConv(const GraphDef& input_graph_def,
         CopyNodeAttr(conv_node, "strides", "strides", &fused_conv);
         new_nodes->push_back(fused_conv);
 
-        return Status::OK();
+        return absl::OkStatus();
       },
       {}, &replaced_graph_def));
   *output_graph_def = replaced_graph_def;
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-Status FusePadAndConv(const GraphDef& input_graph_def,
-                      const TransformFuncContext& context,
-                      GraphDef* output_graph_def) {
+absl::Status FusePadAndConv(const GraphDef& input_graph_def,
+                            const TransformFuncContext& context,
+                            GraphDef* output_graph_def) {
   GraphDef replaced_graph_def;
   TF_RETURN_IF_ERROR(ReplaceMatchingOpTypes(
       input_graph_def,  // clang-format off
@@ -151,8 +151,8 @@ Status FusePadAndConv(const GraphDef& input_graph_def,
               {"*"}
           }
       },  // clang-format on
-      [](const NodeMatch& match, const std::set<string>& input_nodes,
-         const std::set<string>& output_nodes,
+      [](const NodeMatch& match, const std::set<std::string>& input_nodes,
+         const std::set<std::string>& output_nodes,
          std::vector<NodeDef>* new_nodes) {
         // Find all the nodes we expect in the subgraph.
         const NodeDef& conv_node = match.node;
@@ -181,11 +181,11 @@ Status FusePadAndConv(const GraphDef& input_graph_def,
         CopyNodeAttr(conv_node, "strides", "strides", &fused_conv);
         new_nodes->push_back(fused_conv);
 
-        return Status::OK();
+        return absl::OkStatus();
       },
       {}, &replaced_graph_def));
   *output_graph_def = replaced_graph_def;
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 REGISTER_GRAPH_TRANSFORM("fuse_resize_pad_and_conv", FuseResizePadAndConv);

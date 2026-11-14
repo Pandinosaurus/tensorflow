@@ -47,45 +47,45 @@ const void* Variant::get() const {
 }
 
 template <>
-string TypeNameVariant(const VariantTensorDataProto& value) {
+std::string TypeNameVariant(const VariantTensorDataProto& value) {
   return value.type_name();
 }
 
 template <>
-void EncodeVariant(const VariantTensorDataProto& value,
+bool EncodeVariant(const VariantTensorDataProto& value,
                    VariantTensorData* data) {
-  data->FromConstProto(value);
+  return data->FromConstProto(value);
 }
 
 template <>
 bool DecodeVariant(VariantTensorData* data, VariantTensorDataProto* value) {
-  data->ToProto(value);
-  return true;
+  return data->ToProto(value);
 }
 
 template <>
-void EncodeVariant(const VariantTensorDataProto& value, string* buf) {
-  value.SerializeToString(buf);
+bool EncodeVariant(const VariantTensorDataProto& value, std::string* buf) {
+  return value.SerializeToString(buf);
 }
 
 template <>
-bool DecodeVariant(string* buf, VariantTensorDataProto* value) {
+bool DecodeVariant(std::string* buf, VariantTensorDataProto* value) {
   return value->ParseFromString(*buf);
 }
 
-void EncodeVariantList(const Variant* variant_array, int64_t n,
+bool EncodeVariantList(const Variant* variant_array, int64_t n,
                        std::unique_ptr<port::StringListEncoder> e) {
   for (int i = 0; i < n; ++i) {
-    string s;
-    variant_array[i].Encode(&s);
+    std::string s;
+    if (!variant_array[i].Encode(&s)) return false;
     e->Append(s);
   }
   e->Finalize();
+  return true;
 }
 
 bool DecodeVariantList(std::unique_ptr<port::StringListDecoder> d,
                        Variant* variant_array, int64_t n) {
-  std::vector<uint32> sizes(n);
+  std::vector<uint32_t> sizes(n);
   if (!d->ReadSizes(&sizes)) return false;
 
   for (int i = 0; i < n; ++i) {
@@ -94,11 +94,12 @@ bool DecodeVariantList(std::unique_ptr<port::StringListDecoder> d,
     }
     // TODO(ebrevdo): Replace with StringPiece?  Any way to make this a
     // zero-copy operation that keeps a reference to the data in d?
-    string str(d->Data(sizes[i]), sizes[i]);
+    std::string str(d->Data(sizes[i]), sizes[i]);
     if (!variant_array[i].Decode(std::move(str))) return false;
+    const std::string variant_type_name = variant_array[i].TypeName();
     if (!DecodeUnaryVariant(&variant_array[i])) {
       LOG(ERROR) << "Could not decode variant with type_name: \""
-                 << variant_array[i].TypeName()
+                 << variant_type_name
                  << "\".  Perhaps you forgot to register a "
                     "decoder via REGISTER_UNARY_VARIANT_DECODE_FUNCTION?";
       return false;

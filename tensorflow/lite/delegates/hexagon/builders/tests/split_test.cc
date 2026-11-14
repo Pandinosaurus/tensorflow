@@ -12,8 +12,14 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
+#include <algorithm>
+#include <initializer_list>
+
+#include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include "tensorflow/lite/delegates/hexagon/builders/tests/hexagon_delegate_op_model.h"
+#include "tensorflow/lite/kernels/test_util.h"
+#include "tensorflow/lite/schema/schema_generated.h"
 
 namespace tflite {
 using testing::ElementsAreArray;
@@ -74,7 +80,7 @@ void CheckSplitBehavior(
   for (int i = 0; i < num_splits; ++i) {
     EXPECT_THAT(
         const_m.GetDequantizedOutput<integer_type>(i),
-        ElementsAreArray(ArrayFloatNear(output_data[i], /*max_abs_error=*/0.1)))
+        ElementsAreArray(ArrayFloatNear(output_data[i], /*max_abs_err=*/0.1)))
         << debug(i);
     EXPECT_THAT(const_m.GetOutputShape(i), ElementsAreArray(output_shape))
         << debug(i);
@@ -135,6 +141,16 @@ TEST(SplitOpModel, CheckOneDimensionalSplit_Int8) {
   CheckSplitBehavior<int8_t, TensorType_INT8>(
       /*axis=*/0, /*num_splits=*/8, {8}, {1}, {1, 2, 3, 4, 5, 6, 7, 8},
       {{1}, {2}, {3}, {4}, {5}, {6}, {7}, {8}});
+}
+
+TEST(SplitOpModel, CheckNegativeOneAxisSplit_UInt8) {
+  CheckSplitBehavior<uint8_t, TensorType_UINT8>(
+      /*axis=*/-1, /*num_splits=*/2, {2, 2, 2}, {2, 2, 1},
+      {1, 2, 3, 4, 5, 6, 7, 8},
+      {
+          {1, 3, 5, 7},
+          {2, 4, 6, 8},
+      });
 }
 
 TEST(SplitOpModel, CheckNegativeAxisSplit_UInt8) {

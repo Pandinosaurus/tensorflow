@@ -16,6 +16,11 @@ limitations under the License.
 #ifndef TENSORFLOW_CORE_KERNELS_DATA_RANDOM_SEED_OPS_H_
 #define TENSORFLOW_CORE_KERNELS_DATA_RANDOM_SEED_OPS_H_
 
+#include <memory>
+#include <string>
+#include <utility>
+
+#include "absl/status/status.h"
 #include "tensorflow/core/data/dataset_utils.h"
 #include "tensorflow/core/framework/resource_mgr.h"
 #include "tensorflow/core/lib/random/philox_random.h"
@@ -51,7 +56,7 @@ class RandomSeeds {
 // generated.
 class SeedGenerator {
  public:
-  virtual ~SeedGenerator() {}
+  virtual ~SeedGenerator() = default;
 
   virtual int64_t seed() const = 0;
   virtual int64_t seed2() const = 0;
@@ -135,12 +140,11 @@ class AnonymousSeedGeneratorHandleOp
   void Compute(OpKernelContext* ctx) override;
 
  private:
-  string name() override;
-  Status CreateResource(OpKernelContext* ctx,
-                        std::unique_ptr<FunctionLibraryDefinition> flib_def,
-                        std::unique_ptr<ProcessFunctionLibraryRuntime> pflr,
-                        FunctionLibraryRuntime* lib,
-                        SeedGeneratorManager** manager) override;
+  std::string name() override;
+  absl::Status CreateResource(
+      OpKernelContext* ctx, std::unique_ptr<FunctionLibraryDefinition> flib_def,
+      std::unique_ptr<ProcessFunctionLibraryRuntime> pflr,
+      FunctionLibraryRuntime* lib, SeedGeneratorManager** manager) override;
 
   mutex mu_;
   std::unique_ptr<RandomSeeds> seeds_ TF_GUARDED_BY(mu_);

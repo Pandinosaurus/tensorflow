@@ -15,7 +15,6 @@ limitations under the License.
 #include "tensorflow/lite/testing/init_tensorflow.h"
 
 #include <cstdlib>
-#include <cstring>
 
 #include "tensorflow/core/platform/init_main.h"
 
@@ -28,4 +27,9 @@ void InitTensorFlow() {
   ::tensorflow::port::InitMain(kFakeName, &argc, &argv);
   free(fake_name_copy);
 }
+
+void InitTensorFlow(int argc, char** argv) {
+  ::tensorflow::port::InitMain(argv[0], &argc, &argv);
+}
+
 }  // namespace tflite

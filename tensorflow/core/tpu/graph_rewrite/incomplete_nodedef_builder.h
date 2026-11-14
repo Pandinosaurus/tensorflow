@@ -13,14 +13,18 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#ifndef TENSORFLOW_CORE_TPU_GRAPH_REWRITE_NODEDEF_BUILDER_H_
-#define TENSORFLOW_CORE_TPU_GRAPH_REWRITE_NODEDEF_BUILDER_H_
+#ifndef TENSORFLOW_CORE_TPU_GRAPH_REWRITE_INCOMPLETE_NODEDEF_BUILDER_H_
+#define TENSORFLOW_CORE_TPU_GRAPH_REWRITE_INCOMPLETE_NODEDEF_BUILDER_H_
 
 #include <string>
 
+#include "absl/status/status.h"
+#include "tensorflow/core/framework/node_def.pb.h"
 #include "tensorflow/core/framework/node_def_builder.h"
+#include "tensorflow/core/framework/types.pb.h"
 #include "tensorflow/core/graph/graph.h"
-#include "tensorflow/core/lib/core/status.h"
+#include "tensorflow/core/platform/status.h"
+#include "tensorflow/core/platform/types.h"
 
 namespace tensorflow {
 
@@ -29,23 +33,24 @@ namespace tensorflow {
 // TODO(jpienaar): Clean up NodeDefBuilder and remove this class.
 class IncompleteNodeDefBuilder {
  public:
-  IncompleteNodeDefBuilder(const string& name, const string& op,
+  IncompleteNodeDefBuilder(const std::string& name, const std::string& op,
                            const NodeDebugInfo& debug);
 
-  IncompleteNodeDefBuilder& AddAttr(const string& attr, const DataType& type);
-  IncompleteNodeDefBuilder& AddAttr(const string& attr, int val);
+  IncompleteNodeDefBuilder& AddAttr(const std::string& attr,
+                                    const DataType& type);
+  IncompleteNodeDefBuilder& AddAttr(const std::string& attr, int val);
 
-  IncompleteNodeDefBuilder& Device(const string& device);
+  IncompleteNodeDefBuilder& Device(const std::string& device);
 
-  Status Build(Graph* graph, Node** n);
+  absl::Status Build(Graph* graph, Node** n);
 
-  static IncompleteNodeDefBuilder Identity(const string& name,
+  static IncompleteNodeDefBuilder Identity(const std::string& name,
                                            const DataType& type,
                                            const NodeDebugInfo& debug);
-  static IncompleteNodeDefBuilder Merge(const string& name,
+  static IncompleteNodeDefBuilder Merge(const std::string& name,
                                         const DataType& type,
                                         const NodeDebugInfo& debug, int n);
-  static IncompleteNodeDefBuilder Switch(const string& name,
+  static IncompleteNodeDefBuilder Switch(const std::string& name,
                                          const DataType& type,
                                          const NodeDebugInfo& debug);
 
@@ -55,4 +60,4 @@ class IncompleteNodeDefBuilder {
 
 }  // namespace tensorflow
 
-#endif  // TENSORFLOW_CORE_TPU_GRAPH_REWRITE_NODEDEF_BUILDER_H_
+#endif  // TENSORFLOW_CORE_TPU_GRAPH_REWRITE_INCOMPLETE_NODEDEF_BUILDER_H_

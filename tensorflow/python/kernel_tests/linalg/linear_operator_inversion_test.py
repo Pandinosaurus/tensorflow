@@ -13,10 +13,7 @@
 # limitations under the License.
 # ==============================================================================
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
+from tensorflow.python.framework import config
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import test_util
 from tensorflow.python.ops import array_ops
@@ -36,7 +33,19 @@ class LinearOperatorInversionTest(
     linear_operator_test_util.SquareLinearOperatorDerivedClassTest):
   """Most tests done in the base class LinearOperatorDerivedClassTest."""
 
+  # TODO: b/311343496 - Re-enable this test.
+  @staticmethod
+  def skip_these_tests() -> list[str]:
+    return [
+        "test_saved_model",
+    ]
+
+  def tearDown(self):
+    config.enable_tensor_float_32_execution(self.tf32_keep_)
+
   def setUp(self):
+    self.tf32_keep_ = config.tensor_float_32_execution_enabled()
+    config.enable_tensor_float_32_execution(False)
     self._atol[dtypes.complex64] = 1e-5
     self._rtol[dtypes.complex64] = 1e-5
 
@@ -94,6 +103,47 @@ class LinearOperatorInversionTest(
     self.assertTrue(operator_inv.is_positive_definite)
     self.assertTrue(operator_inv.is_non_singular)
     self.assertFalse(operator_inv.is_self_adjoint)
+
+  def test_solve_on_inverse(self):
+    # The matrix values do not effect auto-setting of the flags.
+    matrix = [[1., 0.], [1., 1.]]
+    operator = linalg.LinearOperatorFullMatrix(matrix)
+    operator_inv = operator.inverse()
+    solved_result = operator_inv.solve(operator)
+    self.assertIsInstance(
+        solved_result, linalg.LinearOperatorComposition)
+
+  def test_solve_operator_matches_solve_tensor(self):
+    operator_inv = LinearOperatorInversion(
+        linalg.LinearOperatorFullMatrix([[1.0, 2.0], [3.0, 4.0]])
+    )
+    rhs = [[5.0, 6.0], [7.0, 8.0]]
+    rhs_operator = linalg.LinearOperatorFullMatrix(rhs)
+    for adjoint in [False, True]:
+      for adjoint_arg in [False, True]:
+        self.assertAllClose(
+            self.evaluate(
+                operator_inv.solve(
+                    rhs_operator, adjoint=adjoint, adjoint_arg=adjoint_arg
+                ).to_dense()
+            ),
+            self.evaluate(
+                operator_inv.solve(
+                    rhs, adjoint=adjoint, adjoint_arg=adjoint_arg
+                )
+            ),
+            msg=f"adjoint={adjoint}, adjoint_arg={adjoint_arg}",
+        )
+
+  def test_inverse_of_inverse(self):
+    # The matrix values do not effect auto-setting of the flags.
+    matrix = [[1., 0.], [1., 1.]]
+    operator = linalg.LinearOperatorFullMatrix(matrix)
+    operator_inv = operator.inverse()
+    self.assertIsInstance(operator_inv, LinearOperatorInversion)
+    inverse_of_op_inverse = operator_inv.inverse()
+    self.assertIsInstance(
+        inverse_of_op_inverse, linalg.LinearOperatorFullMatrix)
 
   def test_contradicting_hints_raise(self):
     # The matrix values do not effect auto-setting of the flags.

@@ -20,7 +20,7 @@ limitations under the License.
 #include <memory>
 #include <vector>
 
-#include "third_party/eigen3/Eigen/Core"
+#include "Eigen/Core"  // from @eigen_archive
 #include "tensorflow/core/lib/core/errors.h"
 #include "tensorflow/core/lib/core/status.h"
 
@@ -49,16 +49,17 @@ class CTCDecoder {
         batch_size_(batch_size),
         merge_repeated_(merge_repeated) {}
 
-  virtual ~CTCDecoder() {}
+  virtual ~CTCDecoder() = default;
 
   // Dimensionality of the input/output is expected to be:
   //  - seq_len[b] - b = 0 to batch_size_
   //  - input[t].rows(b) - t = 0 to timesteps; b = 0 t batch_size_
   //  - output.size() specifies the number of beams to be returned.
   //  - scores(b, i) - b = 0 to batch_size; i = 0 to output.size()
-  virtual Status Decode(const SequenceLength& seq_len,
-                        const std::vector<Input>& input,
-                        std::vector<Output>* output, ScoreOutput* scores) = 0;
+  virtual absl::Status Decode(const SequenceLength& seq_len,
+                              const std::vector<Input>& input,
+                              std::vector<Output>* output,
+                              ScoreOutput* scores) = 0;
 
   int batch_size() { return batch_size_; }
   int num_classes() { return num_classes_; }
@@ -79,16 +80,16 @@ class CTCGreedyDecoder : public CTCDecoder<T> {
   CTCGreedyDecoder(int num_classes, int batch_size, bool merge_repeated)
       : CTCDecoder<T>(num_classes, batch_size, merge_repeated) {}
 
-  Status Decode(const typename CTCDecoder<T>::SequenceLength& seq_len,
-                const std::vector<typename CTCDecoder<T>::Input>& input,
-                std::vector<typename CTCDecoder<T>::Output>* output,
-                typename CTCDecoder<T>::ScoreOutput* scores) override {
+  absl::Status Decode(const typename CTCDecoder<T>::SequenceLength& seq_len,
+                      const std::vector<typename CTCDecoder<T>::Input>& input,
+                      std::vector<typename CTCDecoder<T>::Output>* output,
+                      typename CTCDecoder<T>::ScoreOutput* scores) override {
     if (output->empty() || (*output)[0].size() < Decoder::batch_size_) {
-      return errors::InvalidArgument(
+      return absl::InvalidArgumentError(
           "output needs to be of size at least (1, batch_size).");
     }
     if (scores->rows() < Decoder::batch_size_ || scores->cols() == 0) {
-      return errors::InvalidArgument(
+      return absl::InvalidArgumentError(
           "scores needs to be of size at least (batch_size, 1).");
     }
     // For each batch entry, identify the transitions
@@ -110,7 +111,7 @@ class CTCGreedyDecoder : public CTCDecoder<T> {
         prev_class_ix = max_class_ix;
       }
     }
-    return Status::OK();
+    return absl::OkStatus();
   }
 };
 

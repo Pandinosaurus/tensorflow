@@ -15,47 +15,55 @@ limitations under the License.
 #include "tensorflow/c/experimental/ops/gen/cpp/cpp_generator.h"
 
 #include <algorithm>
+#include <string>
+#include <vector>
 
-#include "tensorflow/core/lib/io/path.h"
+#include "tensorflow/c/experimental/ops/gen/common/path_config.h"
+#include "tensorflow/c/experimental/ops/gen/cpp/renderers/cpp_config.h"
+#include "xla/tsl/platform/status.h"
+#include "tensorflow/core/platform/env.h"
+#include "tensorflow/core/platform/path.h"
 #include "tensorflow/core/platform/test.h"
+#include "tensorflow/core/platform/types.h"
 
 namespace tensorflow {
 namespace generator {
 namespace {
 
 TEST(CppGeneratorTest, typical_usage) {
-  string category = "testing";
-  string name_space = "tensorflow::ops";
-  string output_dir = "tensorflow/c/experimental/ops/gen/cpp/golden";
-  string source_dir = "tensorflow";
-  string api_dirs = "";
-  std::vector<string> ops = {
+  std::string category = "testing";
+  std::string name_space = "tensorflow::ops";
+  std::string output_dir = "tensorflow/c/experimental/ops/gen/cpp/golden";
+  std::string source_dir = "tensorflow";
+  std::string api_dirs = "";
+  std::vector<std::string> ops = {
       "Neg",        // Simple unary Op
       "MatMul",     // 2 inputs & attrs with default values
       "IdentityN",  // Variadic input+output
       "SparseSoftmaxCrossEntropyWithLogits",  // 2 outputs
       "AccumulatorApplyGradient",             // 0 outputs
       "VarHandleOp",                          // type, shape, list(string) attrs
+      "RestoreV2",  // Variadic output-only, list(type) attr
   };
 
   cpp::CppConfig cpp_config(category, name_space);
   PathConfig controller_config(output_dir, source_dir, api_dirs, ops);
   CppGenerator generator(cpp_config, controller_config);
 
-  string generated_header = generator.HeaderFileContents().Render();
-  string generated_source = generator.SourceFileContents().Render();
-
   Env *env = Env::Default();
-  string expected_header;
-  string header_file_name =
-      io::JoinPath(testing::TensorFlowSrcRoot(),
-                   controller_config.tf_output_dir, "testing_ops.h.golden");
+  std::string golden_dir = io::JoinPath(testing::TensorFlowSrcRoot(),
+                                        controller_config.tf_output_dir);
+
+  std::string generated_header = generator.HeaderFileContents().Render();
+  std::string generated_source = generator.SourceFileContents().Render();
+  std::string expected_header;
+  std::string header_file_name =
+      io::JoinPath(golden_dir, "testing_ops.h.golden");
   TF_CHECK_OK(ReadFileToString(env, header_file_name, &expected_header));
 
-  string expected_source;
-  string source_file_name =
-      io::JoinPath(testing::TensorFlowSrcRoot(),
-                   controller_config.tf_output_dir, "testing_ops.cc.golden");
+  std::string expected_source;
+  std::string source_file_name =
+      io::JoinPath(golden_dir, "testing_ops.cc.golden");
   TF_CHECK_OK(ReadFileToString(env, source_file_name, &expected_source));
 
   // Remove carriage returns (for Windows)

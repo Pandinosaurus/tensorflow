@@ -22,16 +22,25 @@ limitations under the License.
 namespace tensorflow {
 
 class NodeDef;
+struct KernelRegistry;
 
 // Returns into *{input,output}_memory_types the memory type of each
 // {input,output} tensor.
 //
 // REQUIRES: * '*_memory_types' is not nullptr.
 //           * def has all attrs specified (e.g. using AddDefaultsToNodeDef()).
-Status MemoryTypesForNode(const OpRegistryInterface* op_registry,
-                          const DeviceType& device_type, const NodeDef& ndef,
-                          MemoryTypeVector* input_memory_types,
-                          MemoryTypeVector* output_memory_types);
+absl::Status MemoryTypesForNode(const OpRegistryInterface* op_registry,
+                                const DeviceType& device_type,
+                                const NodeDef& ndef,
+                                MemoryTypeVector* input_memory_types,
+                                MemoryTypeVector* output_memory_types);
+
+absl::Status MemoryTypesForNode(const OpRegistryInterface* op_registry,
+                                const DeviceType& device_type,
+                                const NodeDef& ndef,
+                                MemoryTypeVector* input_memory_types,
+                                MemoryTypeVector* output_memory_types,
+                                const KernelRegistry* registry);
 
 }  // namespace tensorflow
 

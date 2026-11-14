@@ -14,10 +14,6 @@
 # ==============================================================================
 """Tests for spectral_ops."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import itertools
 
 from absl.testing import parameterized
@@ -42,13 +38,7 @@ class SpectralOpsTest(test.TestCase, parameterized.TestCase):
   def _np_hann_periodic_window(length):
     if length == 1:
       return np.ones(1)
-    odd = length % 2
-    if not odd:
-      length += 1
-    window = 0.5 - 0.5 * np.cos(2.0 * np.pi * np.arange(length) / (length - 1))
-    if not odd:
-      window = window[:-1]
-    return window
+    return 0.5 - 0.5 * np.cos(2.0 * np.pi * np.arange(length) / length)
 
   @staticmethod
   def _np_frame(data, window_length, hop_length):
@@ -225,7 +215,10 @@ class SpectralOpsTest(test.TestCase, parameterized.TestCase):
       (256, 64),
       (128, 25),
       (127, 32),
-      (128, 64))
+      (128, 64),
+      (64, 64),
+      (64, 128),
+  )
   def test_inverse_stft_window_fn(self, frame_length, frame_step):
     """Test that inverse_stft_window_fn has unit gain at each window phase."""
     hann_window = window_ops.hann_window(frame_length, dtype=dtypes.float32)
@@ -236,6 +229,11 @@ class SpectralOpsTest(test.TestCase, parameterized.TestCase):
     # Expect unit gain at each phase of the window.
     product_window = hann_window * inverse_window
     for i in range(frame_step):
+      hann_window_i = hann_window[i::frame_step]
+      inverse_window_i = inverse_window[i::frame_step]
+      # Skip if both windows are 0 (can happen for frame_length <= frame_step).
+      if (hann_window_i == 0.0).all() and (inverse_window_i == 0.0).all():
+        continue
       self.assertAllClose(1.0, np.sum(product_window[i::frame_step]))
 
   @parameterized.parameters((256, 64), (128, 32))
@@ -361,6 +359,49 @@ class SpectralOpsTest(test.TestCase, parameterized.TestCase):
 
     # Check that the inverse and original signal are close.
     self.assertAllClose(inverse_mdct, signal, atol=tol, rtol=tol)
+
+  def test_inverse_stft_zero_frames(self):
+    stfts = np.zeros((0, 5), dtype=np.complex64)
+    inverse_stft = spectral_ops.inverse_stft(
+        stfts, frame_length=8, frame_step=4, fft_length=8
+    )
+    self.assertAllEqual(
+        self.evaluate(inverse_stft), np.zeros((0,), dtype=np.float32)
+    )
+
+  def test_inverse_stft_zero_frames_batched(self):
+    stfts = np.zeros((2, 0, 5), dtype=np.complex64)
+    inverse_stft = spectral_ops.inverse_stft(
+        stfts, frame_length=8, frame_step=4, fft_length=8
+    )
+    self.assertAllEqual(
+        self.evaluate(inverse_stft), np.zeros((2, 0), dtype=np.float32)
+    )
+
+  def test_inverse_stft_rejects_zero_frame_length(self):
+    # Regression for https://github.com/tensorflow/tensorflow/issues/117843:
+    # frame_length=0 (or stfts.shape[-1] == 1, which makes the inferred
+    # fft_length 0) used to slip through the Python validation and abort
+    # the process inside the DUCC FFT backend (`Assertion failure: no
+    # zero-sized FFTs`). The Python layer should now reject these cases
+    # with a clean ValueError before any kernel runs.
+    stfts = np.zeros((1, 2, 1), dtype=np.complex64)
+    with self.assertRaisesRegex(ValueError, "must be a positive integer"):
+      spectral_ops.inverse_stft(
+          stfts, frame_length=0, frame_step=1, fft_length=None
+      )
+    # Explicit zero fft_length is also rejected.
+    with self.assertRaisesRegex(ValueError, "must be a positive integer"):
+      spectral_ops.inverse_stft(
+          stfts, frame_length=4, frame_step=1, fft_length=0
+      )
+    # Same for stft, for symmetry.
+    signals = np.zeros((1, 4), dtype=np.float32)
+    with self.assertRaisesRegex(ValueError, "must be a positive integer"):
+      spectral_ops.stft(signals, frame_length=0, frame_step=1)
+    with self.assertRaisesRegex(ValueError, "must be a positive integer"):
+      spectral_ops.stft(signals, frame_length=4, frame_step=1, fft_length=0)
+
 
 if __name__ == "__main__":
   test.main()

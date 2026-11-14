@@ -23,7 +23,6 @@ limitations under the License.
 #include <sys/time.h>
 
 #include <algorithm>
-#include <functional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -38,10 +37,10 @@ namespace benchmark {
 //
 // TODO(b/33546473): Refactor tensorflow::Env::NowMicros() so that we can re-use
 // the implementation without pulling in all of the Env dependencies.
-static double NowMicros() {
+static uint64_t NowMicros() {
   struct timeval tv;
   gettimeofday(&tv, nullptr);
-  return static_cast<uint64>(tv.tv_sec) * 1000000 + tv.tv_usec;
+  return static_cast<uint64_t>(tv.tv_sec) * 1000000 + tv.tv_usec;
 }
 
 void DumpStatsToStdout(const Stats& stats) {

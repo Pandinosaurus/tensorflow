@@ -24,9 +24,11 @@ namespace deadness_analysis_internal {
 
 // Returns a map describing the predicate each Tensor was mapped to.  For
 // testing purposes only.
-using PredicateMapTy = absl::flat_hash_map<TensorId, string, TensorId::Hasher>;
-Status ComputePredicates(const Graph& graph, PredicateMapTy* out_predicate_map,
-                         bool enable_optimistic = true);
+using PredicateMapTy =
+    absl::flat_hash_map<TensorId, std::string, TensorId::Hasher>;
+absl::Status ComputePredicates(const Graph& graph,
+                               PredicateMapTy* out_predicate_map,
+                               bool enable_optimistic = true);
 
 }  // namespace deadness_analysis_internal
 }  // namespace tensorflow

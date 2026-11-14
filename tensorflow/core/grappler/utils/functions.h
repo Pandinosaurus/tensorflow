@@ -36,25 +36,25 @@ namespace grappler {
 // Function input argument instantiated into an '_Arg' node in the function body
 // graph, with an 'index' attribute corresponding to the input position.
 struct InputArgInstantiation {
-  InputArgInstantiation(string node_name, DataType data_type)
+  InputArgInstantiation(std::string node_name, DataType data_type)
       : node_name(std::move(node_name)), data_type(data_type) {}
-  string node_name;
+  std::string node_name;
   DataType data_type;
 };
 
 // Function output instantiated into a '_Retval' node in the function body
 // graph, with an 'index' attribute corresponding to the output position.
 struct OutputArgInstantiation {
-  OutputArgInstantiation(string node_name, DataType data_type)
+  OutputArgInstantiation(std::string node_name, DataType data_type)
       : node_name(std::move(node_name)), data_type(data_type) {}
-  string node_name;
+  std::string node_name;
   DataType data_type;
 };
 
 // A mapping from control output name to node name in function body graph.
 struct ControlOutput {
-  string output_name;
-  string node_name;
+  std::string output_name;
+  std::string node_name;
   bool operator<(const ControlOutput& a) const {
     return output_name < a.output_name;
   }
@@ -65,7 +65,7 @@ class GrapplerFunctionItem : public GrapplerItem {
  public:
   GrapplerFunctionItem() = default;
 
-  const string& description() const;
+  const std::string& description() const;
 
   const std::vector<InputArgInstantiation>& inputs() const;
   const InputArgInstantiation& input(int i) const;
@@ -88,16 +88,17 @@ class GrapplerFunctionItem : public GrapplerItem {
   GrapplerFunctionItem& SwapFunctionBody(GraphDef&& other);
 
  private:
-  friend Status MakeGrapplerFunctionItem(const FunctionDef&, const AttrSlice&,
-                                         const FunctionLibraryDefinition&, int,
-                                         GrapplerFunctionItem*);
-  friend Status ReplaceInputWithConst(const NodeDef&, int,
-                                      GrapplerFunctionItem*);
-  friend Status RemoveFunctionOutputs(const absl::flat_hash_set<int>&,
-                                      GrapplerFunctionItem*,
-                                      std::vector<std::pair<int, int>>*);
+  friend absl::Status MakeGrapplerFunctionItem(const FunctionDef&,
+                                               const AttrSlice&,
+                                               const FunctionLibraryDefinition&,
+                                               int, GrapplerFunctionItem*);
+  friend absl::Status ReplaceInputWithConst(const NodeDef&, int,
+                                            GrapplerFunctionItem*);
+  friend absl::Status RemoveFunctionOutputs(const absl::flat_hash_set<int>&,
+                                            GrapplerFunctionItem*,
+                                            std::vector<std::pair<int, int>>*);
 
-  GrapplerFunctionItem(string func_name, string description,
+  GrapplerFunctionItem(std::string func_name, std::string description,
                        AttrSlice func_attr,
                        std::vector<const FunctionDef::ArgAttrs*> arg_attr,
                        std::vector<InputArgInstantiation> input_args,
@@ -106,7 +107,7 @@ class GrapplerFunctionItem : public GrapplerItem {
                        int graph_def_version, bool is_stateful,
                        GraphDef&& function_body);
 
-  string description_;
+  std::string description_;
   AttrSlice func_attr_;  // Attributes specific to function definition that
                          // produced this item (FuncDef.attr field).
 
@@ -134,54 +135,54 @@ bool IsParametrized(const FunctionDef& func);
 
 // Resolve function instantiation type parameters from the attributes of the
 // caller node. Return error if type can't be resolved.
-Status InstantiationTypeParameters(
+absl::Status InstantiationTypeParameters(
     const FunctionDef& func, const AttrSlice& func_instantiation_attr,
-    absl::flat_hash_map<string, DataType>* type_parameters);
+    absl::flat_hash_map<std::string, DataType>* type_parameters);
 
 // Resolve function instantiation body parameters (values for the function body
 // attr placeholders) from the attributes of the caller node. Return error if
 // type can't be resolved.
-Status InstantiationBodyParameters(
+absl::Status InstantiationBodyParameters(
     const FunctionDef& func, const AttrSlice& func_instantiation_attr,
-    absl::flat_hash_map<string, AttrValue>* body_parameters);
+    absl::flat_hash_map<std::string, AttrValue>* body_parameters);
 
 // Replace one of the function inputs with a constant.
-Status ReplaceInputWithConst(const NodeDef& input_const, int input_index,
-                             GrapplerFunctionItem* item);
+absl::Status ReplaceInputWithConst(const NodeDef& input_const, int input_index,
+                                   GrapplerFunctionItem* item);
 
 // Removes outputs from instantiated grappler function item. For all active
 // function outputs that changed its output index, this function adds an output
 // mapping (std::pair<old index, new index>).
-Status RemoveFunctionOutputs(const absl::flat_hash_set<int>& remove_outputs,
-                             GrapplerFunctionItem* item,
-                             std::vector<std::pair<int, int>>* output_mapping);
+absl::Status RemoveFunctionOutputs(
+    const absl::flat_hash_set<int>& remove_outputs, GrapplerFunctionItem* item,
+    std::vector<std::pair<int, int>>* output_mapping);
 
 // TODO(ezhulenev, b/120103818): Add RemoveFunctionInputs.
 
 // Make a GrapplerFunctionItem from the function definition and function
 // instantiation attributes (caller node attributes). Returns error if the given
 // function def cannot be converted (e.g. not all attributes are defined).
-Status MakeGrapplerFunctionItem(const FunctionDef& func,
-                                const AttrSlice& func_instantiation_attr,
-                                const FunctionLibraryDefinition& flib,
-                                int graph_def_version,
-                                GrapplerFunctionItem* item);
+absl::Status MakeGrapplerFunctionItem(const FunctionDef& func,
+                                      const AttrSlice& func_instantiation_attr,
+                                      const FunctionLibraryDefinition& flib,
+                                      int graph_def_version,
+                                      GrapplerFunctionItem* item);
 
 // Make a GrapplerFunction item from the function definition. Function must be
 // fully defined (no type or body parametrization).
 // TODO(ezhulenev): Support parametrized functions without fully defined
 // instantiation attributes? Do we ever want to optimize parametrized function
 // without specializing it to its instantiation attributes (at least types)?
-Status MakeGrapplerFunctionItem(const FunctionDef& func,
-                                const FunctionLibraryDefinition& flib,
-                                int graph_def_version,
-                                GrapplerFunctionItem* item);
+absl::Status MakeGrapplerFunctionItem(const FunctionDef& func,
+                                      const FunctionLibraryDefinition& flib,
+                                      int graph_def_version,
+                                      GrapplerFunctionItem* item);
 
 // Make a FunctionDef from the GrapplerFunctionItem. Use function library
 // definition to lookup function body nodes output names and ranges.
-Status MakeFunctionDef(const GrapplerFunctionItem& item,
-                       const FunctionLibraryDefinition& flib,
-                       FunctionDef* func);
+absl::Status MakeFunctionDef(const GrapplerFunctionItem& item,
+                             const FunctionLibraryDefinition& flib,
+                             FunctionDef* func);
 
 }  // end namespace grappler
 }  // end namespace tensorflow

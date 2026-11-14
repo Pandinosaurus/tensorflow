@@ -1,0 +1,385 @@
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
+# Groups the implementations of the HLO to TF operation conversions.
+load("//tensorflow/core/platform:rules_cc.bzl", "cc_library")
+
+package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:LICENSE"],
+    default_visibility = [
+        "//visibility:public",
+    ],
+    licenses = ["notice"],
+)
+
+cc_library(
+    name = "util",
+    srcs = [
+        "util.cc",
+    ],
+    hdrs = [
+        "util.h",
+    ],
+    deps = [
+        "//tensorflow/compiler/mlir/lite:tensorflow_lite_ops",
+        "@llvm-project//llvm:Support",
+        "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:Support",
+        "@llvm-project//mlir:TransformUtils",
+        "@stablehlo//:stablehlo_ops",
+    ],
+)
+
+cc_library(
+    name = "scatter",
+    srcs = [
+        "scatter.cc",
+    ],
+    hdrs = [
+        "scatter.h",
+    ],
+    deps = [
+        ":util",
+        "//tensorflow/compiler/mlir/tensorflow",
+        "@llvm-project//llvm:Support",
+        "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:Support",
+        "@llvm-project//mlir:TransformUtils",
+        "@stablehlo//:stablehlo_ops",
+    ],
+)
+
+cc_library(
+    name = "reduce",
+    srcs = [
+        "reduce.cc",
+    ],
+    hdrs = [
+        "reduce.h",
+    ],
+    deps = [
+        ":util",
+        "//tensorflow/compiler/mlir/lite:tensorflow_lite_ops",
+        "//tensorflow/compiler/mlir/lite/stablehlo:hlo_matchers",
+        "@llvm-project//llvm:Support",
+        "@llvm-project//mlir:ArithDialect",
+        "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:Support",
+        "@llvm-project//mlir:TransformUtils",
+        "@stablehlo//:stablehlo_ops",
+    ],
+)
+
+cc_library(
+    name = "dot_general",
+    srcs = [
+        "dot_general.cc",
+    ],
+    hdrs = ["dot_general.h"],
+    deps = [
+        ":util",
+        "//tensorflow/compiler/mlir/lite:tensorflow_lite_ops",
+        "@llvm-project//llvm:Support",
+        "@llvm-project//mlir:FuncDialect",
+        "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:Support",
+        "@llvm-project//mlir:TransformUtils",
+        "@stablehlo//:stablehlo_ops",
+    ],
+)
+
+cc_library(
+    name = "custom_call",
+    srcs = [
+        "custom_call.cc",
+    ],
+    hdrs = [
+        "custom_call.h",
+    ],
+    deps = [
+        "//tensorflow/compiler/mlir/lite:strict_qdq_quantize_passes",
+        "//tensorflow/compiler/mlir/lite:tensorflow_lite_ops",
+        "//tensorflow/compiler/mlir/lite:tfl_carrier",
+        "@llvm-project//llvm:Support",
+        "@llvm-project//mlir:ArithDialect",
+        "@llvm-project//mlir:AsmParser",
+        "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:QuantOps",
+        "@llvm-project//mlir:Support",
+        "@llvm-project//mlir:TransformUtils",
+        "@stablehlo//:stablehlo_ops",
+    ],
+)
+
+cc_library(
+    name = "gelu",
+    srcs = ["gelu.cc"],
+    hdrs = ["gelu.h"],
+    deps = [
+        "//tensorflow/compiler/mlir/lite:tensorflow_lite_ops",
+        "@llvm-project//llvm:Support",
+        "@llvm-project//mlir:FuncDialect",
+        "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:Support",
+        "@stablehlo//:chlo_ops",
+        "@stablehlo//:stablehlo_ops",
+    ],
+)
+
+cc_library(
+    name = "conv",
+    srcs = ["conv.cc"],
+    hdrs = ["conv.h"],
+    deps = [
+        ":conv_util",
+        ":op_util_common",
+        "//tensorflow/compiler/mlir/lite:tensorflow_lite_ops",
+        "@llvm-project//llvm:Support",
+        "@llvm-project//mlir:ArithDialect",
+        "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:Support",
+        "@llvm-project//mlir:TransformUtils",
+        "@stablehlo//:stablehlo_ops",
+    ],
+)
+
+cc_library(
+    name = "conv_util",
+    srcs = ["conv_util.cc"],
+    hdrs = ["conv_util.h"],
+    deps = [
+        ":op_util_common",
+        "@llvm-project//llvm:Support",
+        "@llvm-project//mlir:ArithDialect",
+        "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:Support",
+        "@stablehlo//:stablehlo_ops",
+    ],
+)
+
+cc_library(
+    name = "pad",
+    srcs = ["pad.cc"],
+    hdrs = ["pad.h"],
+    deps = [
+        ":op_util_common",
+        ":pad_util",
+        "//tensorflow/compiler/mlir/lite:tensorflow_lite_ops",
+        "@llvm-project//llvm:Support",
+        "@llvm-project//mlir:ArithDialect",
+        "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:Support",
+        "@llvm-project//mlir:TransformUtils",
+        "@stablehlo//:stablehlo_ops",
+    ],
+)
+
+cc_library(
+    name = "pad_util",
+    srcs = ["pad_util.cc"],
+    hdrs = ["pad_util.h"],
+    deps = [
+        ":op_util_common",
+        "@llvm-project//llvm:Support",
+        "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:Support",
+        "@stablehlo//:stablehlo_ops",
+    ],
+)
+
+cc_library(
+    name = "gather",
+    srcs = ["gather.cc"],
+    hdrs = ["gather.h"],
+    deps = [
+        ":util",
+        "//tensorflow/compiler/mlir/lite:tensorflow_lite_ops",
+        "@llvm-project//llvm:Support",
+        "@llvm-project//mlir:ArithDialect",
+        "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:Support",
+        "@llvm-project//mlir:TransformUtils",
+        "@stablehlo//:stablehlo_ops",
+    ],
+)
+
+cc_library(
+    name = "reduce_window",
+    srcs = ["reduce_window.cc"],
+    hdrs = ["reduce_window.h"],
+    deps = [
+        ":op_util_common",
+        ":reduce_window_util",
+        ":util",
+        "//tensorflow/compiler/mlir/lite:tensorflow_lite_ops",
+        "@llvm-project//llvm:Support",
+        "@llvm-project//mlir:ArithDialect",
+        "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:Support",
+        "@llvm-project//mlir:TransformUtils",
+        "@stablehlo//:stablehlo_ops",
+    ],
+)
+
+cc_library(
+    name = "op_util_common",
+    srcs = ["op_util_common.cc"],
+    hdrs = ["op_util_common.h"],
+    deps = [
+        "@llvm-project//llvm:Support",
+        "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:Support",
+    ],
+)
+
+cc_library(
+    name = "reduce_window_util",
+    srcs = ["reduce_window_util.cc"],
+    hdrs = ["reduce_window_util.h"],
+    deps = [
+        ":op_util_common",
+        "@llvm-project//llvm:Support",
+        "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:Support",
+        "@stablehlo//:stablehlo_ops",
+    ],
+)
+
+cc_library(
+    name = "slice",
+    srcs = ["slice.cc"],
+    hdrs = ["slice.h"],
+    deps = [
+        ":op_util_common",
+        "//tensorflow/compiler/mlir/lite:tensorflow_lite_ops",
+        "@llvm-project//llvm:Support",
+        "@llvm-project//mlir:ArithDialect",
+        "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:Support",
+        "@llvm-project//mlir:TransformUtils",
+        "@stablehlo//:stablehlo_ops",
+    ],
+)
+
+cc_library(
+    name = "sort",
+    srcs = ["sort.cc"],
+    hdrs = ["sort.h"],
+    deps = [
+        "//tensorflow/compiler/mlir/lite:tensorflow_lite_ops",
+        "//tensorflow/compiler/mlir/lite/stablehlo:hlo_matchers",
+        "@llvm-project//llvm:Support",
+        "@llvm-project//mlir:ArithDialect",
+        "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:Support",
+        "@llvm-project//mlir:TransformUtils",
+        "@stablehlo//:stablehlo_ops",
+    ],
+)
+
+cc_library(
+    name = "iota",
+    srcs = ["iota.cc"],
+    hdrs = ["iota.h"],
+    deps = [
+        ":op_util_common",
+        "//tensorflow/compiler/mlir/lite:tensorflow_lite_ops",
+        "@llvm-project//llvm:Support",
+        "@llvm-project//mlir:ArithDialect",
+        "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:Support",
+        "@llvm-project//mlir:TransformUtils",
+        "@stablehlo//:stablehlo_ops",
+    ],
+)
+
+cc_library(
+    name = "while",
+    srcs = ["while.cc"],
+    hdrs = ["while.h"],
+    deps = [
+        ":op_util_common",
+        "//tensorflow/compiler/mlir/lite:tensorflow_lite_ops",
+        "@llvm-project//llvm:Support",
+        "@llvm-project//mlir:ArithDialect",
+        "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:Support",
+        "@llvm-project//mlir:TransformUtils",
+        "@stablehlo//:stablehlo_ops",
+    ],
+)
+
+cc_library(
+    name = "get_dimension_size",
+    srcs = ["get_dimension_size.cc"],
+    hdrs = ["get_dimension_size.h"],
+    deps = [
+        ":util",
+        "//tensorflow/compiler/mlir/lite:tensorflow_lite_ops",
+        "@llvm-project//llvm:Support",
+        "@llvm-project//mlir:ArithDialect",
+        "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:Support",
+        "@llvm-project//mlir:TransformUtils",
+        "@stablehlo//:stablehlo_ops",
+    ],
+)
+
+cc_library(
+    name = "case",
+    srcs = ["case.cc"],
+    hdrs = ["case.h"],
+    deps = [
+        ":util",
+        "//tensorflow/compiler/mlir/lite:tensorflow_lite_ops",
+        "@llvm-project//mlir:ArithDialect",
+        "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:Support",
+        "@llvm-project//mlir:TransformUtils",
+        "@stablehlo//:stablehlo_ops",
+    ],
+)
+
+cc_library(
+    name = "if",
+    srcs = ["if.cc"],
+    hdrs = ["if.h"],
+    deps = [
+        ":util",
+        "//tensorflow/compiler/mlir/lite:tensorflow_lite_ops",
+        "@llvm-project//llvm:Support",
+        "@llvm-project//mlir:ArithDialect",
+        "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:Support",
+        "@llvm-project//mlir:TransformUtils",
+        "@stablehlo//:stablehlo_ops",
+    ],
+)
+
+cc_library(
+    name = "fft",
+    srcs = ["fft.cc"],
+    hdrs = ["fft.h"],
+    deps = [
+        "//tensorflow/compiler/mlir/lite:shape_and_size_utils",
+        "//tensorflow/compiler/mlir/lite:tensorflow_lite_ops",
+        "@llvm-project//llvm:Support",
+        "@llvm-project//mlir:ArithDialect",
+        "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:Support",
+        "@llvm-project//mlir:TransformUtils",
+        "@stablehlo//:stablehlo_ops",
+    ],
+)

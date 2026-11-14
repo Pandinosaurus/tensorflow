@@ -1,10 +1,27 @@
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
 # copybara:uncomment(oss-unused) load("//net/grpc/go/build_defs:go_grpc_library.bzl", "go_grpc_library")
-load("//tensorflow:tensorflow.bzl", "filegroup")
+load("@rules_python//python:proto.bzl", "py_proto_library")
 load("//tensorflow:tensorflow.bzl", "tf_cc_binary")
-load("//tensorflow/core/platform:rules_cc.bzl", "cc_library")
+load("//tensorflow:tensorflow.default.bzl", "filegroup")
 load("//tensorflow/core/platform:build_config.bzl", "tf_additional_all_protos", "tf_proto_library")
+load("//tensorflow/core/platform:rules_cc.bzl", "cc_library")
 
 package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
     default_visibility = ["//tensorflow:internal"],
     licenses = ["notice"],
 )
@@ -27,17 +44,23 @@ package_group(
 tf_proto_library(
     name = "profiler_service_monitor_result_proto",
     srcs = ["profiler_service_monitor_result.proto"],
-    cc_api_version = 2,
     make_default_target_header_only = True,
+    protodeps = [
+        "@tsl//tsl/profiler/protobuf:profiler_service_monitor_result_proto",
+    ],
     visibility = ["//visibility:public"],
+    exports = [
+        "@tsl//tsl/profiler/protobuf:profiler_service_monitor_result_proto",
+    ],
 )
 
 tf_proto_library(
     name = "profiler_options_proto",
     srcs = ["profiler_options.proto"],
-    cc_api_version = 2,
     make_default_target_header_only = True,
+    protodeps = ["@tsl//tsl/profiler/protobuf:profiler_options_proto"],
     visibility = ["//visibility:public"],
+    exports = ["@tsl//tsl/profiler/protobuf:profiler_options_proto"],
 )
 
 # This is needed because of how tf_android_core_proto_sources parses proto paths.
@@ -49,28 +72,25 @@ exports_files(
 tf_proto_library(
     name = "profiler_service_proto",
     srcs = ["profiler_service.proto"],
-    has_services = 1,
-    cc_api_version = 2,
-    cc_grpc_version = 1,
     make_default_target_header_only = True,
     protodeps = [
-        ":profiler_options_proto",
-        ":profiler_service_monitor_result_proto",
+        "@tsl//tsl/profiler/protobuf:profiler_service_proto",
     ],
     use_grpc_namespace = True,
     visibility = ["//visibility:public"],
+    exports = ["@tsl//tsl/profiler/protobuf:profiler_service_proto"],
 )
 
 tf_proto_library(
     name = "profiler_analysis_proto",
     srcs = ["profiler_analysis.proto"],
-    has_services = 1,
-    cc_api_version = 2,
-    cc_grpc_version = 1,
     make_default_target_header_only = True,
-    protodeps = [":profiler_service_proto"],
+    protodeps = [
+        "@tsl//tsl/profiler/protobuf:profiler_analysis_proto",
+    ],
     use_grpc_namespace = True,
     visibility = ["//visibility:public"],
+    exports = ["@tsl//tsl/profiler/protobuf:profiler_analysis_proto"],
 )
 
 tf_proto_library(
@@ -81,20 +101,29 @@ tf_proto_library(
         "tfprof_options.proto",
         "tfprof_output.proto",
     ],
-    cc_api_version = 2,
-    protodeps = tf_additional_all_protos(),
+    protodeps = [
+        "@tsl//tsl/profiler/protobuf:profile_proto",
+    ] + tf_additional_all_protos(),
     visibility = [":friends"],
+    exports = [
+        "@tsl//tsl/profiler/protobuf:profile_proto",
+    ],
 )
 
 cc_library(
     name = "profiler_impl",
-    visibility = ["//tensorflow:__pkg__"],
+    visibility = [
+        "//tensorflow:__pkg__",
+        "//tensorflow/python:__pkg__",
+        "//tensorflow/security/fuzzing/cc/ops:__pkg__",
+    ],
     deps = [
-        "//tensorflow/core/profiler/internal/cpu:annotation_stack_impl",
-        "//tensorflow/core/profiler/internal/cpu:traceme_recorder_impl",
         "//tensorflow/core/profiler/lib:profiler_factory_impl",
         "//tensorflow/core/profiler/lib:profiler_session_impl",
-        "//tensorflow/core/profiler/utils:time_utils_impl",
+        "@xla//xla/tsl/profiler/backends/cpu:annotation_stack_impl",
+        "@xla//xla/tsl/profiler/backends/cpu:threadpool_listener",
+        "@xla//xla/tsl/profiler/backends/cpu:traceme_recorder_impl",
+        "@xla//xla/tsl/profiler/utils:time_utils_impl",
     ],
     alwayslink = True,
 )
@@ -106,16 +135,21 @@ tf_cc_binary(
     visibility = ["//visibility:public"],
     deps = [
         ":protos_all_cc",
-        "//tensorflow/c:c_api",
         "//tensorflow/c:checkpoint_reader",
-        "//tensorflow/core:framework_headers_lib",
+        "//tensorflow/c:tf_status",
         "//tensorflow/core:framework_internal",
         "//tensorflow/core:lib",
-        "//tensorflow/core:protos_all_cc",
+        "//tensorflow/core:lib_proto_parsing",
+        "//tensorflow/core/framework:graph_proto_cc",
+        "//tensorflow/core/platform:protobuf",
         "//tensorflow/core/profiler:tfprof_options",
         "//tensorflow/core/profiler/internal:tfprof_stats",
         "//tensorflow/core/profiler/internal:tfprof_utils",
         "//tensorflow/core/profiler/internal/advisor:tfprof_advisor",
+        "//tensorflow/core/protobuf:for_core_protos_cc",
+        "@com_google_absl//absl/log:check",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/strings:str_format",
         "@linenoise",
     ],
 )
@@ -128,7 +162,11 @@ cc_library(
     deps = [
         ":protos_all_cc",
         "//tensorflow/core:framework_headers_lib",
-        "//tensorflow/core:lib",
+        "//tensorflow/core:framework_types_hdr",
+        "//tensorflow/core:portable_gif_internal",
+        "//tensorflow/core/lib/core:status",
+        "//tensorflow/core/platform:status",
+        "@com_google_absl//absl/status",
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/strings:str_format",
     ],
@@ -137,15 +175,25 @@ cc_library(
 filegroup(
     name = "mobile_srcs_no_runtime",
     srcs = [
-        "//tensorflow/core/profiler/lib:mobile_srcs_no_runtime",
+        "@tsl//tsl/profiler/lib:mobile_srcs_no_runtime",
     ],
     visibility = ["//tensorflow/core:__pkg__"],
 )
 
 filegroup(
-    name = "mobile_srcs_only_runtime",
+    name = "mobile_hdrs_no_runtime",
     srcs = [
-        "//tensorflow/core/profiler/lib:mobile_srcs_only_runtime",
+        "//tensorflow/core/profiler/lib:mobile_hdrs_no_runtime",
+        "@tsl//tsl/profiler/lib:mobile_hdrs_no_runtime",
+    ],
+    visibility = ["//tensorflow/core:__pkg__"],
+)
+
+filegroup(
+    name = "mobile_hdrs_only_runtime",
+    srcs = [
+        "//tensorflow/core/profiler/lib:mobile_hdrs_only_runtime",
+        "@tsl//tsl/profiler/lib:mobile_hdrs_only_runtime",
     ],
     visibility = ["//tensorflow/core:__pkg__"],
 )
@@ -154,14 +202,12 @@ filegroup(
 # py_proto_library(
 #     name = "profiler_analysis_proto_py_pb2",
 #     has_services = 1,
-#     api_version = 2,
 #     visibility = ["//visibility:public"],
 #     deps = [":profiler_analysis_proto"],
 # )
 #
 # py_proto_library(
 #     name = "protos_all_py_pb2",
-#     api_version = 2,
 #     visibility = [":friends"],
 #     deps = [":protos_all"],
 # )

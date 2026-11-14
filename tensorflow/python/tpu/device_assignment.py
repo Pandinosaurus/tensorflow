@@ -14,19 +14,15 @@
 # ======================================
 """Library of TPU helper functions."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import enum
 import math
-from typing import List, Optional, Text, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
-from six.moves import xrange  # pylint: disable=redefined-builtin
 
 from tensorflow.python.platform import tf_logging as logging
 from tensorflow.python.tpu.topology import Topology
+from tensorflow.python.util import numpy_compat
 from tensorflow.python.util.tf_export import tf_export
 
 
@@ -36,8 +32,8 @@ SINGLE_CORE_ASSIGNMENT = [[[0, 0, 0, 0]]]
 def _compute_task_and_cores_to_replicas(core_assignment, topology):
   """Computes a nested dict which maps task and logical core to replicas."""
   task_and_cores_to_replicas = {}
-  for replica in xrange(core_assignment.shape[0]):
-    for logical_core in xrange(core_assignment.shape[1]):
+  for replica in range(core_assignment.shape[0]):
+    for logical_core in range(core_assignment.shape[1]):
       coordinates = core_assignment[replica, logical_core, :]
       task_id = topology.task_ordinal_at_coordinates(coordinates)
       if task_id not in task_and_cores_to_replicas:
@@ -56,6 +52,18 @@ def _compute_task_and_cores_to_replicas(core_assignment, topology):
 
     task_to_sorted_replica_id[task] = core_to_sorted_replicas
   return task_to_sorted_replica_id
+
+
+@tf_export("tpu.experimental.DeviceOrderMode")
+class DeviceOrderMode(enum.IntEnum):
+  """The way of determining device orders when computing device assignment."""
+  # By default the mode is set to AUTO, the library will choose to form rings
+  # when that is possible.
+  AUTO = 0
+  # Form rings for replicas and model-parallel cores.
+  RING = 1
+  # Form meshes for replicas and/or model-parallel cores.
+  MESH = 2
 
 
 @tf_export("tpu.experimental.DeviceAssignment")
@@ -83,7 +91,7 @@ class DeviceAssignment(object):
     if not isinstance(topology, Topology):
       raise ValueError("topology must be a Topology object, got {}".format(
           type(topology)))
-    core_assignment = np.asarray(core_assignment, dtype=np.int32)
+    core_assignment = numpy_compat.np_asarray(core_assignment, dtype=np.int32)
 
     self._topology = topology
 
@@ -162,7 +170,7 @@ class DeviceAssignment(object):
   def host_device(self,
                   replica: int = 0,
                   logical_core: int = 0,
-                  job: Optional[Text] = None) -> Text:
+                  job: Optional[str] = None) -> str:
     """Returns the CPU device attached to a logical core."""
     coordinates = self.coordinates(replica, logical_core)
     return self._topology.cpu_device_name_at_coordinates(coordinates, job=job)
@@ -170,18 +178,27 @@ class DeviceAssignment(object):
   def tpu_device(self,
                  replica: int = 0,
                  logical_core: int = 0,
-                 job: Optional[Text] = None) -> Text:
+                 job: Optional[str] = None) -> str:
     """Returns the name of the TPU device assigned to a logical core."""
     coordinates = self.coordinates(replica, logical_core)
     return self._topology.tpu_device_name_at_coordinates(coordinates, job=job)
 
-  @staticmethod
-  def build(topology: Topology,
-            computation_shape: Optional[np.ndarray] = None,
-            computation_stride: Optional[np.ndarray] = None,
-            num_replicas: int = 1) -> "DeviceAssignment":
-    return device_assignment(topology, computation_shape, computation_stride,
-                             num_replicas)
+  @classmethod
+  def build(
+      cls,
+      topology: Topology,
+      computation_shape: Optional[np.ndarray] = None,
+      computation_stride: Optional[np.ndarray] = None,
+      num_replicas: int = 1,
+      device_order_mode: DeviceOrderMode = DeviceOrderMode.AUTO,
+  ) -> "DeviceAssignment":
+    return device_assignment(
+        topology=topology,
+        computation_shape=computation_shape,
+        computation_stride=computation_stride,
+        num_replicas=num_replicas,
+        device_order_mode=device_order_mode,
+    )
 
 
 def _open_ring_2d(x_size: int, y_size: int,
@@ -323,23 +340,12 @@ def _ring_3d(x_size: int, y_size: int,
   return ret
 
 
-class DeviceOrderMode(enum.IntEnum):
-  """The way of determining device orders when computing device assignment."""
-  # By default the mode is set to AUTO, the library will choose to form rings
-  # when that is possible.
-  AUTO = 0
-  # Form rings for replicas and model-parallel cores.
-  RING = 1
-  # Form meshes for replicas and/or model-parallel cores.
-  MESH = 2
-
-
 def device_assignment(
     topology: Topology,
     computation_shape: Optional[np.ndarray] = None,
     computation_stride: Optional[np.ndarray] = None,
     num_replicas: int = 1,
-    device_order_mode: DeviceOrderMode = DeviceOrderMode.AUTO
+    device_order_mode: DeviceOrderMode = DeviceOrderMode.AUTO,
 ) -> DeviceAssignment:
   """Computes a device_assignment of a computation across a TPU topology.
 
@@ -387,19 +393,24 @@ def device_assignment(
 
   if not isinstance(topology, Topology):
     raise ValueError(
-        f"`topology` is not a Topology object; got {type(topology)}")
+        f"`topology` is not a Topology object; got {type(topology)}"
+    )
 
   topology_rank = len(topology.mesh_shape)
   mesh_shape = topology.mesh_shape
   if computation_shape is None:
     computation_shape = np.array([1] * topology_rank, dtype=np.int32)
   else:
-    computation_shape = np.asarray(computation_shape, dtype=np.int32)
+    computation_shape = numpy_compat.np_asarray(
+        computation_shape, dtype=np.int32
+    )
 
   if computation_stride is None:
     computation_stride = np.array([1] * topology_rank, dtype=np.int32)
   else:
-    computation_stride = np.asarray(computation_stride, dtype=np.int32)
+    computation_stride = numpy_compat.np_asarray(
+        computation_stride, dtype=np.int32
+    )
 
   if computation_shape.shape != (topology_rank,):
     raise ValueError(
@@ -499,10 +510,10 @@ def device_assignment(
       outer_ring = _ring_3d(replica_shape[0], replica_shape[1],
                             replica_shape[2])
 
-      for replica in xrange(num_replicas):
+      for replica in range(num_replicas):
         outer_x, outer_y, outer_z = outer_ring[replica]
         per_replica_assignment = []
-        for index in xrange(np.prod(computation_shape)):
+        for index in range(np.prod(computation_shape)):
           inner_x, inner_y, inner_z = inner_ring[index // mesh_shape[-1]]
           px = outer_x * computation_shape[0] + inner_x
           py = outer_y * computation_shape[1] + inner_y
@@ -511,7 +522,7 @@ def device_assignment(
           per_replica_assignment.append([px, py, pz, pi])
         assignment.append(per_replica_assignment)
     else:
-      for replica in xrange(num_replicas):
+      for replica in range(num_replicas):
         # Chooses a replica number in each axis.
         t = replica
         pos = []
@@ -550,9 +561,9 @@ def device_assignment(
     device_coordinates = topology.device_coordinates
     assignment = []
     devices_per_replica = np.prod(computation_shape)
-    for rindex in xrange(num_replicas):
+    for rindex in range(num_replicas):
       replica_assignment = []
-      for index in xrange(devices_per_replica):
+      for index in range(devices_per_replica):
         logical_id = rindex * devices_per_replica + index
         # Pick logical cores in task order
         task = logical_id // topology.num_tpus_per_task
@@ -561,4 +572,4 @@ def device_assignment(
         replica_assignment.append(device_coordinates[task, device, :])
       assignment.append(replica_assignment)
 
-  return DeviceAssignment(topology, core_assignment=assignment)
+  return DeviceAssignment(topology, core_assignment=assignment)  # pyrefly: ignore[bad-argument-type]

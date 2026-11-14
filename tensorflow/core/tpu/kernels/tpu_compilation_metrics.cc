@@ -12,22 +12,26 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
+
 #include "tensorflow/core/tpu/kernels/tpu_compilation_metrics.h"
+
+#include <cstdint>
+
+#include "absl/strings/string_view.h"
 
 namespace tensorflow {
 namespace tpu {
 
-// TODO(henrytan): remove this once `TpuCompilationCache` migration to OSS is
+// TODO(b/295556102): remove this once `TpuCompilationCache` migration to OSS is
 // completed.
-#if defined(LIBTPU_ON_GCE)
-/* static */
+
 void TpuCompilationMetrics::IncrementCacheLookupCount(
     bool is_cache_hit, absl::string_view session_name) {
   // A placeholder for tracking metrics.
 }
 
 /* static */
-void TpuCompilationMetrics::SetCacheEntryCount(int64 count) {
+void TpuCompilationMetrics::SetCacheEntryCount(int64_t count) {
   // A placeholder for tracking metrics.
 }
 
@@ -36,7 +40,7 @@ void TpuCompilationMetrics::IncrementCompilationCount(
     absl::string_view session_name) {
   // A placeholder for tracking metrics.
 }
-#endif  // LIBTPU_ON_GCE
 
 }  // namespace tpu
 }  // namespace tensorflow
+

@@ -21,7 +21,6 @@ limitations under the License.
 
 #include "absl/container/flat_hash_map.h"
 #include "tensorflow/core/graph/graph.h"
-#include "tensorflow/stream_executor/lib/statusor.h"
 
 namespace tensorflow {
 
@@ -35,7 +34,7 @@ extern const char kXlaInferredShapesAttrName[];
 // We have to perform shape inference before encapsulation because after
 // encapsulation, some nodes will be encapsulated into function call, and shape
 // inference does not handle function call at the moment.
-Status PerformStaticShapeInferenceBeforeEncapsulation(Graph* g);
+absl::Status PerformStaticShapeInferenceBeforeEncapsulation(Graph* g);
 
 // Attribute indicating that some ops in this node's XLA computation has control
 // dependency on this node. Attribute value will always be "true".
@@ -95,32 +94,32 @@ struct XlaClusterInfo {
   // TODO(klimek): In c++17 we'll be able to initialize host_compute_core
   // without losing aggregate initialization, which allows us to get rid of
   // the constructor definitions again.
-  XlaClusterInfo() {}
-  XlaClusterInfo(const string& cluster_name,
+  XlaClusterInfo() = default;
+  XlaClusterInfo(const std::string& cluster_name,
                  const NameAttrList& func_name_attrs, Node* node,
-                 const std::map<string, int>& host_compute_core)
+                 const std::map<std::string, int>& host_compute_core)
       : cluster_name(cluster_name),
         func_name_attrs(func_name_attrs),
         node(node),
         host_compute_core(host_compute_core) {}
   // XLA cluster name. It might be different from `func_name`.
-  const string cluster_name;
+  const std::string cluster_name;
   // Name and attributes of XLA computation function.
   const NameAttrList func_name_attrs;
   // The XLA computation node in the graph.
   Node* node;
   // A mapping from outside compilation cluster name to its device assignment.
-  const std::map<string, int> host_compute_core;
+  const std::map<std::string, int> host_compute_core;
 };
 
 // Finds dependencies between outside compilation clusters, including both data
 // dependencies and control dependencies. cluster_deps maps the name name of an
 // outside compilation cluster to a set of names of outside compilation clusters
 // that it depends on.
-stream_executor::port::StatusOr<
-    std::unique_ptr<absl::flat_hash_map<string, std::vector<string>>>>
+absl::StatusOr<
+    std::unique_ptr<absl::flat_hash_map<std::string, std::vector<std::string>>>>
 OutsideCompilationClusterDependencies(
-    const Graph* g, const string& outside_compilation_attr_name);
+    const Graph* g, const std::string& outside_compilation_attr_name);
 
 // Preprocesses edges within the same XLA cluster. It will perform the following
 // operations in order:
@@ -135,8 +134,8 @@ OutsideCompilationClusterDependencies(
 //     outside compilation node.
 // 2.  For data edges between different outside compilations, remove the edge
 //     and create a Placeholder node as dst node's input.
-Status PreprocessEdgesBetweenOutsideCompilations(
-    Graph* g, const string& outside_compilation_attr_name);
+absl::Status PreprocessEdgesBetweenOutsideCompilations(
+    Graph* g, const std::string& outside_compilation_attr_name);
 
 // Postprocesses edges within the same XLA cluster. This function reverts what
 // `PreprocessEdgesBetweenOutsideCompilations` did. It will perform the
@@ -149,8 +148,8 @@ Status PreprocessEdgesBetweenOutsideCompilations(
 // Notice that control edges marked by
 // `PreprocessEdgesBetweenOutsideCompilations` step 1b are not handled here.
 // They are handled in `RewriteOutsideCompilationSubgraphFn`.
-Status PostprocessEdgesBetweenOutsideCompilations(
-    Graph* g, const string& outside_compilation_attr_name);
+absl::Status PostprocessEdgesBetweenOutsideCompilations(
+    Graph* g, const std::string& outside_compilation_attr_name);
 }  // namespace tensorflow
 
 #endif  // TENSORFLOW_COMPILER_JIT_ENCAPSULATE_UTIL_H_

@@ -13,14 +13,22 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include <string>
+#include <vector>
+
 #include "tensorflow/compiler/tf2xla/shape_util.h"
 #include "tensorflow/compiler/tf2xla/xla_op_kernel.h"
 #include "tensorflow/compiler/tf2xla/xla_op_registry.h"
-#include "tensorflow/compiler/xla/client/xla_builder.h"
+#include "xla/hlo/builder/xla_builder.h"
+#include "xla/shape.h"
+#include "xla/shape_util.h"
+#include "xla/tsl/platform/logging.h"  // IWYU pragma: keep
 #include "tensorflow/core/framework/op_kernel.h"
-
-#include "tensorflow/compiler/tf2xla/type_util.h"
-#include "tensorflow/core/framework/kernel_def_builder.h"
+#include "tensorflow/core/framework/op_requires.h"
+#include "tensorflow/core/framework/tensor_shape.h"
+#include "tensorflow/core/framework/types.h"
+#include "tensorflow/core/framework/types.pb.h"
+#include "tensorflow/core/platform/types.h"
 
 namespace tensorflow {
 
@@ -38,14 +46,15 @@ class OutfeedEnqueueOp : public XlaOpKernel {
     OP_REQUIRES_OK(
         ctx, TensorShapeToXLAShape(dtype_, ctx->InputShape(0), &xla_shape));
     // Outfeed configuration is only needed for embedding outfeed.
-    const string outfeed_config;
+    const std::string outfeed_config;
     xla::Outfeed(ctx->Input(0), xla_shape, outfeed_config);
   }
 
  private:
   DataType dtype_;
 
-  TF_DISALLOW_COPY_AND_ASSIGN(OutfeedEnqueueOp);
+  OutfeedEnqueueOp(const OutfeedEnqueueOp&) = delete;
+  void operator=(const OutfeedEnqueueOp&) = delete;
 };
 
 REGISTER_XLA_OP(Name("OutfeedEnqueue"), OutfeedEnqueueOp);
@@ -75,14 +84,15 @@ class OutfeedEnqueueTupleOp : public XlaOpKernel {
     auto b = ctx->builder();
     auto tuple = xla::Tuple(b, handles);
     // Outfeed configuration is only needed for embedding outfeed.
-    const string outfeed_config;
+    const std::string outfeed_config;
     xla::Outfeed(tuple, tuple_shape, outfeed_config);
   }
 
  private:
   DataTypeVector dtypes_;
 
-  TF_DISALLOW_COPY_AND_ASSIGN(OutfeedEnqueueTupleOp);
+  OutfeedEnqueueTupleOp(const OutfeedEnqueueTupleOp&) = delete;
+  void operator=(const OutfeedEnqueueTupleOp&) = delete;
 };
 
 REGISTER_XLA_OP(Name("OutfeedEnqueueTuple"), OutfeedEnqueueTupleOp);

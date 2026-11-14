@@ -41,14 +41,14 @@ class ArithmeticOptimizer : public GraphOptimizer {
       : opt_level_(opt_level),
         options_(ArithmeticOptimizerOptions::Default(opt_level)) {}
 
-  ~ArithmeticOptimizer() override {}
+  ~ArithmeticOptimizer() override = default;
 
-  string name() const override { return "arithmetic_optimizer"; };
+  std::string name() const override { return "arithmetic_optimizer"; };
 
   bool UsesFunctionLibrary() const override { return false; }
 
-  Status Optimize(Cluster* cluster, const GrapplerItem& item,
-                  GraphDef* optimized_graph) override;
+  absl::Status Optimize(Cluster* cluster, const GrapplerItem& item,
+                        GraphDef* optimized_graph) override;
 
  private:
   friend class ArithmeticOptimizerTest;
@@ -110,7 +110,7 @@ class ArithmeticOptimizer : public GraphOptimizer {
 
   // Runs peep-hole optimizations on `optimized_graph`, e.g., removing inverse
   // transposes.
-  Status SimplifyArithmeticOps(bool can_use_shapes);
+  absl::Status SimplifyArithmeticOps(bool can_use_shapes);
   // Tries to simplify the expression that roots at `node` and replaces the uses
   // of `node` to the simplified expression. Returns the name of the simplified
   // tensor (e.g. "split:1") or an empty string if no simplification is
@@ -126,18 +126,18 @@ class ArithmeticOptimizer : public GraphOptimizer {
   // TODO(jingyue): This interface is not suitable for optimizing nodes with
   // multiple output tensors. We should pass in a tensor name instead of a
   // NodeDef.
-  string TrySimplifyAndReplaceUses(const NodeDef* node,
-                                   SetVector<NodeDef*>* nodes_to_simplify);
+  std::string TrySimplifyAndReplaceUses(const NodeDef* node,
+                                        SetVector<NodeDef*>* nodes_to_simplify);
 
   RewriterConfig::Toggle opt_level_;
   ArithmeticOptimizerOptions options_;
 
   bool fetch_nodes_known_ = false;
-  std::unordered_set<string> nodes_to_preserve_;
+  std::unordered_set<std::string> nodes_to_preserve_;
   std::unique_ptr<NodeMap> node_map_;
   std::unique_ptr<GraphProperties> graph_properties_;
   GraphDef* optimized_graph_ = nullptr;  // Not owned.
-  gtl::FlatSet<string> feed_nodes_;
+  gtl::FlatSet<std::string> feed_nodes_;
 };
 
 }  // end namespace grappler

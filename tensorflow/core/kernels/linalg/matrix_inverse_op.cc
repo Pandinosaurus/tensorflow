@@ -15,12 +15,12 @@ limitations under the License.
 
 // See docs in ../ops/linalg_ops.cc.
 
-#if GOOGLE_CUDA
+#if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 #define EIGEN_USE_GPU
 #endif
 
-#include "third_party/eigen3/Eigen/Core"
-#include "third_party/eigen3/Eigen/LU"
+#include "Eigen/Core"  // from @eigen_archive
+#include "Eigen/LU"  // from @eigen_archive
 #include "tensorflow/core/framework/kernel_def_builder.h"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/tensor_shape.h"
@@ -30,8 +30,8 @@ limitations under the License.
 #include "tensorflow/core/platform/macros.h"
 #include "tensorflow/core/platform/types.h"
 
-#if GOOGLE_CUDA
-#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
+#if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
+#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
 #include "tensorflow/core/kernels/linalg/eye_functor.h"
 #include "tensorflow/core/kernels/transpose_functor.h"
 #include "tensorflow/core/util/gpu_solvers.h"
@@ -73,14 +73,58 @@ class MatrixInverseOp : public LinearAlgebraOp<Scalar> {
     const RealScalar min_abs_pivot =
         lu_decomposition.matrixLU().diagonal().cwiseAbs().minCoeff();
     OP_REQUIRES(context, min_abs_pivot > RealScalar(0),
-                errors::InvalidArgument("Input is not invertible."));
+                absl::InvalidArgumentError("Input is not invertible."));
     outputs->at(0).noalias() = lu_decomposition.inverse();
   }
 
  private:
   bool adjoint_;
 
-  TF_DISALLOW_COPY_AND_ASSIGN(MatrixInverseOp);
+  MatrixInverseOp(const MatrixInverseOp&) = delete;
+  void operator=(const MatrixInverseOp&) = delete;
+};
+
+// For Eigen::half, compute inverse via float32 - otherwise precision is
+// too poor for meaningful results.
+template <>
+class MatrixInverseOp<Eigen::half> : public LinearAlgebraOp<Eigen::half> {
+ public:
+  INHERIT_LINALG_TYPEDEFS(Eigen::half);
+
+  explicit MatrixInverseOp(OpKernelConstruction* context) : Base(context) {
+    OP_REQUIRES_OK(context, context->GetAttr("adjoint", &adjoint_));
+  }
+
+  void ComputeMatrix(OpKernelContext* context, const ConstMatrixMaps& inputs,
+                     MatrixMaps* outputs) final {
+    const ConstMatrixMap& input = inputs[0];
+    if (input.rows() == 0) {
+      // By definition, an empty matrix's inverse is an empty matrix.
+      return;
+    }
+
+    using FloatMatrix =
+        Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
+
+    Eigen::PartialPivLU<FloatMatrix> lu_decomposition;
+    if (adjoint_) {
+      lu_decomposition.compute(input.adjoint().template cast<float>());
+    } else {
+      lu_decomposition.compute(input.template cast<float>());
+    }
+    const float min_abs_pivot =
+        lu_decomposition.matrixLU().diagonal().cwiseAbs().minCoeff();
+    OP_REQUIRES(context, min_abs_pivot > 0.0,
+                absl::InvalidArgumentError("Input is not invertible."));
+    outputs->at(0).noalias() =
+        lu_decomposition.inverse().template cast<Eigen::half>();
+  }
+
+ private:
+  bool adjoint_;
+
+  MatrixInverseOp(const MatrixInverseOp&) = delete;
+  void operator=(const MatrixInverseOp&) = delete;
 };
 
 #if GOOGLE_CUDA
@@ -98,17 +142,17 @@ class MatrixInverseOpGpu : public AsyncOpKernel {
   void ComputeAsync(OpKernelContext* context, DoneCallback done) final {
     const Tensor& input = context->input(0);
     const int ndims = input.dims();
-    const int64_t n = input.dim_size(ndims - 1);
     // Validate inputs.
-    OP_REQUIRES_ASYNC(
-        context, ndims >= 2,
-        errors::InvalidArgument("Input must have rank >= 2, got ", ndims),
-        done);
-    OP_REQUIRES_ASYNC(
-        context, input.dim_size(ndims - 2) == n,
-        errors::InvalidArgument("Input matrices must be squares, got",
-                                input.dim_size(ndims - 2), " != ", n),
-        done);
+    OP_REQUIRES_ASYNC(context, ndims >= 2,
+                      absl::InvalidArgumentError(absl::StrCat(
+                          "Input must have rank >= 2, got ", ndims)),
+                      done);
+    const int64_t n = input.dim_size(ndims - 1);
+    OP_REQUIRES_ASYNC(context, input.dim_size(ndims - 2) == n,
+                      absl::InvalidArgumentError(
+                          absl::StrCat("Input matrices must be square, got ",
+                                       input.dim_size(ndims - 2), " != ", n)),
+                      done);
 
     // By definition, an empty matrix's inverse is an empty matrix.
     if (input.NumElements() == 0) {
@@ -155,10 +199,10 @@ class MatrixInverseOpGpu : public AsyncOpKernel {
                                        TensorShape{batch_size, n}, &pivots),
         done);
     auto pivots_mat = pivots.template matrix<int>();
-    auto input_copy_ptr_array = solver->GetScratchSpace<uint8>(
+    auto input_copy_ptr_array = solver->GetScratchSpace<uint8_t>(
         sizeof(Scalar*) * batch_size, "input_copy_ptr_array",
         /* on_host */ true);
-    auto output_ptr_array = solver->GetScratchSpace<uint8>(
+    auto output_ptr_array = solver->GetScratchSpace<uint8_t>(
         sizeof(Scalar*) * batch_size, "output_copy_ptr_array",
         /* on_host */ true);
     auto output_reshaped = output->template flat_inner_dims<Scalar, 3>();
@@ -227,23 +271,28 @@ class MatrixInverseOpGpu : public AsyncOpKernel {
       functor::EyeFunctor<GPUDevice, Scalar> eye;
       eye(device, output_reshaped);
 
+#if GOOGLE_CUDA
+      cublasOperation_t trans = CUBLAS_OP_N;
+#elif TENSORFLOW_USE_ROCM
+      rocblas_operation trans = rocblas_operation_none;
+#endif
+
       // Solve A X = I.
       dev_info.push_back(solver->GetDeviceLapackInfo(batch_size, "getrs"));
       for (int batch = 0; batch < batch_size; ++batch) {
         OP_REQUIRES_OK_ASYNC(
             context,
-            solver->Getrs(CUBLAS_OP_N, n, n, &input_copy_reshaped(batch, 0, 0),
-                          n, &pivots_mat(batch, 0),
-                          &output_reshaped(batch, 0, 0), n,
-                          &dev_info.back()(batch)),
+            solver->Getrs(trans, n, n, &input_copy_reshaped(batch, 0, 0), n,
+                          &pivots_mat(batch, 0), &output_reshaped(batch, 0, 0),
+                          n, &dev_info.back()(batch)),
             done);
       }
     }
     // Callback for checking info after kernels finish.
     auto info_checker = [context, done](
-                            const Status& status,
+                            const absl::Status& status,
                             const std::vector<HostLapackInfo>& host_infos) {
-      if (!status.ok() && errors::IsInvalidArgument(status)) {
+      if (!status.ok() && absl::IsInvalidArgument(status)) {
         for (const auto& host_info : host_infos) {
           for (int i = 0; i < host_info.size(); ++i) {
             // Match the CPU error message for singular matrices. Otherwise
@@ -251,7 +300,7 @@ class MatrixInverseOpGpu : public AsyncOpKernel {
             // below.
             OP_REQUIRES_ASYNC(
                 context, host_info(i) <= 0,
-                errors::InvalidArgument("Input is not invertible."), done);
+                absl::InvalidArgumentError("Input is not invertible."), done);
           }
         }
       }
@@ -275,10 +324,14 @@ REGISTER_LINALG_OP_GPU("MatrixInverse", (MatrixInverseOpGpu<complex128>),
 
 #endif  // GOOGLE_CUDA
 
+REGISTER_LINALG_OP("MatrixInverse", (MatrixInverseOp<Eigen::half>),
+                   Eigen::half);
 REGISTER_LINALG_OP("MatrixInverse", (MatrixInverseOp<float>), float);
 REGISTER_LINALG_OP("MatrixInverse", (MatrixInverseOp<double>), double);
 REGISTER_LINALG_OP("MatrixInverse", (MatrixInverseOp<complex64>), complex64);
 REGISTER_LINALG_OP("MatrixInverse", (MatrixInverseOp<complex128>), complex128);
+REGISTER_LINALG_OP("BatchMatrixInverse", (MatrixInverseOp<Eigen::half>),
+                   Eigen::half);
 REGISTER_LINALG_OP("BatchMatrixInverse", (MatrixInverseOp<float>), float);
 REGISTER_LINALG_OP("BatchMatrixInverse", (MatrixInverseOp<double>), double);
 

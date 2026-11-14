@@ -13,15 +13,12 @@
 # limitations under the License.
 # ==============================================================================
 """Tests for the private `_ModelDataset` transformation."""
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 from absl.testing import parameterized
 
 from tensorflow.python.data.experimental.ops import testing
 from tensorflow.python.data.kernel_tests import test_base
 from tensorflow.python.data.ops import dataset_ops
+from tensorflow.python.data.ops import map_op
 from tensorflow.python.data.ops import options as options_lib
 from tensorflow.python.framework import combinations
 from tensorflow.python.framework import errors
@@ -48,7 +45,7 @@ class ModelDatasetTest(test_base.DatasetTestBase, parameterized.TestCase):
   @combinations.generate(test_base.default_test_combinations())
   def testParallelMapWithAutotune(self):
     dataset = dataset_ops.Dataset.range(1000)
-    dataset = dataset_ops.ParallelMapDataset(
+    dataset = map_op._ParallelMapDataset(  # pylint: disable=protected-access
         dataset,
         lambda x: x + 1,
         num_parallel_calls=1,

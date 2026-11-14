@@ -17,7 +17,9 @@ limitations under the License.
 
 #include "tensorflow/core/framework/attr_value_util.h"
 #include "tensorflow/core/framework/function_testlib.h"
+#include "tensorflow/core/framework/graph.pb.h"
 #include "tensorflow/core/framework/tensor_testutil.h"
+#include "tensorflow/core/framework/types.pb.h"
 #include "tensorflow/core/grappler/grappler_item.h"
 #include "tensorflow/core/grappler/optimizers/data/graph_test_utils.h"
 #include "tensorflow/core/grappler/optimizers/data/graph_utils.h"
@@ -41,31 +43,6 @@ TEST(ParallelBatch, BatchDataset) {
             {{"value", false}, {"dtype", DT_BOOL}}),
        NDef("batch", "BatchDatasetV2",
             {"range", "batch_size", "drop_remainder"}, {})});
-
-  ParallelBatch optimizer;
-  GraphDef output;
-  TF_ASSERT_OK(optimizer.Optimize(nullptr, item, &output));
-  EXPECT_TRUE(graph_utils::ContainsGraphNodeWithName("batch", output));
-  int index = graph_utils::FindGraphNodeWithName("batch", output);
-  EXPECT_TRUE(output.node(index).attr().at("parallel_copy").b());
-}
-
-TEST(ParallelBatch, ParallelBatchDataset) {
-  using test::function::NDef;
-  GrapplerItem item;
-  item.graph = test::function::GDef(
-      {NDef("start", "Const", {}, {{"value", 0}, {"dtype", DT_INT32}}),
-       NDef("stop", "Const", {}, {{"value", 10}, {"dtype", DT_INT32}}),
-       NDef("step", "Const", {}, {{"value", 1}, {"dtype", DT_INT32}}),
-       NDef("range", "RangeDataset", {"start", "stop", "step"}, {}),
-       NDef("batch_size", "Const", {}, {{"value", 5}, {"dtype", DT_INT32}}),
-       NDef("num_parallel_calls", "Const", {},
-            {{"value", 4}, {"dtype", DT_INT32}}),
-       NDef("drop_remainder", "Const", {},
-            {{"value", false}, {"dtype", DT_BOOL}}),
-       NDef("batch", "ParallelBatchDataset",
-            {"range", "batch_size", "num_parallel_calls", "drop_remainder"},
-            {})});
 
   ParallelBatch optimizer;
   GraphDef output;

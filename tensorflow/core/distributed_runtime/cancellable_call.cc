@@ -25,12 +25,12 @@ void CancellableCall::Start(const StatusCallback& done) {
   const bool not_yet_cancelled =
       cancel_mgr_->RegisterCallback(token, [this]() { Cancel(); });
   if (not_yet_cancelled) {
-    IssueCall([this, token, done](const Status& s) {
+    IssueCall([this, token, done](const absl::Status& s) {
       cancel_mgr_->DeregisterCallback(token);
       done(s);
     });
   } else {
-    done(errors::Cancelled("RPC Request was cancelled"));
+    done(absl::CancelledError("RPC Request was cancelled"));
   }
 }
 

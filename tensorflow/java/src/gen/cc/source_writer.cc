@@ -13,11 +13,20 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include <string>
-#include <algorithm>
-#include <list>
-
 #include "tensorflow/java/src/gen/cc/source_writer.h"
+
+#include <algorithm>
+#include <cstddef>
+#include <list>
+#include <string>
+
+#include "absl/log/check.h"
+#include "absl/strings/string_view.h"
+#include "xla/tsl/platform/status.h"
+#include "tensorflow/core/platform/env.h"
+#include "tensorflow/core/platform/stringpiece.h"
+#include "tensorflow/core/platform/types.h"
+#include "tensorflow/java/src/gen/cc/java_defs.h"
 
 namespace tensorflow {
 namespace java {
@@ -48,30 +57,30 @@ SourceWriter& SourceWriter::Prefix(const char* line_prefix) {
   return *this;
 }
 
-SourceWriter& SourceWriter::Write(const StringPiece& str) {
+SourceWriter& SourceWriter::Write(const absl::string_view& str) {
   size_t line_pos = 0;
   do {
     size_t start_pos = line_pos;
     line_pos = str.find('\n', start_pos);
-    if (line_pos != string::npos) {
+    if (line_pos != std::string::npos) {
       ++line_pos;
       Append(str.substr(start_pos, line_pos - start_pos));
       newline_ = true;
     } else {
       Append(str.substr(start_pos, str.size() - start_pos));
     }
-  } while (line_pos != string::npos && line_pos < str.size());
+  } while (line_pos != std::string::npos && line_pos < str.size());
 
   return *this;
 }
 
-SourceWriter& SourceWriter::WriteFromFile(const string& fname, Env* env) {
-  string data_;
+SourceWriter& SourceWriter::WriteFromFile(const std::string& fname, Env* env) {
+  std::string data_;
   TF_CHECK_OK(ReadFileToString(env, fname, &data_));
   return Write(data_);
 }
 
-SourceWriter& SourceWriter::Append(const StringPiece& str) {
+SourceWriter& SourceWriter::Append(const absl::string_view& str) {
   if (!str.empty()) {
     if (newline_) {
       DoAppend(left_margin_ + line_prefix_);
@@ -109,7 +118,7 @@ SourceWriter& SourceWriter::EndLine() {
   return *this;
 }
 
-SourceWriter& SourceWriter::BeginBlock(const string& expression) {
+SourceWriter& SourceWriter::BeginBlock(const std::string& expression) {
   if (!expression.empty()) {
     Append(expression + " {");
   } else {
@@ -179,7 +188,7 @@ SourceWriter& SourceWriter::BeginType(const Type& type, int modifiers,
   }
   if (!type_importer.imports().empty()) {
     EndLine();
-    for (const string& s : type_importer.imports()) {
+    for (const std::string& s : type_importer.imports()) {
       Append("import ").Append(s).Append(";").EndLine();
     }
   }

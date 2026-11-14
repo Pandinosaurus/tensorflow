@@ -36,7 +36,7 @@ struct ControlFlowInfo {
 
   const Node* frame = nullptr;         // frame of a node
   const Node* parent_frame = nullptr;  // parent frame of a node
-  string frame_name;                   // frame name of a node
+  std::string frame_name;              // frame name of a node
 };
 
 // Clear and populate `info` with each node's frame and the level it belongs to.
@@ -52,8 +52,9 @@ struct ControlFlowInfo {
 // NOTE(yuanbyu): For now, we require all sends/recvs have iteration level 0.
 // This essentially means there can't be multiple serial Nexts in an iteration,
 // which all sane front-ends should satisfy.
-Status BuildControlFlowInfo(const Graph* g, std::vector<ControlFlowInfo>* info,
-                            std::vector<string>* unreachable_nodes = nullptr);
+absl::Status BuildControlFlowInfo(
+    const Graph* g, std::vector<ControlFlowInfo>* info,
+    std::vector<std::string>* unreachable_nodes = nullptr);
 
 }  // namespace tensorflow
 

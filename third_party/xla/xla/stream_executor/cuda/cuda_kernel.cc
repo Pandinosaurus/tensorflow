@@ -1,0 +1,191 @@
+/* Copyright 2019 The OpenXLA Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+==============================================================================*/
+
+#include "xla/stream_executor/cuda/cuda_kernel.h"
+
+#include <atomic>
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <optional>
+
+#include "absl/log/check.h"
+#include "absl/log/log.h"
+#include "absl/status/status.h"
+#include "absl/status/status_macros.h"
+#include "absl/status/statusor.h"
+#include "absl/strings/str_cat.h"
+#include "absl/strings/str_format.h"
+#include "third_party/gpus/cuda/include/cuda.h"
+#include "xla/stream_executor/activate_context.h"
+#include "xla/stream_executor/cuda/cuda_status.h"
+#include "xla/stream_executor/kernel_args.h"
+#include "xla/stream_executor/kernel_metadata.h"
+#include "xla/stream_executor/launch_dim.h"
+#include "xla/stream_executor/stream.h"
+#include "tsl/profiler/lib/traceme.h"
+#include "tsl/profiler/lib/traceme_encode.h"
+
+using tsl::profiler::TraceMe;
+using tsl::profiler::TraceMeEncode;
+using tsl::profiler::TraceMeLevel;
+
+namespace stream_executor {
+namespace gpu {
+
+namespace {
+
+absl::Status GetCudaAttribute(CUfunction_attribute attribute, CUfunction func,
+                              int* attribute_value) {
+  return cuda::ToStatus(
+      cuFuncGetAttribute(attribute_value, attribute, func),
+      absl::StrCat("Failed to query kernel attribute: ", attribute));
+}
+
+}  // namespace
+
+absl::StatusOr<int32_t> CudaKernel::GetMaxOccupiedBlocksPerCore(
+    ThreadDim threads, size_t dynamic_shared_memory_bytes) const {
+  int32_t threads_per_block = threads.x * threads.y * threads.z;
+  VLOG(3) << "Get kernel block occupancy: " << name()
+          << "; threads_per_block: " << threads_per_block
+          << "; dynamic_shared_memory_bytes: " << dynamic_shared_memory_bytes;
+  std::unique_ptr<ActivateContext> activation = executor_->Activate();
+
+  int max_blocks;
+  ABSL_RETURN_IF_ERROR(cuda::ToStatus(
+      cuOccupancyMaxActiveBlocksPerMultiprocessorWithFlags(
+          &max_blocks, gpu_function_, threads_per_block,
+          dynamic_shared_memory_bytes, CU_OCCUPANCY_DISABLE_CACHING_OVERRIDE),
+      absl::StrFormat("Failed to calculate occupancy of kernel %p",
+                      gpu_function_)));
+  return max_blocks;
+}
+
+absl::StatusOr<KernelMetadata> CudaKernel::GetKernelMetadata() {
+  KernelMetadata kernel_metadata;
+  int value;
+  ABSL_RETURN_IF_ERROR(
+      GetCudaAttribute(CU_FUNC_ATTRIBUTE_NUM_REGS, gpu_function_, &value));
+  kernel_metadata.set_registers_per_thread(value);
+
+  ABSL_RETURN_IF_ERROR(GetCudaAttribute(CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES,
+                                   gpu_function_, &value));
+  kernel_metadata.set_shared_memory_bytes(value);
+  return kernel_metadata;
+}
+
+absl::Status CudaKernel::UpdateMaxDynamicSharedMemoryBytes(
+    int32_t shared_memory_bytes) const {
+  if (shared_memory_bytes <=
+      max_dynamic_shared_memory_bytes_.load(std::memory_order_relaxed)) {
+    return absl::OkStatus();
+  }
+
+  ABSL_RETURN_IF_ERROR(
+      executor_->UpdateMaxDynamicSharedMemoryBytes(this, shared_memory_bytes));
+  max_dynamic_shared_memory_bytes_.store(shared_memory_bytes,
+                                         std::memory_order_relaxed);
+  return absl::OkStatus();
+}
+
+absl::Status CudaKernel::UpdateNonPortableClusterSize(
+    const std::optional<ClusterDim>& cluster_dims) const {
+  if (!cluster_dims.has_value() ||
+      cluster_dims->x * cluster_dims->y * cluster_dims->z <= 8 ||
+      non_portable_cluster_size_allowed_.load(std::memory_order_relaxed)) {
+    return absl::OkStatus();
+  }
+
+  std::unique_ptr<ActivateContext> activation = executor_->Activate();
+  ABSL_RETURN_IF_ERROR(cuda::ToStatus(
+      cuFuncSetAttribute(gpu_function_,
+                         CU_FUNC_ATTRIBUTE_NON_PORTABLE_CLUSTER_SIZE_ALLOWED,
+                         1),
+      absl::StrFormat(
+          "Failed to set CU_FUNC_ATTRIBUTE_NON_PORTABLE_CLUSTER_SIZE_ALLOWED "
+          "on kernel %s",
+          name())));
+  non_portable_cluster_size_allowed_.store(true, std::memory_order_relaxed);
+  return absl::OkStatus();
+}
+
+absl::Status CudaKernel::Launch(const ThreadDim& thread_dims,
+                                const BlockDim& block_dims,
+                                const std::optional<ClusterDim>& cluster_dims,
+                                Stream* stream, const KernelArgs& args) {
+  TraceMe trace([] { return TraceMeEncode("CudaKernel::Launch", {}); },
+                /*level=*/TraceMeLevel::kVerbose);
+
+  CUfunction function = gpu_function();
+
+  // Launch kernels with packed arguments.
+  auto launch =
+      [this, stream, &cluster_dims, &thread_dims, &block_dims,
+       function](const KernelArgsPackedArrayBase& packed) -> absl::Status {
+    TraceMe trace([] { return TraceMeEncode("CudaKernel::Launch/launch", {}); },
+                  /*level=*/TraceMeLevel::kVerbose);
+
+    int32_t expected_number_of_arguments =
+        Arity() + (packed.number_of_shared_bytes() > 0);
+
+    // Kernels loaded without a typed signature (e.g. FFI registered kernels)
+    // report arity 0, so their argument count can't be checked here.
+    CHECK(Arity() == 0 ||
+          expected_number_of_arguments == packed.number_of_arguments())
+        << "Kernel " << name() << " has " << packed.number_of_arguments()
+        << " arguments, but expected " << expected_number_of_arguments
+        << "; arity=" << Arity()
+        << "; number_of_shared_bytes=" << packed.number_of_shared_bytes();
+
+    void** params = const_cast<void**>(packed.argument_addresses().data());
+
+    ABSL_RETURN_IF_ERROR(
+        UpdateMaxDynamicSharedMemoryBytes(packed.number_of_shared_bytes()));
+    ABSL_RETURN_IF_ERROR(UpdateNonPortableClusterSize(cluster_dims));
+
+    return stream->LaunchKernel(thread_dims, block_dims, cluster_dims, function,
+                                name(), params, packed.number_of_shared_bytes(),
+                                use_pdl());
+  };
+
+  // If arguments are already packed we can just launch the kernel.
+  if (auto* packed = DynCast<KernelArgsPackedArrayBase>(&args)) {
+    auto& pack = args_packing();
+    if (!pack) {
+      return launch(*packed);
+    }
+    ABSL_ASSIGN_OR_RETURN(auto repacked, pack(*this, *packed));
+    return launch(*repacked);
+  }
+
+  // For device memory array we rely on a custom kernel arguments packing.
+  if (auto* device_mem = DynCast<KernelArgsDeviceAddressArray>(&args)) {
+    auto& pack = args_packing();
+    if (!pack) {
+      return absl::InternalError(
+          "Kernel is missing a custom arguments packing function for device "
+          "memory arguments array");
+    }
+
+    ABSL_ASSIGN_OR_RETURN(auto packed, pack(*this, *device_mem));
+    return launch(*packed);
+  }
+
+  return absl::InternalError("Unsupported kernel arguments type");
+}
+
+}  // namespace gpu
+}  // namespace stream_executor

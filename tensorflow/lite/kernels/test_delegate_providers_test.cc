@@ -24,18 +24,22 @@ TEST(KernelTestDelegateProvidersTest, DelegateProvidersParams) {
   const auto& params = providers.ConstParams();
   EXPECT_TRUE(params.HasParam("use_xnnpack"));
   EXPECT_TRUE(params.HasParam("use_nnapi"));
+  EXPECT_TRUE(params.HasParam("allow_fp16_precision_for_fp32"));
 
-  int argc = 3;
+  int argc = 4;
   const char* argv[] = {"program_name", "--use_nnapi=true",
+                        "--allow_fp16_precision_for_fp32=true",
                         "--other_undefined_flag=1"};
   EXPECT_TRUE(providers.InitFromCmdlineArgs(&argc, argv));
   EXPECT_TRUE(params.Get<bool>("use_nnapi"));
+  EXPECT_TRUE(params.Get<bool>("allow_fp16_precision_for_fp32"));
   EXPECT_EQ(2, argc);
   EXPECT_EQ("--other_undefined_flag=1", argv[1]);
 }
 
 TEST(KernelTestDelegateProvidersTest, CreateTfLiteDelegates) {
-#if !defined(__Fuchsia__) && !defined(TFLITE_WITHOUT_XNNPACK)
+#if !defined(__Fuchsia__) && !defined(__s390x__) && \
+    !defined(TFLITE_WITHOUT_XNNPACK)
   KernelTestDelegateProviders providers;
   providers.MutableParams()->Set<bool>("use_xnnpack", true);
   EXPECT_GE(providers.CreateAllDelegates().size(), 1);

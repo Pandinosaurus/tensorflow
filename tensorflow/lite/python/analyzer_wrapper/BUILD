@@ -1,6 +1,23 @@
-load("//tensorflow:tensorflow.bzl", "pybind_extension")
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("//tensorflow:tensorflow.default.bzl", "pybind_extension")
 
 package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:LICENSE"],
     default_visibility = ["//tensorflow:internal"],
     licenses = ["notice"],
 )
@@ -10,7 +27,15 @@ pybind_extension(
     srcs = [
         "analyzer_wrapper.cc",
     ],
-    module_name = "_pywrap_analyzer_wrapper",
+    common_lib_packages = [
+        "litert/python",
+        "tensorflow/lite/python",
+    ],
+    enable_stub_generation = True,
+    pytype_srcs = [
+        "_pywrap_analyzer_wrapper.pyi",
+    ],
+    wrap_py_init = True,
     deps = [
         ":model_analyzer",
         "@pybind11",
@@ -23,12 +48,13 @@ cc_library(
     hdrs = ["model_analyzer.h"],
     visibility = ["//visibility:public"],
     deps = [
-        "//tensorflow/lite:model_builder",
+        "//tensorflow/compiler/mlir/lite/schema:schema_utils",
+        "//tensorflow/core/public:release_version",
         "//tensorflow/lite:version",
+        "//tensorflow/lite/core:model_builder",
         "//tensorflow/lite/core/api:error_reporter",
         "//tensorflow/lite/schema:schema_fbs",
-        "//tensorflow/lite/schema:schema_utils",
-        "//tensorflow/lite/tools/versioning:gpu_compatibility",
         "@com_google_absl//absl/strings",
+        "@flatbuffers//:runtime_cc",
     ],
 )

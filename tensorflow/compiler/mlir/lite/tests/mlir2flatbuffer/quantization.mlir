@@ -1,6 +1,20 @@
+// Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+// ==============================================================================
 // RUN: flatbuffer_translate -mlir-to-tflite-flatbuffer %s -o - | flatbuffer_to_string - | FileCheck %s
 
-func @main(%arg0: tensor<1x224x224x3xf32>) -> tensor<1x401408xf32> {
+func.func @main(%arg0: tensor<1x224x224x3xf32>) -> tensor<1x401408xf32> {
 // CHECK: {
 // CHECK-NEXT:  version: 3,
 // CHECK-NEXT:  operator_codes: [ {
@@ -31,7 +45,8 @@ func @main(%arg0: tensor<1x224x224x3xf32>) -> tensor<1x401408xf32> {
 // CHECK-NEXT:      name: "arg0",
 // CHECK-NEXT:      quantization: {
 // CHECK-EMPTY:
-// CHECK-NEXT:      }
+// CHECK-NEXT:      },
+// CHECK-NEXT:      has_rank: true
 // CHECK-NEXT:    }, {
 // CHECK-NEXT:      shape: [ 2 ],
 // CHECK-NEXT:      type: INT32,
@@ -39,7 +54,8 @@ func @main(%arg0: tensor<1x224x224x3xf32>) -> tensor<1x401408xf32> {
 // CHECK-NEXT:      name: "Const",
 // CHECK-NEXT:      quantization: {
 // CHECK-EMPTY:
-// CHECK-NEXT:      }
+// CHECK-NEXT:      },
+// CHECK-NEXT:      has_rank: true
 // CHECK-NEXT:    }, {
 // CHECK-NEXT:      shape: [ 1, 224, 224, 3 ],
 // CHECK-NEXT:      type: UINT8,
@@ -48,7 +64,8 @@ func @main(%arg0: tensor<1x224x224x3xf32>) -> tensor<1x401408xf32> {
 // CHECK-NEXT:      quantization: {
 // CHECK-NEXT:        scale: [ 0.007812 ],
 // CHECK-NEXT:        zero_point: [ 128 ]
-// CHECK-NEXT:      }
+// CHECK-NEXT:      },
+// CHECK-NEXT:      has_rank: true
 // CHECK-NEXT:    }, {
 // CHECK-NEXT:      shape: [ 32, 3, 3, 3 ],
 // CHECK-NEXT:      type: UINT8,
@@ -57,7 +74,8 @@ func @main(%arg0: tensor<1x224x224x3xf32>) -> tensor<1x401408xf32> {
 // CHECK-NEXT:      quantization: {
 // CHECK-NEXT:        scale: [ 0.021827 ],
 // CHECK-NEXT:        zero_point: [ 151 ]
-// CHECK-NEXT:      }
+// CHECK-NEXT:      },
+// CHECK-NEXT:      has_rank: true
 // CHECK-NEXT:    }, {
 // CHECK-NEXT:      shape: [ 32 ],
 // CHECK-NEXT:      type: INT32,
@@ -66,7 +84,8 @@ func @main(%arg0: tensor<1x224x224x3xf32>) -> tensor<1x401408xf32> {
 // CHECK-NEXT:      quantization: {
 // CHECK-NEXT:        scale: [ 0.000171 ],
 // CHECK-NEXT:        zero_point: [ 0 ]
-// CHECK-NEXT:      }
+// CHECK-NEXT:      },
+// CHECK-NEXT:      has_rank: true
 // CHECK-NEXT:    }, {
 // CHECK-NEXT:      shape: [ 1, 112, 112, 32 ],
 // CHECK-NEXT:      type: UINT8,
@@ -75,7 +94,8 @@ func @main(%arg0: tensor<1x224x224x3xf32>) -> tensor<1x401408xf32> {
 // CHECK-NEXT:      quantization: {
 // CHECK-NEXT:        scale: [ 0.023528 ],
 // CHECK-NEXT:        zero_point: [ 0 ]
-// CHECK-NEXT:      }
+// CHECK-NEXT:      },
+// CHECK-NEXT:      has_rank: true
 // CHECK-NEXT:    }, {
 // CHECK-NEXT:      shape: [ 1, 401408 ],
 // CHECK-NEXT:      type: UINT8,
@@ -84,7 +104,8 @@ func @main(%arg0: tensor<1x224x224x3xf32>) -> tensor<1x401408xf32> {
 // CHECK-NEXT:      quantization: {
 // CHECK-NEXT:        scale: [ 0.023528 ],
 // CHECK-NEXT:        zero_point: [ 0 ]
-// CHECK-NEXT:      }
+// CHECK-NEXT:      },
+// CHECK-NEXT:      has_rank: true
 // CHECK-NEXT:    }, {
 // CHECK-NEXT:      shape: [ 1, 401408 ],
 // CHECK-NEXT:      type: UINT8,
@@ -93,14 +114,16 @@ func @main(%arg0: tensor<1x224x224x3xf32>) -> tensor<1x401408xf32> {
 // CHECK-NEXT:      quantization: {
 // CHECK-NEXT:        scale: [ 0.003906 ],
 // CHECK-NEXT:        zero_point: [ 0 ]
-// CHECK-NEXT:      }
+// CHECK-NEXT:      },
+// CHECK-NEXT:      has_rank: true
 // CHECK-NEXT:    }, {
 // CHECK-NEXT:      shape: [ 1, 401408 ],
 // CHECK-NEXT:      buffer: 9,
 // CHECK-NEXT:      name: "tfl.dequantize",
 // CHECK-NEXT:      quantization: {
 // CHECK-EMPTY:
-// CHECK-NEXT:      }
+// CHECK-NEXT:      },
+// CHECK-NEXT:      has_rank: true
 // CHECK-NEXT:    } ],
 // CHECK-NEXT:    inputs: [ 0 ],
 // CHECK-NEXT:    outputs: [ 8 ],
@@ -174,5 +197,5 @@ func @main(%arg0: tensor<1x224x224x3xf32>) -> tensor<1x401408xf32> {
   %5 = "tfl.reshape"(%4, %0) : (tensor<1x112x112x32x!quant.uniform<u8:f32, 0.023528476789885875>>, tensor<2xi32>) -> tensor<1x401408x!quant.uniform<u8:f32, 0.023528476789885875>>
   %6 = "tfl.softmax"(%5) {beta = 1.000000e+00 : f32} : (tensor<1x401408x!quant.uniform<u8:f32, 0.023528476789885875>>) -> tensor<1x401408x!quant.uniform<u8:f32, 3.906250e-03>>
   %7 = "tfl.dequantize"(%6) : (tensor<1x401408x!quant.uniform<u8:f32, 3.906250e-03>>) -> tensor<1x401408xf32>
-  return %7 : tensor<1x401408xf32>
+  func.return %7 : tensor<1x401408xf32>
 }

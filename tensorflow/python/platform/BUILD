@@ -1,23 +1,40 @@
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
 # platform package
 
-# buildifier: disable=same-origin-load
-load("//tensorflow:tensorflow.bzl", "tf_py_build_info_genrule")
+load("@xla//third_party/rules_python/python:py_library.bzl", "py_library")
+load(
+    "//tensorflow:tensorflow.bzl",
+    "if_oss",
+)
+load("//tensorflow:tensorflow.default.bzl", "pybind_extension", "tf_py_build_info_genrule", "tf_py_strict_test", "tf_python_pybind_extension")
 load("//tensorflow/core/platform:build_config.bzl", "pyx_library", "tf_additional_all_protos", "tf_additional_lib_deps", "tf_proto_library", "tf_protos_grappler")  # @unused
-
-# buildifier: disable=same-origin-load
-load("//tensorflow:tensorflow.bzl", "tf_python_pybind_extension")
-
-# buildifier: disable=same-origin-load
-load("//tensorflow:tensorflow.bzl", "pybind_extension")
-
-# buildifier: disable=same-origin-load
-load("//tensorflow:tensorflow.bzl", "tf_py_test")
 
 visibility = [
     "//tensorflow:__subpackages__",
+    "//tensorflow/dtensor:dtensor-internal",
+    # copybara:uncomment "//learning/brain/python/platform:__subpackages__",
+    # copybara:uncomment "//learning/brain/contrib/eager/numlib/benchmarks/kumamon:__subpackages__",
+    # copybara:uncomment "//learning/brain/mobile/lite/tooling/model_analyzer:__subpackages__",
+    # copybara:uncomment "//tensorflow_serving/model_servers:__subpackages__",
+    # copybara:uncomment "//third_party/odml/model_customization/quantization:__subpackages__",
 ]
 
 package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
     default_visibility = visibility,
     licenses = ["notice"],
 )
@@ -30,215 +47,384 @@ tf_py_build_info_genrule(
 py_library(
     name = "build_info",
     srcs = ["build_info.py"],
-    srcs_version = "PY3",
 )
 
 py_library(
-    name = "platform",
-    srcs = glob(
-        [
-            "*.py",
-        ],
-        exclude = [
-            "*test.py",
-            "benchmark.py",  # In platform_benchmark.
-            "analytics.py",  # In platform_analytics.
-            "device_context.py",  # In platform_device_context.
-        ],
-    ) + ["build_info.py"],
-    data = select({
-        "//tensorflow:windows": [],
-        "//conditions:default": ["//tensorflow/core/platform:_cpu_feature_guard.so"],
-    }),
-    srcs_version = "PY3",
-    deps = [
-        ":build_info",
-        "//tensorflow/core:protos_all_py",
-        "//tensorflow/python:pywrap_tfe",
-        "//tensorflow/python:util",
-        "//tensorflow/python/lib/io:lib",
-        "//tensorflow/python/util:_pywrap_util_port",
-        "@absl_py//absl:app",
-        "@absl_py//absl/flags",
-        "@absl_py//absl/logging",
-        "@rules_python//python/runfiles",
-        "@six_archive//:six",
+    name = "windows_lib_diagnostics",
+    srcs = ["windows_lib_diagnostics.py"],
+)
+
+tf_py_strict_test(
+    name = "windows_lib_diagnostics_test",
+    size = "small",
+    srcs = ["windows_lib_diagnostics_test.py"],
+    main = "windows_lib_diagnostics_test.py",
+    tags = [
+        "no_pip",
     ],
+    deps = [
+        ":client_testlib",
+        ":windows_lib_diagnostics",
+    ],
+)
+
+py_library(
+    name = "self_check",
+    srcs = ["self_check.py"],
+    deps = if_oss(
+        [
+            ":build_info",
+            ":_pywrap_cpu_feature_guard",
+        ],
+    ),
 )
 
 py_library(
     name = "benchmark",
     srcs = ["benchmark.py"],
-    srcs_version = "PY3",
+    visibility = visibility + ["//tensorflow:internal"],
     deps = [
-        ":platform",
-        "//tensorflow/python:client",
-        "@six_archive//:six",
+        ":gfile",
+        ":tf_logging",
+        "//tensorflow/core:protos_all_py",
+        "//tensorflow/python/client:timeline",
+        "//tensorflow/python/framework:ops",
+        "//tensorflow/python/util:tf_export",
+        "//tensorflow/python/util:tf_inspect",
+        "@absl_py//absl:app",
     ],
 )
 
 py_library(
     name = "analytics",
     srcs = ["analytics.py"],
-    srcs_version = "PY3",
 )
 
 py_library(
     name = "device_context",
     srcs = ["device_context.py"],
-    srcs_version = "PY3",
     deps = [
-        "//tensorflow/python:control_flow_ops",
-        "//tensorflow/python:framework",
+        "//tensorflow/python/framework:ops",
+        "//tensorflow/python/ops:control_flow_ops",
     ],
 )
 
 py_library(
     name = "test",
     srcs = ["googletest.py"],
-    srcs_version = "PY3",
+    # copybara:uncomment_begin(google-only)
+    # visibility = visibility + ["//tensorflow:internal"],
+    # copybara:uncomment_end_and_comment_begin
+    visibility = [
+        "//visibility:public",
+    ],
+    # copybara:comment_end
     deps = [
         ":benchmark",
+        ":flags",
+        "//tensorflow/python/util:tf_export",
+    ] + if_oss([
+        ":tf_logging",
+        "@absl_py//absl:app",
         "@absl_py//absl/testing:absltest",
-    ],
+        "//tensorflow/python/framework:errors",
+        "//tensorflow/python/util:tf_inspect",
+    ]),
 )
 
-tf_py_test(
+tf_py_strict_test(
     name = "resource_loader_test",
     size = "small",
     srcs = ["resource_loader_test.py"],
     data = [
         "resource_loader.py",
     ],
-    python_version = "PY3",
     tags = [
         "no_pip",
         "no_windows",
     ],
     deps = [
-        ":platform",
+        ":resource_loader",
         ":test",
     ],
 )
 
-tf_py_test(
+tf_py_strict_test(
     name = "sysconfig_test",
     size = "small",
     srcs = ["sysconfig_test.py"],
     data = [
         "sysconfig.py",
     ],
-    python_version = "PY3",
     tags = [
+        "no_mac",  # TODO(b/259295275) re-enable after fixing sysconfig.get_path breakage
+        "no_oss",  # TODO(b/259295275) re-enable after fixing sysconfig.get_path breakage
         "no_pip",
         "no_windows",
     ],
     deps = [
-        ":platform",
+        ":client_testlib",
+        ":sysconfig",
         ":test",
-        "//tensorflow:tensorflow_py",
     ],
 )
 
-tf_py_test(
+tf_py_strict_test(
     name = "flags_test",
     size = "small",
     srcs = ["flags_test.py"],
-    python_version = "PY3",
+    tags = [
+        "no_mac",  # TODO(b/259295275) re-enable after fixing sysconfig.get_path breakage
+        "no_oss",  # TODO(b/263966250) re-enable after fixing sysconfig.get_path breakage
+    ],
     deps = [
         ":client_testlib",
-        ":platform",
+        ":flags",
+        "@absl_py//absl/flags",
     ],
 )
 
-tf_py_test(
+tf_py_strict_test(
     name = "stacktrace_handler_test",
     size = "small",
     srcs = ["stacktrace_handler_test.py"],
-    python_version = "PY3",
     tags = [
+        "no_oss",  # TODO(b/263966250) re-enable after fixing sysconfig.get_path breakage
         "no_windows",
         "nomac",
+        "nozapfhahn",
     ],
     deps = [
         ":client_testlib",
-        ":platform",
+        ":tf_logging",
     ],
 )
 
-tf_py_test(
+tf_py_strict_test(
     name = "app_test",
     size = "small",
     srcs = ["app_test.py"],
-    python_version = "PY3",
     tags = [
         "manual",
         "notap",
     ],
-    deps = [":platform"],
+    deps = [
+        ":app",
+        ":flags",
+    ],
 )
 
 tf_python_pybind_extension(
     name = "_pywrap_stacktrace_handler",
     srcs = ["stacktrace_handler_wrapper.cc"],
-    hdrs = ["//tensorflow/core/platform:stacktrace_handler_hdrs"],
-    module_name = "_pywrap_stacktrace_handler",
+    hdrs = [
+        "//tensorflow/core/platform:stacktrace_handler_hdrs",
+        "@tsl//tsl/platform:stacktrace_handler_hdrs",
+    ],
+    enable_stub_generation = True,
+    pytype_srcs = [
+        "_pywrap_stacktrace_handler.pyi",
+    ],
     deps = [
-        "//third_party/python_runtime:headers",
         "@pybind11",
+        "@tsl//tsl/platform:stacktrace_handler_hdrs_lib",
+        "@xla//third_party/python_runtime:headers",
+    ],
+)
+
+tf_python_pybind_extension(
+    name = "_pywrap_cpu_feature_guard",
+    srcs = ["cpu_feature_guard_wrapper.cc"],
+    enable_stub_generation = True,
+    pytype_srcs = [
+        "_pywrap_cpu_feature_guard.pyi",
+    ],
+    deps = [
+        "//tensorflow/core/platform:cpu_feature_guard_hdr",  # Only depend on header to avoid ODR issues.
+        "@pybind11",
+        "@xla//third_party/python_runtime:headers",
     ],
 )
 
 py_library(
     name = "client_testlib",
     srcs = ["test.py"],
-    srcs_version = "PY3",
+    # copybara:uncomment_begin(google-only)
+    # visibility = visibility + [
+    # "//third_party/cloud_tpu/convergence_tools:__subpackages__",
+    # "//third_party/py/tf_slim:__subpackages__",
+    # "//tensorflow:internal",
+    # "//tensorflow_models:__subpackages__",
+    # ],
+    # copybara:uncomment_end_and_comment_begin
+    visibility = [
+        "//visibility:public",
+    ],
+    # copybara:comment_end
     deps = [
         ":test",
-        "//tensorflow/python:client",
-        "//tensorflow/python:cond_v2",
-        "//tensorflow/python:framework_test_lib",
-        "//tensorflow/python:gradient_checker",
-        "//tensorflow/python:gradient_checker_v2",
-        "//tensorflow/python:util",
-        "//tensorflow/python:while_v2",
+        "//tensorflow/python/framework:test_lib",
+        "//tensorflow/python/ops:gradient_checker",
+        "//tensorflow/python/util:tf_export",
     ],
 )
 
-tf_py_test(
+py_library(
+    name = "app",
+    srcs = ["app.py"],
+    deps = [
+        ":flags",
+        "//tensorflow/python/util:_pywrap_util_port",
+        "//tensorflow/python/util:tf_export",
+        "@absl_py//absl:app",
+    ],
+)
+
+py_library(
+    name = "sysconfig",
+    srcs = ["sysconfig.py"],
+    deps = [
+        ":build_info",
+        "//tensorflow/python/client:pywrap_tf_session",
+        "//tensorflow/python/framework:versions",
+        "//tensorflow/python/util:tf_export",
+    ],
+)
+
+py_library(
+    name = "__init__",
+    srcs = ["__init__.py"],
+    deps = [
+    ],
+)
+
+py_library(
+    name = "control_imports",
+    srcs = ["control_imports.py"],
+    deps = [
+    ],
+)
+
+py_library(
+    name = "parameterized",
+    srcs = ["parameterized.py"],
+)
+
+py_library(
+    name = "remote_utils",
+    srcs = ["remote_utils.py"],
+    deps = [
+    ],
+)
+
+py_library(
+    name = "gfile",
+    srcs = ["gfile.py"],
+    # copybara:uncomment_begin(google-only)
+    # visibility = visibility,
+    # copybara:uncomment_end_and_comment_begin
+    visibility = [
+        "//visibility:public",
+    ],
+    # copybara:comment_end
+    deps = [
+        "//tensorflow/python/lib/io:file_io",
+        "//tensorflow/python/util:deprecation",
+        "//tensorflow/python/util:tf_export",
+    ],
+)
+
+py_library(
+    name = "tf_logging",
+    srcs = ["tf_logging.py"],
+    # copybara:uncomment_begin(google-only)
+    # visibility = visibility + [
+    # "//learning/brain/contrib/learn:__pkg__",
+    # "//learning/brain/mobile/lite/lstm:__pkg__",
+    # "//third_party/py/tf_keras/distribute:__pkg__",
+    # "//third_party/py/tf_keras/layers/preprocessing:__pkg__",
+    # "//third_party/py/tf_keras/models:__pkg__",
+    # "//third_party/py/tf_keras/optimizers:__pkg__",
+    # "//third_party/py/tf_keras/tests:__pkg__",
+    # "//third_party/py/tf_slim/training:__pkg__",
+    # ],
+    # copybara:uncomment_end_and_comment_begin
+    visibility = [
+        "//visibility:public",
+    ],
+    # copybara:comment_end
+    deps = [
+        "//tensorflow/python/util:tf_export",
+        "@absl_py//absl/logging",
+    ],
+)
+
+py_library(
+    name = "flags",
+    srcs = ["flags.py"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//tensorflow/python/util:tf_decorator_py",
+        "@absl_py//absl/flags",
+    ],
+)
+
+py_library(
+    name = "resource_loader",
+    srcs = ["resource_loader.py"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":tf_logging",
+        "//tensorflow/python/util:tf_export",
+        "//tensorflow/python/util:tf_inspect",
+    ] + if_oss([
+        "@rules_python//python/runfiles",
+    ]),
+)
+
+tf_py_strict_test(
     name = "build_info_test",
     size = "small",
-    srcs = [
-        "build_info.py",
-        "build_info_test.py",
-    ],
+    srcs = ["build_info_test.py"],
     main = "build_info_test.py",
-    python_version = "PY3",
+    tags = [
+        "no_pip",
+        "notap",
+    ],
+    deps = [
+        ":build_info",
+        ":client_testlib",
+        "//tensorflow/compiler/tf2tensorrt:_pywrap_py_utils",
+    ],
+)
+
+tf_py_strict_test(
+    name = "self_check_test",
+    size = "small",
+    srcs = ["self_check_test.py"],
+    main = "self_check_test.py",
     tags = [
         "no_pip",
         "notap",
     ],
     deps = [
         ":client_testlib",
-        ":platform",
+        ":self_check",
     ],
 )
 
-tf_py_test(
+tf_py_strict_test(
     name = "benchmark_test",
     size = "small",
-    srcs = [
-        "benchmark.py",
-        "benchmark_test.py",
-    ],
+    srcs = ["benchmark_test.py"],
     main = "benchmark_test.py",
-    python_version = "PY3",
     tags = [
         "no_pip",
     ],
     deps = [
+        ":benchmark",
         ":client_testlib",
-        ":platform",
+        "//tensorflow/core:protos_all_py",
     ],
 )
 
@@ -246,7 +432,10 @@ pybind_extension(
     name = "_pywrap_tf2",
     srcs = ["enable_tf2.cc"],
     hdrs = ["//tensorflow/core/platform:enable_tf2_hdr"],
-    module_name = "_pywrap_tf2",
+    enable_stub_generation = True,
+    pytype_srcs = [
+        "_pywrap_tf2.pyi",
+    ],
     deps = [
         "//tensorflow/core:lib",
         "//tensorflow/core:protos_all_cc",

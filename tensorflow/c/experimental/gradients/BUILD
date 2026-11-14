@@ -1,23 +1,33 @@
-load("//tensorflow:tensorflow.bzl", "filegroup")
-load("//tensorflow/core/platform:rules_cc.bzl", "cc_library")
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
 
-# buildifier: disable=same-origin-load
 load(
     "//tensorflow:tensorflow.bzl",
     "if_libtpu",
     "tf_cuda_cc_test",
 )
-load(
-    "//tensorflow/core/platform:build_config.bzl",
-    "tf_kernel_tests_linkstatic",
-)
+load("//tensorflow:tensorflow.default.bzl", "filegroup")
 load(
     "//tensorflow/core/platform:build_config_root.bzl",
     "tf_cuda_tests_tags",
 )
+load("//tensorflow/core/platform:rules_cc.bzl", "cc_library")
 
 # Library of gradient functions.
 package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
     licenses = ["notice"],
 )
 
@@ -46,11 +56,18 @@ cc_library(
         "//tensorflow:internal",
     ],
     deps = [
+        "//tensorflow/c/eager:abstract_context",
         "//tensorflow/c/eager:abstract_tensor_handle",
         "//tensorflow/c/eager:gradients_internal",
         "//tensorflow/c/experimental/ops:array_ops",
         "//tensorflow/c/experimental/ops:math_ops",
-        "//tensorflow/c/experimental/ops:nn_ops",
+        "//tensorflow/core:framework_types_hdr",
+        "//tensorflow/core/common_runtime/eager:attr_builder",
+        "@com_google_absl//absl/log:check",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/types:span",
+        "@xla//xla/tsl/platform:errors",
     ],
 )
 
@@ -61,7 +78,7 @@ cc_library(
         "nn_grad.h",
     ],
     visibility = [
-        "//tensorflow:internal",
+        "//tensorflow/python/framework/experimental:__pkg__",
     ],
     deps = [
         "//tensorflow/c/eager:abstract_tensor_handle",
@@ -120,7 +137,6 @@ tf_cuda_cc_test(
         "custom_gradient_test.cc",
     ],
     args = ["--heap_check="],  # TODO(b/174752220): Remove
-    linkstatic = tf_kernel_tests_linkstatic(),
     tags = tf_cuda_tests_tags(),
     deps = [
         "//tensorflow/c:tf_status_helper",
@@ -146,10 +162,7 @@ filegroup(
         "nn_grad.h",
         "not_differentiable.h",
     ],
-    visibility = [
-        "//tensorflow/core:__pkg__",
-        "//tensorflow/python:__pkg__",
-    ],
+    visibility = ["//tensorflow/python:__pkg__"],
 )
 
 cc_library(
@@ -157,9 +170,7 @@ cc_library(
     testonly = True,
     srcs = ["grad_test_helper.cc"],
     hdrs = ["grad_test_helper.h"],
-    visibility = [
-        "//tensorflow:internal",
-    ],
+    visibility = ["//visibility:private"],
     deps = [
         "//tensorflow/c/eager:gradient_checker",
         "//tensorflow/c/eager:gradients_internal",
@@ -177,7 +188,6 @@ tf_cuda_cc_test(
         "nn_grad_test.cc",
     ],
     args = ["--heap_check="],  # TODO(b/174752220): Remove
-    linkstatic = tf_kernel_tests_linkstatic(),
     tags = tf_cuda_tests_tags() + ["no_cuda_asan"],  # b/173654156,
     deps = [
         ":grad_test_helper",
@@ -188,9 +198,9 @@ tf_cuda_cc_test(
         "//tensorflow/c/eager:unified_api_testutil",
         "//tensorflow/c/experimental/gradients/tape:tape_context",
         "//tensorflow/c/experimental/ops:nn_ops",
-        "//tensorflow/core/platform:tensor_float_32_utils",
         "//tensorflow/core:test",
         "//tensorflow/core:test_main",
+        "//tensorflow/core/platform:tensor_float_32_utils",
     ] + if_libtpu(
         if_false = ["//tensorflow/compiler/mlir/tensorflow/c:mlir_c_api_registration"],
         if_true = [],
@@ -204,20 +214,28 @@ tf_cuda_cc_test(
         "math_grad_test.cc",
     ],
     args = ["--heap_check="],  # TODO(b/174752220): Remove
-    linkstatic = tf_kernel_tests_linkstatic(),
     tags = tf_cuda_tests_tags() + ["no_cuda_asan"],  # b/173654156,
     deps = [
         ":grad_test_helper",
         ":math_grad",
+        "//tensorflow/c:tf_datatype_hdrs",
+        "//tensorflow/c:tf_status",
         "//tensorflow/c:tf_status_helper",
+        "//tensorflow/c/eager:abstract_context",
+        "//tensorflow/c/eager:abstract_tensor_handle",
+        "//tensorflow/c/eager:c_api_experimental",
         "//tensorflow/c/eager:c_api_test_util",
         "//tensorflow/c/eager:c_api_unified_internal",
+        "//tensorflow/c/eager:gradients_internal",
         "//tensorflow/c/eager:unified_api_testutil",
         "//tensorflow/c/experimental/gradients/tape:tape_context",
         "//tensorflow/c/experimental/ops:math_ops",
-        "//tensorflow/core/platform:tensor_float_32_utils",
         "//tensorflow/core:test",
         "//tensorflow/core:test_main",
+        "//tensorflow/core/platform:errors",
+        "//tensorflow/core/platform:tensor_float_32_utils",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/types:span",
     ] + if_libtpu(
         if_false = ["//tensorflow/compiler/mlir/tensorflow/c:mlir_c_api_registration"],
         if_true = [],
@@ -231,20 +249,19 @@ tf_cuda_cc_test(
         "array_grad_test.cc",
     ],
     args = ["--heap_check="],  # TODO(b/174752220): Remove
-    linkstatic = tf_kernel_tests_linkstatic(),
     tags = tf_cuda_tests_tags() + ["no_cuda_asan"],  # b/173654156,
     deps = [
-        ":grad_test_helper",
         ":array_grad",
+        ":grad_test_helper",
         "//tensorflow/c:tf_status_helper",
         "//tensorflow/c/eager:c_api_test_util",
-        "//tensorflow/c/experimental/gradients/tape:tape_context",
-        "//tensorflow/c/experimental/ops:array_ops",
-        "//tensorflow/core/platform:tensor_float_32_utils",
-        "//tensorflow/core:test",
-        "//tensorflow/core:test_main",
         "//tensorflow/c/eager:c_api_unified_internal",
         "//tensorflow/c/eager:unified_api_testutil",
+        "//tensorflow/c/experimental/gradients/tape:tape_context",
+        "//tensorflow/c/experimental/ops:array_ops",
+        "//tensorflow/core:test",
+        "//tensorflow/core:test_main",
+        "//tensorflow/core/platform:tensor_float_32_utils",
     ] + if_libtpu(
         if_false = ["//tensorflow/compiler/mlir/tensorflow/c:mlir_c_api_registration"],
         if_true = [],

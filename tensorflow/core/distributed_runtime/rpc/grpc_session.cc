@@ -40,11 +40,11 @@ const size_t kSchemePrefixLength = strlen(kSchemePrefix);
 GrpcSession::GrpcSession(const SessionOptions& options)
     : options_(options), current_graph_version_(-1) {}
 
-GrpcSession::~GrpcSession() {}
+GrpcSession::~GrpcSession() = default;
 
 /* static */
-Status GrpcSession::Create(const SessionOptions& options,
-                           std::unique_ptr<GrpcSession>* out_session) {
+absl::Status GrpcSession::Create(const SessionOptions& options,
+                                 std::unique_ptr<GrpcSession>* out_session) {
   std::unique_ptr<GrpcSession> session(new GrpcSession(options));
   std::unique_ptr<MasterInterface> master;
   // For testing, we enable the client to disable the use of the local
@@ -63,7 +63,7 @@ Status GrpcSession::Create(const SessionOptions& options,
   }
   session->SetRemoteMaster(std::move(master));
   *out_session = std::move(session);
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 namespace {
@@ -96,27 +96,28 @@ void ReEncodeConsts(GraphDef* gdef) {
 }
 }  // namespace
 
-void GrpcSession::SetHandleAndGraphVersion(string handle,
+void GrpcSession::SetHandleAndGraphVersion(std::string handle,
                                            int64_t graph_version) {
   mutex_lock l(mu_);
   handle_ = std::move(handle);
   current_graph_version_ = graph_version;
 }
 
-Status GrpcSession::Handle(string* out_handle) {
+absl::Status GrpcSession::Handle(std::string* out_handle) {
   mutex_lock l(mu_);
   if (handle_.empty()) {
-    return errors::InvalidArgument("A session is not created yet....");
+    return absl::InvalidArgumentError("A session is not created yet....");
   }
   *out_handle = handle_;
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-Status GrpcSession::CreateImpl(CallOptions* call_options, GraphDef graph) {
+absl::Status GrpcSession::CreateImpl(CallOptions* call_options,
+                                     GraphDef graph) {
   {
     mutex_lock l(mu_);
     if (!handle_.empty()) {
-      return errors::InvalidArgument("A session is alive.");
+      return absl::InvalidArgumentError("A session is alive.");
     }
   }
   CreateSessionRequest req;
@@ -125,35 +126,37 @@ Status GrpcSession::CreateImpl(CallOptions* call_options, GraphDef graph) {
   req.set_target(options_.target);
   ReEncodeConsts(req.mutable_graph_def());
   CreateSessionResponse resp;
-  Status s = master_->CreateSession(call_options, &req, &resp);
+  absl::Status s = master_->CreateSession(call_options, &req, &resp);
   if (s.ok()) {
     SetHandleAndGraphVersion(resp.session_handle(), resp.graph_version());
   }
   return s;
 }
 
-Status GrpcSession::Create(const GraphDef& graph) {
+absl::Status GrpcSession::Create(const GraphDef& graph) {
   return Create(GraphDef(graph));
 }
 
-Status GrpcSession::Create(const RunOptions& run_options,
-                           const GraphDef& graph) {
+absl::Status GrpcSession::Create(const RunOptions& run_options,
+                                 const GraphDef& graph) {
   return Create(run_options, GraphDef(graph));
 }
 
-Status GrpcSession::Create(GraphDef&& graph) {
+absl::Status GrpcSession::Create(GraphDef&& graph) {
   CallOptions call_options;
   call_options.SetTimeout(options_.config.operation_timeout_in_ms());
   return CreateImpl(&call_options, std::move(graph));
 }
 
-Status GrpcSession::Create(const RunOptions& run_options, GraphDef&& graph) {
+absl::Status GrpcSession::Create(const RunOptions& run_options,
+                                 GraphDef&& graph) {
   CallOptions call_options;
   call_options.SetTimeout(run_options.timeout_in_ms());
   return CreateImpl(&call_options, std::move(graph));
 }
 
-Status GrpcSession::ExtendImpl(CallOptions* call_options, GraphDef graph) {
+absl::Status GrpcSession::ExtendImpl(CallOptions* call_options,
+                                     GraphDef graph) {
   bool handle_is_empty;
   {
     mutex_lock l(mu_);
@@ -169,40 +172,42 @@ Status GrpcSession::ExtendImpl(CallOptions* call_options, GraphDef graph) {
   req.mutable_graph_def()->Swap(&graph);
   req.set_current_graph_version(current_graph_version_);
   ExtendSessionResponse resp;
-  Status s = master_->ExtendSession(call_options, &req, &resp);
+  absl::Status s = master_->ExtendSession(call_options, &req, &resp);
   if (s.ok()) {
     current_graph_version_ = resp.new_graph_version();
   }
   return s;
 }
 
-Status GrpcSession::Extend(const GraphDef& graph) {
+absl::Status GrpcSession::Extend(const GraphDef& graph) {
   return Extend(GraphDef(graph));
 }
 
-Status GrpcSession::Extend(const RunOptions& run_options,
-                           const GraphDef& graph) {
+absl::Status GrpcSession::Extend(const RunOptions& run_options,
+                                 const GraphDef& graph) {
   return Extend(run_options, GraphDef(graph));
 }
 
-Status GrpcSession::Extend(GraphDef&& graph) {
+absl::Status GrpcSession::Extend(GraphDef&& graph) {
   CallOptions call_options;
   call_options.SetTimeout(options_.config.operation_timeout_in_ms());
   return ExtendImpl(&call_options, std::move(graph));
 }
 
-Status GrpcSession::Extend(const RunOptions& run_options, GraphDef&& graph) {
+absl::Status GrpcSession::Extend(const RunOptions& run_options,
+                                 GraphDef&& graph) {
   CallOptions call_options;
   call_options.SetTimeout(run_options.timeout_in_ms());
   return ExtendImpl(&call_options, std::move(graph));
 }
 
-Status GrpcSession::RunHelper(
+absl::Status GrpcSession::RunHelper(
     const RunOptions& run_options,
-    const std::vector<std::pair<string, Tensor>>& inputs,
-    const std::vector<string>& output_tensor_names,
-    const std::vector<string>& target_node_names, std::vector<Tensor>* outputs,
-    RunMetadata* run_metadata, const string& prun_handle) {
+    const std::vector<std::pair<std::string, Tensor>>& inputs,
+    const std::vector<std::string>& output_tensor_names,
+    const std::vector<std::string>& target_node_names,
+    std::vector<Tensor>* outputs, RunMetadata* run_metadata,
+    const std::string& prun_handle) {
   // Convert to proto
   std::unique_ptr<MutableRunStepRequestWrapper> req(
       master_->CreateRunStepRequest());
@@ -229,14 +234,14 @@ Status GrpcSession::RunHelper(
 
   // Build an index from fetch tensor name to first index in
   // output_tensor_names.
-  std::unordered_map<string, int> output_name_to_offset;
+  std::unordered_map<std::string, int> output_name_to_offset;
   for (int i = 0, end = output_tensor_names.size(); i < end; ++i) {
-    const string& name = output_tensor_names[i];
+    const std::string& name = output_tensor_names[i];
     if (output_name_to_offset.insert(std::make_pair(name, i)).second) {
       req->add_fetch(name);
     }
   }
-  for (const string& target : target_node_names) {
+  for (const std::string& target : target_node_names) {
     req->add_target(target);
   }
 
@@ -245,7 +250,7 @@ Status GrpcSession::RunHelper(
   TF_RETURN_IF_ERROR(RunProto(&call_options, req.get(), resp.get()));
 
   // Look for an extended error returned in the response body.
-  if (resp->status_code() != error::Code::OK) {
+  if (resp->status_code() != absl::StatusCode::kOk) {
     return resp->status();
   }
 
@@ -257,8 +262,8 @@ Status GrpcSession::RunHelper(
   for (size_t i = 0; i < resp->num_tensors(); ++i) {
     auto fetch_it = output_name_to_offset.find(resp->tensor_name(i));
     if (fetch_it == output_name_to_offset.end()) {
-      return errors::Internal("Received response for unrequested fetch: ",
-                              resp->tensor_name(i));
+      return absl::InternalError(absl::StrCat(
+          "Received response for unrequested fetch: ", resp->tensor_name(i)));
     }
 
     Tensor output;
@@ -269,7 +274,7 @@ Status GrpcSession::RunHelper(
   // the duplicate values.
   if (output_name_to_offset.size() != output_tensor_names.size()) {
     for (int i = 0, end = output_tensor_names.size(); i < end; ++i) {
-      const string& name = output_tensor_names[i];
+      const std::string& name = output_tensor_names[i];
       int offset = output_name_to_offset[name];
       if (offset != i) {
         (*outputs)[i] = (*outputs)[offset];
@@ -281,79 +286,81 @@ Status GrpcSession::RunHelper(
     run_metadata->Swap(resp->mutable_metadata());
   }
 
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-Status GrpcSession::Run(const RunOptions& run_options,
-                        const std::vector<std::pair<string, Tensor>>& inputs,
-                        const std::vector<string>& output_tensor_names,
-                        const std::vector<string>& target_node_names,
-                        std::vector<Tensor>* outputs,
-                        RunMetadata* run_metadata) {
+absl::Status GrpcSession::Run(
+    const RunOptions& run_options,
+    const std::vector<std::pair<std::string, Tensor>>& inputs,
+    const std::vector<std::string>& output_tensor_names,
+    const std::vector<std::string>& target_node_names,
+    std::vector<Tensor>* outputs, RunMetadata* run_metadata) {
   return RunHelper(run_options, inputs, output_tensor_names, target_node_names,
                    outputs, run_metadata, /* prun_handle */ "");
 }
 
-Status GrpcSession::Run(const std::vector<std::pair<string, Tensor>>& inputs,
-                        const std::vector<string>& output_tensor_names,
-                        const std::vector<string>& target_node_names,
-                        std::vector<Tensor>* outputs) {
+absl::Status GrpcSession::Run(
+    const std::vector<std::pair<std::string, Tensor>>& inputs,
+    const std::vector<std::string>& output_tensor_names,
+    const std::vector<std::string>& target_node_names,
+    std::vector<Tensor>* outputs) {
   RunOptions run_options;
   run_options.set_timeout_in_ms(options_.config.operation_timeout_in_ms());
   return Run(run_options, inputs, output_tensor_names, target_node_names,
              outputs, nullptr);
 }
 
-Status GrpcSession::RunProto(CallOptions* call_options,
-                             MutableRunStepRequestWrapper* req,
-                             MutableRunStepResponseWrapper* resp) {
-  string handle;
+absl::Status GrpcSession::RunProto(CallOptions* call_options,
+                                   MutableRunStepRequestWrapper* req,
+                                   MutableRunStepResponseWrapper* resp) {
+  std::string handle;
   TF_RETURN_IF_ERROR(Handle(&handle));
   req->set_session_handle(handle);
   return master_->RunStep(call_options, req, resp);
 }
 
-Status GrpcSession::PRunSetup(const std::vector<string>& input_names,
-                              const std::vector<string>& output_names,
-                              const std::vector<string>& target_nodes,
-                              string* handle) {
+absl::Status GrpcSession::PRunSetup(
+    const std::vector<std::string>& input_names,
+    const std::vector<std::string>& output_names,
+    const std::vector<std::string>& target_nodes, std::string* handle) {
   // Convert to proto
   PartialRunSetupRequest req;
   PartialRunSetupResponse resp;
   CallOptions call_options;
   TF_RETURN_IF_ERROR(Handle(req.mutable_session_handle()));
-  for (const string& feed : input_names) {
+  for (const std::string& feed : input_names) {
     req.add_feed(feed);
   }
-  for (const string& fetch : output_names) {
+  for (const std::string& fetch : output_names) {
     req.add_fetch(fetch);
   }
-  for (const string& target : target_nodes) {
+  for (const std::string& target : target_nodes) {
     req.add_target(target);
   }
   if (!is_local_) req.set_request_id(GetUniqueRequestId());
   call_options.SetTimeout(options_.config.operation_timeout_in_ms());
   TF_RETURN_IF_ERROR(master_->PartialRunSetup(&call_options, &req, &resp));
   *handle = resp.partial_run_handle();
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-Status GrpcSession::PRun(const string& handle,
-                         const std::vector<std::pair<string, Tensor>>& inputs,
-                         const std::vector<string>& output_names,
-                         std::vector<Tensor>* outputs) {
+absl::Status GrpcSession::PRun(
+    const std::string& handle,
+    const std::vector<std::pair<std::string, Tensor>>& inputs,
+    const std::vector<std::string>& output_names,
+    std::vector<Tensor>* outputs) {
   RunOptions run_options;
   run_options.set_timeout_in_ms(options_.config.operation_timeout_in_ms());
   return RunHelper(run_options, inputs, output_names, /* targets */ {}, outputs,
                    /* run_metadata */ nullptr, handle);
 }
 
-Status GrpcSession::Close() {
+absl::Status GrpcSession::Close() {
   CloseSessionRequest req;
   {
     mutex_lock l(mu_);
     if (handle_.empty()) {
-      return Status::OK();
+      return absl::OkStatus();
     }
     req.set_session_handle(handle_);
     handle_.clear();
@@ -364,7 +371,7 @@ Status GrpcSession::Close() {
   return master_->CloseSession(&call_options, &req, &resp);
 }
 
-Status GrpcSession::ListDevices(std::vector<DeviceAttributes>* response) {
+absl::Status GrpcSession::ListDevices(std::vector<DeviceAttributes>* response) {
   ListDevicesRequest req;
   {
     mutex_lock l(mu_);
@@ -384,7 +391,7 @@ Status GrpcSession::ListDevices(std::vector<DeviceAttributes>* response) {
   ListDevicesResponse resp;
   CallOptions call_options;
   call_options.SetTimeout(options_.config.operation_timeout_in_ms());
-  Status s = master_->ListDevices(&call_options, &req, &resp);
+  absl::Status s = master_->ListDevices(&call_options, &req, &resp);
   if (!s.ok()) {
     LOG(ERROR) << "Could not list devices: " << s;
     return s;
@@ -398,7 +405,7 @@ Status GrpcSession::ListDevices(std::vector<DeviceAttributes>* response) {
   for (const auto& device_attr : resp.remote_device()) {
     response->emplace_back(device_attr);
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 void GrpcSession::SetRemoteMaster(std::unique_ptr<MasterInterface> master) {
@@ -406,8 +413,8 @@ void GrpcSession::SetRemoteMaster(std::unique_ptr<MasterInterface> master) {
 }
 
 // Static method.
-Status GrpcSession::Reset(const SessionOptions& options,
-                          const std::vector<string>& containers) {
+absl::Status GrpcSession::Reset(const SessionOptions& options,
+                                const std::vector<std::string>& containers) {
   SharedGrpcChannelPtr master_channel;
   TF_RETURN_IF_ERROR(
       NewHostPortGrpcChannel(options.target.substr(kSchemePrefixLength),
@@ -419,13 +426,13 @@ Status GrpcSession::Reset(const SessionOptions& options,
   ResetResponse resp;
   CallOptions call_options;
   call_options.SetTimeout(options.config.operation_timeout_in_ms());
-  Status ret = master->Reset(&call_options, &req, &resp);
+  absl::Status ret = master->Reset(&call_options, &req, &resp);
   delete master;
   return ret;
 }
 
-Status GrpcSession::MakeCallable(const CallableOptions& callable_options,
-                                 CallableHandle* out_handle) {
+absl::Status GrpcSession::MakeCallable(const CallableOptions& callable_options,
+                                       CallableHandle* out_handle) {
   MakeCallableRequest req;
   TF_RETURN_IF_ERROR(Handle(req.mutable_session_handle()));
   *req.mutable_options() = callable_options;
@@ -435,13 +442,13 @@ Status GrpcSession::MakeCallable(const CallableOptions& callable_options,
   call_options.SetTimeout(options_.config.operation_timeout_in_ms());
   TF_RETURN_IF_ERROR(master_->MakeCallable(&call_options, &req, &resp));
   *out_handle = resp.handle();
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-Status GrpcSession::RunCallable(CallableHandle handle,
-                                const std::vector<Tensor>& feed_tensors,
-                                std::vector<Tensor>* fetch_tensors,
-                                RunMetadata* run_metadata) {
+absl::Status GrpcSession::RunCallable(CallableHandle handle,
+                                      const std::vector<Tensor>& feed_tensors,
+                                      std::vector<Tensor>* fetch_tensors,
+                                      RunMetadata* run_metadata) {
   RunCallableRequest req;
   TF_RETURN_IF_ERROR(Handle(req.mutable_session_handle()));
   req.set_handle(handle);
@@ -457,15 +464,15 @@ Status GrpcSession::RunCallable(CallableHandle handle,
   for (const TensorProto& fetch : resp.fetch()) {
     Tensor fetch_tensor;
     if (!fetch_tensor.FromProto(cpu_allocator(), fetch)) {
-      return errors::Internal(
+      return absl::InternalError(
           "Could not parse fetched tensor data in response from master.");
     }
     fetch_tensors->push_back(std::move(fetch_tensor));
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-Status GrpcSession::ReleaseCallable(CallableHandle handle) {
+absl::Status GrpcSession::ReleaseCallable(CallableHandle handle) {
   ReleaseCallableRequest req;
   TF_RETURN_IF_ERROR(Handle(req.mutable_session_handle()));
   req.set_handle(handle);
@@ -481,17 +488,17 @@ class GrpcSessionFactory : public SessionFactory {
     return absl::StartsWith(options.target, kSchemePrefix);
   }
 
-  Status NewSession(const SessionOptions& options,
-                    Session** out_session) override {
+  absl::Status NewSession(const SessionOptions& options,
+                          Session** out_session) override {
     std::unique_ptr<GrpcSession> session;
     TF_RETURN_IF_ERROR(GrpcSession::Create(options, &session));
     *out_session = session.release();
-    return Status::OK();
+    return absl::OkStatus();
   }
 
   // Invokes the session specific static method to reset containers.
-  Status Reset(const SessionOptions& options,
-               const std::vector<string>& containers) override {
+  absl::Status Reset(const SessionOptions& options,
+                     const std::vector<std::string>& containers) override {
     return GrpcSession::Reset(options, containers);
   }
 };

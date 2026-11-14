@@ -15,6 +15,11 @@ limitations under the License.
 #ifndef TENSORFLOW_CORE_COMMON_RUNTIME_EAGER_EAGER_OP_REWRITE_REGISTRY_H_
 #define TENSORFLOW_CORE_COMMON_RUNTIME_EAGER_EAGER_OP_REWRITE_REGISTRY_H_
 
+#include <array>
+#include <list>
+#include <memory>
+#include <utility>
+
 #include "tensorflow/core/common_runtime/eager/eager_operation.h"
 
 namespace tensorflow {
@@ -23,21 +28,22 @@ namespace tensorflow {
 // implement the Run method.
 class EagerOpRewrite {
  public:
-  EagerOpRewrite(string name, string file, string line) {
+  EagerOpRewrite(std::string name, std::string file, std::string line) {
     debug_info_.name = name;
     debug_info_.file = file;
     debug_info_.line = line;
   }
 
-  virtual ~EagerOpRewrite() {}
+  virtual ~EagerOpRewrite() = default;
 
   // To be implemented by an Eager op rewrite pass.
-  virtual Status Run(EagerOperation* orig_op,
-                     std::unique_ptr<tensorflow::EagerOperation>* out_op) = 0;
+  virtual absl::Status Run(
+      EagerOperation* orig_op,
+      std::unique_ptr<tensorflow::EagerOperation>* out_op) = 0;
 
   // Holds information about the rewrite registration.
   struct DebugInfo {
-    string name, file, line;
+    std::string name, file, line;
   };
 
   // Returns information about the registered Eager op rewrite.
@@ -60,8 +66,8 @@ class EagerOpRewriteRegistry {
                 std::unique_ptr<EagerOpRewrite> pass);
 
   // Run the rewrite pass registered for a given phase.
-  Status RunRewrite(Phase phase, EagerOperation* orig_op,
-                    std::unique_ptr<tensorflow::EagerOperation>* out_op);
+  absl::Status RunRewrite(Phase phase, EagerOperation* orig_op,
+                          std::unique_ptr<tensorflow::EagerOperation>* out_op);
 
   // Returns the global registry of rewrite passes.
   static EagerOpRewriteRegistry* Global();
@@ -69,7 +75,7 @@ class EagerOpRewriteRegistry {
  private:
   static constexpr int32_t kNumPhases = 2;
   // Holds all the registered Eager op rewrites and their ordinal numbers.
-  std::array<std::list<std::pair<std::unique_ptr<EagerOpRewrite>, int32>>,
+  std::array<std::list<std::pair<std::unique_ptr<EagerOpRewrite>, int32_t>>,
              kNumPhases>
       rewrites_;
 };

@@ -23,10 +23,13 @@ limitations under the License.
 #include <vector>
 
 #include "absl/container/flat_hash_set.h"
+#include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
 #include "tensorflow/core/common_runtime/device.h"
 #include "tensorflow/core/framework/allocator.h"
 #include "tensorflow/core/framework/attr_value.pb.h"
+#include "tensorflow/core/framework/full_type.pb.h"
 #include "tensorflow/core/framework/node_def.pb.h"
 #include "tensorflow/core/framework/op.h"
 #include "tensorflow/core/framework/tensor.pb.h"
@@ -54,23 +57,24 @@ namespace tensorflow {
 namespace grappler {
 namespace {
 
-using TensorVector = gtl::InlinedVector<TensorValue, 4>;
+using TensorVector = absl::InlinedVector<TensorValue, 4UL>;
 
 class LoopInvariantNodeMotionOptimizer {
  public:
   explicit LoopInvariantNodeMotionOptimizer(GraphDef* optimized_graph)
       : optimized_graph_(optimized_graph) {}
   virtual ~LoopInvariantNodeMotionOptimizer() = default;
-  Status Optimize();
+  absl::Status Optimize();
 
  private:
-  Status FindInvariantNodes(NodeDef* node);
-  Status RevertInvariantNodes();
-  Status MoveInvariantNodes(const int frame_id);
-  Status HandleInvariantNode(NodeDef* node, const int num_outputs,
-                             const int frame_id);
-  Status HandleConst(NodeDef* node, const int num_outputs, const int frame_id);
-  Status HandleInvariantEnter(NodeDef* node, const int num_outputs);
+  absl::Status FindInvariantNodes(NodeDef* node);
+  absl::Status RevertInvariantNodes();
+  absl::Status MoveInvariantNodes(const int frame_id);
+  absl::Status HandleInvariantNode(NodeDef* node, const int num_outputs,
+                                   const int frame_id);
+  absl::Status HandleConst(NodeDef* node, const int num_outputs,
+                           const int frame_id);
+  absl::Status HandleInvariantEnter(NodeDef* node, const int num_outputs);
 
   GraphDef* optimized_graph_;  // Not owned.
   std::unique_ptr<NodeMap> node_map_;
@@ -83,11 +87,11 @@ class LoopInvariantNodeMotionOptimizer {
   int new_enter_id_;
 };
 
-Status LoopInvariantNodeMotionOptimizer::HandleInvariantEnter(
+absl::Status LoopInvariantNodeMotionOptimizer::HandleInvariantEnter(
     NodeDef* node, const int num_outputs) {
   auto consumers = node_map_->GetOutputs(node->name());
-  std::vector<string> enter_control_inputs;
-  string enter_input;
+  std::vector<std::string> enter_control_inputs;
+  std::string enter_input;
   for (auto& input : node->input()) {
     if (IsControlInput(input)) {
       enter_control_inputs.push_back(input);
@@ -110,12 +114,11 @@ Status LoopInvariantNodeMotionOptimizer::HandleInvariantEnter(
       }
     }
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-Status LoopInvariantNodeMotionOptimizer::HandleConst(NodeDef* node,
-                                                     const int num_outputs,
-                                                     const int frame_id) {
+absl::Status LoopInvariantNodeMotionOptimizer::HandleConst(
+    NodeDef* node, const int num_outputs, const int frame_id) {
   NodeDef* const_node = nullptr;
   if (num_outputs == 0) {
     // all successor nodes are invariant
@@ -128,7 +131,7 @@ Status LoopInvariantNodeMotionOptimizer::HandleConst(NodeDef* node,
     // some successor nodes are variant
     // Have to keep the const node in the frame,
     // so create a new one outside the frame (in parent frame)
-    const string const_node_name =
+    const std::string const_node_name =
         AddPrefixToNodeName(node->name(), kLoopOptimizer);
     const_node = node_map_->GetNode(const_node_name);
     if (const_node == nullptr) {
@@ -161,8 +164,8 @@ Status LoopInvariantNodeMotionOptimizer::HandleConst(NodeDef* node,
     int parent_id = frame_parent_[frame_id];
     auto loop_cond_it = loop_cond_.find(parent_id);
     if (loop_cond_it == loop_cond_.end()) {
-      return errors::InvalidArgument("Frame ", frame_id,
-                                     " doesn't have a LoopCond node");
+      return absl::InvalidArgumentError(
+          absl::StrCat("Frame ", frame_id, " doesn't have a LoopCond node"));
     }
     auto& loop_cond_name = loop_cond_it->second->name();
     NodeDef* switch_node = nullptr;
@@ -173,20 +176,36 @@ Status LoopInvariantNodeMotionOptimizer::HandleConst(NodeDef* node,
       }
     }
     if (!switch_node) {
-      return errors::InvalidArgument("LoopCond node of Frame ", frame_id,
-                                     " doesn't connect to any Switch node");
+      return absl::InvalidArgumentError(
+          absl::StrCat("LoopCond node of Frame ", frame_id,
+                       " doesn't connect to any Switch node"));
     }
-    string switch_output = StrCat(switch_node->name(), ":1");
-    const string ctrl_dep = ConstantFolding::AddControlDependency(
+    std::string switch_output = absl::StrCat(switch_node->name(), ":1");
+    const std::string ctrl_dep = ConstantFolding::AddControlDependency(
         switch_output, optimized_graph_, node_map_.get());
     const_node->add_input(ctrl_dep);
     node_map_->AddOutput(NodeName(ctrl_dep), const_node->name());
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-Status LoopInvariantNodeMotionOptimizer::HandleInvariantNode(
+absl::Status LoopInvariantNodeMotionOptimizer::HandleInvariantNode(
     NodeDef* node, const int num_outputs, const int frame_id) {
+  int piterations = 0;
+  std::string fname;
+  if (num_outputs > 0) {
+    const auto& enter_attr = invariant_enters_[frame_id][0]->attr();
+    const auto piter_it = enter_attr.find("parallel_iterations");
+    if (piter_it == enter_attr.end() ||
+        piter_it->second.value_case() != AttrValue::kI ||
+        piter_it->second.i() <= 0 ||
+        piter_it->second.i() > std::numeric_limits<int>::max()) {
+      return absl::InvalidArgumentError(
+          "Invariant Enter node is missing positive parallel_iterations");
+    }
+    fname = enter_attr.at("frame_name").s();
+    piterations = static_cast<int>(piter_it->second.i());
+  }
   // have to remove control inputs to the invariant node from the same frame
   // when moving this node out of this frame
   for (int i = 0; i < node->input_size(); ++i) {
@@ -196,7 +215,7 @@ Status LoopInvariantNodeMotionOptimizer::HandleInvariantNode(
     }
   }
   if (num_outputs == 0) {
-    return Status::OK();
+    return absl::OkStatus();
   }
 
   DataTypeVector input_types;
@@ -208,28 +227,30 @@ Status LoopInvariantNodeMotionOptimizer::HandleInvariantNode(
                                        &output_types));
 
   auto consumers = node_map_->GetOutputs(node->name());
-  string fname = invariant_enters_[frame_id][0]->attr().at("frame_name").s();
-  int piterations =
-      invariant_enters_[frame_id][0]->attr().at("parallel_iterations").i();
   for (auto* consumer : consumers) {
     if (!invariant_nodes_.count(consumer)) {
       for (int i = 0; i < consumer->input_size(); ++i) {
         int port;
-        string node_name = ParseNodeName(consumer->input(i), &port);
+        std::string node_name = ParseNodeName(consumer->input(i), &port);
         if (node_name != node->name()) {
           continue;
         }
         if (port < 0) {
-          return errors::InvalidArgument(
+          return absl::InvalidArgumentError(
               "Invariant node should not have control outputs "
               "to variant node");
+        }
+        if (port >= static_cast<int>(output_types.size())) {
+          return absl::InvalidArgumentError(
+              absl::StrCat("Invariant node output port ", port,
+                           " out of range for ", node->name()));
         }
         DataType output_type = output_types[port];
         NodeDef* new_enter = optimized_graph_->add_node();
         new_enter->set_op("Enter");
         new_enter->set_device(node->device());
         new_enter->set_name(AddPrefixToNodeName(
-            StrCat(fname, "_enter_", new_enter_id_++), kLoopOptimizer));
+            absl::StrCat(fname, "_enter_", new_enter_id_++), kLoopOptimizer));
         AttrValue data_type;
         data_type.set_type(output_type);
         new_enter->mutable_attr()->insert({"T", data_type});
@@ -251,10 +272,10 @@ Status LoopInvariantNodeMotionOptimizer::HandleInvariantNode(
       }
     }
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-Status LoopInvariantNodeMotionOptimizer::MoveInvariantNodes(
+absl::Status LoopInvariantNodeMotionOptimizer::MoveInvariantNodes(
     const int frame_id) {
   for (auto iter = invariant_nodes_.begin(); iter != invariant_nodes_.end();
        ++iter) {
@@ -269,10 +290,10 @@ Status LoopInvariantNodeMotionOptimizer::MoveInvariantNodes(
           HandleInvariantNode(invariant_node, num_outputs, frame_id));
     }
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-Status LoopInvariantNodeMotionOptimizer::RevertInvariantNodes() {
+absl::Status LoopInvariantNodeMotionOptimizer::RevertInvariantNodes() {
   std::deque<const NodeDef*> reverted_nodes;
   for (auto iter = invariant_nodes_.begin(); iter != invariant_nodes_.end();) {
     bool erased = false;
@@ -326,10 +347,10 @@ Status LoopInvariantNodeMotionOptimizer::RevertInvariantNodes() {
       }
     }
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-Status LoopInvariantNodeMotionOptimizer::FindInvariantNodes(
+absl::Status LoopInvariantNodeMotionOptimizer::FindInvariantNodes(
     NodeDef* start_node) {
   std::vector<NodeDef*> stack;
   stack.reserve(32);
@@ -346,7 +367,7 @@ Status LoopInvariantNodeMotionOptimizer::FindInvariantNodes(
       bool is_invariant = true;
       for (const auto& input : consumer->input()) {
         if (!IsControlInput(input)) {
-          const string name = NodeName(input);
+          const std::string name = NodeName(input);
           auto* producer = node_map_->GetNode(name);
           if (!invariant_nodes_.count(producer)) {
             if (IsConstant(*producer)) {
@@ -375,10 +396,10 @@ Status LoopInvariantNodeMotionOptimizer::FindInvariantNodes(
       }
     }
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-Status LoopInvariantNodeMotionOptimizer::Optimize() {
+absl::Status LoopInvariantNodeMotionOptimizer::Optimize() {
   node_map_.reset(new NodeMap(optimized_graph_));
   FrameView frame_view;
   // TODO(ezhulenev): Use GraphView when migrated from NodeMap.
@@ -404,14 +425,14 @@ Status LoopInvariantNodeMotionOptimizer::Optimize() {
       frame_children_[frame_ids.back()] = empty_set_;
       if (node.op() == "LoopCond") {
         if (loop_cond_.count(frame_ids.back())) {
-          return errors::InvalidArgument(
-              "Loop ", frame_ids.back(),
-              " has more than one LoopCond node: ", node.name(), " and ",
-              loop_cond_[frame_ids.back()]->name());
+          return absl::InvalidArgumentError(absl::StrCat(
+              "Loop ", frame_ids.back(), " has more than one LoopCond node: ",
+              node.name(), " and ", loop_cond_[frame_ids.back()]->name()));
         }
         loop_cond_[frame_ids.back()] = &node;
       }
-      if (IsEnter(node) && node.attr().at("is_constant").b()) {
+      if (IsEnter(node) && node.attr().contains("is_constant") &&
+          node.attr().at("is_constant").b()) {
         invariant_enters_[frame_ids.back()].push_back(
             const_cast<NodeDef*>(&node));
       }
@@ -449,15 +470,16 @@ Status LoopInvariantNodeMotionOptimizer::Optimize() {
 
     TF_RETURN_IF_ERROR(MoveInvariantNodes(frame_id));
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 std::vector<int> GetStackPushNodesToConvert(
     const GraphTopologyView& graph_view,
-    const std::unordered_set<string>& nodes_to_preserve, int stack_node_idx) {
+    const std::unordered_set<std::string>& nodes_to_preserve,
+    int stack_node_idx) {
   VLOG(1) << "Stack node: " << graph_view.graph()->node(stack_node_idx).name();
 
-  const std::unordered_set<string> op_types_to_traverse(
+  const std::unordered_set<std::string> op_types_to_traverse(
       {"Stack", "StackV2", "Enter", "RefEnter", "Switch", "RefSwitch",
        "_SwitchN", "Identity", "RefIdentity"});
   const auto is_op_to_traverse = [&](const NodeDef* node) -> bool {
@@ -515,8 +537,9 @@ std::vector<int> GetStackPushNodesToConvert(
   return nodes_to_convert;
 }
 
-Status RemoveStackOps(const std::unordered_set<string>& nodes_to_preserve,
-                      GraphDef* optimized_graph) {
+absl::Status RemoveStackOps(
+    const std::unordered_set<std::string>& nodes_to_preserve,
+    GraphDef* optimized_graph) {
   NodeMap node_map(optimized_graph);
   GraphTopologyView graph_view;
   TF_RETURN_IF_ERROR(graph_view.InitializeFromGraph(*optimized_graph));
@@ -536,14 +559,14 @@ Status RemoveStackOps(const std::unordered_set<string>& nodes_to_preserve,
         }
         push_node->set_op("Identity");
         push_node->mutable_input()->SwapElements(0, 1);
-        const string ctrl_dep = ConstantFolding::AddControlDependency(
+        const std::string ctrl_dep = ConstantFolding::AddControlDependency(
             push_node->input(1), optimized_graph, &node_map);
         push_node->set_input(1, ctrl_dep);
         VLOG(1) << "After converting: " << push_node->DebugString();
       }
     }
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 bool IsSimpleBinaryOperator(const NodeDef& node) {
@@ -551,42 +574,57 @@ bool IsSimpleBinaryOperator(const NodeDef& node) {
           IsGreaterEqual(node) || IsEqual(node));
 }
 
-Status EvaluateBoolOpForConstantOperands(const NodeDef& op_node,
-                                         const NodeDef& constant_operand_0,
-                                         const NodeDef& constant_operand_1,
-                                         DeviceBase* cpu_device,
-                                         ResourceMgr* resource_mgr,
-                                         bool* value) {
+bool ExtractConstTensor(const NodeDef& const_node, Tensor* tensor) {
+  const auto value_it = const_node.attr().find("value");
+  if (value_it == const_node.attr().end() || !value_it->second.has_tensor()) {
+    return false;
+  }
+  return tensor->FromProto(value_it->second.tensor());
+}
+
+absl::Status EvaluateBoolOpForConstantOperands(
+    const NodeDef& op_node, const NodeDef& constant_operand_0,
+    const NodeDef& constant_operand_1, DeviceBase* cpu_device,
+    ResourceMgr* resource_mgr, bool* value) {
   VLOG(4) << "Evaluate bool op: op_node=" << op_node.name()
           << " input0=" << constant_operand_0.name()
           << " input1=" << constant_operand_1.name();
+  Tensor value_0;
+  Tensor value_1;
+  if (!ExtractConstTensor(constant_operand_0, &value_0) ||
+      !ExtractConstTensor(constant_operand_1, &value_1)) {
+    return absl::InvalidArgumentError(
+        "Constant operand is missing a valid TensorProto value.");
+  }
   TensorVector inputs;
-
-  const TensorProto& raw_val_0 = constant_operand_0.attr().at("value").tensor();
-  Tensor value_0(raw_val_0.dtype(), raw_val_0.tensor_shape());
-  CHECK(value_0.FromProto(raw_val_0));
   inputs.emplace_back(&value_0);
-  const TensorProto& raw_val_1 = constant_operand_1.attr().at("value").tensor();
-  Tensor value_1(raw_val_1.dtype(), raw_val_1.tensor_shape());
-  CHECK(value_1.FromProto(raw_val_1));
   inputs.emplace_back(&value_1);
 
   TensorVector outputs;
-  TF_RETURN_IF_ERROR(
-      EvaluateNode(op_node, inputs, cpu_device, resource_mgr, &outputs));
-
-  if (outputs.size() != 1 || outputs[0].tensor == nullptr) {
-    return Status(error::INVALID_ARGUMENT, "Expected one output.");
+  absl::Status eval_status =
+      EvaluateNode(op_node, inputs, cpu_device, resource_mgr, &outputs);
+  auto free_outputs = [&outputs]() {
+    for (auto& output : outputs) {
+      delete output.tensor;
+    }
+  };
+  if (!eval_status.ok()) {
+    free_outputs();
+    return eval_status;
+  }
+  if (outputs.size() != 1 || outputs[0].tensor == nullptr ||
+      outputs[0].tensor->dtype() != DT_BOOL || outputs[0].tensor->dims() != 0) {
+    free_outputs();
+    return absl::InvalidArgumentError("Expected one scalar bool output.");
   }
   *value = outputs[0].tensor->scalar<bool>()();
-  delete outputs[0].tensor;
-
-  return Status::OK();
+  free_outputs();
+  return absl::OkStatus();
 }
 
 // TODO(lyandy): Consolidate with ConstantFolding implementation.
 bool IsReallyConstant(const NodeDef& node,
-                      const absl::flat_hash_set<string>& feed_nodes) {
+                      const absl::flat_hash_set<std::string>& feed_nodes) {
   if (!IsConstant(node)) {
     return false;
   }
@@ -594,15 +632,22 @@ bool IsReallyConstant(const NodeDef& node,
   return feed_nodes.find(node.name()) == feed_nodes.end();
 }
 
-Status CheckForDeadFanout(const MutableGraphView& view,
-                          const NodeDef& switch_node, const NodeMap& node_map,
-                          const absl::flat_hash_set<string>& feed_nodes,
-                          DeviceBase* cpu_device, ResourceMgr* resource_mgr,
-                          bool* has_dead_fanout, int* dead_fanout) {
+absl::Status CheckForDeadFanout(
+    const MutableGraphView& view, const NodeDef& switch_node,
+    const NodeMap& node_map, const absl::flat_hash_set<std::string>& feed_nodes,
+    DeviceBase* cpu_device, ResourceMgr* resource_mgr, bool* has_dead_fanout,
+    int* dead_fanout) {
   *has_dead_fanout = false;
-  GraphView::InputPort switch_loopcond_port(&switch_node, 1);
-  const NodeDef* switch_predicate =
-      view.GetRegularFanin(switch_loopcond_port).node;
+  const auto switch_input_fanin =
+      view.GetRegularFanin(GraphView::InputPort(&switch_node, 0));
+  const auto switch_loopcond_fanin =
+      view.GetRegularFanin(GraphView::InputPort(&switch_node, 1));
+  const NodeDef* switch_input = switch_input_fanin.node;
+  const NodeDef* switch_predicate = switch_loopcond_fanin.node;
+  if (switch_input == nullptr || switch_input_fanin.port_id < 0 ||
+      switch_predicate == nullptr || switch_loopcond_fanin.port_id < 0) {
+    return absl::OkStatus();
+  }
 
   // CASE 1: Control is a constant.
   if (IsReallyConstant(*switch_predicate, feed_nodes)) {
@@ -610,30 +655,34 @@ Status CheckForDeadFanout(const MutableGraphView& view,
             << " switch_node=" << switch_node.name()
             << " switch_predicate=" << switch_predicate->name();
     Tensor selector;
-    CHECK(selector.FromProto(switch_predicate->attr().at("value").tensor()));
+    if (!ExtractConstTensor(*switch_predicate, &selector) ||
+        selector.dtype() != DT_BOOL || selector.dims() != 0) {
+      VLOG(3) << "Skipping malformed constant switch predicate: "
+              << switch_predicate->name();
+      return absl::OkStatus();
+    }
     *has_dead_fanout = true;
     *dead_fanout = selector.scalar<bool>()() ? 0 : 1;
-    return Status::OK();
+    return absl::OkStatus();
   }
-
-  GraphView::InputPort switch_input_port(&switch_node, 0);
-  const NodeDef* switch_input = view.GetRegularFanin(switch_input_port).node;
 
   // CASE 2: Zero-iteration while loop.
   // We check if its a while loop such that the condition is a simple binary
   // operator which returns false for the initialization value.
   // TODO(srjoglekar): Improve to work with arbitrary predicate subgraphs.
   if (!IsMerge(*switch_input) || !IsLoopCond(*switch_predicate)) {
-    return Status::OK();
+    return absl::OkStatus();
   }
 
   VLOG(4) << "Try to find a zero iteration while loop:"
           << " switch_node=" << switch_node.name();
 
   // Find the boolean predicate from a LoopCond node (e.g. Greater).
-  NodeDef* switch_ctrl_node = view.GetRegularFanin({switch_predicate, 0}).node;
-  if (!switch_ctrl_node || !IsSimpleBinaryOperator(*switch_ctrl_node)) {
-    return Status::OK();
+  const auto switch_ctrl = view.GetRegularFanin({switch_predicate, 0});
+  NodeDef* switch_ctrl_node = switch_ctrl.node;
+  if (!switch_ctrl_node || switch_ctrl.port_id < 0 ||
+      !IsSimpleBinaryOperator(*switch_ctrl_node)) {
+    return absl::OkStatus();
   }
 
   // Find the Merge node & the Constant Operand to the condition node, if
@@ -642,10 +691,11 @@ Status CheckForDeadFanout(const MutableGraphView& view,
   NodeDef* constant_ctrl_input = nullptr;
   int constant_index = 0;
   for (int i = 0; i < switch_ctrl_node->input().size(); ++i) {
-    const string& input = switch_ctrl_node->input(i);
+    const std::string& input = switch_ctrl_node->input(i);
     if (IsControlInput(input)) continue;
 
-    NodeDef* node = view.GetNode(switch_ctrl_node->input(i));
+    NodeDef* node = node_map.GetNode(input);
+    if (node == nullptr) return absl::OkStatus();
     if (IsMerge(*node)) {
       merge_node = node;
     }
@@ -655,14 +705,16 @@ Status CheckForDeadFanout(const MutableGraphView& view,
     }
   }
   if (merge_node == nullptr || constant_ctrl_input == nullptr) {
-    return Status::OK();
+    return absl::OkStatus();
   }
 
   // Find the initialization constant (via Enter, if one exists).
   NodeDef* enter_node = nullptr;
   NodeDef* constant_init_node = nullptr;
   for (const auto& input : merge_node->input()) {
+    if (IsControlInput(input)) continue;
     NodeDef* node = node_map.GetNode(input);
+    if (node == nullptr) return absl::OkStatus();
     if (IsEnter(*node)) {
       enter_node = node;
     }
@@ -671,16 +723,18 @@ Status CheckForDeadFanout(const MutableGraphView& view,
     }
   }
   if (enter_node != nullptr) {
-    if (constant_init_node != nullptr) return Status::OK();
+    if (constant_init_node != nullptr) return absl::OkStatus();
     for (const auto& input : enter_node->input()) {
+      if (IsControlInput(input)) continue;
       NodeDef* node = node_map.GetNode(input);
+      if (node == nullptr) return absl::OkStatus();
       if (IsReallyConstant(*node, feed_nodes)) {
         constant_init_node = node;
       }
     }
   }
   if (constant_init_node == nullptr) {
-    return Status::OK();
+    return absl::OkStatus();
   }
 
   VLOG(4) << "Check if loop will be 0 iterations:"
@@ -699,9 +753,12 @@ Status CheckForDeadFanout(const MutableGraphView& view,
   NodeDef* operand_1 =
       constant_index ? constant_ctrl_input : constant_init_node;
   bool constant_switch_value;
-  TF_RETURN_IF_ERROR(EvaluateBoolOpForConstantOperands(
-      *switch_ctrl_node, *operand_0, *operand_1, cpu_device, resource_mgr,
-      &constant_switch_value));
+  if (!EvaluateBoolOpForConstantOperands(*switch_ctrl_node, *operand_0,
+                                         *operand_1, cpu_device, resource_mgr,
+                                         &constant_switch_value)
+           .ok()) {
+    return absl::OkStatus();
+  }
 
   if (constant_switch_value == false) {
     VLOG(3) << "Remove 0 iteration while loop:"
@@ -711,7 +768,7 @@ Status CheckForDeadFanout(const MutableGraphView& view,
   } else {
     VLOG(4) << "Was not able to prove that loop has 0 iterations.";
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 }  // namespace
@@ -729,12 +786,12 @@ LoopOptimizer::LoopOptimizer(RewriterConfig::Toggle opt_level,
   resource_mgr_.reset(new ResourceMgr());
 }
 
-Status LoopOptimizer::Optimize(Cluster* cluster, const GrapplerItem& item,
-                               GraphDef* optimized_graph) {
+absl::Status LoopOptimizer::Optimize(Cluster* cluster, const GrapplerItem& item,
+                                     GraphDef* optimized_graph) {
   if (!options_.enable_loop_invariant_node_motion &&
       !options_.enable_stack_push_removal &&
       !options_.enable_dead_branch_removal) {
-    return errors::Aborted("Nothing to do.");
+    return absl::AbortedError("Nothing to do.");
   }
   *optimized_graph = item.graph;
   // Set up helper data structures.
@@ -747,7 +804,7 @@ Status LoopOptimizer::Optimize(Cluster* cluster, const GrapplerItem& item,
   }
   if (options_.enable_dead_branch_removal) {
     NodeMap node_map(optimized_graph);
-    absl::flat_hash_set<string> feed_nodes;
+    absl::flat_hash_set<std::string> feed_nodes;
     for (const auto& feed : item.feed) {
       feed_nodes.insert(NodeName(feed.first));
     }
@@ -755,12 +812,38 @@ Status LoopOptimizer::Optimize(Cluster* cluster, const GrapplerItem& item,
                                           feed_nodes, optimized_graph));
   }
 
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-Status LoopOptimizer::RemoveDeadBranches(
-    const std::unordered_set<string>& nodes_to_preserve, NodeMap& node_map,
-    const absl::flat_hash_set<string>& feed_nodes, GraphDef* optimized_graph) {
+// An Identity node has only 1 output, but Switch and Merge nodes have 2.
+// Update full type information (which describes the output) if present, i.e.
+// do simple type inference.
+static absl::Status update_identity_node_type(NodeDef* sw_node) {
+  if (sw_node->has_experimental_type() &&
+      (sw_node->experimental_type().type_id() == TFT_PRODUCT)) {
+    FullTypeDef old_t = sw_node->experimental_type();
+    if (old_t.args_size() != 2) {
+      return absl::InternalError(absl::StrCat(
+          "When converting Switch or Merge node '", sw_node->name(),
+          "' to Identity, full type of original node describes ",
+          old_t.args_size(), " outputs, not 2.\n", old_t.DebugString()));
+    }
+    FullTypeDef new_t;
+    new_t.set_type_id(TFT_PRODUCT);
+    // For a Merge node, the type of output 0 matches the output of the
+    // corresponding Identity. For a Switch node, the type of both outputs
+    // is the same and matches the output of the corresponding identity,
+    // so using output 0 is fine.
+    *(new_t.add_args()) = old_t.args()[0];
+    *(sw_node->mutable_experimental_type()) = new_t;
+  }
+  return absl::OkStatus();
+}
+
+absl::Status LoopOptimizer::RemoveDeadBranches(
+    const std::unordered_set<std::string>& nodes_to_preserve, NodeMap& node_map,
+    const absl::flat_hash_set<std::string>& feed_nodes,
+    GraphDef* optimized_graph) {
   std::unordered_set<const NodeDef*> dead_nodes;
   std::unordered_map<NodeDef*, std::set<int>> dead_merge_inputs;
   absl::flat_hash_set<GraphView::OutputPort> identity_switches;
@@ -907,14 +990,14 @@ Status LoopOptimizer::RemoveDeadBranches(
       LOG(WARNING)
           << "Skipping loop optimization for Merge node with control input: "
           << merge_node->name();
-      return Status::OK();
+      return absl::OkStatus();
     } else if (dead_inputs.size() != 1 || num_data_inputs != 2) {
       LOG(WARNING) << "Skipping loop optimization for Merge node ("
                    << merge_node->name()
                    << ") with unexpected dead_inputs.size() ("
                    << dead_inputs.size() << " or  num_data_inputs"
                    << num_data_inputs;
-      return Status::OK();
+      return absl::OkStatus();
     }
   }
 
@@ -936,6 +1019,7 @@ Status LoopOptimizer::RemoveDeadBranches(
     inputs->RemoveLast();
     merge_node->set_op("Identity");
     merge_node->mutable_attr()->erase("N");
+    TF_RETURN_IF_ERROR(update_identity_node_type(merge_node));
 
     VLOG(3) << "Merge node after cleanup: " << merge_node->DebugString();
   }
@@ -954,9 +1038,9 @@ Status LoopOptimizer::RemoveDeadBranches(
       // input names of consumers. When switch will be replaced with Identity,
       // it will have only 1 output versus 2 outputs of a Switch node
       int live_port_id = (dead_port_id + 1) % 2;
-      string live_output_name = sw_node->name();
+      std::string live_output_name = sw_node->name();
       if (live_port_id == 1) {
-        live_output_name = StrCat(sw_node->name(), ":1");
+        live_output_name = absl::StrCat(sw_node->name(), ":1");
       }
 
       // Get consumers of live port and update the input names
@@ -975,17 +1059,18 @@ Status LoopOptimizer::RemoveDeadBranches(
 
       // Change node from Switch to Identity and add a control dependency to
       // this Identity op.
-      const string ctrl_dep = ConstantFolding::AddControlDependency(
+      const std::string ctrl_dep = ConstantFolding::AddControlDependency(
           pred->name(), optimized_graph, &node_map);
       node_map.UpdateInput(sw_node->name(), pred->name(), ctrl_dep);
       sw_node->set_input(1, ctrl_dep);
       sw_node->set_op("Identity");
+      TF_RETURN_IF_ERROR(update_identity_node_type(sw_node));
       VLOG(3) << "Switch node after cleanup: " << sw_node->DebugString();
     }
   }
   EraseNodesFromGraph(std::move(nodes_idx_to_delete), optimized_graph);
 
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 }  // end namespace grappler

@@ -14,10 +14,6 @@
 # ==============================================================================
 """Tests for jacobian and batch_jacobian ops."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import functools
 import os
 import time
@@ -32,7 +28,7 @@ from tensorflow.python.framework import ops
 from tensorflow.python.framework import test_util
 from tensorflow.python.layers import layers as tf_layers
 from tensorflow.python.ops import array_ops
-from tensorflow.python.ops import control_flow_ops as tf_control_flow_ops
+from tensorflow.python.ops import array_ops_stack
 from tensorflow.python.ops import functional_ops
 from tensorflow.python.ops import gradients as gradient_ops
 from tensorflow.python.ops import math_ops
@@ -41,6 +37,7 @@ from tensorflow.python.ops import random_ops
 from tensorflow.python.ops import rnn
 from tensorflow.python.ops import rnn_cell
 from tensorflow.python.ops import variables
+from tensorflow.python.ops import while_loop
 from tensorflow.python.ops.losses import losses
 from tensorflow.python.ops.parallel_for import control_flow_ops
 from tensorflow.python.ops.parallel_for import gradients
@@ -48,7 +45,7 @@ from tensorflow.python.platform import test
 from tensorflow.python.util import nest
 
 
-class FullyConnectedModel(object):
+class FullyConnectedModel:
 
   def __init__(self, activation_size, num_layers):
     self._layers = [
@@ -401,9 +398,8 @@ class GradientsTest(test.TestCase):
   def test_jacobian_while_loop_shape(self):
     # Shape x: [3, 4]
     x = random_ops.random_uniform([3, 4])
-    _, y = tf_control_flow_ops.while_loop(lambda i, a: i > 5.,
-                                          lambda i, a: (i + 1, a + i),
-                                          (constant_op.constant(0.), x))
+    _, y = while_loop.while_loop(lambda i, a: i > 5., lambda i, a:
+                                 (i + 1, a + i), (constant_op.constant(0.), x))
     # Shape y: [2, 3]
     y = y[:2, :3]
     jacobian = gradients.jacobian(y, x)
@@ -457,7 +453,7 @@ class GradientsTest(test.TestCase):
     batch_jacobian_pfor = gradients.batch_jacobian(y, x, use_pfor=True)
     batch_jacobian_while = gradients.batch_jacobian(y, x, use_pfor=False)
     two_x = 2 * x
-    answer = array_ops.stack(
+    answer = array_ops_stack.stack(
         [array_ops.diag(two_x[0]),
          array_ops.diag(two_x[1])])
     self.run_and_assert_equal(answer, batch_jacobian_pfor)
@@ -470,7 +466,7 @@ class GradientsTest(test.TestCase):
       batch_jacobian_pfor = gradients.batch_jacobian(y, x, use_pfor=True)
       batch_jacobian_while = gradients.batch_jacobian(y, x, use_pfor=False)
       two_x = 2 * x
-      answer = array_ops.stack(
+      answer = array_ops_stack.stack(
           [array_ops.diag(two_x[0]),
            array_ops.diag(two_x[1])])
       ans, pfor_value, while_value = sess.run(
@@ -514,14 +510,23 @@ class GradientsTest(test.TestCase):
     pfor_hessian, while_hessian = create_lstm_batch_hessian(2, 2, 2)
     self.run_and_assert_equal(pfor_hessian, while_hessian)
 
+  @test_util.run_without_tensor_float_32(
+      "Fails on sm90 where TF32 is the default"
+  )
   def test_fc_per_eg_grad(self):
     pfor_outputs, while_outputs = create_fc_per_eg_grad(8, 4, 2)
     self.run_and_assert_equal(pfor_outputs, while_outputs)
 
+  @test_util.run_without_tensor_float_32(
+      "Fails on sm90 where TF32 is the default"
+  )
   def test_lstm_per_eg_grad(self):
     pfor_outputs, while_outputs = create_lstm_per_eg_grad(8, 4, 2)
     self.run_and_assert_equal(pfor_outputs, while_outputs)
 
+  @test_util.run_without_tensor_float_32(
+      "Fails on sm90 where TF32 is the default"
+  )
   def test_mnist_per_eg_grad(self):
     # It looks like CUDNN_CONVOLUTION_BWD_DATA_ALGO_WINOGRAD_NONFUSED
     # configuration of Winograd can cause low precision output resulting in
@@ -533,9 +538,13 @@ class GradientsTest(test.TestCase):
     # the same result with pfor and with while_loop.
     pfor_outputs, while_outputs = create_mnist_per_eg_grad(
         4, data_format, training=False)
-    self.run_and_assert_equal(pfor_outputs, while_outputs, rtol=1e-3)
+    self.run_and_assert_equal(
+        pfor_outputs, while_outputs, rtol=1e-3, atol=1e-3)
     os.environ.pop("TF_ENABLE_WINOGRAD_NONFUSED", None)
 
+  @test_util.run_without_tensor_float_32(
+      "Fails on sm90 where TF32 is the default"
+  )
   def test_mnist_per_eg_jacobian(self):
     # It looks like CUDNN_CONVOLUTION_BWD_DATA_ALGO_WINOGRAD_NONFUSED
     # configuration of Winograd can cause low precision output resulting in
@@ -547,7 +556,8 @@ class GradientsTest(test.TestCase):
     # the same result with pfor and with while_loop.
     pfor_outputs, while_outputs = create_mnist_per_eg_jacobian(
         2, data_format, training=False)
-    self.run_and_assert_equal(pfor_outputs, while_outputs, rtol=1e-3)
+    self.run_and_assert_equal(
+        pfor_outputs, while_outputs, rtol=1e-3, atol=1e-3)
     os.environ.pop("TF_ENABLE_WINOGRAD_NONFUSED", None)
 
   def test_fc_jacobian(self):

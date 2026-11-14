@@ -2,91 +2,99 @@ path: "tensorflow.distribute"
 tf_module {
   member {
     name: "CrossDeviceOps"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "DistributedDataset"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "DistributedIterator"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "DistributedValues"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "HierarchicalCopyAllReduce"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "InputContext"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "InputOptions"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "InputReplicationMode"
-    mtype: "<class \'enum.EnumMeta\'>"
+    mtype: "<class \'enum.EnumType\'>"
   }
   member {
     name: "MirroredStrategy"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "MultiWorkerMirroredStrategy"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "NcclAllReduce"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "OneDeviceStrategy"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
+  }
+  member {
+    name: "ParameterServerStrategy"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "ReduceOp"
-    mtype: "<class \'enum.EnumMeta\'>"
+    mtype: "<class \'enum.EnumType\'>"
   }
   member {
     name: "ReductionToOneDevice"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "ReplicaContext"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "RunOptions"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "Server"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "Strategy"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "StrategyExtended"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "TPUStrategy"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "cluster_resolver"
-    mtype: "<type \'module\'>"
+    mtype: "<class \'module\'>"
+  }
+  member {
+    name: "coordinator"
+    mtype: "<class \'module\'>"
   }
   member {
     name: "experimental"
-    mtype: "<type \'module\'>"
+    mtype: "<class \'module\'>"
   }
   member_method {
     name: "experimental_set_strategy"

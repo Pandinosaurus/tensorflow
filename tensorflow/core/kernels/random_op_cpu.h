@@ -60,12 +60,12 @@ using random::SingleSampleAdapter;
 template <typename Device, class Distribution>
 struct FillPhiloxRandom {
   typedef typename Distribution::ResultElementType T;
-  void operator()(OpKernelContext* ctx, const Device&, const uint64* key,
-                  const uint64* counter, random::PhiloxRandom gen, T* data,
+  void operator()(OpKernelContext* ctx, const Device&, const uint64_t* key,
+                  const uint64_t* counter, random::PhiloxRandom gen, T* data,
                   int64_t size, Distribution dist) {
     OP_REQUIRES(
         ctx, false,
-        errors::Internal(
+        absl::InternalError(
             "Default `FillPhiloxRandom` implementation should not be executed. "
             "The cause of this error is probably that `FillPhiloxRandom` does "
             "not support this device or random distribution yet."));
@@ -156,10 +156,14 @@ struct FillPhiloxRandomTask<Distribution, true> {
 // It splits the work into several tasks and run them in parallel
 template <class Distribution>
 void FillPhiloxRandom<CPUDevice, Distribution>::operator()(
-    OpKernelContext* ctx, const CPUDevice&, const uint64* key,
-    const uint64* counter, random::PhiloxRandom gen,
+    OpKernelContext* ctx, const CPUDevice&, const uint64_t* key,
+    const uint64_t* counter, random::PhiloxRandom gen,
     typename Distribution::ResultElementType* data, int64_t size,
     Distribution dist) {
+  if (key != nullptr && counter != nullptr) {
+    gen = GetPhiloxRandomFromCounterKeyMem(counter, key);
+  }
+
   const int kGroupSize = Distribution::kResultElementCount;
 
   auto worker_threads = *(ctx->device()->tensorflow_cpu_worker_threads());
@@ -169,10 +173,6 @@ void FillPhiloxRandom<CPUDevice, Distribution>::operator()(
   const int kGroupCost =
       random::PhiloxRandom::kResultElementCount *
       (random::PhiloxRandom::kElementCost + Distribution::kElementCost);
-
-  if (key != nullptr && counter != nullptr) {
-    gen = GetPhiloxRandomFromCounterKeyMem(counter, key);
-  }
 
   Shard(worker_threads.num_threads, worker_threads.workers, total_group_count,
         kGroupCost,

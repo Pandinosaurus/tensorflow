@@ -15,18 +15,25 @@ limitations under the License.
 
 #include "tensorflow/lite/delegates/xnnpack/pool_2d_tester.h"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
+#include <cstdlib>
 #include <functional>
+#include <memory>
 #include <random>
 #include <vector>
 
 #include <gtest/gtest.h>
-#include "flatbuffers/flatbuffers.h"  // from @flatbuffers
+#include "flatbuffers/buffer.h"  // from @flatbuffers
+#include "flatbuffers/flatbuffer_builder.h"  // from @flatbuffers
+#include "flatbuffers/string.h"  // from @flatbuffers
+#include "tensorflow/compiler/mlir/lite/schema/schema_conversion_utils.h"
+#include "tensorflow/lite/core/interpreter_builder.h"
+#include "tensorflow/lite/core/kernels/register.h"
+#include "tensorflow/lite/delegates/xnnpack/test_util.h"
 #include "tensorflow/lite/interpreter.h"
-#include "tensorflow/lite/kernels/register.h"
-#include "tensorflow/lite/model.h"
-#include "tensorflow/lite/schema/schema_conversion_utils.h"
+#include "tensorflow/lite/profiling/buffered_profiler.h"
 #include "tensorflow/lite/schema/schema_generated.h"
 #include "tensorflow/lite/version.h"
 
@@ -70,6 +77,12 @@ void Pool2DTester::Test(tflite::BuiltinOperator pool_op,
   ASSERT_EQ(delegate_interpreter->AllocateTensors(), kTfLiteOk);
   ASSERT_EQ(default_interpreter->AllocateTensors(), kTfLiteOk);
 
+  std::unique_ptr<::tflite::profiling::BufferedProfiler> profiler;
+  if (yield_fp16_precision_) {
+    profiler = std::make_unique<::tflite::profiling::BufferedProfiler>(1024);
+    delegate_interpreter->SetProfiler(profiler.get());
+  }
+
   ASSERT_EQ(delegate_interpreter->ModifyGraphWithDelegate(delegate), kTfLiteOk);
 
   float* default_input_data = default_interpreter->typed_input_tensor<float>(0);
@@ -101,8 +114,18 @@ void Pool2DTester::Test(tflite::BuiltinOperator pool_op,
                 BatchSize() * InputHeight() * InputWidth() * Channels(),
             xnnpack_input_data);
 
+  if (profiler) {
+    profiler->StartProfiling();
+  }
+
   ASSERT_EQ(default_interpreter->Invoke(), kTfLiteOk);
   ASSERT_EQ(delegate_interpreter->Invoke(), kTfLiteOk);
+
+  if (profiler) {
+    profiler->StopProfiling();
+    EXPECT_TRUE(HasConvertNode(profiler.get()))
+        << "Expected Convert nodes in FP16 rewrite";
+  }
 
   float* default_output_data =
       default_interpreter->typed_output_tensor<float>(0);
@@ -122,8 +145,17 @@ void Pool2DTester::Test(tflite::BuiltinOperator pool_op,
                 << " / " << OutputHeight() << ", x position " << x << " / "
                 << OutputWidth() << ", channel " << c << " / " << Channels();
           } else {
+            float tolerance = Tolerance();
+            if (tolerance == 0.0f) {
+              tolerance = std::abs(default_output_data[index]) * 3.0e-6f;
+            } else {
+              // tolerance is treated as relative tolerance if > 0.
+              tolerance = std::abs(default_output_data[index]) * tolerance;
+            }
+            const float floor = yield_fp16_precision_ ? 1.0e-3f : 1.0e-5f;
+            tolerance = std::max(tolerance, floor);
             ASSERT_NEAR(default_output_data[index], xnnpack_output_data[index],
-                        std::abs(default_output_data[index]) * 3.0e-6f)
+                        tolerance)
                 << "batch " << i << " / " << BatchSize() << ", y position " << y
                 << " / " << OutputHeight() << ", x position " << x << " / "
                 << OutputWidth() << ", channel " << c << " / " << Channels();

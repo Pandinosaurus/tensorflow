@@ -14,15 +14,21 @@ limitations under the License.
 ==============================================================================*/
 #include "tensorflow/c/experimental/ops/gen/cpp/views/arg_view.h"
 
+#include <string>
+#include <vector>
+
+#include "tensorflow/c/experimental/ops/gen/model/arg_spec.h"
+#include "tensorflow/core/platform/types.h"
+
 namespace tensorflow {
 namespace generator {
 namespace cpp {
 
 ArgView::ArgView(ArgSpec arg) : arg_(arg) {}
 
-string ArgView::VariableName() const { return arg_.name(); }
+std::string ArgView::VariableName() const { return arg_.name(); }
 
-string ArgView::SetterMethod() const {
+std::string ArgView::SetterMethod() const {
   if (IsList()) {
     return "AddInputList";
   } else {
@@ -30,7 +36,9 @@ string ArgView::SetterMethod() const {
   }
 }
 
-std::vector<string> ArgView::SetterArgs() const { return {VariableName()}; }
+std::vector<std::string> ArgView::SetterArgs() const {
+  return {VariableName()};
+}
 
 bool ArgView::IsList() const { return arg_.arg_type().is_list(); }
 

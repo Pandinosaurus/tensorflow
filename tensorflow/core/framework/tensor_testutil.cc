@@ -15,7 +15,7 @@ limitations under the License.
 
 #include "tensorflow/core/framework/tensor_testutil.h"
 
-#include <cmath>
+#include <iomanip>
 
 #include "tensorflow/core/framework/tensor.h"
 #include "tensorflow/core/platform/types.h"
@@ -47,6 +47,13 @@ static ::testing::AssertionResult EqualFailure(const T& x, const T& y) {
          << std::setprecision(std::numeric_limits<T>::digits10 + 2) << x
          << " not equal to " << y;
 }
+
+template <>
+::testing::AssertionResult EqualFailure<int8_t>(const int8_t& x,
+                                                const int8_t& y) {
+  return EqualFailure(static_cast<int>(x), static_cast<int>(y));
+}
+
 static ::testing::AssertionResult IsEqual(float x, float y, Tolerance t) {
   // We consider NaNs equal for testing.
   if (Eigen::numext::isnan(x) && Eigen::numext::isnan(y))
@@ -100,12 +107,42 @@ static ::testing::AssertionResult IsEqual(Eigen::half x, Eigen::half y,
   }
   return EqualFailure(x, y);
 }
+static ::testing::AssertionResult IsEqual(tsl::bfloat16 x, tsl::bfloat16 y,
+                                          Tolerance t) {
+  // We consider NaNs equal for testing.
+  if (Eigen::numext::isnan(x) && Eigen::numext::isnan(y))
+    return ::testing::AssertionSuccess();
+
+  // Below is a reimplementation of CmpHelperFloatingPointEQ<tsl::bfloat16>,
+  // which we cannot use because tsl::bfloat16 is not default-constructible.
+
+  if (Eigen::numext::isnan(x) || Eigen::numext::isnan(y))
+    return EqualFailure(x, y);
+
+  auto sign_and_magnitude_to_biased = [](uint16_t sam) {
+    const uint16_t kSignBitMask = 0x8000;
+    if (kSignBitMask & sam) return ~sam + 1;  // negative number.
+    return kSignBitMask | sam;                // positive number.
+  };
+
+  auto xb = sign_and_magnitude_to_biased(Eigen::numext::bit_cast<uint16_t>(x));
+  auto yb = sign_and_magnitude_to_biased(Eigen::numext::bit_cast<uint16_t>(y));
+  if (t == Tolerance::kNone) {
+    if (xb == yb) return ::testing::AssertionSuccess();
+  } else {
+    auto distance = xb >= yb ? xb - yb : yb - xb;
+    const uint16_t kMaxUlps = 4;
+    if (distance <= kMaxUlps) return ::testing::AssertionSuccess();
+  }
+  return EqualFailure(x, y);
+}
 template <typename T>
 static ::testing::AssertionResult IsEqual(const T& x, const T& y, Tolerance t) {
   if (::testing::internal::CmpHelperEQ<T>("", "", x, y))
     return ::testing::AssertionSuccess();
   return EqualFailure(x, y);
 }
+
 template <typename T>
 static ::testing::AssertionResult IsEqual(const std::complex<T>& x,
                                           const std::complex<T>& y,
@@ -195,17 +232,17 @@ void ExpectEqual(const Tensor& x, const Tensor& y, Tolerance t) {
     case DT_DOUBLE:
       return ExpectEqual<double>(x, y, t);
     case DT_INT32:
-      return ExpectEqual<int32>(x, y);
+      return ExpectEqual<int32_t>(x, y);
     case DT_UINT32:
-      return ExpectEqual<uint32>(x, y);
+      return ExpectEqual<uint32_t>(x, y);
     case DT_UINT16:
-      return ExpectEqual<uint16>(x, y);
+      return ExpectEqual<uint16_t>(x, y);
     case DT_UINT8:
-      return ExpectEqual<uint8>(x, y);
+      return ExpectEqual<uint8_t>(x, y);
     case DT_INT16:
-      return ExpectEqual<int16>(x, y);
+      return ExpectEqual<int16_t>(x, y);
     case DT_INT8:
-      return ExpectEqual<int8>(x, y);
+      return ExpectEqual<int8_t>(x, y);
     case DT_STRING:
       return ExpectEqual<tstring>(x, y);
     case DT_COMPLEX64:
@@ -215,7 +252,7 @@ void ExpectEqual(const Tensor& x, const Tensor& y, Tolerance t) {
     case DT_INT64:
       return ExpectEqual<int64_t>(x, y);
     case DT_UINT64:
-      return ExpectEqual<uint64>(x, y);
+      return ExpectEqual<uint64_t>(x, y);
     case DT_BOOL:
       return ExpectEqual<bool>(x, y);
     case DT_QINT8:
@@ -232,6 +269,28 @@ void ExpectEqual(const Tensor& x, const Tensor& y, Tolerance t) {
       return ExpectEqual<bfloat16>(x, y, t);
     case DT_HALF:
       return ExpectEqual<Eigen::half>(x, y, t);
+    case DT_FLOAT8_E5M2:
+      return ExpectEqual<float8_e5m2>(x, y, t);
+    case DT_FLOAT8_E4M3FN:
+      return ExpectEqual<float8_e4m3fn>(x, y, t);
+    case DT_FLOAT8_E4M3FNUZ:
+      return ExpectEqual<float8_e4m3fnuz>(x, y, t);
+    case DT_FLOAT8_E4M3B11FNUZ:
+      return ExpectEqual<float8_e4m3b11fnuz>(x, y, t);
+    case DT_FLOAT8_E5M2FNUZ:
+      return ExpectEqual<float8_e5m2fnuz>(x, y, t);
+    case DT_FLOAT8_E8M0FNU:
+      return ExpectEqual<float8_e8m0fnu>(x, y, t);
+    case DT_FLOAT4_E2M1FN:
+      return ExpectEqual<float4_e2m1fn>(x, y, t);
+    case DT_INT4:
+      return ExpectEqual<int4>(x, y, t);
+    case DT_UINT4:
+      return ExpectEqual<uint4>(x, y, t);
+    case DT_INT2:
+      return ExpectEqual<int2>(x, y, t);
+    case DT_UINT2:
+      return ExpectEqual<uint2>(x, y, t);
     default:
       EXPECT_TRUE(false) << "Unsupported type : " << DataTypeString(x.dtype());
   }

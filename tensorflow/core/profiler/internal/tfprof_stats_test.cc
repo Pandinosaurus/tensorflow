@@ -1,4 +1,4 @@
-/* Copyright 2016 The TensorFlow Authors All Rights Reserved.
+/* Copyright 2016 The TensorFlow Authors. All Rights Reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -15,62 +15,61 @@ limitations under the License.
 
 #include "tensorflow/core/profiler/internal/tfprof_stats.h"
 
+#include <memory>
 #include <utility>
 
-#include "tensorflow/c/checkpoint_reader.h"
-#include "tensorflow/core/framework/graph.pb.h"
 #include "tensorflow/core/lib/io/path.h"
 #include "tensorflow/core/platform/env.h"
-#include "tensorflow/core/platform/protobuf.h"
 #include "tensorflow/core/platform/test.h"
 #include "tensorflow/core/profiler/internal/tfprof_constants.h"
 #include "tensorflow/core/profiler/internal/tfprof_utils.h"
 #include "tensorflow/core/profiler/tfprof_log.pb.h"
 #include "tensorflow/core/profiler/tfprof_options.h"
 #include "tensorflow/core/profiler/tfprof_output.pb.h"
-#include "tensorflow/core/protobuf/config.pb.h"
 
 namespace tensorflow {
 namespace tfprof {
 class TFProfStatsTest : public ::testing::Test {
  protected:
   TFProfStatsTest() {
-    string graph_path =
+    std::string graph_path =
         io::JoinPath(testing::TensorFlowSrcRoot(),
                      "core/profiler/internal/testdata/graph.pbtxt");
-    std::unique_ptr<tensorflow::GraphDef> graph_pb(new tensorflow::GraphDef());
+    std::unique_ptr<tensorflow::GraphDef> graph_pb =
+        std::make_unique<tensorflow::GraphDef>();
     TF_CHECK_OK(
         ReadProtoFile(Env::Default(), graph_path, graph_pb.get(), false));
 
-    std::unique_ptr<tensorflow::RunMetadata> run_meta_pb(
-        new tensorflow::RunMetadata());
-    string run_meta_path =
+    std::unique_ptr<tensorflow::RunMetadata> run_meta_pb =
+        std::make_unique<tensorflow::RunMetadata>();
+    std::string run_meta_path =
         io::JoinPath(testing::TensorFlowSrcRoot(),
                      "core/profiler/internal/testdata/run_meta");
     TF_CHECK_OK(
         ReadProtoFile(Env::Default(), run_meta_path, run_meta_pb.get(), true));
 
-    std::unique_ptr<OpLogProto> op_log_pb(new OpLogProto());
-    string op_log_path =
+    std::unique_ptr<OpLogProto> op_log_pb = std::make_unique<OpLogProto>();
+    std::string op_log_path =
         io::JoinPath(testing::TensorFlowSrcRoot(),
                      "core/profiler/internal/testdata/tfprof_log");
     TF_CHECK_OK(ReadBinaryProto(Env::Default(), op_log_path, op_log_pb.get()));
 
-    string ckpt_path = io::JoinPath(testing::TensorFlowSrcRoot(),
-                                    "core/profiler/internal/testdata/ckpt");
+    std::string ckpt_path = io::JoinPath(
+        testing::TensorFlowSrcRoot(), "core/profiler/internal/testdata/ckpt");
     TF_Status* status = TF_NewStatus();
-    std::unique_ptr<checkpoint::CheckpointReader> ckpt_reader(
-        new checkpoint::CheckpointReader(ckpt_path, status));
+    std::unique_ptr<checkpoint::CheckpointReader> ckpt_reader =
+        std::make_unique<checkpoint::CheckpointReader>(ckpt_path, status);
     CHECK(TF_GetCode(status) == TF_OK);
     TF_DeleteStatus(status);
 
-    tf_stats_.reset(new TFStats(std::move(graph_pb), std::move(run_meta_pb),
-                                std::move(op_log_pb), std::move(ckpt_reader)));
+    tf_stats_ =
+        std::make_unique<TFStats>(std::move(graph_pb), std::move(run_meta_pb),
+                                  std::move(op_log_pb), std::move(ckpt_reader));
     tf_stats_->BuildAllViews();
   }
 
-  string TestToFromProto(const string& cmd, const Options& opts) {
-    string profile_file = io::JoinPath(testing::TmpDir(), "profile");
+  std::string TestToFromProto(const std::string& cmd, const Options& opts) {
+    std::string profile_file = io::JoinPath(testing::TmpDir(), "profile");
     tf_stats_->WriteProfile(profile_file);
     TFStats new_stats(profile_file, nullptr);
     new_stats.BuildAllViews();

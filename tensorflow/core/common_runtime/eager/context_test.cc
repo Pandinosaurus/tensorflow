@@ -15,12 +15,38 @@ limitations under the License.
 
 #include "tensorflow/core/common_runtime/eager/context.h"
 
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <gmock/gmock.h>
+#include "absl/status/status.h"
+#include "absl/synchronization/notification.h"
 #include "absl/types/span.h"
+#include "tensorflow/c/eager/abstract_tensor_handle.h"
+#include "tensorflow/c/eager/immediate_execution_context.h"
+#include "tensorflow/c/eager/immediate_execution_operation.h"
+#include "tensorflow/c/eager/immediate_execution_tensor_handle.h"
+#include "xla/tsl/lib/core/status_test_util.h"
+#include "xla/tsl/platform/env.h"
+#include "xla/tsl/platform/status.h"
+#include "tensorflow/core/common_runtime/composite_device.h"
+#include "tensorflow/core/common_runtime/device_mgr.h"
+#include "tensorflow/core/common_runtime/eager/context_distributed_manager.h"
+#include "tensorflow/core/framework/allocator.h"
 #include "tensorflow/core/framework/function.h"
+#include "tensorflow/core/framework/tensor.h"
 #include "tensorflow/core/framework/tensor_testutil.h"
-#include "tensorflow/core/lib/core/status_test_util.h"
-#include "tensorflow/core/platform/errors.h"
+#include "tensorflow/core/framework/types.h"
+#include "tensorflow/core/platform/env.h"
+#include "tensorflow/core/platform/refcount.h"
+#include "tensorflow/core/platform/status.h"
 #include "tensorflow/core/platform/test.h"
+#include "tensorflow/core/platform/types.h"
+#include "tensorflow/core/public/session_options.h"
+#include "tsl/platform/refcount.h"
 
 namespace tensorflow {
 namespace {
@@ -30,11 +56,11 @@ using ::testing::HasSubstr;
 typedef FunctionDefHelper FDH;
 
 // Return a fake device.
-static Device* CreateDevice(const string& type, int n) {
+static Device* CreateDevice(const std::string& type, int n) {
   class FakeDevice : public Device {
    public:
     explicit FakeDevice(const DeviceAttributes& attr) : Device(nullptr, attr) {}
-    Status Sync() override { return Status::OK(); }
+    absl::Status Sync() override { return absl::OkStatus(); }
     Allocator* GetAllocator(AllocatorAttributes) override { return nullptr; }
   };
   DeviceAttributes attr;
@@ -49,24 +75,29 @@ class EagerContextTest : public ::testing::Test {
   EagerContext* context() { return context_.get(); }
 
   void InitContext(const SessionOptions& opts,
-                   ContextDevicePlacementPolicy policy, bool async = false) {
+                   ContextDevicePlacementPolicy policy, bool async = false,
+                   tsl::core::RefCountPtr<Rendezvous> rendezvous = nullptr) {
     ASSERT_EQ(context_, nullptr);
-    InitDeviceManager();
-    context_ = core::RefCountPtr<EagerContext>(
-        new EagerContext(opts, policy, async, device_manager_.get(),
-                         /*device_mgr_owned=*/false, /*rendezvous=*/nullptr,
-                         /*cluster_flr=*/nullptr));
+    if (!device_manager_) {
+      InitDeviceManager();
+    }
+    context_ = core::RefCountPtr<EagerContext>(new EagerContext(
+        opts, policy, async, device_manager_.get(),
+        /*device_mgr_owned=*/false, std::move(rendezvous),
+        /*cluster_flr=*/nullptr, /*collective_executor_mgr=*/nullptr,
+        /*run_eager_op_as_function=*/true));
   }
 
  protected:
   void InitDeviceManager() {
     ASSERT_EQ(device_manager_, nullptr);
-    device_manager_ = absl::make_unique<DynamicDeviceMgr>();
+    device_manager_ = std::make_unique<DynamicDeviceMgr>();
     std::vector<std::unique_ptr<Device>> added_devices;
     added_devices.emplace_back(CreateDevice(DEVICE_CPU, 0));
     added_devices.emplace_back(CreateDevice(DEVICE_CPU, 1));
     added_devices.emplace_back(CreateDevice(DEVICE_GPU, 0));
     added_devices.emplace_back(CreateDevice(DEVICE_GPU, 1));
+    added_devices.emplace_back(CreateDevice(DEVICE_TPU, 0));
 
     TF_CHECK_OK(device_manager_->AddDevices(std::move(added_devices)));
   }
@@ -77,7 +108,7 @@ class EagerContextTest : public ::testing::Test {
 
 TEST_F(EagerContextTest, CompositeDevice) {
   InitContext(SessionOptions(), DEVICE_PLACEMENT_EXPLICIT);
-  std::vector<string> underlying_devices = {
+  std::vector<std::string> underlying_devices = {
       "/job:worker/replica:0/task:0/device:CPU:0",
       "/job:worker/replica:0/task:0/device:CPU:1"};
   CompositeDevice* composite_device_0 = nullptr;
@@ -106,16 +137,16 @@ TEST_F(EagerContextTest, CompositeDevice) {
       "/job:localhost/replica:0/task:0/device:COMPOSITE:1", &device));
   EXPECT_EQ(device, composite_device_2);
 
-  EXPECT_TRUE(errors::IsNotFound(context()->FindCompositeDeviceFromName(
+  EXPECT_TRUE(absl::IsNotFound(context()->FindCompositeDeviceFromName(
       "/job:localhost/replica:0/task:0/device:COMPOSITE:2", &device)));
 }
 
 TEST_F(EagerContextTest, CompositeDeviceWithGivenName) {
   InitContext(SessionOptions(), DEVICE_PLACEMENT_EXPLICIT);
-  const std::vector<string> underlying_devices_0 = {
+  const std::vector<std::string> underlying_devices_0 = {
       "/job:worker/replica:0/task:0/device:CPU:0",
       "/job:worker/replica:0/task:0/device:CPU:1"};
-  const string composite_device_name =
+  const std::string composite_device_name =
       "/job:worker1/replica:0/task:0/device:COMPOSITE:5";
   // Create a CompositeDevice with the given name.
   CompositeDevice* composite_device_0 = nullptr;
@@ -128,7 +159,7 @@ TEST_F(EagerContextTest, CompositeDeviceWithGivenName) {
       context()->FindCompositeDeviceFromName(composite_device_name, &device));
   EXPECT_EQ(device, composite_device_0);
 
-  std::vector<string> underlying_devices_1 = {
+  std::vector<std::string> underlying_devices_1 = {
       "/job:worker/replica:0/task:0/device:CPU:1",
       "/job:worker/replica:0/task:0/device:CPU:2"};
   // Find a CompositeDevice with the given name.
@@ -232,13 +263,12 @@ TEST_F(EagerContextTest, AddFunctionDefRepeatDifferent) {
           {{"scale"}, "Cast", {"two"}, {{"SrcT", DT_INT64}, {"DstT", "$T"}}},
           {{"y"}, "Mul", {"x", "scale"}, {{"T", "$T"}}},
       });
-  Status s = context()->AddFunctionDef(x_times_two_copy);
+  absl::Status s = context()->AddFunctionDef(x_times_two_copy);
   EXPECT_FALSE(s.ok());
 }
 
 TEST_F(EagerContextTest, FunctionErrorRecovery) {
   InitContext(SessionOptions(), DEVICE_PLACEMENT_EXPLICIT, /*async=*/true);
-  context()->SetReuseRendezvousForFunctions(true);
   const FunctionDef assert_and_identity = FDH::Define(
       // Name
       "AssertAndIdentity",
@@ -260,7 +290,7 @@ TEST_F(EagerContextTest, FunctionErrorRecovery) {
            {{"T", DT_FLOAT}},
            /*dep=*/{"assert"}},
       });
-  Status s = context()->AddFunctionDef(assert_and_identity);
+  absl::Status s = context()->AddFunctionDef(assert_and_identity);
   auto fail_op = ImmediateOpPtr(context()->CreateOperation());
   TF_ASSERT_OK(fail_op->Reset("AssertAndIdentity",
                               "/job:localhost/replica:0/task:0/device:CPU:0"));
@@ -280,7 +310,7 @@ TEST_F(EagerContextTest, FunctionErrorRecovery) {
   op_and_sync_status.Update(
       fail_op->Execute(absl::MakeSpan(retvals), &num_retvals));
   op_and_sync_status.Update(context()->SyncExecutors());
-  ASSERT_THAT(op_and_sync_status.as_summary_status().error_message(),
+  ASSERT_THAT(op_and_sync_status.as_summary_status().message(),
               HasSubstr("assertion failed"));
   if (retvals[0] != nullptr) {
     retvals[0]->Unref();
@@ -301,6 +331,161 @@ TEST_F(EagerContextTest, FunctionErrorRecovery) {
   TF_ASSERT_OK(context()->SyncExecutors());
   retvals[0]->Unref();
   retvals[0] = nullptr;
+}
+
+TEST_F(EagerContextTest, XlaCompileDeviceType) {
+  InitContext(SessionOptions(), DEVICE_PLACEMENT_EXPLICIT, /*async=*/true);
+  const Tensor kTwo = test::AsScalar<int64_t>(2);
+  const FunctionDef x_times_two = FDH::Define(
+      // Name
+      "XTimesTwo",
+      // Args
+      {"x: int64"},
+      // Return values
+      {"y: int64"}, {},
+      // Nodes
+      {
+          {{"two"}, "Const", {}, {{"value", kTwo}, {"dtype", DT_INT64}}},
+          {{"y"}, "Mul", {"x", "two"}, {{"T", DT_INT64}}},
+      });
+
+  absl::Status s = context()->AddFunctionDef(x_times_two);
+  context()->SetJitCompileRewrite(true);
+  auto op = ImmediateOpPtr(context()->CreateOperation());
+  TF_ASSERT_OK(
+      op->Reset("XTimesTwo", "/job:localhost/replica:0/task:0/device:CPU:0"));
+  Tensor int_tensor = test::AsScalar<int64_t>(3);
+  auto input_int = core::RefCountPtr<ImmediateExecutionTensorHandle>(
+      context()->CreateLocalHandleFromTFTensor(
+          int_tensor, context()->HostCPUName().c_str()));
+  TF_ASSERT_OK(op->AddInput(input_int.get()));
+  std::vector<AbstractTensorHandle*> retvals(1);
+  int num_retvals = retvals.size();
+  TF_ASSERT_OK(op->Execute(absl::MakeSpan(retvals), &num_retvals));
+  retvals[0]->Unref();
+  retvals[0] = nullptr;
+}
+
+TEST_F(EagerContextTest, LocalRendezvousCreation) {
+  InitContext(SessionOptions(), DEVICE_PLACEMENT_EXPLICIT);
+  auto rendezvous_creator = context()->RendezvousFactory();
+
+  // Create a new rendezvous instance.
+  // Initially its ref-count is 2:
+  // one added upon rendezvous creation, the other one added by EagerContext.
+  tsl::core::RefCountPtr<Rendezvous> rendezvous_1;
+  TF_ASSERT_OK(rendezvous_creator(1, nullptr, &rendezvous_1));
+  EXPECT_EQ(rendezvous_1->RefCount(), 1);
+
+  // Create another rendezvous instance with the same step-id.
+  // This would add one more ref-count to the existing rendezvous insteance
+  // insted of creating a new instance.
+  tsl::core::RefCountPtr<Rendezvous> rendezvous_2;
+  TF_ASSERT_OK(rendezvous_creator(1, nullptr, &rendezvous_2));
+  EXPECT_EQ(rendezvous_2->RefCount(), 2);
+
+  // Caller releases rendezvous-1.
+  rendezvous_1.reset();
+  EXPECT_EQ(rendezvous_2->RefCount(), 1);
+
+  // Caller releases rendezvous-2.
+  tsl::core::WeakPtr<Rendezvous> weak2{rendezvous_2.get()};
+  rendezvous_2.reset();
+  EXPECT_EQ(weak2.GetNewRef(), nullptr);
+}
+
+void TestGlobalRendezvous(EagerContext* context, bool reuse_global_rendezvous) {
+  auto rendezvous_creator = context->RendezvousFactory(reuse_global_rendezvous);
+  tsl::core::RefCountPtr<Rendezvous> rendezvous_1;
+  TF_ASSERT_OK(rendezvous_creator(-1, nullptr, &rendezvous_1));
+  EXPECT_EQ(rendezvous_1->RefCount(), 2);
+  tsl::core::RefCountPtr<Rendezvous> rendezvous_2;
+  TF_ASSERT_OK(rendezvous_creator(-1, nullptr, &rendezvous_2));
+  EXPECT_EQ(rendezvous_2->RefCount(), 3);
+
+  // Global rendezvous's ref-count should be back to 1 after resetting.
+  context->ResetGlobalRendezvousForFunction();
+
+  tsl::core::RefCountPtr<Rendezvous> rendezvous_3;
+  TF_ASSERT_OK(rendezvous_creator(-1, nullptr, &rendezvous_3));
+  EXPECT_EQ(rendezvous_3->RefCount(), 2);
+}
+
+TEST_F(EagerContextTest, GlobalRendezvousCreation) {
+  InitContext(SessionOptions(), DEVICE_PLACEMENT_EXPLICIT);
+
+  TestGlobalRendezvous(context(), false);
+}
+
+TEST_F(EagerContextTest, ReuseGlobalRendezvous) {
+  InitContext(SessionOptions(), DEVICE_PLACEMENT_EXPLICIT);
+
+  TestGlobalRendezvous(context(), true);
+}
+
+TEST_F(EagerContextTest, IsTensorFlowExecutorThreadTest) {
+  {
+    std::unique_ptr<Thread> t(tsl::Env::Default()->StartThread(
+        ThreadOptions(), "tf_test",
+        []() { EXPECT_TRUE(internal::IsTensorFlowExecutorThread()); }));
+  }
+  {
+    std::unique_ptr<Thread> t(tsl::Env::Default()->StartThread(
+        ThreadOptions(), "other_name",
+        []() { EXPECT_FALSE(internal::IsTensorFlowExecutorThread()); }));
+  }
+}
+
+class NotificationRendezvous : public Rendezvous {
+ public:
+  explicit NotificationRendezvous(absl::Notification* n, int64_t* thread_id)
+      : n_(n), destructor_thread_id_(thread_id) {}
+  ~NotificationRendezvous() override {
+    if (destructor_thread_id_) {
+      *destructor_thread_id_ = tsl::Env::Default()->GetCurrentThreadId();
+    }
+    n_->Notify();
+  }
+
+  absl::Status Send(const ParsedKey& key, const Args& args, const Tensor& val,
+                    const bool is_dead) override {
+    return absl::OkStatus();
+  }
+  void RecvAsync(const ParsedKey& key, const Args& args,
+                 DoneCallback done) override {}
+  void StartAbort(const absl::Status& status) override {}
+
+ private:
+  absl::Notification* n_;
+  int64_t* destructor_thread_id_ = nullptr;
+};
+
+TEST_F(EagerContextTest, ReleaseOnTfThread) {
+  absl::Notification n;
+  int64_t rendezvous_destructor_thread_id = 0;
+  int64_t tf_thread_id = 0;
+  auto rendezvous = core::RefCountPtr<Rendezvous>(
+      new NotificationRendezvous(&n, &rendezvous_destructor_thread_id));
+  InitDeviceManager();
+  InitContext(SessionOptions(), DEVICE_PLACEMENT_EXPLICIT, false,
+              std::move(rendezvous));
+
+  {
+    std::unique_ptr<Thread> t(
+        tsl::Env::Default()->StartThread(ThreadOptions(), "tf_test", [&]() {
+          tf_thread_id = tsl::Env::Default()->GetCurrentThreadId();
+          // Drop the last reference to context_. Because the thread is named
+          // "tf_test", EagerContext::Release() will detach a thread to execute
+          // Unref().
+          context_.release()->Release();
+        }));
+  }
+
+  // Wait deterministically for the detached thread to finish the deletion
+  // by waiting for the EagerContext's rendezvous member to be destroyed.
+  n.WaitForNotification();
+
+  EXPECT_NE(rendezvous_destructor_thread_id, tf_thread_id);
 }
 
 }  // namespace

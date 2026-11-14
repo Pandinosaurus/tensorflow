@@ -11,8 +11,8 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
-#ifndef TENSORFLOW_CORE_KERNELS_IMAGEADJUST_HSV_GPU_CU_H_
-#define TENSORFLOW_CORE_KERNELS_IMAGEADJUST_HSV_GPU_CU_H_
+#ifndef TENSORFLOW_CORE_KERNELS_IMAGE_ADJUST_HSV_GPU_CU_H_
+#define TENSORFLOW_CORE_KERNELS_IMAGE_ADJUST_HSV_GPU_CU_H_
 
 #if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 
@@ -57,6 +57,11 @@ inline __device__ HsvTuple rgb2hsv_cuda(const float r, const float g,
   } else {
     h = 0.0f;
   }
+  // A hue just below zero can round up to exactly 1, which hsv2rgb_cuda would
+  // place outside every sector.
+  if (h >= 1.0f) {
+    h = 0.0f;
+  }
   // saturation
   if (M > 0.0) {
     s = chroma / M;
@@ -93,13 +98,13 @@ inline __device__ RgbTuple hsv2rgb_cuda(const float h, const float s,
 
 template <bool AdjustHue, bool AdjustSaturation, bool AdjustV, typename T>
 __global__ void adjust_hsv_nhwc(
-    const int64 number_elements, const T* const __restrict__ input,
+    const int64_t number_elements, const T* const __restrict__ input,
     T* const __restrict__ output, const float* const __restrict__ hue_delta,
     const float* const __restrict__ saturation_scale,
     const float* const __restrict__ value_scale) {
   // multiply by 3 since we're dealing with contiguous RGB bytes for each pixel
   // (NHWC)
-  for (int64 idx = (blockDim.x * blockIdx.x + threadIdx.x) * 3;
+  for (int64_t idx = (blockDim.x * blockIdx.x + threadIdx.x) * 3;
        idx < number_elements; idx += blockDim.x * gridDim.x * 3) {
     if (!AdjustHue && !AdjustSaturation && !AdjustV) {
       output[idx] = input[idx];
@@ -142,4 +147,4 @@ __global__ void adjust_hsv_nhwc(
 }  // namespace tensorflow
 
 #endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM
-#endif  // TENSORFLOW_CORE_KERNELS_IMAGEADJUST_HSV_GPU_CU_H_
+#endif  // TENSORFLOW_CORE_KERNELS_IMAGE_ADJUST_HSV_GPU_CU_H_

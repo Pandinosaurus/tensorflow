@@ -13,15 +13,10 @@
 # limitations under the License.
 # ==============================================================================
 """Tests of the Analyzer CLI Backend."""
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import os
 import tempfile
 
 import numpy as np
-from six.moves import xrange  # pylint: disable=redefined-builtin
 
 from tensorflow.core.protobuf import config_pb2
 from tensorflow.core.protobuf import rewriter_config_pb2
@@ -42,7 +37,8 @@ from tensorflow.python.lib.io import file_io
 from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import control_flow_ops
 from tensorflow.python.ops import math_ops
-from tensorflow.python.ops import variables
+from tensorflow.python.ops import variable_v1
+from tensorflow.python.ops import while_loop as while_loop_tf
 from tensorflow.python.platform import googletest
 from tensorflow.python.platform import test
 from tensorflow.python.util import tf_inspect
@@ -396,7 +392,7 @@ def assert_node_attribute_lines(tst,
     tst.assertEqual("", next(line_iter))
 
     dump_timestamps_ms = []
-    for _ in xrange(num_dumped_tensors):
+    for _ in range(num_dumped_tensors):
       line = next(line_iter)
 
       tst.assertStartsWith(line.strip(), "Slot 0 @ DebugIdentity @")
@@ -616,11 +612,11 @@ class AnalyzerCLISimpleMulAddTest(test_util.TensorFlowTestCase):
       v_name = "simple_mul_add/v"
 
       u_init = constant_op.constant(u_init_val, shape=[2, 2], name="u_init")
-      u = variables.VariableV1(u_init, name=u_name)
+      u = variable_v1.VariableV1(u_init, name=u_name)
       cls._u_line_number = line_number_above()
 
       v_init = constant_op.constant(v_init_val, shape=[2, 1], name="v_init")
-      v = variables.VariableV1(v_init, name=v_name)
+      v = variable_v1.VariableV1(v_init, name=v_name)
       cls._v_line_number = line_number_above()
 
       w = math_ops.matmul(u, v, name="simple_mul_add/matmul")
@@ -629,7 +625,7 @@ class AnalyzerCLISimpleMulAddTest(test_util.TensorFlowTestCase):
       x = math_ops.add(w, w, name="simple_mul_add/add")
       cls._x_line_number = line_number_above()
 
-      a = variables.VariableV1([1, 3, 3, 7], name="a")
+      a = variable_v1.VariableV1([1, 3, 3, 7], name="a")
 
       u.initializer.run()
       v.initializer.run()
@@ -1415,7 +1411,7 @@ class AnalyzerCLISimpleMulAddTest(test_util.TensorFlowTestCase):
     # Verify the annotation of the line that creates u.
     index = self._findSourceLine(out, self._u_line_number)
     self.assertEqual(
-        ["L%d         u = variables.VariableV1(u_init, name=u_name)" %
+        ["L%d         u = variable_v1.VariableV1(u_init, name=u_name)" %
          self._u_line_number,
          "    simple_mul_add/u",
          "    simple_mul_add/u/Assign",
@@ -1432,7 +1428,7 @@ class AnalyzerCLISimpleMulAddTest(test_util.TensorFlowTestCase):
     # Verify the annotation of the line that creates v.
     index = self._findSourceLine(out, self._v_line_number)
     self.assertEqual(
-        ["L%d         v = variables.VariableV1(v_init, name=v_name)" %
+        ["L%d         v = variable_v1.VariableV1(v_init, name=v_name)" %
          self._v_line_number,
          "    simple_mul_add/v"],
         out.lines[index : index + 2])
@@ -1469,7 +1465,7 @@ class AnalyzerCLISimpleMulAddTest(test_util.TensorFlowTestCase):
     # Verify the annotation of the line that creates u.
     index = self._findSourceLine(out, self._u_line_number)
     self.assertEqual(
-        ["L%d         u = variables.VariableV1(u_init, name=u_name)" %
+        ["L%d         u = variable_v1.VariableV1(u_init, name=u_name)" %
          self._u_line_number,
          "    simple_mul_add/u/read:0",
          "    simple_mul_add/u:0"],
@@ -1491,7 +1487,7 @@ class AnalyzerCLISimpleMulAddTest(test_util.TensorFlowTestCase):
 
     index = self._findSourceLine(out, self._u_line_number)
     self.assertEqual(
-        ["L%d         u = variables.VariableV1(u_init, name=u_name)" %
+        ["L%d         u = variable_v1.VariableV1(u_init, name=u_name)" %
          self._u_line_number,
          "    simple_mul_add/u",
          "    simple_mul_add/u/Assign",
@@ -1514,7 +1510,7 @@ class AnalyzerCLISimpleMulAddTest(test_util.TensorFlowTestCase):
 
     index = self._findSourceLine(out, self._u_line_number)
     self.assertEqual(
-        ["L%d         u = variables.VariableV1(u_init, name=u_name)" %
+        ["L%d         u = variable_v1.VariableV1(u_init, name=u_name)" %
          self._u_line_number,
          "    simple_mul_add/u",
          "    (... Omitted 2 of 3 op(s) ...) +5"],
@@ -1531,18 +1527,20 @@ class AnalyzerCLISimpleMulAddTest(test_util.TensorFlowTestCase):
     out = self._registry.dispatch_command("list_source", [])
 
     non_tf_lib_files_start = [
-        i for i in xrange(len(out.lines))
-        if out.lines[i].startswith("Source file path")][0] + 1
+        i for i in range(len(out.lines))
+        if out.lines[i].startswith("Source file path")
+    ][0] + 1
     non_tf_lib_files_end = [
-        i for i in xrange(len(out.lines))
-        if out.lines[i].startswith("TensorFlow Python library file(s):")][0] - 1
+        i for i in range(len(out.lines))
+        if out.lines[i].startswith("TensorFlow Python library file(s):")
+    ][0] - 1
     non_tf_lib_files = [
         line.split(" ")[0] for line
         in out.lines[non_tf_lib_files_start : non_tf_lib_files_end]]
     self.assertIn(self._curr_file_path, non_tf_lib_files)
 
     # Check that the TF library files are marked with special color attribute.
-    for i in xrange(non_tf_lib_files_end + 1, len(out.lines)):
+    for i in range(non_tf_lib_files_end + 1, len(out.lines)):
       if not out.lines[i]:
         continue
       for attr_seg in  out.font_attr_segs[i]:
@@ -1556,18 +1554,20 @@ class AnalyzerCLISimpleMulAddTest(test_util.TensorFlowTestCase):
     self.assertStartsWith(out.lines[1], "Node name regex filter: \".*/read\"")
 
     non_tf_lib_files_start = [
-        i for i in xrange(len(out.lines))
-        if out.lines[i].startswith("Source file path")][0] + 1
+        i for i in range(len(out.lines))
+        if out.lines[i].startswith("Source file path")
+    ][0] + 1
     non_tf_lib_files_end = [
-        i for i in xrange(len(out.lines))
-        if out.lines[i].startswith("TensorFlow Python library file(s):")][0] - 1
+        i for i in range(len(out.lines))
+        if out.lines[i].startswith("TensorFlow Python library file(s):")
+    ][0] - 1
     non_tf_lib_files = [
         line.split(" ")[0] for line
         in out.lines[non_tf_lib_files_start : non_tf_lib_files_end]]
     self.assertIn(self._curr_file_path, non_tf_lib_files)
 
     # Check that the TF library files are marked with special color attribute.
-    for i in xrange(non_tf_lib_files_end + 1, len(out.lines)):
+    for i in range(non_tf_lib_files_end + 1, len(out.lines)):
       if not out.lines[i]:
         continue
       for attr_seg in  out.font_attr_segs[i]:
@@ -1625,7 +1625,7 @@ class AnalyzerCLISimpleMulAddTest(test_util.TensorFlowTestCase):
 
     with session.Session(config=no_rewrite_session_config()) as sess:
       with ops.device("CPU:0"):
-        x = variables.VariableV1([1, 3, 3, 7], name="x")
+        x = variable_v1.VariableV1([1, 3, 3, 7], name="x")
         _, idx = array_ops.unique(x, name="x_unique")
         idx_times_two = math_ops.multiply(idx, 2, name="idx_times_two")
         self.evaluate(x.initializer)
@@ -1731,7 +1731,7 @@ class AnalyzerCLIControlDepTest(test_util.TensorFlowTestCase):
     with session.Session(config=no_rewrite_session_config()) as sess:
       x_init_val = np.array([5.0, 3.0])
       x_init = constant_op.constant(x_init_val, shape=[2])
-      x = variables.VariableV1(x_init, name="control_deps/x")
+      x = variable_v1.VariableV1(x_init, name="control_deps/x")
 
       y = math_ops.add(x, x, name="control_deps/y")
       y = control_flow_ops.with_dependencies(
@@ -2053,7 +2053,7 @@ class AnalyzerCLIWhileLoopTest(test_util.TensorFlowTestCase):
       loop_var = constant_op.constant(0, name="while_loop_test/loop_var")
       cond = lambda loop_var: math_ops.less(loop_var, 10)
       body = lambda loop_var: math_ops.add(loop_var, 1)
-      while_loop = control_flow_ops.while_loop(
+      while_loop = while_loop_tf.while_loop(
           cond, body, [loop_var], parallel_iterations=1)
 
       run_options = config_pb2.RunOptions(output_partition_graphs=True)
@@ -2088,7 +2088,7 @@ class AnalyzerCLIWhileLoopTest(test_util.TensorFlowTestCase):
     self.assertEqual("Tensor \"while/Identity:0\" generated 10 dumps:",
                      output.lines[0])
 
-    for i in xrange(10):
+    for i in range(10):
       self.assertTrue(output.lines[i + 1].startswith("#%d" % i))
       self.assertTrue(output.lines[i + 1].endswith(
           " ms] while/Identity:0:DebugIdentity"))
@@ -2100,7 +2100,7 @@ class AnalyzerCLIWhileLoopTest(test_util.TensorFlowTestCase):
     self.assertEqual("  print_tensor while/Identity:0 -n 0", output.lines[-1])
 
   def testMultipleDumpsPrintTensorWithNumber(self):
-    for i in xrange(5):
+    for i in range(5):
       output = self._registry.dispatch_command(
           "pt", ["while/Identity:0", "-n", "%d" % i])
 

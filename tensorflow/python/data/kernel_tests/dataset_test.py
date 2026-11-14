@@ -14,13 +14,11 @@
 # ==============================================================================
 """Tests for `tf.data.Dataset`."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import collections
+import gc
 import os
 import warnings
+import weakref
 
 from absl.testing import parameterized
 import numpy as np
@@ -29,6 +27,7 @@ from tensorflow.core.framework import graph_pb2
 from tensorflow.python.data.experimental.ops import testing
 from tensorflow.python.data.kernel_tests import test_base
 from tensorflow.python.data.ops import dataset_ops
+from tensorflow.python.data.ops import debug_mode
 from tensorflow.python.data.ops import optional_ops
 from tensorflow.python.data.ops import options as options_lib
 from tensorflow.python.data.ops import readers
@@ -255,7 +254,7 @@ class DatasetTest(test_base.DatasetTestBase, parameterized.TestCase):
     dataset = dataset.filter(lambda x: x > 10)
     debug_string = dataset.__debug_string__()
     for transformation in ["Range", "Map", "Filter"]:
-      self.assertContainsSubsequence(debug_string, transformation)
+      self.assertIn(transformation, debug_string)
 
   @combinations.generate(test_base.default_test_combinations())
   def testNoWarnings(self):
@@ -405,7 +404,7 @@ class DatasetTest(test_base.DatasetTestBase, parameterized.TestCase):
     dataset = dataset_ops.Dataset.range(10)
     with ops.Graph().as_default():
       with self.assertRaisesRegex(ValueError,
-                                  "make sure that the dataset is created in "
+                                  "Make sure that the dataset is created in "
                                   "the same graph as the iterator"):
         _ = dataset_ops.make_one_shot_iterator(dataset)
 
@@ -415,7 +414,7 @@ class DatasetTest(test_base.DatasetTestBase, parameterized.TestCase):
     dataset = dataset_ops.Dataset.range(10)
     with ops.Graph().as_default():
       with self.assertRaisesRegex(ValueError,
-                                  "make sure that the dataset is created in "
+                                  "Make sure that the dataset is created in "
                                   "the same graph as the iterator"):
         _ = dataset_ops.make_initializable_iterator(dataset)
 
@@ -568,7 +567,7 @@ class DatasetTest(test_base.DatasetTestBase, parameterized.TestCase):
     else:
       iterator = dataset_ops.make_one_shot_iterator(dataset)
       next_first, next_second = iterator.get_next()
-      self.assertEqual(next_second, None)
+      self.assertIsNone(next_second)
       with self.cached_session() as sess:
         self.assertEqual(sess.run(next_first), 42)
 
@@ -629,10 +628,10 @@ class DebugDatasetTest(test_base.DatasetTestBase, parameterized.TestCase):
 
   def setUp(self):
     super(DebugDatasetTest, self).setUp()
-    dataset_ops.toggle_debug_mode(True)
+    debug_mode.toggle_debug_mode(True)
 
   def tearDown(self):
-    dataset_ops.toggle_debug_mode(False)
+    debug_mode.toggle_debug_mode(False)
     super(DebugDatasetTest, self).tearDown()
 
   @combinations.generate(test_base.eager_only_combinations())
@@ -653,12 +652,140 @@ class DebugDatasetTest(test_base.DatasetTestBase, parameterized.TestCase):
     self.assertLen(counter, 11)
 
   @combinations.generate(test_base.eager_only_combinations())
+  def testDebugModeGenerator(self):
+    def gen():
+      yield from range(10)
+
+    ds = dataset_ops.Dataset.from_generator(
+        gen,
+        output_signature=tensor_spec.TensorSpec(shape=(), dtype=dtypes.int64))
+    self.assertDatasetProduces(ds, list(range(10)))
+
+  @combinations.generate(test_base.eager_only_combinations())
+  def testDebugModeGeneratorTwoComponents(self):
+    data = [(n, n+1) for n in range(10)]
+
+    def gen():
+      yield from data
+
+    ds = dataset_ops.Dataset.from_generator(
+        gen,
+        output_signature=(tensor_spec.TensorSpec(shape=(), dtype=dtypes.int64),
+                          tensor_spec.TensorSpec(shape=(), dtype=dtypes.int64)))
+    self.assertDatasetProduces(ds, data)
+
+  @combinations.generate(
+      combinations.times(
+          test_base.eager_only_combinations(),
+          combinations.combine(
+              signature=["scalar", "nested", "legacy"], empty=[True, False]
+          ),
+      )
+  )
+  def testDebugModeGeneratorGarbageCollection(self, signature, empty):
+    if empty:
+      data = []
+    else:
+      data = [(1, 2), (3, 4)] if signature == "nested" else [1, 2]
+    iterator_refs = []
+
+    def gen():
+      result = (value for value in data)
+      iterator_refs.append(weakref.ref(result))
+      return result
+
+    generator_ref = weakref.ref(gen)
+    spec = tensor_spec.TensorSpec(shape=(), dtype=dtypes.int64)
+    if signature == "legacy":
+      ds = dataset_ops.Dataset.from_generator(
+          gen, output_types=dtypes.int64, output_shapes=()
+      )
+    else:
+      ds = dataset_ops.Dataset.from_generator(
+          gen, output_signature=(spec, spec) if signature == "nested" else spec
+      )
+    iterator = iter(ds)
+    # The iterator alone must keep the generator and its callbacks alive.
+    del ds, gen
+    for value in data:
+      gc.collect()
+      self.assertAllEqual(self.evaluate(next(iterator)), value)
+    gc.collect()
+    with self.assertRaises(StopIteration):
+      next(iterator)
+    gc.collect()
+    # Finalization must release the Python iterator even while the dataset's
+    # functions are still retained by the outer iterator.
+    self.assertLen(iterator_refs, 1)
+    self.assertIsNone(iterator_refs[0]())
+    self.assertIsNotNone(generator_ref())
+    del iterator
+    gc.collect()
+    self.assertIsNone(generator_ref())
+
+  @combinations.generate(test_base.eager_only_combinations())
+  def testDebugModeGeneratorWithFunctionsRunEagerly(self):
+    self.addCleanup(
+        def_function.run_functions_eagerly, def_function.functions_run_eagerly()
+    )
+    def_function.run_functions_eagerly(True)
+
+    def gen():
+      yield from range(2)
+
+    # Debug mode is already enabled, so no warning should suggest enabling it.
+    with warnings.catch_warnings():
+      warnings.simplefilter("error", UserWarning)
+      ds = dataset_ops.Dataset.from_generator(
+          gen, output_signature=tensor_spec.TensorSpec((), dtypes.int64)
+      )
+      self.assertDatasetProduces(ds, [0, 1])
+
+  @combinations.generate(
+      combinations.times(
+          test_base.eager_only_combinations(),
+          combinations.combine(empty=[True, False]),
+      )
+  )
+  def testDebugModeGeneratorMapEagerExecution(self, empty):
+    num_elements = 0 if empty else 2
+    generated = []
+    mapped = []
+
+    def gen():
+      for value in range(num_elements):
+        generated.append(context.executing_eagerly())
+        yield value
+
+    def map_fn(value):
+      mapped.append(context.executing_eagerly())
+      return value + 1
+
+    ds = dataset_ops.Dataset.from_generator(
+        gen, output_signature=tensor_spec.TensorSpec((), dtypes.int64)
+    )
+    ds = ds.map(map_fn, num_parallel_calls=2).prefetch(2)
+    iterator = iter(ds)
+    self.assertEmpty(generated)
+    self.assertEqual(mapped, [False])  # Output structure inference only.
+    for value in range(num_elements):
+      gc.collect()
+      self.assertEqual(self.evaluate(next(iterator)), value + 1)
+      self.assertEqual(generated, [True] * (value + 1))
+      self.assertEqual(mapped, [False] + [True] * (value + 1))
+    gc.collect()
+    with self.assertRaises(StopIteration):
+      next(iterator)
+    self.assertEqual(generated, [True] * num_elements)
+    self.assertEqual(mapped, [False] + [True] * num_elements)
+
+  @combinations.generate(test_base.eager_only_combinations())
   def testDebugModeSequentialExecution(self):
     ds = dataset_ops.Dataset.range(10)
     ds = ds.apply(
         testing.assert_next(["Interleave", "Map", "Batch", "FiniteTake"]))
     ds = ds.interleave(
-        lambda x: dataset_ops.Dataset.from_tensors(x),
+        dataset_ops.Dataset.from_tensors,
         cycle_length=10,
         num_parallel_calls=10)
     ds = ds.map(lambda x: x * x, num_parallel_calls=10)

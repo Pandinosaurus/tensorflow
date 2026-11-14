@@ -1,8 +1,52 @@
-load("//tensorflow:tensorflow.bzl", "get_compatible_with_portable")
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_cc//cc:cc_test.bzl", "cc_test")
+load("//tensorflow:tensorflow.default.bzl", "get_compatible_with_portable")
 
 package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:LICENSE"],
     default_visibility = ["//visibility:public"],
     licenses = ["notice"],
+)
+
+cc_library(
+    name = "cache_buffer",
+    srcs = ["cache_buffer.cc"],
+    hdrs = [
+        "cache_buffer.h",
+        "//tensorflow/lite/core/c:common.h",
+    ],
+    deps = [
+        ":resource",
+        "//tensorflow/lite/core/c:c_api_types",
+        "//tensorflow/lite/core/c:common",
+        "//tensorflow/lite/kernels:kernel_util",
+        "//tensorflow/lite/kernels/internal:compatibility",
+    ],
+)
+
+cc_test(
+    name = "cache_buffer_test",
+    srcs = ["cache_buffer_test.cc"],
+    deps = [
+        ":cache_buffer",
+        "//tensorflow/lite/c:common",
+        "@com_google_googletest//:gtest_main",
+    ],
 )
 
 cc_library(
@@ -23,9 +67,21 @@ cc_library(
     compatible_with = get_compatible_with_portable(),
     deps = [
         "//tensorflow/lite:string_util",
+        "//tensorflow/lite/c:c_api_types",
         "//tensorflow/lite/c:common",
-        "//tensorflow/lite/kernels/internal:compatibility",
+        "//tensorflow/lite/core/c:c_api_types",
+        "//tensorflow/lite/core/c:common",
         "//tensorflow/lite/kernels/internal:tensor",
+        "//tensorflow/lite/kernels/internal:types",
+    ],
+)
+
+cc_library(
+    name = "mock_resource",
+    testonly = 1,
+    hdrs = ["mock_resource.h"],
+    deps = [
+        ":resource",
     ],
 )
 
@@ -35,9 +91,12 @@ cc_test(
         "resource_variable_test.cc",
     ],
     deps = [
+        ":mock_resource",
         ":resource",
         "//tensorflow/lite:util",
-        "//tensorflow/lite/c:common",
+        "//tensorflow/lite/core/c:c_api_types",
+        "//tensorflow/lite/core/c:common",
+        "//tensorflow/lite/kernels:test_util",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ],

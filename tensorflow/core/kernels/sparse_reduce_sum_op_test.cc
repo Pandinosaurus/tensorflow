@@ -53,14 +53,14 @@ TEST_F(SparseReduceSumOpTest, SimpleReduce) {
 
   const auto indices_shape = TensorShape({4, 2});
   std::initializer_list<int64_t> in{0, 1, 1, 0, 2, 0, 2, 1};
-  const gtl::ArraySlice<int64_t> indices(in);
+  const absl::Span<const int64_t> indices(in);
   std::initializer_list<int64_t> sh{3, 2};
-  const gtl::ArraySlice<int64_t> shape(sh);
+  const absl::Span<const int64_t> shape(sh);
 
   AddInputFromArray<int64_t>(indices_shape, indices);
   AddInputFromArray<float>(TensorShape({4}), {1, 2, 3, 4});
   AddInputFromArray<int64_t>(TensorShape({2}), shape);
-  AddInputFromArray<int32>(TensorShape({1}), {0});  // reduction axes
+  AddInputFromArray<int32_t>(TensorShape({1}), {0});  // reduction axes
 
   TF_ASSERT_OK(RunOpKernel());
 
@@ -95,14 +95,14 @@ TEST_F(SparseReduceSumSparseOpTest, SimpleReduce) {
 
   const auto indices_shape = TensorShape({4, 2});
   std::initializer_list<int64_t> in{0, 1, 1, 0, 2, 0, 2, 1};
-  const gtl::ArraySlice<int64_t> indices(in);
+  const absl::Span<const int64_t> indices(in);
   std::initializer_list<int64_t> sh{3, 2};
-  const gtl::ArraySlice<int64_t> shape(sh);
+  const absl::Span<const int64_t> shape(sh);
 
   AddInputFromArray<int64_t>(indices_shape, indices);
   AddInputFromArray<float>(TensorShape({4}), {2, 2, 3, 4});
   AddInputFromArray<int64_t>(TensorShape({2}), shape);
-  AddInputFromArray<int32>(TensorShape({1}), {0});  // reduction axes
+  AddInputFromArray<int32_t>(TensorShape({1}), {0});  // reduction axes
 
   TF_ASSERT_OK(RunOpKernel());
 

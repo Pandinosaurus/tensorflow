@@ -15,6 +15,9 @@ limitations under the License.
 
 #include "tensorflow/core/lib/wav/wav_io.h"
 
+#include <cstddef>
+#include <cstdint>
+#include <limits>
 #include <string>
 
 #include "tensorflow/core/lib/core/status_test_util.h"
@@ -28,9 +31,10 @@ namespace wav {
 
 // These are defined in wav_io.cc, and the signatures are here so we don't have
 // to expose them in the public header.
-Status ExpectText(const string& data, const string& expected_text, int* offset);
-Status ReadString(const string& data, int expected_length, string* value,
-                  int* offset);
+absl::Status ExpectText(const std::string& data,
+                        const std::string& expected_text, int* offset);
+absl::Status ReadString(const std::string& data, int expected_length,
+                        std::string* value, int* offset);
 
 TEST(WavIO, BadArguments) {
   float audio[] = {0.0f, 0.1f, 0.2f, 0.3f, 0.4f, 0.5f};
@@ -44,8 +48,10 @@ TEST(WavIO, BadArguments) {
       error::INVALID_ARGUMENT,
       EncodeAudioAsS16LEWav(audio, 44100, 2, 3, (tstring*)nullptr).code());
 
-  const size_t kuint32max_plus_one = static_cast<size_t>(kuint32max) + 1;
-  const size_t kuint16max_plus_one = static_cast<size_t>(kuint16max) + 1;
+  const size_t kuint32max_plus_one =
+      static_cast<size_t>(std::numeric_limits<uint32_t>::max()) + 1;
+  const size_t kuint16max_plus_one =
+      static_cast<size_t>(std::numeric_limits<uint16_t>::max()) + 1;
 
   // Zero values are invalid.
   EXPECT_EQ(error::INVALID_ARGUMENT,
@@ -70,7 +76,7 @@ TEST(WavIO, BadArguments) {
 
 TEST(WavIO, BasicEven) {
   float audio[] = {0.0f, 0.1f, 0.2f, 0.3f, 0.4f, 0.5f};
-  string result;
+  std::string result;
   TF_EXPECT_OK(EncodeAudioAsS16LEWav(audio, 44100, 2, 3, &result));
   EXPECT_EQ(56, result.size());
   TF_EXPECT_OK(EncodeAudioAsS16LEWav(audio, 22050, 1, 6, &result));
@@ -81,19 +87,19 @@ TEST(WavIO, BasicEven) {
 
 TEST(WavIO, BasicOdd) {
   float audio[] = {0.0f, 0.1f, 0.2f, 0.3f, 0.4f};
-  string result;
+  std::string result;
   TF_EXPECT_OK(EncodeAudioAsS16LEWav(audio, 22050, 1, 5, &result));
   EXPECT_EQ(54, result.size());
 }
 
 TEST(WavIO, EncodeThenDecode) {
   float audio[] = {0.0f, 0.1f, 0.2f, 0.3f, 0.4f, 0.5f};
-  string wav_data;
+  std::string wav_data;
   TF_ASSERT_OK(EncodeAudioAsS16LEWav(audio, 44100, 2, 3, &wav_data));
   std::vector<float> decoded_audio;
-  uint32 decoded_sample_count;
-  uint16 decoded_channel_count;
-  uint32 decoded_sample_rate;
+  uint32_t decoded_sample_count;
+  uint16_t decoded_channel_count;
+  uint32_t decoded_sample_rate;
   TF_ASSERT_OK(DecodeLin16WaveAsFloatVector(
       wav_data, &decoded_audio, &decoded_sample_count, &decoded_channel_count,
       &decoded_sample_rate));
@@ -106,59 +112,129 @@ TEST(WavIO, EncodeThenDecode) {
 }
 
 TEST(WavIO, BasicMono) {
-  std::vector<uint8> wav_data = {
-      'R', 'I', 'F', 'F',  // ChunkID
-      44, 0, 0, 0,         // ChunkSize: 36 + SubChunk2Size
-      'W', 'A', 'V', 'E',  // Format
-      'f', 'm', 't', ' ',  // Subchunk1ID
-      16, 0, 0, 0,         // Subchunk1Size
-      1, 0,                // AudioFormat: 1=PCM
-      1, 0,                // NumChannels
-      0x44, 0xac, 0, 0,    // SampleRate: 44100
-      0x88, 0x58, 0x1, 0,  // BytesPerSecond: SampleRate * NumChannels *
-                           //                 BitsPerSample/8
-      2, 0,                // BytesPerSample: NumChannels * BitsPerSample/8
-      16, 0,               // BitsPerSample
-      'd', 'a', 't', 'a',  // Subchunk2ID
-      8, 0, 0, 0,          // Subchunk2Size: NumSamples * NumChannels *
-                           //                BitsPerSample/8
-      0, 0,                // Sample 1: 0
-      0xff, 0x7f,          // Sample 2: 32767 (saturated)
-      0, 0,                // Sample 3: 0
-      0x00, 0x80,          // Sample 4: -32768 (saturated)
+  std::vector<uint8_t> wav_data = {
+      'R',
+      'I',
+      'F',
+      'F',  // ChunkID
+      44,
+      0,
+      0,
+      0,  // ChunkSize: 36 + SubChunk2Size
+      'W',
+      'A',
+      'V',
+      'E',  // Format
+      'f',
+      'm',
+      't',
+      ' ',  // Subchunk1ID
+      16,
+      0,
+      0,
+      0,  // Subchunk1Size
+      1,
+      0,  // AudioFormat: 1=PCM
+      1,
+      0,  // NumChannels
+      0x44,
+      0xac,
+      0,
+      0,  // SampleRate: 44100
+      0x88,
+      0x58,
+      0x1,
+      0,  // BytesPerSecond: SampleRate * NumChannels *
+          //                 BitsPerSample/8
+      2,
+      0,  // BytesPerSample: NumChannels * BitsPerSample/8
+      16,
+      0,  // BitsPerSample
+      'd',
+      'a',
+      't',
+      'a',  // Subchunk2ID
+      8,
+      0,
+      0,
+      0,  // Subchunk2Size: NumSamples * NumChannels *
+          //                BitsPerSample/8
+      0,
+      0,  // Sample 1: 0
+      0xff,
+      0x7f,  // Sample 2: 32767 (saturated)
+      0,
+      0,  // Sample 3: 0
+      0x00,
+      0x80,  // Sample 4: -32768 (saturated)
   };
-  string expected(wav_data.begin(), wav_data.end());
+  std::string expected(wav_data.begin(), wav_data.end());
   float audio[] = {0.0f, 1.0f, 0.0f, -1.0f};
-  string result;
+  std::string result;
   TF_EXPECT_OK(EncodeAudioAsS16LEWav(audio, 44100, 1, 4, &result));
   EXPECT_EQ(expected, result);
 }
 
 TEST(WavIO, BasicStereo) {
-  std::vector<uint8> wav_data = {
-      'R', 'I', 'F', 'F',  // ChunkID
-      44, 0, 0, 0,         // ChunkSize: 36 + SubChunk2Size
-      'W', 'A', 'V', 'E',  // Format
-      'f', 'm', 't', ' ',  // Subchunk1ID
-      16, 0, 0, 0,         // Subchunk1Size
-      1, 0,                // AudioFormat: 1=PCM
-      2, 0,                // NumChannels
-      0x44, 0xac, 0, 0,    // SampleRate: 44100
-      0x10, 0xb1, 0x2, 0,  // BytesPerSecond: SampleRate * NumChannels *
-                           //                 BitsPerSample/8
-      4, 0,                // BytesPerSample: NumChannels * BitsPerSample/8
-      16, 0,               // BitsPerSample
-      'd', 'a', 't', 'a',  // Subchunk2ID
-      8, 0, 0, 0,          // Subchunk2Size: NumSamples * NumChannels *
-                           //                BitsPerSample/8
-      0, 0,                // Sample 1: 0
-      0xff, 0x7f,          // Sample 2: 32767 (saturated)
-      0, 0,                // Sample 3: 0
-      0x00, 0x80,          // Sample 4: -32768 (saturated)
+  std::vector<uint8_t> wav_data = {
+      'R',
+      'I',
+      'F',
+      'F',  // ChunkID
+      44,
+      0,
+      0,
+      0,  // ChunkSize: 36 + SubChunk2Size
+      'W',
+      'A',
+      'V',
+      'E',  // Format
+      'f',
+      'm',
+      't',
+      ' ',  // Subchunk1ID
+      16,
+      0,
+      0,
+      0,  // Subchunk1Size
+      1,
+      0,  // AudioFormat: 1=PCM
+      2,
+      0,  // NumChannels
+      0x44,
+      0xac,
+      0,
+      0,  // SampleRate: 44100
+      0x10,
+      0xb1,
+      0x2,
+      0,  // BytesPerSecond: SampleRate * NumChannels *
+          //                 BitsPerSample/8
+      4,
+      0,  // BytesPerSample: NumChannels * BitsPerSample/8
+      16,
+      0,  // BitsPerSample
+      'd',
+      'a',
+      't',
+      'a',  // Subchunk2ID
+      8,
+      0,
+      0,
+      0,  // Subchunk2Size: NumSamples * NumChannels *
+          //                BitsPerSample/8
+      0,
+      0,  // Sample 1: 0
+      0xff,
+      0x7f,  // Sample 2: 32767 (saturated)
+      0,
+      0,  // Sample 3: 0
+      0x00,
+      0x80,  // Sample 4: -32768 (saturated)
   };
-  string expected(wav_data.begin(), wav_data.end());
+  std::string expected(wav_data.begin(), wav_data.end());
   float audio[] = {0.0f, 1.0f, 0.0f, -1.0f};
-  string result;
+  std::string result;
   TF_EXPECT_OK(EncodeAudioAsS16LEWav(audio, 44100, 2, 2, &result));
   EXPECT_EQ(expected, result);
 }
@@ -169,44 +245,89 @@ TEST(WavIO, BasicStereo) {
 // large WAV files are not common, and are unsupported by many readers.
 // See b/72655902.
 TEST(WavIO, ChunkSizeOverflow) {
-  std::vector<uint8> wav_data = {
-      'R', 'I', 'F', 'F',      // ChunkID
-      60, 0, 0, 0,             // ChunkSize: 36 + SubChunk2Size
-      'W', 'A', 'V', 'E',      // Format
-      'f', 'm', 't', ' ',      // Subchunk1ID
-      16, 0, 0, 0,             // Subchunk1Size
-      1, 0,                    // AudioFormat: 1=PCM
-      1, 0,                    // NumChannels
-      0x44, 0xac, 0, 0,        // SampleRate: 44100
-      0x88, 0x58, 0x1, 0,      // BytesPerSecond: SampleRate * NumChannels *
-                               //                 BitsPerSample/8
-      2, 0,                    // BytesPerSample: NumChannels * BitsPerSample/8
-      16, 0,                   // BitsPerSample
-      'd', 'a', 't', 'a',      // Subchunk2ID
-      8, 0, 0, 0,              // Subchunk2Size: NumSamples * NumChannels *
-                               //                BitsPerSample/8
-      0, 0,                    // Sample 1: 0
-      0xff, 0x7f,              // Sample 2: 32767 (saturated)
-      0, 0,                    // Sample 3: 0
-      0x00, 0x80,              // Sample 4: -32768 (saturated)
-      'f', 'o', 'o', 'o',      // Subchunk2ID
-      0xff, 0xff, 0xff, 0xf8,  // Chunk size that could cause an infinite loop.
-      0, 0,                    // Sample 1: 0
-      0xff, 0x7f,              // Sample 2: 32767 (saturated)
-      0, 0,                    // Sample 3: 0
-      0x00, 0x80,              // Sample 4: -32768 (saturated)
+  std::vector<uint8_t> wav_data = {
+      'R',
+      'I',
+      'F',
+      'F',  // ChunkID
+      60,
+      0,
+      0,
+      0,  // ChunkSize: 36 + SubChunk2Size
+      'W',
+      'A',
+      'V',
+      'E',  // Format
+      'f',
+      'm',
+      't',
+      ' ',  // Subchunk1ID
+      16,
+      0,
+      0,
+      0,  // Subchunk1Size
+      1,
+      0,  // AudioFormat: 1=PCM
+      1,
+      0,  // NumChannels
+      0x44,
+      0xac,
+      0,
+      0,  // SampleRate: 44100
+      0x88,
+      0x58,
+      0x1,
+      0,  // BytesPerSecond: SampleRate * NumChannels *
+          //                 BitsPerSample/8
+      2,
+      0,  // BytesPerSample: NumChannels * BitsPerSample/8
+      16,
+      0,  // BitsPerSample
+      'd',
+      'a',
+      't',
+      'a',  // Subchunk2ID
+      8,
+      0,
+      0,
+      0,  // Subchunk2Size: NumSamples * NumChannels *
+          //                BitsPerSample/8
+      0,
+      0,  // Sample 1: 0
+      0xff,
+      0x7f,  // Sample 2: 32767 (saturated)
+      0,
+      0,  // Sample 3: 0
+      0x00,
+      0x80,  // Sample 4: -32768 (saturated)
+      'f',
+      'o',
+      'o',
+      'o',  // Subchunk2ID
+      0xff,
+      0xff,
+      0xff,
+      0xf8,  // Chunk size that could cause an infinite loop.
+      0,
+      0,  // Sample 1: 0
+      0xff,
+      0x7f,  // Sample 2: 32767 (saturated)
+      0,
+      0,  // Sample 3: 0
+      0x00,
+      0x80,  // Sample 4: -32768 (saturated)
   };
-  string wav_data_string(wav_data.begin(), wav_data.end());
+  std::string wav_data_string(wav_data.begin(), wav_data.end());
   std::vector<float> decoded_audio;
-  uint32 decoded_sample_count;
-  uint16 decoded_channel_count;
-  uint32 decoded_sample_rate;
-  Status decode_status = DecodeLin16WaveAsFloatVector(
+  uint32_t decoded_sample_count;
+  uint16_t decoded_channel_count;
+  uint32_t decoded_sample_rate;
+  absl::Status decode_status = DecodeLin16WaveAsFloatVector(
       wav_data_string, &decoded_audio, &decoded_sample_count,
       &decoded_channel_count, &decoded_sample_rate);
   EXPECT_FALSE(decode_status.ok());
-  EXPECT_TRUE(absl::StrContains(decode_status.error_message(), "too large"))
-      << decode_status.error_message();
+  EXPECT_TRUE(absl::StrContains(decode_status.message(), "too large"))
+      << decode_status.message();
 }
 
 TEST(WavIO, IncrementOffset) {
@@ -238,17 +359,17 @@ TEST(WavIO, IncrementOffset) {
 }
 
 TEST(WavIO, ExpectText) {
-  std::vector<uint8> test_data = {
+  std::vector<uint8_t> test_data = {
       'E', 'x', 'p', 'e', 'c', 't', 'e', 'd',
   };
-  string test_string(test_data.begin(), test_data.end());
+  std::string test_string(test_data.begin(), test_data.end());
 
   int offset = 0;
   TF_EXPECT_OK(ExpectText(test_string, "Expected", &offset));
   EXPECT_EQ(8, offset);
 
   offset = 0;
-  Status expect_status = ExpectText(test_string, "Unexpected", &offset);
+  absl::Status expect_status = ExpectText(test_string, "Unexpected", &offset);
   EXPECT_FALSE(expect_status.ok());
 
   offset = 0;
@@ -261,13 +382,13 @@ TEST(WavIO, ExpectText) {
 }
 
 TEST(WavIO, ReadString) {
-  std::vector<uint8> test_data = {
+  std::vector<uint8_t> test_data = {
       'E', 'x', 'p', 'e', 'c', 't', 'e', 'd',
   };
-  string test_string(test_data.begin(), test_data.end());
+  std::string test_string(test_data.begin(), test_data.end());
 
   int offset = 0;
-  string read_value;
+  std::string read_value;
   TF_EXPECT_OK(ReadString(test_string, 2, &read_value, &offset));
   EXPECT_EQ("Ex", read_value);
   EXPECT_EQ(2, offset);
@@ -276,13 +397,13 @@ TEST(WavIO, ReadString) {
   EXPECT_EQ("pected", read_value);
   EXPECT_EQ(8, offset);
 
-  Status read_status = ReadString(test_string, 3, &read_value, &offset);
+  absl::Status read_status = ReadString(test_string, 3, &read_value, &offset);
   EXPECT_FALSE(read_status.ok());
 }
 
 TEST(WavIO, ReadValueInt8) {
-  std::vector<uint8> test_data = {0x00, 0x05, 0xff, 0x80};
-  string test_string(test_data.begin(), test_data.end());
+  std::vector<uint8_t> test_data = {0x00, 0x05, 0xff, 0x80};
+  std::string test_string(test_data.begin(), test_data.end());
 
   int offset = 0;
   int8_t read_value;
@@ -302,16 +423,16 @@ TEST(WavIO, ReadValueInt8) {
   EXPECT_EQ(-128, read_value);
   EXPECT_EQ(4, offset);
 
-  Status read_status = ReadValue(test_string, &read_value, &offset);
+  absl::Status read_status = ReadValue(test_string, &read_value, &offset);
   EXPECT_FALSE(read_status.ok());
 }
 
 TEST(WavIO, ReadValueUInt8) {
-  std::vector<uint8> test_data = {0x00, 0x05, 0xff, 0x80};
-  string test_string(test_data.begin(), test_data.end());
+  std::vector<uint8_t> test_data = {0x00, 0x05, 0xff, 0x80};
+  std::string test_string(test_data.begin(), test_data.end());
 
   int offset = 0;
-  uint8 read_value;
+  uint8_t read_value;
   TF_EXPECT_OK(ReadValue(test_string, &read_value, &offset));
   EXPECT_EQ(0, read_value);
   EXPECT_EQ(1, offset);
@@ -328,19 +449,19 @@ TEST(WavIO, ReadValueUInt8) {
   EXPECT_EQ(128, read_value);
   EXPECT_EQ(4, offset);
 
-  Status read_status = ReadValue(test_string, &read_value, &offset);
+  absl::Status read_status = ReadValue(test_string, &read_value, &offset);
   EXPECT_FALSE(read_status.ok());
 }
 
 TEST(WavIO, ReadValueInt16) {
-  std::vector<uint8> test_data = {
+  std::vector<uint8_t> test_data = {
       0x00, 0x00,  // 0
       0xff, 0x00,  // 255
       0x00, 0x01,  // 256
       0xff, 0xff,  // -1
       0x00, 0x80,  // -32768
   };
-  string test_string(test_data.begin(), test_data.end());
+  std::string test_string(test_data.begin(), test_data.end());
 
   int offset = 0;
   int16_t read_value;
@@ -364,22 +485,22 @@ TEST(WavIO, ReadValueInt16) {
   EXPECT_EQ(-32768, read_value);
   EXPECT_EQ(10, offset);
 
-  Status read_status = ReadValue(test_string, &read_value, &offset);
+  absl::Status read_status = ReadValue(test_string, &read_value, &offset);
   EXPECT_FALSE(read_status.ok());
 }
 
 TEST(WavIO, ReadValueUInt16) {
-  std::vector<uint8> test_data = {
+  std::vector<uint8_t> test_data = {
       0x00, 0x00,  // 0
       0xff, 0x00,  // 255
       0x00, 0x01,  // 256
       0xff, 0xff,  // 65535
       0x00, 0x80,  // 32768
   };
-  string test_string(test_data.begin(), test_data.end());
+  std::string test_string(test_data.begin(), test_data.end());
 
   int offset = 0;
-  uint16 read_value;
+  uint16_t read_value;
   TF_EXPECT_OK(ReadValue(test_string, &read_value, &offset));
   EXPECT_EQ(0, read_value);
   EXPECT_EQ(2, offset);
@@ -400,19 +521,19 @@ TEST(WavIO, ReadValueUInt16) {
   EXPECT_EQ(32768, read_value);
   EXPECT_EQ(10, offset);
 
-  Status read_status = ReadValue(test_string, &read_value, &offset);
+  absl::Status read_status = ReadValue(test_string, &read_value, &offset);
   EXPECT_FALSE(read_status.ok());
 }
 
 TEST(WavIO, ReadValueInt32) {
-  std::vector<uint8> test_data = {
+  std::vector<uint8_t> test_data = {
       0x00, 0x00, 0x00, 0x00,  // 0
       0xff, 0x00, 0x00, 0x00,  // 255
       0x00, 0xff, 0x00, 0x00,  // 65280
       0x00, 0x00, 0xff, 0x00,  // 16,711,680
       0xff, 0xff, 0xff, 0xff,  // -1
   };
-  string test_string(test_data.begin(), test_data.end());
+  std::string test_string(test_data.begin(), test_data.end());
 
   int offset = 0;
   int32_t read_value;
@@ -436,22 +557,22 @@ TEST(WavIO, ReadValueInt32) {
   EXPECT_EQ(-1, read_value);
   EXPECT_EQ(20, offset);
 
-  Status read_status = ReadValue(test_string, &read_value, &offset);
+  absl::Status read_status = ReadValue(test_string, &read_value, &offset);
   EXPECT_FALSE(read_status.ok());
 }
 
 TEST(WavIO, ReadValueUInt32) {
-  std::vector<uint8> test_data = {
+  std::vector<uint8_t> test_data = {
       0x00, 0x00, 0x00, 0x00,  // 0
       0xff, 0x00, 0x00, 0x00,  // 255
       0x00, 0xff, 0x00, 0x00,  // 65280
       0x00, 0x00, 0xff, 0x00,  // 16,711,680
       0xff, 0xff, 0xff, 0xff,  // 4,294,967,295
   };
-  string test_string(test_data.begin(), test_data.end());
+  std::string test_string(test_data.begin(), test_data.end());
 
   int offset = 0;
-  uint32 read_value;
+  uint32_t read_value;
   TF_EXPECT_OK(ReadValue(test_string, &read_value, &offset));
   EXPECT_EQ(0, read_value);
   EXPECT_EQ(4, offset);
@@ -472,7 +593,7 @@ TEST(WavIO, ReadValueUInt32) {
   EXPECT_EQ(4294967295, read_value);
   EXPECT_EQ(20, offset);
 
-  Status read_status = ReadValue(test_string, &read_value, &offset);
+  absl::Status read_status = ReadValue(test_string, &read_value, &offset);
   EXPECT_FALSE(read_status.ok());
 }
 

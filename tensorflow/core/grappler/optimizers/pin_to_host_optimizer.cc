@@ -26,7 +26,6 @@ limitations under the License.
 #include "tensorflow/core/grappler/utils/tpu.h"
 #include "tensorflow/core/lib/core/errors.h"
 #include "tensorflow/core/lib/strings/str_util.h"
-#include "tensorflow/core/protobuf/error_codes.pb.h"
 
 namespace tensorflow {
 namespace grappler {
@@ -70,33 +69,34 @@ bool IsTensorSmall(const OpInfo::TensorProperties& prop) {
 }
 
 // Find KernelDef for `node`, greedily return first found from `devices`.
-Status TryFindKernelDef(const std::vector<DeviceType>& devices,
-                        const NodeDef& node, const KernelDef** kdef) {
+absl::Status TryFindKernelDef(const std::vector<DeviceType>& devices,
+                              const NodeDef& node, const KernelDef** kdef) {
   for (const DeviceType& device : devices) {
     const KernelDef* kernel = nullptr;
-    Status s = FindKernelDef(device, node, &kernel, nullptr);
+    absl::Status s = FindKernelDef(device, node, &kernel, nullptr);
     if (s.ok()) {
       if (kdef) {
         *kdef = kernel;
       }
-      return Status::OK();
+      return absl::OkStatus();
     }
   }
 
-  return errors::NotFound("Could not find KernelDef for op: ", node.op());
+  return absl::NotFoundError(
+      absl::StrCat("Could not find KernelDef for op: ", node.op()));
 }
 
 // Checks if a node's output port is host friendly.
 // Roughly this means checking if the output port is on Host memory.
-Status IsNodeOutputPortHostFriendly(const GraphView& graph,
-                                    GraphProperties* properties,
-                                    const NodeDef& node, int port_id,
-                                    bool* is_candidate) {
+absl::Status IsNodeOutputPortHostFriendly(const GraphView& graph,
+                                          GraphProperties* properties,
+                                          const NodeDef& node, int port_id,
+                                          bool* is_candidate) {
   *is_candidate = false;
 
   // Make sure we are not a denylisted op.
   if (IsDenylisted(node)) {
-    return Status::OK();
+    return absl::OkStatus();
   }
 
   // Check to make sure we have the right properties (i.e., statically shaped).
@@ -113,10 +113,10 @@ Status IsNodeOutputPortHostFriendly(const GraphView& graph,
                  << " but output_properties.size()=" << output_properties.size()
                  << "\n"
                  << node.DebugString();
-    return Status::OK();
+    return absl::OkStatus();
   }
   if (!IsTensorSmall(output_properties[port_id])) {
-    return Status::OK();
+    return absl::OkStatus();
   }
 
   // These nodes may be optimized away downstream (even if pinned to Host), we
@@ -127,25 +127,25 @@ Status IsNodeOutputPortHostFriendly(const GraphView& graph,
       TF_RETURN_IF_ERROR(IsNodeOutputPortHostFriendly(
           graph, properties, *fanin.node, fanin.port_id, &fanin_candidate));
       if (!fanin_candidate) {
-        return Status::OK();
+        return absl::OkStatus();
       }
     }
     *is_candidate = true;
-    return Status::OK();
+    return absl::OkStatus();
   }
 
   // Check if op's device is on CPU.
   if (absl::StrContains(node.device(), DEVICE_CPU)) {
     *is_candidate = true;
-    return Status::OK();
+    return absl::OkStatus();
   }
 
   // Check if op's output port is pinned to HostMemory.
   const OpDef* op = nullptr;
-  Status s = OpRegistry::Global()->LookUpOpDef(node.op(), &op);
+  absl::Status s = OpRegistry::Global()->LookUpOpDef(node.op(), &op);
   if (!s.ok()) {
     LOG(WARNING) << "Could not find OpDef for : " << node.op();
-    return Status::OK();
+    return absl::OkStatus();
   }
 
   // Map the port_id to output_arg_id.
@@ -154,7 +154,7 @@ Status IsNodeOutputPortHostFriendly(const GraphView& graph,
     LOG(WARNING) << "Invalid port: " << port_id << "!\n"
                  << node.DebugString() << "\n"
                  << op->DebugString();
-    return Status::OK();
+    return absl::OkStatus();
   }
 
   // Find the kernel.
@@ -163,18 +163,18 @@ Status IsNodeOutputPortHostFriendly(const GraphView& graph,
                        &kernel);
   if (!s.ok()) {
     LOG(INFO) << "Could not find KernelDef for: " << node.op();
-    return Status::OK();
+    return absl::OkStatus();
   }
 
   // Check if the output_arg is pinned to Host.
-  for (const string& host_memory_arg : kernel->host_memory_arg()) {
+  for (const std::string& host_memory_arg : kernel->host_memory_arg()) {
     if (op->output_arg(output_arg_id).name() == host_memory_arg) {
       *is_candidate = true;
       break;
     }
   }
 
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 // Checks if a node's input port is Host friendly.
@@ -187,7 +187,7 @@ bool IsNodeInputPortHostFriendly(const NodeDef& node, int port_id) {
 
   // Check if op's input port is pinned to HostMemory.
   const OpDef* op = nullptr;
-  Status s = OpRegistry::Global()->LookUpOpDef(node.op(), &op);
+  absl::Status s = OpRegistry::Global()->LookUpOpDef(node.op(), &op);
   if (!s.ok()) {
     LOG(WARNING) << "Could not find OpDef for : " << node.op();
     return false;
@@ -204,7 +204,7 @@ bool IsNodeInputPortHostFriendly(const NodeDef& node, int port_id) {
   }
 
   // Check if the input_arg is pinned to Host.
-  for (const string& host_memory_arg : kernel->host_memory_arg()) {
+  for (const std::string& host_memory_arg : kernel->host_memory_arg()) {
     if (op->input_arg(input_arg_id).name() == host_memory_arg) {
       return true;
     }
@@ -219,25 +219,26 @@ bool IsNodeInputPortHostFriendly(const NodeDef& node, int port_id) {
 // 2] Check if node can run on Host.
 // 3] Check all input/outputs are Host "friendly" (atm, friendly means small,
 //    ints, and pinned to Host).
-Status IsNodeHostCandidate(const GraphView& graph, GraphProperties* properties,
-                           const NodeDef& node, bool* is_candidate) {
+absl::Status IsNodeHostCandidate(const GraphView& graph,
+                                 GraphProperties* properties,
+                                 const NodeDef& node, bool* is_candidate) {
   *is_candidate = false;
 
   // Check if node already on CPU.
   if (absl::StrContains(node.device(), DEVICE_CPU)) {
     *is_candidate = true;
-    return Status::OK();
+    return absl::OkStatus();
   }
 
   // Skip these node types.
   if (IsDenylisted(node)) {
-    return Status::OK();
+    return absl::OkStatus();
   }
 
   // Check the node can be run on CPU.
-  Status s = TryFindKernelDef({DEVICE_CPU}, node, nullptr);
+  absl::Status s = TryFindKernelDef({DEVICE_CPU}, node, nullptr);
   if (!s.ok()) {
-    return Status::OK();
+    return absl::OkStatus();
   }
 
   // Check all inputs are Host friendly.
@@ -247,7 +248,7 @@ Status IsNodeHostCandidate(const GraphView& graph, GraphProperties* properties,
     TF_RETURN_IF_ERROR(IsNodeOutputPortHostFriendly(
         graph, properties, *fanin.node, fanin.port_id, &fanin_candidate));
     if (!fanin_candidate) {
-      return Status::OK();
+      return absl::OkStatus();
     }
   }
 
@@ -260,18 +261,18 @@ Status IsNodeHostCandidate(const GraphView& graph, GraphProperties* properties,
   }
   for (const auto& prop : properties->GetOutputProperties(node.name())) {
     if (!IsTensorSmall(prop)) {
-      return Status::OK();
+      return absl::OkStatus();
     }
   }
 
   *is_candidate = true;
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 // Tries to find a Host device from `devices`. Returns empty string if no
 // matching Host device is found.
-string TryFindHostDevice(const gtl::FlatSet<string>& devices,
-                         bool has_device_cpu, const string& device) {
+std::string TryFindHostDevice(const gtl::FlatSet<std::string>& devices,
+                              bool has_device_cpu, const std::string& device) {
   // Force this node onto the CPU.
   if (device.empty() && has_device_cpu) {
     return "/device:CPU:0";
@@ -280,11 +281,11 @@ string TryFindHostDevice(const gtl::FlatSet<string>& devices,
     //   devices = {"/device:CPU:0", "/device:XLA_GPU:0"}
     // and we need to handle them properly.
     for (const auto& device_match :
-         {std::pair<string, string>("GPU", "CPU:0"),
-          std::pair<string, string>("/device", "/device:CPU:0")}) {
-      const string device_host =
-          strings::StrCat(device.substr(0, device.rfind(device_match.first)),
-                          device_match.second);
+         {std::pair<std::string, std::string>("GPU", "CPU:0"),
+          std::pair<std::string, std::string>("/device", "/device:CPU:0")}) {
+      const std::string device_host =
+          absl::StrCat(device.substr(0, device.rfind(device_match.first)),
+                       device_match.second);
       if (devices.find(device_host) != devices.end()) {
         return device_host;
       }
@@ -296,21 +297,22 @@ string TryFindHostDevice(const gtl::FlatSet<string>& devices,
 }
 }  // end namespace internal
 
-Status PinToHostOptimizer::Optimize(Cluster* cluster, const GrapplerItem& item,
-                                    GraphDef* optimized_graph) {
+absl::Status PinToHostOptimizer::Optimize(Cluster* cluster,
+                                          const GrapplerItem& item,
+                                          GraphDef* optimized_graph) {
   *optimized_graph = item.graph;
 
-  // Skip all TPU graphs.
-  if (IsTPUGraphDef(*optimized_graph)) {
-    return Status::OK();
+  // Skip Legacy TPU bridge graphs.
+  if (IsLegacyTPUBridgeGraphDef(*optimized_graph)) {
+    return absl::OkStatus();
   }
 
   GraphProperties properties(item);
   GraphView graph(optimized_graph);
 
-  gtl::FlatSet<string> devices;
+  gtl::FlatSet<std::string> devices;
   if (cluster) {
-    const std::vector<string> device_names = cluster->GetDeviceNames();
+    const std::vector<std::string> device_names = cluster->GetDeviceNames();
     devices.insert(device_names.begin(), device_names.end());
   } else {
     devices = {"/device:CPU:0"};
@@ -323,7 +325,7 @@ Status PinToHostOptimizer::Optimize(Cluster* cluster, const GrapplerItem& item,
   TF_RETURN_IF_ERROR(TopologicalSort(optimized_graph));
 
   // All the Const nodes, and their original devices in topological order.
-  std::vector<std::pair<NodeDef*, string>> const_nodes;
+  std::vector<std::pair<NodeDef*, std::string>> const_nodes;
 
   for (auto& node : *optimized_graph->mutable_node()) {
     GRAPPLER_RETURN_IF_DEADLINE_EXCEEDED();
@@ -334,7 +336,7 @@ Status PinToHostOptimizer::Optimize(Cluster* cluster, const GrapplerItem& item,
       continue;
     }
 
-    string device =
+    std::string device =
         internal::TryFindHostDevice(devices, has_device_cpu, node.device());
     if (!device.empty()) {
       // Keep track of all Const nodes that we swapped.
@@ -350,7 +352,7 @@ Status PinToHostOptimizer::Optimize(Cluster* cluster, const GrapplerItem& item,
   for (auto& it : const_nodes) {
     GRAPPLER_RETURN_IF_DEADLINE_EXCEEDED();
     NodeDef* node = it.first;
-    const string& device = it.second;
+    const std::string& device = it.second;
 
     // Check all the consumers of this node, if any of them are not on CPU, swap
     // this node back onto the original device.
@@ -365,7 +367,7 @@ Status PinToHostOptimizer::Optimize(Cluster* cluster, const GrapplerItem& item,
       }
     }
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 }  // end namespace grappler

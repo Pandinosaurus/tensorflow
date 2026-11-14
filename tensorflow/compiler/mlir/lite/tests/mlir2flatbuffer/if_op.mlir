@@ -1,3 +1,17 @@
+// Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+// ==============================================================================
 // RUN: flatbuffer_translate -mlir-to-tflite-flatbuffer %s -o - | flatbuffer_to_string - | FileCheck %s
 
 
@@ -25,14 +39,16 @@
 // CHECK-NEXT:       name: "arg0",
 // CHECK-NEXT:       quantization: {
 // CHECK-EMPTY:
-// CHECK-NEXT:       }
+// CHECK-NEXT:       },
+// CHECK-NEXT:       has_rank: true
 // CHECK-NEXT:     }, {
 // CHECK-NEXT:       shape: [ 1 ],
 // CHECK-NEXT:       buffer: 2,
 // CHECK-NEXT:       name: "arg1",
 // CHECK-NEXT:       quantization: {
 // CHECK-EMPTY:
-// CHECK-NEXT:       }
+// CHECK-NEXT:       },
+// CHECK-NEXT:       has_rank: true
 // CHECK-NEXT:     }, {
 // CHECK-NEXT:       shape: [ 1 ],
 // CHECK-NEXT:       type: BOOL,
@@ -40,14 +56,16 @@
 // CHECK-NEXT:       name: "tfl.less",
 // CHECK-NEXT:       quantization: {
 // CHECK-EMPTY:
-// CHECK-NEXT:       }
+// CHECK-NEXT:       },
+// CHECK-NEXT:       has_rank: true
 // CHECK-NEXT:     }, {
 // CHECK-NEXT:       shape: [ 1 ],
 // CHECK-NEXT:       buffer: 4,
 // CHECK-NEXT:       name: "tf.If",
 // CHECK-NEXT:       quantization: {
 // CHECK-EMPTY:
-// CHECK-NEXT:       }
+// CHECK-NEXT:       },
+// CHECK-NEXT:       has_rank: true
 // CHECK-NEXT:     } ],
 // CHECK-NEXT:     inputs: [ 0, 1 ],
 // CHECK-NEXT:     outputs: [ 3 ],
@@ -69,14 +87,14 @@
 // CHECK-NEXT:     tensors: [ {
 // CHECK-NEXT:       shape: [  ],
 // CHECK-NEXT:       buffer: 5,
-// CHECK-NEXT:       name: "arg0",
+// CHECK-NEXT:       name: "cond_true_arg0",
 // CHECK-NEXT:       quantization: {
 // CHECK-EMPTY:
 // CHECK-NEXT:       }
 // CHECK-NEXT:     }, {
 // CHECK-NEXT:       shape: [  ],
 // CHECK-NEXT:       buffer: 6,
-// CHECK-NEXT:       name: "arg1",
+// CHECK-NEXT:       name: "cond_true_arg1",
 // CHECK-NEXT:       quantization: {
 // CHECK-EMPTY:
 // CHECK-NEXT:       }
@@ -104,14 +122,14 @@
 // CHECK-NEXT:     tensors: [ {
 // CHECK-NEXT:       shape: [  ],
 // CHECK-NEXT:       buffer: 8,
-// CHECK-NEXT:       name: "arg0",
+// CHECK-NEXT:       name: "cond_false_arg0",
 // CHECK-NEXT:       quantization: {
 // CHECK-EMPTY:
 // CHECK-NEXT:       }
 // CHECK-NEXT:     }, {
 // CHECK-NEXT:       shape: [  ],
 // CHECK-NEXT:       buffer: 9,
-// CHECK-NEXT:       name: "arg1",
+// CHECK-NEXT:       name: "cond_false_arg1",
 // CHECK-NEXT:       quantization: {
 // CHECK-EMPTY:
 // CHECK-NEXT:       }
@@ -169,18 +187,18 @@
 // CHECK-NEXT:   signature_defs: [ ]
 // CHECK-NEXT: }
 
-func @main(%arg0: tensor<1xf32>, %arg1: tensor<1xf32>) -> tensor<1xf32> {
+func.func @main(%arg0: tensor<1xf32>, %arg1: tensor<1xf32>) -> tensor<1xf32> {
   %0 = "tfl.less"(%arg0, %arg1) : (tensor<1xf32>, tensor<1xf32>) -> tensor<1xi1>
   %1 = "tf.If"(%0, %arg0, %arg1) {else_branch = @cond_false, then_branch = @cond_true, is_stateless = false} : (tensor<1xi1>, tensor<1xf32>, tensor<1xf32>) -> tensor<1xf32>
-  return %1 : tensor<1xf32>
+  func.return %1 : tensor<1xf32>
 }
 
-func @cond_true(%arg0: tensor<*xf32>, %arg1: tensor<*xf32>) -> tensor<*xf32> {
+func.func @cond_true(%arg0: tensor<*xf32>, %arg1: tensor<*xf32>) -> tensor<*xf32> {
   %0 = tfl.add %arg0, %arg1 {fused_activation_function = "NONE"} : tensor<*xf32>
-  return %0 : tensor<*xf32>
+  func.return %0 : tensor<*xf32>
 }
 
-func @cond_false(%arg0: tensor<*xf32>, %arg1: tensor<*xf32>) -> tensor<*xf32> {
+func.func @cond_false(%arg0: tensor<*xf32>, %arg1: tensor<*xf32>) -> tensor<*xf32> {
   %0 = tfl.mul %arg0, %arg1 {fused_activation_function = "NONE"} : tensor<*xf32>
-  return %0 : tensor<*xf32>
+  func.return %0 : tensor<*xf32>
 }

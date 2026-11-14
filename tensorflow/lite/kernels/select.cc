@@ -15,11 +15,12 @@ limitations under the License.
 #include <stddef.h>
 #include <stdint.h>
 
-#include "tensorflow/lite/c/common.h"
+#include "tensorflow/lite/core/c/common.h"
 #include "tensorflow/lite/kernels/internal/reference/reference_ops.h"
 #include "tensorflow/lite/kernels/internal/tensor.h"
 #include "tensorflow/lite/kernels/internal/tensor_ctypes.h"
 #include "tensorflow/lite/kernels/kernel_util.h"
+#include "tensorflow/lite/types/half.h"
 
 namespace tflite {
 namespace ops {
@@ -85,7 +86,7 @@ TfLiteStatus SelectPrepare(TfLiteContext* context, TfLiteNode* node) {
       GetTensorShape(input_x).FlatSize() == 1 &&
       GetTensorShape(input_y).FlatSize() == 1 &&
       GetTensorShape(output).FlatSize() == 1) {
-    return kTfLiteOk;
+    return context->ResizeTensor(context, output, output->dims);
   }
 
   bool same_shape = HaveSameShapes(input_condition, input_x) &&
@@ -112,6 +113,7 @@ TfLiteStatus SelectPrepare(TfLiteContext* context, TfLiteNode* node) {
         TF_LITE_ENSURE_OK(context, CalculateShapeForBroadcast(
                                        context, input_condition, input_x,
                                        input_y, &output_size));
+        TF_LITE_ENSURE(context, output_size->size <= 8);
         data->requires_broadcast = true;
         break;
       }
@@ -147,42 +149,34 @@ TfLiteStatus SelectEval(TfLiteContext* context, TfLiteNode* node) {
                     GetTensorShape(input_y), GetTensorData<type>(input_y), \
                     GetTensorShape(output), GetTensorData<type>(output));
 
-#define TF_LITE_SWITCH(type, op)                                               \
-  switch (type) {                                                              \
-    break;                                                                     \
-    case kTfLiteBool:                                                          \
-      TF_LITE_SELECT(bool, op);                                                \
-      break;                                                                   \
-    case kTfLiteFloat32:                                                       \
-      TF_LITE_SELECT(float, op);                                               \
-      break;                                                                   \
-    case kTfLiteUInt8:                                                         \
-      TF_LITE_SELECT(uint8_t, op);                                             \
-      break;                                                                   \
-    case kTfLiteInt8:                                                          \
-      TF_LITE_SELECT(int8_t, op);                                              \
-      break;                                                                   \
-    case kTfLiteInt16:                                                         \
-      TF_LITE_SELECT(int16_t, op);                                             \
-      break;                                                                   \
-    case kTfLiteInt32:                                                         \
-      TF_LITE_SELECT(int32_t, op);                                             \
-      break;                                                                   \
-    case kTfLiteInt64:                                                         \
-      TF_LITE_SELECT(int64_t, op);                                             \
-      break;                                                                   \
-    default:                                                                   \
-      context->ReportError(context,                                            \
-                           "Does not support type other than bool|float|int, " \
-                           "got %d",                                           \
-                           type);                                              \
-      return kTfLiteError;                                                     \
+  // Select is basically just a conditional copy, so we don't care what the type
+  // of the values as long as the type is the correct size.
+#define TF_LITE_SWITCH(type, op)                                             \
+  switch (TfLiteTypeGetSizeBits(type)) {                                     \
+    case 8:                                                                  \
+      TF_LITE_SELECT(uint8_t, op);                                           \
+      break;                                                                 \
+    case 16:                                                                 \
+      TF_LITE_SELECT(uint16_t, op);                                          \
+      break;                                                                 \
+    case 32:                                                                 \
+      TF_LITE_SELECT(uint32_t, op);                                          \
+      break;                                                                 \
+    case 64:                                                                 \
+      TF_LITE_SELECT(uint64_t, op);                                          \
+      break;                                                                 \
+    default:                                                                 \
+      TF_LITE_KERNEL_LOG(context,                                            \
+                         "Does not support type other than bool|float|int, " \
+                         "got %d",                                           \
+                         type);                                              \
+      return kTfLiteError;                                                   \
   }
 
   if (data->has_low_rank_input_condition) {
     TF_LITE_SWITCH(input_x->type, RankOneSelect);
   } else if (data->requires_broadcast) {
-    TF_LITE_SWITCH(input_x->type, BroadcastSelect4DSlow);
+    TF_LITE_SWITCH(input_x->type, BroadcastSelect5DSlow);
   } else {
     TF_LITE_SWITCH(input_x->type, Select);
   }

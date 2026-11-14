@@ -14,6 +14,12 @@ limitations under the License.
 ==============================================================================*/
 #include "tensorflow/lite/testing/split.h"
 
+#include <cstddef>
+#include <utility>
+#include <vector>
+
+#include "tensorflow/lite/string_type.h"
+
 namespace tflite {
 namespace testing {
 

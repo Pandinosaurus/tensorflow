@@ -1,0 +1,226 @@
+/* Copyright 2020 The OpenXLA Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+==============================================================================*/
+
+#ifndef XLA_PJRT_GPU_SE_GPU_PJRT_CLIENT_H_
+#define XLA_PJRT_GPU_SE_GPU_PJRT_CLIENT_H_
+
+#include <cstdint>
+#include <map>
+#include <memory>
+#include <optional>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include "absl/base/thread_annotations.h"
+#include "absl/container/flat_hash_map.h"
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
+#include "absl/strings/string_view.h"
+#include "absl/synchronization/mutex.h"
+#include "absl/time/time.h"
+#include "absl/types/span.h"
+#include "xla/backends/gpu/collectives/allocator_memory_registration.h"
+#include "xla/backends/gpu/collectives/gpu_clique_key.h"
+#include "xla/backends/gpu/collectives/gpu_cliques.h"
+#include "xla/client/local_client.h"
+#include "xla/executable_run_options.h"
+#include "xla/future.h"
+#include "xla/hlo/builder/xla_computation.h"
+#include "xla/layout.h"
+#include "xla/pjrt/device_event.h"
+#include "xla/pjrt/distributed/coordination/coordination_service.pb.h"
+#include "xla/pjrt/distributed/key_value_store_interface.h"
+#include "xla/pjrt/gpu/allocator_config.h"
+#include "xla/pjrt/gpu/se_gpu_topology_description.h"
+#include "xla/pjrt/host_memory_allocator.h"
+#include "xla/pjrt/maybe_owning_mlir_module.h"
+#include "xla/pjrt/pjrt_abi_version.h"
+#include "xla/pjrt/pjrt_client.h"
+#include "xla/pjrt/pjrt_compiler.h"
+#include "xla/pjrt/pjrt_executable.h"
+#include "xla/pjrt/plugin/xla_gpu/xla_gpu_client_options.h"
+#include "xla/pjrt/raw_buffer.h"
+#include "xla/pjrt/se/buffer_sequencing_event.h"
+#include "xla/pjrt/se/local_device_state.h"
+#include "xla/pjrt/se/pjrt_stream_executor_client.h"
+#include "xla/pjrt/se/se_raw_buffer.h"
+#include "xla/runtime/device_id.h"
+#include "xla/service/gpu/gpu_executable_run_options.h"
+#include "xla/service/gpu_topology.h"
+#include "xla/service/gpu_topology.pb.h"
+#include "xla/shape.h"
+#include "xla/stream_executor/device_address.h"
+#include "xla/stream_executor/device_address_allocator.h"
+#include "xla/stream_executor/device_description.h"
+#include "xla/stream_executor/stream_executor.h"
+#include "xla/tsl/concurrency/async_value.h"
+#include "xla/tsl/concurrency/ref_count.h"
+#include "xla/tsl/framework/allocator.h"
+#include "xla/xla_data.pb.h"
+
+namespace xla {
+
+class StreamExecutorGpuHbmMemorySpace : public PjRtStreamExecutorMemorySpace {
+ public:
+  static constexpr absl::string_view kKind = "device";
+  static const int kKindId;
+
+  StreamExecutorGpuHbmMemorySpace(int id, PjRtDevice* device);
+};
+
+class StreamExecutorGpuRawClient : public PjRtStreamExecutorRawClient {
+ public:
+  StreamExecutorGpuRawClient(
+      PjRtPlatformId platform_id,
+      std::vector<std::unique_ptr<LocalDeviceState>> local_device_states,
+      std::unique_ptr<se::DeviceAddressAllocator> allocator,
+      LocalClient* client,
+      std::unique_ptr<HostMemoryAllocator> host_memory_allocator,
+      bool should_stage_host_to_device_transfers,
+      bool confidential_computing_enabled,
+      std::unique_ptr<AsyncWorkRunner> async_work_runner,
+      se::StreamExecutor* executor = nullptr,
+      std::shared_ptr<KeyValueStoreInterface> kv_store = nullptr,
+      bool cache_fabric_handles = false,
+      bool abort_collectives_on_failure = false,
+      std::unique_ptr<gpu::GpuExecutableRunOptions> gpu_run_options = nullptr,
+      std::shared_ptr<gpu::AllocatorMemoryRegistration> memory_registration =
+          nullptr,
+      tsl::RCReference<const GpuMultiSliceConfig> multi_slice_config = {})
+      : PjRtStreamExecutorRawClient(
+            platform_id, std::move(local_device_states), std::move(allocator),
+            client, std::move(host_memory_allocator),
+            should_stage_host_to_device_transfers, std::move(async_work_runner),
+            executor, std::move(gpu_run_options),
+            confidential_computing_enabled, std::move(multi_slice_config)),
+        kv_store_(std::move(kv_store)),
+        cache_fabric_handles_(cache_fabric_handles),
+        abort_collectives_on_failure_(abort_collectives_on_failure),
+        memory_registration_(std::move(memory_registration)) {}
+
+  std::optional<std::shared_ptr<KeyValueStoreInterface>> key_value_store()
+      const override {
+    if (!kv_store_) {
+      return std::nullopt;
+    }
+    return kv_store_;
+  }
+
+  void ScheduleRemoteSend(LocalDeviceId local_device_id, int memory_kind_id,
+                          PjRtRawBufferRef raw_buffer,
+                          PjRtDeviceEventRefVector definition_events,
+                          PjRtDeviceEventPromiseRef usage_event_promise,
+                          Future<std::string> serialized_descriptor,
+                          PjRtBuffer::RemoteSendCallback on_done) override;
+
+  absl::StatusOr<PjRtDeviceEventRefVector> CrossHostReceiveBuffersInto(
+      absl::Span<const PjRtRawBufferRef> buffers,
+      PjRtCrossHostRecvNotifier notifier,
+      PjRtDeviceEventSpan transfer_dependency_avs) override;
+
+  absl::StatusOr<PjRtDeviceEventRefVector> CrossHostTransferBuffers(
+      PjRtDeviceEventRefVector transfer_dependencies,
+      std::vector<CommonPjRtClient::CrossHostTransferSpec> transfer_specs)
+      override;
+
+  void UpdateCompileOptionsTopology(const PjRtTopologyDescription& topology,
+                                    CompileOptions* options) const override;
+
+  void UpdateGlobalProcessInfo(absl::Span<xla::coordination::TaskInfo> infos);
+
+  absl::StatusOr<std::unique_ptr<PjRtRuntimeAbiVersion>> RuntimeAbiVersion()
+      const override;
+
+  void RecordMemoryStats(LocalDeviceState* local_device_state) override;
+
+ private:
+  void ScheduleTransfersOnLocalDevice(
+      LocalDeviceState* local_device_state, GlobalDeviceId device_id,
+      tsl::AsyncValueRef<BufferSequencingEvent> transfer_event,
+      PjRtDeviceEventRefVector transfer_dependencies,
+      std::vector<CommonPjRtClient::CrossHostTransferSpec> transfer_specs);
+
+  // Exports a fabric handle for a given buffer. If `cache_fabric_handles_` is
+  // true, the fabric handle will be cached and reused for subsequent calls.
+  absl::StatusOr<std::string> GetOrExportFabricHandle(
+      se::StreamExecutor* executor, void* ptr);
+
+  // Imports a fabric handle and returns the address. If `cache_fabric_handles_`
+  // is true, the fabric handle will be cached and reused for subsequent calls.
+  absl::StatusOr<std::shared_ptr<se::DeviceAddressBase>>
+  GetOrImportFabricHandle(se::StreamExecutor* executor,
+                          absl::string_view fabric_handle);
+
+  std::shared_ptr<KeyValueStoreInterface> kv_store_;
+  // Whether to cache fabric handles. Exporting and importing fabric handles can
+  // be expensive, but it makes sense to cache them only if there are only a
+  // handful of such handles, e.g., preallocation is enabled.
+  const bool cache_fabric_handles_ = false;
+
+  const bool abort_collectives_on_failure_ = false;
+
+  absl::Mutex mu_;
+
+  // Mapping from (executor, buffer_ptr) to fabric handle.
+  absl::flat_hash_map<std::pair<se::StreamExecutor*, void*>, std::string>
+      exported_fabric_handles_ ABSL_GUARDED_BY(mu_);
+
+  // Mapping from (executor, fabric_handle) to buffer.
+  absl::flat_hash_map<std::pair<se::StreamExecutor*, std::string>,
+                      std::shared_ptr<se::DeviceAddressBase>>
+      imported_fabric_handles_ ABSL_GUARDED_BY(mu_);
+
+  std::shared_ptr<gpu::AllocatorMemoryRegistration> memory_registration_;
+};
+
+absl::StatusOr<std::unique_ptr<PjRtClient>> GetStreamExecutorGpuClient(
+    const GpuClientOptions& options);
+
+// Constructs a StreamExecutorGpuClient which is intended to be used by
+// tensorflow. Don't use this for anything because it has tensorflow specific
+// quirks.
+absl::StatusOr<std::unique_ptr<PjRtClient>> GetSharedStreamExecutorGpuClient(
+    const GpuClientOptions& options, LocalClient* local_client,
+    std::map<int, std::unique_ptr<LocalDeviceState>> local_device_states,
+    std::unique_ptr<se::DeviceAddressAllocator> allocator,
+    std::unique_ptr<HostMemoryAllocator> host_memory_allocator);
+
+// Tensorflow specific API for exchanging an empty topology. Tensorflow
+// has some processes which don't have any hardware on them but still exchanges
+// topologies for these devices for some reason.
+absl::Status ExchangeEmptyStreamExecutorGpuTopology(
+    int process_id, int num_nodes,
+    std::shared_ptr<KeyValueStoreInterface> kv_store,
+    absl::Duration get_local_topology_timeout = absl::Minutes(2),
+    absl::Duration get_global_topology_timeout = absl::Minutes(5));
+
+// Creates allocator memory registration and adds the required suballocator
+// visitors to `allocator_config`. Returns nullptr when registration is off or
+// the pool is not preallocated.
+std::shared_ptr<gpu::AllocatorMemoryRegistration>
+CreateAllocatorMemoryRegistration(GpuAllocatorConfig* allocator_config);
+
+// Memory fraction the BFC allocator is built with: the client's resolved
+// policy unless --xla_gpu_memory_fraction_policy is set, pinned to a
+// FixedMemFraction (with a warning) when
+// --xla_gpu_enable_nccl_user_buffers_in_default_space requires a fixed arena
+// for the shared spatial pool. Fails if the flag does not parse.
+absl::StatusOr<MemFraction> ResolveBfcMemFraction(
+    const GpuAllocatorConfig& allocator_config);
+
+}  // namespace xla
+
+#endif  // XLA_PJRT_GPU_SE_GPU_PJRT_CLIENT_H_

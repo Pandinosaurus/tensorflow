@@ -23,7 +23,7 @@ limitations under the License.
 #include "tensorflow/compiler/tf2xla/sharding_util.h"
 #include "tensorflow/compiler/tf2xla/xla_context.h"
 #include "tensorflow/compiler/tf2xla/xla_helpers.h"
-#include "tensorflow/compiler/xla/client/xla_builder.h"
+#include "xla/hlo/builder/xla_builder.h"
 #include "tensorflow/core/common_runtime/local_device.h"
 #include "tensorflow/core/framework/device_base.h"
 #include "tensorflow/core/platform/mem.h"
@@ -36,16 +36,17 @@ namespace tensorflow {
 // represented by the Tensor.
 class XlaCompilationAllocator : public Allocator {
  public:
-  XlaCompilationAllocator() {}
-  ~XlaCompilationAllocator() override {}
+  XlaCompilationAllocator() = default;
+  ~XlaCompilationAllocator() override = default;
 
-  string Name() override { return "xla_compilation"; }
+  std::string Name() override { return "xla_compilation"; }
 
   void* AllocateRaw(size_t alignment, size_t num_bytes) override {
     // Regardless of the size requested, always allocates an XlaExpression.
     // Respects the alignment request because there is alignment checking even
     // for Tensors whose data is never accessed.
-    void* p = port::AlignedMalloc(sizeof(XlaExpression), alignment);
+    void* p = tsl::port::AlignedMalloc(
+        sizeof(XlaExpression), static_cast<std::align_val_t>(alignment));
     XlaExpression* expression = reinterpret_cast<XlaExpression*>(p);
     new (expression) XlaExpression();
     return expression;
@@ -77,7 +78,7 @@ XlaCompilationDevice::XlaCompilationDevice(const SessionOptions& options,
                                             type.type()))),
       allocator_(new XlaCompilationAllocator()) {}
 
-XlaCompilationDevice::~XlaCompilationDevice() {}
+XlaCompilationDevice::~XlaCompilationDevice() = default;
 
 Allocator* XlaCompilationDevice::GetAllocator(AllocatorAttributes attr) {
   return allocator_.get();
@@ -91,7 +92,7 @@ static void AttachLocationToMetadata(xla::OpMetadata& metadata,
                                      OpKernel* op_kernel, XlaContext& context) {
   if (const AbstractStackTrace* stack_trace =
           context.StackTraceForNodeName(op_kernel->def().name())) {
-    if (absl::optional<StackFrame> frame = stack_trace->LastUserFrame()) {
+    if (std::optional<StackFrame> frame = stack_trace->LastUserFrame()) {
       metadata.set_source_file(frame->file_name);
       metadata.set_source_line(frame->line_number);
     }
@@ -114,14 +115,13 @@ void XlaCompilationDevice::Compute(OpKernel* op_kernel,
       ParseShardingFromDevice(op_kernel->def(), std::numeric_limits<int>::max(),
                               /*add_metadata=*/false);
   OP_REQUIRES_OK(context, sharding_parse_result.status());
-  absl::optional<xla::OpSharding> op_sharding =
-      sharding_parse_result.ValueOrDie();
+  std::optional<xla::OpSharding> op_sharding = sharding_parse_result.value();
 
   auto frontend_attributes_result =
       GetFrontendAttributesFromAttrSlice(AttrSlice(op_kernel->def()));
   OP_REQUIRES_OK(context, frontend_attributes_result.status());
-  absl::optional<xla::FrontendAttributes> attributes =
-      frontend_attributes_result.ValueOrDie();
+  std::optional<xla::FrontendAttributes> attributes =
+      frontend_attributes_result.value();
 
   xla::FrontendAttributes merged_attributes = b->frontend_attributes();
   if (attributes.has_value()) {
@@ -141,12 +141,12 @@ void XlaCompilationDevice::Compute(OpKernel* op_kernel,
   VLOG(4) << "Done";
 }
 
-Status XlaCompilationDevice::Sync() { return Status::OK(); }
+absl::Status XlaCompilationDevice::Sync() { return absl::OkStatus(); }
 
-Status XlaCompilationDevice::MakeTensorFromProto(
+absl::Status XlaCompilationDevice::MakeTensorFromProto(
     const TensorProto& tensor_proto, const AllocatorAttributes alloc_attrs,
     Tensor* tensor) {
-  return errors::InvalidArgument(
+  return absl::InvalidArgumentError(
       "XLACompilationDevice::MakeTensorFromProto should not be called");
 }
 

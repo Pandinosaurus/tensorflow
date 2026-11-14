@@ -1,14 +1,30 @@
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_cc//cc:cc_test.bzl", "cc_test")
+load("@xla//third_party/rules_python/python:py_library.bzl", "py_library")
+load("//tensorflow:tensorflow.bzl", "py_test")
+load("//tensorflow:tensorflow.default.bzl", "get_compatible_with_portable", "pybind_extension", "replace_with_portable_tf_lib_when_required")
+
 # Utilities for signature_defs in TFLite
 load("//tensorflow/lite:build_def.bzl", "tflite_copts")
 load("//tensorflow/lite:special_rules.bzl", "tflite_portable_test_suite")
 
-# buildifier: disable=same-origin-load
-load("//tensorflow:tensorflow.bzl", "pybind_extension")
-
-# buildifier: disable=same-origin-load
-load("//tensorflow:tensorflow.bzl", "replace_with_portable_tf_lib_when_required")
-
 package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:LICENSE"],
     default_visibility = [
         "//visibility:public",
     ],
@@ -19,20 +35,25 @@ cc_library(
     name = "signature_def_util",
     srcs = ["signature_def_util.cc"],
     hdrs = ["signature_def_util.h"],
+    compatible_with = get_compatible_with_portable(),
     copts = tflite_copts(),
+    features = select({
+        "//tensorflow:android": ["-layering_check"],
+        "//conditions:default": [],
+    }),
     deps = replace_with_portable_tf_lib_when_required([
         "//tensorflow/core:lib_proto_parsing",
         "//tensorflow/core:protos_all_cc",
-        "//tensorflow/core/platform:errors",
-        "//tensorflow/core/platform:status",
     ]) + [
-        "@com_google_protobuf//:protobuf",
-        "@com_google_absl//absl/memory",
-        "@flatbuffers",
         "//tensorflow/core:protos_all_cc_impl",
-        "//tensorflow/lite:framework",
-        "//tensorflow/lite/c:common",
         "//tensorflow/lite/schema:schema_fbs",
+        "@com_google_absl//absl/algorithm:container",
+        "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/strings:string_view",
+        "@com_google_protobuf//:protobuf",
+        "@flatbuffers",
     ],
 )
 
@@ -44,19 +65,20 @@ cc_test(
         "//tensorflow/lite:testdata/add.bin",
     ],
     tags = [
+        "no_oss",
         "tflite_not_portable",
     ],
     deps = [
         ":signature_def_util",
         "//tensorflow/cc/saved_model:signature_constants",
-        "//tensorflow/core:tflite_portable_logging",
-        "//tensorflow/core/platform:errors",
-        "//tensorflow/lite:framework_lib",
-        "//tensorflow/lite/c:c_api",
-        "//tensorflow/lite/c:common",
+        "//tensorflow/core/protobuf:for_core_protos_cc",
+        "//tensorflow/lite:framework",
+        "//tensorflow/lite/core:framework",
         "//tensorflow/lite/schema:schema_fbs",
-        "//tensorflow/lite/testing:util",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings:string_view",
         "@com_google_googletest//:gtest_main",
+        "@flatbuffers//:runtime_cc",
     ],
 )
 
@@ -65,11 +87,17 @@ pybind_extension(
     srcs = [
         "signature_def_util_wrapper_pybind11.cc",
     ],
-    module_name = "_pywrap_signature_def_util_wrapper",
+    data = [
+        "_pywrap_signature_def_util_wrapper.pyi",
+    ],
+    enable_stub_generation = True,
     deps = [
         ":signature_def_util",
-        "//tensorflow/lite:framework_lib",
-        "//tensorflow/python:pybind11_lib",
+        "//tensorflow/core/protobuf:for_core_protos_cc",
+        "//tensorflow/lite:framework",
+        "//tensorflow/lite/core:framework",
+        "//tensorflow/python/lib/core:pybind11_lib",
+        "@com_google_absl//absl/status",
         "@pybind11",
     ],
 )
@@ -77,7 +105,7 @@ pybind_extension(
 py_library(
     name = "signature_def_utils",
     srcs = ["signature_def_utils.py"],
-    srcs_version = "PY3",
+    strict_deps = True,
     deps = [
         ":_pywrap_signature_def_util_wrapper",
         "//tensorflow/core:protos_all_py",
@@ -88,14 +116,15 @@ py_test(
     name = "signature_def_utils_test",
     srcs = ["signature_def_utils_test.py"],
     data = ["//tensorflow/lite:testdata/add.bin"],
-    python_version = "PY3",
-    srcs_version = "PY3",
+    strict_deps = True,
     tags = [
         "no_mac",
+        "no_oss",
     ],
     visibility = ["//visibility:public"],
     deps = [
         ":signature_def_utils",
+        #internal proto upb dep
         "//tensorflow:tensorflow_py",
         "//tensorflow/core:protos_all_py",
     ],

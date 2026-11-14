@@ -25,7 +25,6 @@ limitations under the License.
 
 namespace tensorflow {
 
-class Allocator;
 class DeviceBase;
 class TensorProto;
 
@@ -34,7 +33,7 @@ class TensorProto;
 // into Tensor contents as well as associated metadata.
 class TensorResponse {
  public:
-  TensorResponse() {}
+  TensorResponse() = default;
 
   // Reset to initial state.
   void Clear();
@@ -68,16 +67,16 @@ class TensorResponse {
 
   // Parse the RecvTensorResponse encoded in the data yielded by
   // source->contents() into *this.
-  Status ParseFrom(Source* source);
+  absl::Status ParseFrom(Source* source);
 
   // Initialize tensor from *response.
   // Leaves *response with unspecified contents.
-  Status InitFrom(RecvTensorResponse* response);
+  absl::Status InitFrom(RecvTensorResponse* response);
 
   // Initialize tensor metadata from response and allocate
   // uninitialized backing storage for actual contents.
-  void InitPartial(const RecvTensorResponse& response,
-                   const AllocationAttributes& allocation_attr);
+  absl::Status InitPartial(const RecvTensorResponse& response,
+                           const AllocationAttributes& allocation_attr);
 
   // Return a reference to the parsed tensor.  The tensor will remain
   // live only until *this is destroyed or modified.

@@ -17,6 +17,8 @@ limitations under the License.
 #define TENSORFLOW_CORE_FRAMEWORK_REGISTER_TYPES_H_
 // This file is used by cuda code and must remain compilable by nvcc.
 
+#include <cstdint>  // IWYU pragma: export
+
 #include "tensorflow/core/framework/numeric_types.h"
 #include "tensorflow/core/framework/resource_handle.h"
 #include "tensorflow/core/framework/variant.h"
@@ -61,19 +63,19 @@ limitations under the License.
 // readability.
 #define TF_CALL_float(m) m(float)
 #define TF_CALL_double(m) m(double)
-#define TF_CALL_int32(m) m(::tensorflow::int32)
-#define TF_CALL_uint32(m) m(::tensorflow::uint32)
-#define TF_CALL_uint8(m) m(::tensorflow::uint8)
-#define TF_CALL_int16(m) m(::tensorflow::int16)
+#define TF_CALL_int32(m) m(::int32_t)
+#define TF_CALL_uint32(m) m(::uint32_t)
+#define TF_CALL_uint8(m) m(::uint8_t)
+#define TF_CALL_int16(m) m(::int16_t)
 
-#define TF_CALL_int8(m) m(::tensorflow::int8)
+#define TF_CALL_int8(m) m(::int8_t)
 #define TF_CALL_string(m) m(::tensorflow::tstring)
 #define TF_CALL_tstring(m) m(::tensorflow::tstring)
 #define TF_CALL_resource(m) m(::tensorflow::ResourceHandle)
 #define TF_CALL_variant(m) m(::tensorflow::Variant)
 #define TF_CALL_complex64(m) m(::tensorflow::complex64)
 #define TF_CALL_int64(m) m(::int64_t)
-#define TF_CALL_uint64(m) m(::tensorflow::uint64)
+#define TF_CALL_uint64(m) m(::uint64_t)
 #define TF_CALL_bool(m) m(bool)
 
 #define TF_CALL_qint8(m) m(::tensorflow::qint8)
@@ -83,9 +85,22 @@ limitations under the License.
 #define TF_CALL_qint16(m) m(::tensorflow::qint16)
 
 #define TF_CALL_quint16(m) m(::tensorflow::quint16)
-#define TF_CALL_uint16(m) m(::tensorflow::uint16)
+#define TF_CALL_uint16(m) m(::uint16_t)
 #define TF_CALL_complex128(m) m(::tensorflow::complex128)
 #define TF_CALL_half(m) m(Eigen::half)
+
+#define TF_CALL_float8_e5m2(m) m(::tensorflow::float8_e5m2)
+#define TF_CALL_float8_e4m3fn(m) m(::tensorflow::float8_e4m3fn)
+#define TF_CALL_float8_e4m3fnuz(m) m(::tensorflow::float8_e4m3fnuz)
+#define TF_CALL_float8_e4m3b11fnuz(m) m(::tensorflow::float8_e4m3b11fnuz)
+#define TF_CALL_float8_e5m2fnuz(m) m(::tensorflow::float8_e5m2fnuz)
+#define TF_CALL_float8_e8m0fnu(m) m(::tensorflow::float8_e8m0fnu)
+#define TF_CALL_float4_e2m1fn(m) m(::tensorflow::float4_e2m1fn)
+
+#define TF_CALL_int4(m) m(::tensorflow::int4)
+#define TF_CALL_uint4(m) m(::tensorflow::uint4)
+#define TF_CALL_int2(m) m(::tensorflow::int2)
+#define TF_CALL_uint2(m) m(::tensorflow::uint2)
 
 #elif defined(__ANDROID_TYPES_FULL__)
 
@@ -93,7 +108,7 @@ limitations under the License.
 // supported.
 #define TF_CALL_float(m) m(float)
 #define TF_CALL_double(m)
-#define TF_CALL_int32(m) m(::tensorflow::int32)
+#define TF_CALL_int32(m) m(::int32_t)
 #define TF_CALL_uint32(m)
 #define TF_CALL_uint8(m)
 #define TF_CALL_int16(m)
@@ -119,12 +134,25 @@ limitations under the License.
 #define TF_CALL_complex128(m)
 #define TF_CALL_half(m) m(Eigen::half)
 
+#define TF_CALL_float8_e5m2(m)
+#define TF_CALL_float8_e4m3fn(m)
+#define TF_CALL_float8_e4m3fnuz(m)
+#define TF_CALL_float8_e4m3b11fnuz(m)
+#define TF_CALL_float8_e5m2fnuz(m)
+#define TF_CALL_float8_e8m0fnu(m)
+#define TF_CALL_float4_e2m1fn(m)
+
+#define TF_CALL_int4(m)
+#define TF_CALL_uint4(m)
+#define TF_CALL_int2(m)
+#define TF_CALL_uint2(m)
+
 #else  // defined(IS_MOBILE_PLATFORM) && !defined(__ANDROID_TYPES_FULL__)
 
 // Only float, int32, and bool are supported.
 #define TF_CALL_float(m) m(float)
 #define TF_CALL_double(m)
-#define TF_CALL_int32(m) m(::tensorflow::int32)
+#define TF_CALL_int32(m) m(::int32_t)
 #define TF_CALL_uint32(m)
 #define TF_CALL_uint8(m)
 #define TF_CALL_int16(m)
@@ -149,6 +177,19 @@ limitations under the License.
 #define TF_CALL_uint16(m)
 #define TF_CALL_complex128(m)
 #define TF_CALL_half(m)
+
+#define TF_CALL_float8_e5m2(m)
+#define TF_CALL_float8_e4m3fn(m)
+#define TF_CALL_float8_e4m3fnuz(m)
+#define TF_CALL_float8_e4m3b11fnuz(m)
+#define TF_CALL_float8_e5m2fnuz(m)
+#define TF_CALL_float8_e8m0fnu(m)
+#define TF_CALL_float4_e2m1fn(m)
+
+#define TF_CALL_int4(m)
+#define TF_CALL_uint4(m)
+#define TF_CALL_int2(m)
+#define TF_CALL_uint2(m)
 
 #endif  // defined(IS_MOBILE_PLATFORM)  - end of TF_CALL_type defines
 
@@ -193,7 +234,7 @@ limitations under the License.
 
 // Call "m" on all number types supported on GPU.
 #define TF_CALL_GPU_NUMBER_TYPES(m) \
-  TF_CALL_half(m) TF_CALL_float(m) TF_CALL_double(m)
+  TF_CALL_half(m) TF_CALL_bfloat16(m) TF_CALL_float(m) TF_CALL_double(m)
 
 // Call "m" on all types supported on GPU.
 #define TF_CALL_GPU_ALL_TYPES(m) \

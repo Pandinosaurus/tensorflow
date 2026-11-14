@@ -14,13 +14,22 @@
 # ==============================================================================
 """Tests for TFE_TensorHandleToNumpy."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import numpy as np
+
 from tensorflow.python.eager import pywrap_tensor_test_util as util
 from tensorflow.python.eager import test
+from tensorflow.python.framework import constant_op
+from tensorflow.python.framework import test_util
+
+
+class MyPythonObject:
+  pass
+
+
+def my_layer(x):
+  y = x**2
+  y.my_dynamic_attribute = MyPythonObject()
+  return y
 
 
 class PywrapTensorTest(test.TestCase):
@@ -29,6 +38,67 @@ class PywrapTensorTest(test.TestCase):
     result = util.get_scalar_one()
     self.assertIsInstance(result, np.ndarray)
     self.assertAllEqual(result, 1.0)
+
+  @test_util.assert_no_new_pyobjects_executing_eagerly()
+  def test_no_leak(self):
+    x = constant_op.constant([1, 2, 3])
+    layer = my_layer(x)
+    for _ in range(int(1e2)):
+      layer = my_layer(x)
+    self.assertIsNotNone(layer)
+
+  @test_util.assert_no_new_pyobjects_executing_eagerly()
+  def test_no_leak_cycles(self):
+    for i in range(int(1e2)):
+      # use multiply to avoid cached tensors.
+      x = 1.0 * constant_op.constant([1.0, 1, 1, i])
+      y = 1.0 * constant_op.constant([1.0, 1, 2, i])
+      x.self_ref = lambda x: x
+      x.y = y
+      y.x = x
+
+  @test_util.assert_no_new_pyobjects_executing_eagerly()
+  def test_no_leak_shape(self):
+    for i in range(int(1e2)):
+      # use multiply to avoid cached tensors.
+      x = 1.0 * constant_op.constant([3.0, 1, 1, i])
+      x.shape.x = x
+
+  @test_util.assert_no_new_pyobjects_executing_eagerly()
+  def test_no_leak_handle_data(self):
+    for i in range(int(1e2)):
+      # use multiply to avoid cached tensors.
+      x = 1.0 * constant_op.constant([4.0, 1, 1, i])
+      x._handle_data = x
+
+  def test_delete_handle_data_raises(self):
+    x = constant_op.constant([1.0, 2.0])
+    with self.assertRaisesRegex(
+        AttributeError, "Cannot delete attribute '_handle_data'"
+    ):
+      del x._handle_data
+
+  def test_delete_tensor_shape_raises(self):
+    x = constant_op.constant([1.0, 2.0])
+    with self.assertRaisesRegex(
+        AttributeError, "Cannot delete attribute '_tensor_shape'"
+    ):
+      del x._tensor_shape
+
+  def test_handle_data_reentrancy(self):
+    x = constant_op.constant([1.0, 2.0])
+
+    class ReentrantObject:
+
+      def __init__(self, tensor):
+        self.tensor = tensor
+
+      def __del__(self):
+        self.tensor._handle_data = None
+
+    x._handle_data = ReentrantObject(x)
+    x._handle_data = None
+    self.assertIsNone(x._handle_data)
 
 
 if __name__ == "__main__":

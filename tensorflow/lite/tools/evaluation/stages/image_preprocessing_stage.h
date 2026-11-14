@@ -17,10 +17,14 @@ limitations under the License.
 
 #include <stdint.h>
 
+#include <string>
+#include <utility>
 #include <vector>
 
+#include "absl/log/log.h"
+#include "xla/tsl/util/stats_calculator.h"
 #include "tensorflow/core/platform/logging.h"
-#include "tensorflow/core/util/stats_calculator.h"
+#include "tensorflow/lite/c/c_api_types.h"
 #include "tensorflow/lite/tools/evaluation/evaluation_stage.h"
 #include "tensorflow/lite/tools/evaluation/proto/evaluation_config.pb.h"
 #include "tensorflow/lite/tools/evaluation/proto/evaluation_stages.pb.h"
@@ -42,18 +46,19 @@ class ImagePreprocessingStage : public EvaluationStage {
 
   EvaluationStageMetrics LatestMetrics() override;
 
-  ~ImagePreprocessingStage() override {}
+  ~ImagePreprocessingStage() override = default;
 
   // Call before Run().
   void SetImagePath(std::string* image_path) { image_path_ = image_path; }
 
   // Provides preprocessing output.
   void* GetPreprocessedImageData();
+  size_t GetPreprocessedImageBytes();
 
  private:
   std::string* image_path_ = nullptr;
   TfLiteType output_type_;
-  tensorflow::Stat<int64_t> latency_stats_;
+  tsl::Stat<int64_t> latency_stats_;
 
   // One of the following 3 vectors will be populated based on output_type_.
   std::vector<float> float_preprocessed_image_;

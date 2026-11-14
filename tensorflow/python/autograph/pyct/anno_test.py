@@ -14,10 +14,6 @@
 # ==============================================================================
 """Tests for anno module."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import ast
 
 from tensorflow.python.autograph.pyct import anno
@@ -65,7 +61,7 @@ class AnnoTest(test.TestCase):
 
   def test_duplicate(self):
     node = ast.If(
-        test=ast.Num(1),
+        test=ast.Constant(value=1),
         body=[ast.Expr(ast.Name('bar', ast.Load()))],
         orelse=[])
     anno.setanno(node, 'spam', 1)

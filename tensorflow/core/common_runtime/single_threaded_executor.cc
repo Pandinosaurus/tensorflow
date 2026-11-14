@@ -15,58 +15,74 @@ limitations under the License.
 
 #include "tensorflow/core/common_runtime/single_threaded_executor.h"
 
+#include <cstddef>
+#include <cstdint>
+#include <map>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include "absl/container/flat_hash_map.h"
+#include "absl/container/inlined_vector.h"
+#include "absl/log/check.h"
+#include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
+#include "xla/tsl/platform/errors.h"
+#include "xla/tsl/platform/macros.h"
 #include "tensorflow/core/common_runtime/entry.h"
 #include "tensorflow/core/common_runtime/executor.h"
 #include "tensorflow/core/common_runtime/executor_factory.h"
 #include "tensorflow/core/common_runtime/renamed_device.h"
+#include "tensorflow/core/framework/allocator.h"
+#include "tensorflow/core/framework/control_flow.h"
+#include "tensorflow/core/framework/device.h"
+#include "tensorflow/core/framework/node_def_util.h"
+#include "tensorflow/core/framework/op_kernel.h"
+#include "tensorflow/core/framework/types.h"
 #include "tensorflow/core/graph/algorithm.h"
-#include "tensorflow/core/lib/core/errors.h"
-#include "tensorflow/core/lib/core/status.h"
+#include "tensorflow/core/graph/graph.h"
 #include "tensorflow/core/lib/gtl/cleanup.h"
-#include "tensorflow/core/platform/errors.h"
-#include "tensorflow/core/platform/macros.h"
 
 namespace tensorflow {
 
-Status ValidateOp(const Node& n) {
+absl::Status ValidateOpIsSafeForSyncExecution(
+    const Node& n, bool allow_control_flow_sync_execution) {
   for (DataType dt : n.output_types()) {
     if (IsRefType(dt)) {
-      return errors::Unimplemented(
+      return absl::UnimplementedError(absl::StrCat(
           "Single-threaded executor does not support reference-typed "
           "edges.  But saw type ",
-          DataTypeString(dt), " in outputs of node ", n.name());
+          DataTypeString(dt), " in outputs of node ", n.name()));
     }
   }
-  if (n.IsControlFlow()) {
-    return errors::FailedPrecondition(
+  // Executing Switch nodes requires propagating deadness which is
+  // not currently supported in the SingleThreadedExecutor.
+  if (n.IsSwitch()) {
+    return absl::FailedPreconditionError(absl::StrCat(
+        "Single-threaded executor does not support switch op, but saw node ",
+        n.name(),
+        ". Perhaps your graph contains old-style control flow primitives? "
+        "Try using tf.compat.v1.enable_control_flow_v2()."));
+  }
+  if (n.IsControlFlow() && !allow_control_flow_sync_execution) {
+    return absl::FailedPreconditionError(absl::StrCat(
         "Single-threaded executor does not support low level control flow, "
         " but saw control flow node ",
         n.name(),
         ".  Perhaps your graph contains old-style control flow primitives? "
-        "Try using tf.compat.v1.enable_control_flow_v2().");
+        "Try using tf.compat.v1.enable_control_flow_v2()."));
   }
-  if (n.IsSend() || n.IsHostSend() || n.IsRecv() || n.IsHostRecv()) {
-    return errors::Unimplemented(
-        "Single-threaded executor does not support partitioned graphs.  "
-        "But saw send/recv node ",
-        n.name());
-  }
-  if (n.IsCollective()) {
-    return errors::Unimplemented(
-        "Single-threaded executor does not support collective ops.  But "
-        "saw collective node ",
-        n.name());
-  }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 namespace {
 
-typedef gtl::InlinedVector<TensorValue, 4> TensorValueVec;
-typedef gtl::InlinedVector<AllocatorAttributes, 4> AllocatorAttributeVec;
+typedef absl::InlinedVector<TensorValue, 4UL> TensorValueVec;
+typedef absl::InlinedVector<AllocatorAttributes, 4UL> AllocatorAttributeVec;
 
-static const string& kSingleThreadedExecutor =
-    *new string("SINGLE_THREADED_EXECUTOR");
+static const std::string& kSingleThreadedExecutor =
+    *new std::string("SINGLE_THREADED_EXECUTOR");
 
 class SingleThreadedExecutorImpl : public Executor {
  public:
@@ -82,35 +98,41 @@ class SingleThreadedExecutorImpl : public Executor {
     }
   }
 
-  Status Initialize(const Graph& graph) {
+  absl::Status Initialize(const Graph& graph) {
     // Topologicially sort `graph` to get a sequence of OpKernels.
     std::vector<Node*> ordered_nodes;
     ordered_nodes.reserve(graph.num_nodes());
     GetReversePostOrder(graph, &ordered_nodes);
     int ordered_nodes_size = ordered_nodes.size();
     if (ordered_nodes_size != graph.num_nodes()) {
-      return errors::InvalidArgument("Graph had ", graph.num_nodes(),
-                                     " but reverse post-order had ",
-                                     ordered_nodes.size());
+      return absl::InvalidArgumentError(
+          absl::StrCat("Graph had ", graph.num_nodes(),
+                       " but reverse post-order had ", ordered_nodes.size()));
     }
 
-    kernels_.reserve(ordered_nodes.size());
+    // We reserve two less nodes because we do not need to create kernels for
+    // the _SOURCE and _SINK nodes.
+    kernels_.reserve(ordered_nodes.size() - 2);
     std::vector<Node*> nodes_with_kernels;
     std::vector<Node*> nodes_with_const_tensor_kernels;
-    nodes_with_kernels.reserve(ordered_nodes.size());
+    nodes_with_kernels.reserve(ordered_nodes.size() - 2);
 
     std::map<size_t, Node*> arg_index_to_node_map;
     absl::flat_hash_map<Node*, size_t> node_to_index_map;
 
     // Create the kernel and input-related structures for each node in `graph`.
     for (Node* n : ordered_nodes) {
-      TF_RETURN_IF_ERROR(ValidateOp(*n));
+      if (n->IsSource() || n->IsSink()) {
+        continue;
+      }
+      TF_RETURN_IF_ERROR(ValidateOpIsSafeForSyncExecution(
+          *n, params_.allow_control_flow_sync_execution));
       if (n->IsArg()) {
         int32_t arg_index;
         TF_RETURN_IF_ERROR(GetNodeAttr(n->attrs(), "index", &arg_index));
         if (arg_index < 0) {
-          return errors::InvalidArgument("Invalid argument index ", arg_index,
-                                         " in node ", n->name());
+          return absl::InvalidArgumentError(absl::StrCat(
+              "Invalid argument index ", arg_index, " in node ", n->name()));
         }
         arg_index_to_node_map[arg_index] = n;
         // We do not create a kernel for Arg nodes, and instead inline the
@@ -166,8 +188,9 @@ class SingleThreadedExecutorImpl : public Executor {
           if (e->src_output() == Graph::kControlSlot) {
             continue;
           } else if (e->src_output() != 0) {
-            return errors::Internal("Invalid output index ", e->src_output(),
-                                    " from argument node ", arg_index);
+            return absl::InternalError(
+                absl::StrCat("Invalid output index ", e->src_output(),
+                             " from argument node ", arg_index));
           }
           arg_output_locations_[arg_index].push_back(
               kernels_[node_to_index_map[e->dst()]].input_start_index +
@@ -185,8 +208,9 @@ class SingleThreadedExecutorImpl : public Executor {
         if (e->src_output() == Graph::kControlSlot) {
           continue;
         } else if (e->src_output() != 0) {
-          return errors::Internal("Invalid output index ", e->src_output(),
-                                  " from node ", n->DebugString());
+          return absl::InternalError(
+              absl::StrCat("Invalid output index ", e->src_output(),
+                           " from node ", n->DebugString()));
         }
         kernel_state.output_locations.push_back(
             kernels_[node_to_index_map[e->dst()]].input_start_index +
@@ -235,20 +259,41 @@ class SingleThreadedExecutorImpl : public Executor {
           last_kernel_state.input_start_index + last_kernel_state.num_inputs;
       input_alloc_attrs_.resize(total_num_inputs_);
       for (size_t i = 0; i < kernels_.size(); ++i) {
+        const size_t input_start_index = kernels_[i].input_start_index;
+        OpKernel* op_kernel = kernels_[i].kernel;
+        // `_Arg` nodes have no kernel; `Run()` forwards their tensors
+        // directly into consumer input slots. Derive host placement from
+        // the consumer's input memory type, which matches the producer's
+        // after `EnsureMemoryTypes()`. Producer attrs are merged below.
+        const MemoryTypeVector& input_memory_types =
+            op_kernel->input_memory_types();
+        DCHECK_EQ(input_memory_types.size(), kernels_[i].num_inputs);
+        for (size_t j = 0; j < kernels_[i].num_inputs; ++j) {
+          if (input_memory_types[j] == HOST_MEMORY) {
+            input_alloc_attrs_[input_start_index + j].set_on_host(true);
+          }
+        }
         for (size_t j = 0; j < kernels_[i].output_locations.size(); ++j) {
           for (size_t output_location : kernels_[i].output_locations[j]) {
-            input_alloc_attrs_[output_location] =
-                kernels_[i].output_alloc_attrs[j];
+            input_alloc_attrs_[output_location].Merge(
+                kernels_[i].output_alloc_attrs[j]);
           }
+        }
+      }
+      for (size_t i = 0; i < const_tensor_kernels_.size(); ++i) {
+        for (size_t output_location :
+             const_tensor_kernels_[i].output_locations) {
+          input_alloc_attrs_[output_location].Merge(
+              const_tensor_kernels_[i].output_alloc_attr);
         }
       }
     } else {
       total_num_inputs_ = 0;
     }
-    return Status::OK();
+    return absl::OkStatus();
   }
 
-  Status Run(const Args& args) override {
+  absl::Status Run(const Args& args) override {
     // The inputs to each kernel are stored contiguously in `inputs`.
     //
     // We use `kernels_[i].input_start_index` and `kernels_[i].num_inputs` to
@@ -309,14 +354,14 @@ class SingleThreadedExecutorImpl : public Executor {
     params.session_metadata = params_.session_metadata;
     params.tensor_store = args.tensor_store;
     params.cancellation_manager = args.cancellation_manager;
+    params.session_config = args.session_config;
     params.call_frame = args.call_frame;
     params.function_library = params_.function_library;
     params.resource_manager = device->resource_manager();
     params.step_container = args.step_container;
     params.collective_executor = args.collective_executor;
+    params.stack_trace = args.stack_trace;
     params.slice_reader_cache = nullptr;  // TODO(mrry): Too severe?
-    params.inputs = &node_inputs;
-    params.input_alloc_attrs = &input_alloc_attrs;
 
     Args::Runner runner_copy = args.runner;
     params.runner = &runner_copy;
@@ -341,9 +386,9 @@ class SingleThreadedExecutorImpl : public Executor {
     const size_t received_args =
         args.call_frame ? args.call_frame->num_args() : 0;
     if (TF_PREDICT_FALSE(arg_output_locations_.size() > received_args)) {
-      return errors::InvalidArgument("Expected ", arg_output_locations_.size(),
-                                     " arguments, but only received ",
-                                     received_args, ".");
+      return absl::InvalidArgumentError(
+          absl::StrCat("Expected ", arg_output_locations_.size(),
+                       " arguments, but only received ", received_args, "."));
     }
 
     // ArgOp is a relatively expensive OpKernel due to the Tensor
@@ -430,6 +475,8 @@ class SingleThreadedExecutorImpl : public Executor {
         }
         input_alloc_attrs[j] = input_alloc_attrs_[input_start_index + j];
       }
+      params.inputs = node_inputs;
+      params.input_alloc_attrs = input_alloc_attrs;
       params.op_kernel = kernel_state.kernel;
       params.output_attr_array = kernel_state.output_alloc_attrs.data();
       OpKernelContext ctx(&params, num_outputs);
@@ -455,30 +502,38 @@ class SingleThreadedExecutorImpl : public Executor {
             // ensure that the necessary validation has already happened.
             Entry& input = inputs[kernel_state.output_locations[j][k]];
             input.state = Entry::State::HAS_VALUE;
-            input.val.Init(*val.tensor);
+            if (val.tensor != nullptr) {
+              input.val.Init(*val.tensor);
+            } else {
+              input.val.Init(Tensor(kernel_state.kernel->output_type(j)));
+            }
           }
           // Move `arg` to the last consumer to avoid the cost of copying it.
           Entry& input =
               inputs[kernel_state.output_locations[j][num_destinations - 1]];
           input.state = Entry::State::HAS_VALUE;
-          input.val.Init(std::move(*val.tensor));
+          if (val.tensor != nullptr) {
+            input.val.Init(std::move(*val.tensor));
+          } else {
+            input.val.Init(Tensor(kernel_state.kernel->output_type(j)));
+          }
         }
         delete val.tensor;
       }
     }
-    return Status::OK();
+    return absl::OkStatus();
   }
 
+ private:
   // Execute all operations in the calling thread when asynchronous execution
   // is requested. Callers may expect to perform expensive work in the calling
   // thread even when the execution itself is single-threaded.
   //
   // This also avoid stack-overflow issues with functional control flow.
-  void RunAsync(const Args& args, DoneCallback done) override {
+  void RunAsyncInternal(const Args& args, DoneCallback done) override {
     args.runner([this, args, done]() { done(Run(args)); });
   }
 
- private:
   const LocalExecutorParams params_;
 
   // All following members are read-only after Initialize().
@@ -562,12 +617,13 @@ class SingleThreadedExecutorRegistrar {
 
  private:
   class Factory : public ExecutorFactory {
-    Status NewExecutor(const LocalExecutorParams& params, const Graph& graph,
-                       std::unique_ptr<Executor>* out_executor) override {
+    absl::Status NewExecutor(const LocalExecutorParams& params,
+                             const Graph& graph,
+                             std::unique_ptr<Executor>* out_executor) override {
       Executor* ret;
       TF_RETURN_IF_ERROR(NewSingleThreadedExecutor(params, graph, &ret));
       out_executor->reset(ret);
-      return Status::OK();
+      return absl::OkStatus();
     }
   };
 };
@@ -575,12 +631,13 @@ static SingleThreadedExecutorRegistrar registrar;
 
 }  // namespace
 
-Status NewSingleThreadedExecutor(const LocalExecutorParams& params,
-                                 const Graph& graph, Executor** executor) {
-  auto impl = absl::make_unique<SingleThreadedExecutorImpl>(params);
+absl::Status NewSingleThreadedExecutor(const LocalExecutorParams& params,
+                                       const Graph& graph,
+                                       Executor** executor) {
+  auto impl = std::make_unique<SingleThreadedExecutorImpl>(params);
   TF_RETURN_IF_ERROR(impl->Initialize(graph));
   *executor = impl.release();
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 }  // namespace tensorflow

@@ -14,23 +14,38 @@
 # ==============================================================================
 """Tests for utilities working with arbitrarily nested structures."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import collections
-import numpy as np
+import dataclasses
+
 from absl.testing import parameterized
+import numpy as np
 
 from tensorflow.python.data.kernel_tests import test_base
 from tensorflow.python.data.util import nest
 from tensorflow.python.framework import combinations
 from tensorflow.python.framework import constant_op
 from tensorflow.python.framework import sparse_tensor
+from tensorflow.python.framework import tensor
 from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import math_ops
 from tensorflow.python.ops.ragged import ragged_factory_ops
 from tensorflow.python.platform import test
+
+
+@dataclasses.dataclass
+class MaskedTensor:
+  mask: bool
+  value: tensor.Tensor
+
+  def __tf_flatten__(self):
+    metadata = (self.mask,)
+    components = (self.value,)
+    return metadata, components
+
+  def __tf_unflatten__(self, metadata, components):
+    mask = metadata[0]
+    value = components[0]
+    return MaskedTensor(mask=mask, value=value)
 
 
 class NestTest(test_base.DatasetTestBase, parameterized.TestCase):
@@ -69,6 +84,89 @@ class NestTest(test_base.DatasetTestBase, parameterized.TestCase):
 
     with self.assertRaises(ValueError):
       nest.pack_sequence_as([5, 6, [7, 8]], ["a", "b", "c"])
+
+  @combinations.generate(test_base.default_test_combinations())
+  def testDataclassIsNested(self):
+    mt = MaskedTensor(mask=True, value=constant_op.constant([1]))
+    self.assertTrue(nest.is_nested(mt))
+
+  @combinations.generate(test_base.default_test_combinations())
+  def testFlattenDataclass(self):
+    mt = MaskedTensor(mask=True, value=constant_op.constant([1]))
+    leaves = nest.flatten(mt)
+    self.assertLen(leaves, 1)
+    self.assertAllEqual(leaves[0], [1])
+
+  @combinations.generate(test_base.default_test_combinations())
+  def testPackDataclass(self):
+    mt = MaskedTensor(mask=True, value=constant_op.constant([1]))
+    leaves = nest.flatten(mt)
+    reconstructed_mt = nest.pack_sequence_as(mt, leaves)
+    self.assertIsInstance(reconstructed_mt, MaskedTensor)
+    self.assertEqual(reconstructed_mt.mask, mt.mask)
+    self.assertAllEqual(reconstructed_mt.value, mt.value)
+
+    mt2 = MaskedTensor(mask=False, value=constant_op.constant([2]))
+    reconstructed_mt = nest.pack_sequence_as(mt2, leaves)
+    self.assertIsInstance(reconstructed_mt, MaskedTensor)
+    self.assertFalse(reconstructed_mt.mask)
+    self.assertAllEqual(reconstructed_mt.value, [1])
+
+  @combinations.generate(test_base.default_test_combinations())
+  def testDataclassMapStructure(self):
+    mt = MaskedTensor(mask=True, value=constant_op.constant([1]))
+    mt_doubled = nest.map_structure(lambda x: x * 2, mt)
+    self.assertIsInstance(mt_doubled, MaskedTensor)
+    self.assertEqual(mt_doubled.mask, True)
+    self.assertAllEqual(mt_doubled.value, [2])
+
+  @combinations.generate(test_base.default_test_combinations())
+  def testDataclassAssertSameStructure(self):
+    mt1 = MaskedTensor(mask=True, value=constant_op.constant([1]))
+    mt2 = MaskedTensor(mask=False, value=constant_op.constant([2]))
+    nest.assert_same_structure(mt1, mt2)
+
+    mt3 = (1, 2)
+
+    with self.assertRaisesRegex(  # pylint: disable=g-error-prone-assert-raises
+        TypeError,
+        "don't have the same nested structure",
+    ):
+      nest.assert_same_structure(mt1, mt3)
+
+    class SubMaskedTensor(MaskedTensor):
+      pass
+
+    mt_subclass = SubMaskedTensor(mask=True, value=constant_op.constant([1]))
+    nest.assert_same_structure(mt1, mt_subclass, check_types=False)
+    with self.assertRaisesRegex(  # pylint: disable=g-error-prone-assert-raises
+        TypeError,
+        "don't have the same sequence type",
+    ):
+      nest.assert_same_structure(mt1, mt_subclass)
+
+  @combinations.generate(test_base.default_test_combinations())
+  def testDataclassAssertShallowStructure(self):
+    mt = MaskedTensor(mask=True, value=constant_op.constant([1]))
+    structure1 = ("a", "b")
+    structure2 = (mt, "c")
+    nest.assert_shallow_structure(structure1, structure2)
+
+    structure3 = (mt, "d", "e")
+
+    with self.assertRaisesRegex(  # pylint: disable=g-error-prone-assert-raises
+        ValueError,
+        "don't have the same sequence length",
+    ):
+      nest.assert_shallow_structure(structure1, structure3)
+
+    structure4 = {"a": mt, "b": "c"}
+    nest.assert_shallow_structure(structure1, structure4, check_types=False)
+    with self.assertRaisesRegex(  # pylint: disable=g-error-prone-assert-raises
+        TypeError,
+        "don't have the same sequence type",
+    ):
+      nest.assert_shallow_structure(structure1, structure4)
 
   @combinations.generate(test_base.default_test_combinations())
   def testFlattenDictOrder(self):
@@ -165,21 +263,21 @@ class NestTest(test_base.DatasetTestBase, parameterized.TestCase):
     self.assertEqual([rt, rt, rt], nest.flatten(dict_of_values))
 
   @combinations.generate(test_base.default_test_combinations())
-  def testIsSequence(self):
-    self.assertFalse(nest.is_sequence("1234"))
-    self.assertFalse(nest.is_sequence([1, 3, [4, 5]]))
-    self.assertTrue(nest.is_sequence(((7, 8), (5, 6))))
-    self.assertFalse(nest.is_sequence([]))
-    self.assertFalse(nest.is_sequence(set([1, 2])))
+  def testIsNested(self):
+    self.assertFalse(nest.is_nested("1234"))
+    self.assertFalse(nest.is_nested([1, 3, [4, 5]]))
+    self.assertTrue(nest.is_nested(((7, 8), (5, 6))))
+    self.assertFalse(nest.is_nested([]))
+    self.assertFalse(nest.is_nested(set([1, 2])))
     ones = array_ops.ones([2, 3])
-    self.assertFalse(nest.is_sequence(ones))
-    self.assertFalse(nest.is_sequence(math_ops.tanh(ones)))
-    self.assertFalse(nest.is_sequence(np.ones((4, 5))))
-    self.assertTrue(nest.is_sequence({"foo": 1, "bar": 2}))
+    self.assertFalse(nest.is_nested(ones))
+    self.assertFalse(nest.is_nested(math_ops.tanh(ones)))
+    self.assertFalse(nest.is_nested(np.ones((4, 5))))
+    self.assertTrue(nest.is_nested({"foo": 1, "bar": 2}))
     self.assertFalse(
-        nest.is_sequence(sparse_tensor.SparseTensorValue([[0]], [0], [1])))
+        nest.is_nested(sparse_tensor.SparseTensorValue([[0]], [0], [1])))
     self.assertFalse(
-        nest.is_sequence(ragged_factory_ops.constant_value([[[0]], [[1]]])))
+        nest.is_nested(ragged_factory_ops.constant_value([[[0]], [[1]]])))
 
   @combinations.generate(test_base.default_test_combinations())
   def testAssertSameStructure(self):

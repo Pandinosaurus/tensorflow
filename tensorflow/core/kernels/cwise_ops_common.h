@@ -87,7 +87,17 @@ class BinaryOp : public BinaryOpShared {
 
   void Compute(OpKernelContext* ctx) override {
     const Tensor& input_0 = ctx->input(0);
+    OP_REQUIRES(ctx, input_0.dtype() == DataTypeToEnum<Tin>::v(),
+                errors::InvalidArgument(
+                    "Expected tensor of type ",
+                    DataTypeString(DataTypeToEnum<Tin>::v()), " but got type ",
+                    DataTypeString(input_0.dtype())));
     const Tensor& input_1 = ctx->input(1);
+    OP_REQUIRES(ctx, input_1.dtype() == DataTypeToEnum<Tin>::v(),
+                errors::InvalidArgument(
+                    "Expected tensor of type ",
+                    DataTypeString(DataTypeToEnum<Tin>::v()), " but got type ",
+                    DataTypeString(input_1.dtype())));
     const Device& eigen_device = ctx->eigen_device<Device>();
     bool error = false;
     bool* const error_ptr = Functor::has_errors ? &error : nullptr;
@@ -230,11 +240,11 @@ class ApproximateEqualOp : public OpKernel {
   void Compute(OpKernelContext* context) override {
     const Tensor& x_input = context->input(0);
     const Tensor& y_input = context->input(1);
-    OP_REQUIRES(
-        context, x_input.shape() == y_input.shape(),
-        errors::InvalidArgument("x and y must be of the same shape. ",
-                                "x shape: ", x_input.shape().DebugString(),
-                                ". y shape: ", y_input.shape().DebugString()));
+    OP_REQUIRES(context, x_input.shape() == y_input.shape(),
+                absl::InvalidArgumentError(absl::StrCat(
+                    "x and y must be of the same shape. ",
+                    "x shape: ", x_input.shape().DebugString(),
+                    ". y shape: ", y_input.shape().DebugString())));
     Tensor* z_output = nullptr;
     OP_REQUIRES_OK(context,
                    context->allocate_output(0, x_input.shape(), &z_output));
@@ -265,17 +275,17 @@ class SimpleBinaryOp : public OpKernel {
   void Compute(OpKernelContext* ctx) override {
     const Tensor& in0 = ctx->input(0);
     const Tensor& in1 = ctx->input(1);
-    OP_REQUIRES(
-        ctx, in0.NumElements() == in1.NumElements(),
-        errors::InvalidArgument("The two arguments to a cwise op must have "
-                                "same number of elements, got ",
-                                in0.NumElements(), " and ", in1.NumElements()));
+    OP_REQUIRES(ctx, in0.NumElements() == in1.NumElements(),
+                absl::InvalidArgumentError(absl::StrCat(
+                    "The two arguments to a cwise op must have "
+                    "same number of elements, got ",
+                    in0.NumElements(), " and ", in1.NumElements())));
     auto in0_flat = in0.flat<Tin>();
     auto in1_flat = in1.flat<Tin>();
     const Device& eigen_device = ctx->eigen_device<Device>();
 
     Tensor* out = nullptr;
-    if (std::is_same<Tin, Tout>::value) {
+    if (std::is_same_v<Tin, Tout>) {
       OP_REQUIRES_OK(ctx, ctx->forward_input_or_allocate_output(
                               {0, 1}, 0, in0.shape(), &out));
     } else {
@@ -306,7 +316,7 @@ class UnaryOp : public OpKernel {
   void Compute(OpKernelContext* ctx) override {
     const Tensor& inp = ctx->input(0);
     Tensor* out = nullptr;
-    if (std::is_same<Tin, Tout>::value) {
+    if (std::is_same_v<Tin, Tout>) {
       OP_REQUIRES_OK(ctx, ctx->forward_input_or_allocate_output(
                               {0}, 0, inp.shape(), &out));
     } else {
@@ -326,7 +336,7 @@ class UnaryVariantOp : public OpKernel {
     const Tensor& inp = ctx->input(0);
     OP_REQUIRES(
         ctx, TensorShapeUtils::IsScalar(inp.shape()),
-        errors::InvalidArgument("Non-scalar variants are not supported."));
+        absl::InvalidArgumentError("Non-scalar variants are not supported."));
     const Variant& v = inp.scalar<Variant>()();
     Variant v_out;
     OP_REQUIRES_OK(ctx, UnaryOpVariant<Device>(ctx, OpEnum, v, &v_out));
@@ -360,10 +370,7 @@ struct BinaryFunctor<CPUDevice, Functor, NDIMS, false> {
     typedef typename Functor::out_type Tout;
     typedef typename Functor::in_type Tin;
     typedef typename Functor::func Binary;
-    typedef
-        typename Eigen::internal::scalar_left<Tout, Tin, Binary,
-                                              /*is_scalar_in_host_memory=*/true>
-            Unary;
+    typedef typename Eigen::internal::scalar_left<Tout, Tin, Binary> Unary;
     Assign(d, out, in.unaryExpr(Unary(scalar.data())));
   }
 
@@ -373,9 +380,7 @@ struct BinaryFunctor<CPUDevice, Functor, NDIMS, false> {
     typedef typename Functor::out_type Tout;
     typedef typename Functor::in_type Tin;
     typedef typename Functor::func Binary;
-    typedef typename Eigen::internal::scalar_right<
-        Tout, Tin, Binary, /*is_scalar_in_host_memory=*/true>
-        Unary;
+    typedef typename Eigen::internal::scalar_right<Tout, Tin, Binary> Unary;
     Assign(d, out, in.unaryExpr(Unary(scalar.data())));
   }
 
@@ -421,10 +426,7 @@ struct BinaryFunctor<CPUDevice, Functor, 2, false> {
     typedef typename Functor::out_type Tout;
     typedef typename Functor::in_type Tin;
     typedef typename Functor::func Binary;
-    typedef
-        typename Eigen::internal::scalar_left<Tout, Tin, Binary,
-                                              /*is_scalar_in_host_memory=*/true>
-            Unary;
+    typedef typename Eigen::internal::scalar_left<Tout, Tin, Binary> Unary;
     Assign(d, out, in.unaryExpr(Unary(scalar.data())));
   }
 
@@ -434,31 +436,22 @@ struct BinaryFunctor<CPUDevice, Functor, 2, false> {
     typedef typename Functor::out_type Tout;
     typedef typename Functor::in_type Tin;
     typedef typename Functor::func Binary;
-    typedef typename Eigen::internal::scalar_right<
-        Tout, Tin, Binary, /*is_scalar_in_host_memory=*/true>
-        Unary;
+    typedef typename Eigen::internal::scalar_right<Tout, Tin, Binary> Unary;
     Assign(d, out, in.unaryExpr(Unary(scalar.data())));
   }
 
-#if !defined(EIGEN_HAS_INDEX_LIST)
-  inline Eigen::DSizes<int, 2> NByOne(int n) {
-    return Eigen::DSizes<int, 2>(n, 1);
-  }
-  inline Eigen::DSizes<int, 2> OneByM(int m) {
-    return Eigen::DSizes<int, 2>(1, m);
-  }
-#else
-  inline Eigen::IndexList<int, Eigen::type2index<1>> NByOne(int n) {
-    Eigen::IndexList<int, Eigen::type2index<1>> ret;
+  inline Eigen::IndexList<Eigen::DenseIndex, Eigen::type2index<1>> NByOne(
+      Eigen::DenseIndex n) {
+    Eigen::IndexList<Eigen::DenseIndex, Eigen::type2index<1>> ret;
     ret.set(0, n);
     return ret;
   }
-  inline Eigen::IndexList<Eigen::type2index<1>, int> OneByM(int m) {
-    Eigen::IndexList<Eigen::type2index<1>, int> ret;
+  inline Eigen::IndexList<Eigen::type2index<1>, Eigen::DenseIndex> OneByM(
+      Eigen::DenseIndex m) {
+    Eigen::IndexList<Eigen::type2index<1>, Eigen::DenseIndex> ret;
     ret.set(1, m);
     return ret;
   }
-#endif
 
   void BCast(const CPUDevice& dev,
              typename TTypes<typename Functor::out_type, NDIMS>::Tensor out,
@@ -486,10 +479,10 @@ struct BinaryFunctor<CPUDevice, Functor, 2, false> {
       // use_broadcast_optimization<T> are compile-time constant, gcc
       // does a decent job avoiding generating code when conditions
       // are not met.
-      const int a = in0.dimension(0);  // in0 is shape [a, b]
-      const int b = in0.dimension(1);
-      const int c = in1.dimension(0);  // in1 is shape [c, d]
-      const int d = in1.dimension(1);
+      const Eigen::DenseIndex a = in0.dimension(0);  // in0 is shape [a, b]
+      const Eigen::DenseIndex b = in0.dimension(1);
+      const Eigen::DenseIndex c = in1.dimension(0);  // in1 is shape [c, d]
+      const Eigen::DenseIndex d = in1.dimension(1);
       if ((a == 1) && (d == 1)) {
         auto lhs = in0.reshape(OneByM(b)).broadcast(NByOne(c));
         auto rhs = in1.reshape(NByOne(c)).broadcast(OneByM(b));
@@ -566,10 +559,7 @@ struct BinaryFunctor<CPUDevice, Functor, NDIMS, true> {
     typedef typename Functor::out_type Tout;
     typedef typename Functor::in_type Tin;
     typedef typename Functor::func Binary;
-    typedef
-        typename Eigen::internal::scalar_left<Tout, Tin, Binary,
-                                              /*is_scalar_in_host_memory=*/true>
-            Unary;
+    typedef typename Eigen::internal::scalar_left<Tout, Tin, Binary> Unary;
     Assign(d, out, in.unaryExpr(Unary(scalar.data(), error)));
   }
 
@@ -579,9 +569,7 @@ struct BinaryFunctor<CPUDevice, Functor, NDIMS, true> {
     typedef typename Functor::out_type Tout;
     typedef typename Functor::in_type Tin;
     typedef typename Functor::func Binary;
-    typedef typename Eigen::internal::scalar_right<
-        Tout, Tin, Binary, /*is_scalar_in_host_memory=*/true>
-        Unary;
+    typedef typename Eigen::internal::scalar_right<Tout, Tin, Binary> Unary;
     Assign(d, out, in.unaryExpr(Unary(scalar.data(), error)));
   }
 
@@ -605,6 +593,14 @@ struct UnaryFunctor<CPUDevice, Functor> {
   void operator()(const CPUDevice& d, typename Functor::tout_type out,
                   typename Functor::tin_type in) {
     Assign(d, out, in.unaryExpr(typename Functor::func()));
+  }
+};
+
+template <typename Functor, typename Targ>
+struct UnaryFunctorWithArg<CPUDevice, Functor, Targ> {
+  void operator()(const CPUDevice& d, typename Functor::tout_type out,
+                  typename Functor::tin_type in, Targ val) {
+    Assign(d, out, in.unaryExpr(typename Functor::func(val)));
   }
 };
 

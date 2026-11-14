@@ -12,8 +12,13 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
+#include <initializer_list>
+
+#include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include "tensorflow/lite/delegates/hexagon/builders/tests/hexagon_delegate_op_model.h"
+#include "tensorflow/lite/kernels/test_util.h"
+#include "tensorflow/lite/schema/schema_generated.h"
 
 namespace tflite {
 using testing::ElementsAreArray;
@@ -52,7 +57,7 @@ TEST(NegOpModel, NegTest_UInt8) {
   EXPECT_THAT(
       m.GetDequantizedOutput<uint8_t>(),
       ElementsAreArray(ArrayFloatNear({2.0f, 1.0f, 0.f, -1.0f, -2.0f, -3.0f},
-                                      /*max_abs_error=*/0.05)));
+                                      /*max_abs_err=*/0.05)));
 }
 
 TEST(NegOpModel, NegTest_Int8) {
@@ -63,7 +68,7 @@ TEST(NegOpModel, NegTest_Int8) {
   EXPECT_THAT(
       m.GetDequantizedOutput<int8_t>(),
       ElementsAreArray(ArrayFloatNear({2.0f, 1.0f, 0.f, -1.0f, -2.0f, -3.0f},
-                                      /*max_abs_error=*/0.05)));
+                                      /*max_abs_err=*/0.05)));
 }
 
 }  // namespace tflite

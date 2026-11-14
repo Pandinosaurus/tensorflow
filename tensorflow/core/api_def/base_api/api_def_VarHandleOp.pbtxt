@@ -4,12 +4,19 @@ op {
     name: "container"
     description: <<END
 the container this variable is placed in.
+A non-empty `container` name must start with `'.'`, a letter, or a digit, and may contain only `'-'`, `'.'`, `'/'`, letters, and digits.
 END
   }
   attr {
     name: "shared_name"
     description: <<END
 the name by which this variable is referred to.
+END
+  }
+  attr {
+    name: "debug_name"
+    description: <<END
+the user-given name, which still applies in anonymous mode.
 END
   }
   attr {

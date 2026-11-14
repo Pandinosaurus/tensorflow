@@ -18,9 +18,14 @@ limitations under the License.
 #ifndef TENSORFLOW_COMPILER_TF2XLA_KERNELS_REDUCTION_OPS_H_
 #define TENSORFLOW_COMPILER_TF2XLA_KERNELS_REDUCTION_OPS_H_
 
+#include <cstdint>
+#include <vector>
+
 #include "tensorflow/compiler/tf2xla/xla_op_kernel.h"
-#include "tensorflow/compiler/xla/client/xla_builder.h"
+#include "xla/hlo/builder/xla_builder.h"
+#include "xla/xla_data.pb.h"
 #include "tensorflow/core/framework/op_kernel.h"
+#include "tensorflow/core/framework/types.pb.h"
 
 namespace tensorflow {
 
@@ -34,7 +39,7 @@ namespace tensorflow {
 class XlaReductionOp : public XlaOpKernel {
  public:
   XlaReductionOp(OpKernelConstruction* ctx, DataType reduction_type);
-  ~XlaReductionOp() override {}
+  ~XlaReductionOp() override = default;
 
   // Return the base case for the reduction.
   virtual xla::XlaOp InitialValue(xla::XlaBuilder* builder) = 0;
@@ -46,6 +51,13 @@ class XlaReductionOp : public XlaOpKernel {
   virtual void BuildReducer(xla::XlaBuilder* builder,
                             const xla::XlaOp& scalar_lhs,
                             const xla::XlaOp& scalar_rhs) = 0;
+
+  // Applies a transformation to the input of the reduction. The desired
+  // computation should be added to 'builder'. Argument 'data' is the original
+  // input of the reduction. Returns the transformed reduction input.
+  // Defaults to returning 'data'.
+  virtual xla::XlaOp PreprocessInput(xla::XlaBuilder* builder,
+                                     const xla::XlaOp& data);
 
   // Applies a transformation to the output of the reduction. The desired
   // computation should be added to 'builder'. Argument 'input' is the original

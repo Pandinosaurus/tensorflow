@@ -1,4 +1,4 @@
-/* Copyright 2016 The TensorFlow Authors All Rights Reserved.
+/* Copyright 2016 The TensorFlow Authors. All Rights Reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -15,17 +15,23 @@ limitations under the License.
 
 #include "tensorflow/core/profiler/internal/tfprof_node.h"
 
+#include <algorithm>
+#include <utility>
+#include <vector>
+
 #include "tensorflow/core/profiler/internal/tfprof_utils.h"
 
 namespace tensorflow {
 namespace tfprof {
-bool CountAsAcceleratorTime(const string& device) {
+bool CountAsAcceleratorTime(const std::string& device) {
   return device.find("stream:all") != device.npos;
 }
-bool CountAsCPUTime(const string& device) {
+bool CountAsCPUTime(const std::string& device) {
   return RE2::FullMatch(device, ".*/(device:gpu|gpu|device:cpu|cpu):\\d+");
 }
-bool IsCanonicalDevice(const string& device) { return CountAsCPUTime(device); }
+bool IsCanonicalDevice(const std::string& device) {
+  return CountAsCPUTime(device);
+}
 
 // Notes about start and end time from the NodeExecStats proto:
 // For GPU, there is no difference between op_end_rel_micros and
@@ -43,7 +49,8 @@ bool IsCanonicalDevice(const string& device) { return CountAsCPUTime(device); }
 // For ops on cpu:
 // It will only appear as cpu:0.
 
-void ExecStep::AddTimeStats(const string& dev, const NodeExecStats& step_stat) {
+void ExecStep::AddTimeStats(const std::string& dev,
+                            const NodeExecStats& step_stat) {
   devices_.insert(dev);
   if (step_stat.all_start_micros() > 0) {
     if (exec_.all_start_micros() > 0) {
@@ -77,7 +84,7 @@ void ExecStep::AddTimeStats(const string& dev, const NodeExecStats& step_stat) {
   }
 }
 
-void ExecStep::AddMemoryStats(const string& dev,
+void ExecStep::AddMemoryStats(const std::string& dev,
                               const NodeExecStats& step_stat) {
   ExecMemory exec_mem;
   if (step_stat.all_start_micros() > 0) {
@@ -120,7 +127,7 @@ void ExecStep::AddMemoryStats(const string& dev,
                                       output.tensor_description()
                                           .allocation_description()
                                           .requested_bytes());
-      uint64 output_ptr =
+      uint64_t output_ptr =
           output.tensor_description().allocation_description().ptr();
       total_output_bytes += output_bytes;
 
@@ -188,9 +195,9 @@ void ExecStep::AddMemoryStats(const string& dev,
   memory_execs_.emplace_back(exec_mem);
 }
 
-void TFGraphNode::AddStepStat(int64_t step, const string& device,
+void TFGraphNode::AddStepStat(int64_t step, const std::string& device,
                               const NodeExecStats& step_stat) {
-  string dev = absl::AsciiStrToLower(device);
+  std::string dev = absl::AsciiStrToLower(device);
 
   // TODO(xpan): Make this more robust?
   // See run_metadata_test.py
@@ -279,10 +286,10 @@ TensorShapeProto VecToShapeProto(const std::vector<int64_t>& shape_vec) {
   return shape_pb;
 }
 
-bool IsPlacedOnAccelerator(const string& device) {
+bool IsPlacedOnAccelerator(const std::string& device) {
   return device.find("gpu") != device.npos;
 }
-bool IsPlacedOnCPU(const string& device) {
+bool IsPlacedOnCPU(const std::string& device) {
   return device.find("cpu") != device.npos;
 }
 }  // namespace tfprof

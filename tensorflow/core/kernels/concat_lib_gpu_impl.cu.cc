@@ -70,7 +70,10 @@ __global__ void concat_variable_kernel(
   IntType num_inputs = input_ptr_data.size;
 
   // verbose declaration needed due to template
-  GPU_DYNAMIC_SHARED_MEM_DECL(sizeof(T), unsigned char, smem);
+  constexpr size_t kAlignTI =
+      (alignof(T) > alignof(IntType)) ? alignof(T) : alignof(IntType);
+  constexpr size_t kAlign = (kAlignTI < 16) ? 16 : kAlignTI;
+  GPU_DYNAMIC_SHARED_MEM_DECL(kAlign, unsigned char, smem);
   IntType* smem_col_scan = reinterpret_cast<IntType*>(smem);
 
   if (useSmem) {
@@ -123,7 +126,7 @@ void ConcatGPUSlice(
     Eigen::array<IntType, 2> size;
     size[0] = inputs_flat[i]->dimension(0);
     size[1] = inputs_flat[i]->dimension(1);
-    if (std::is_same<IntType, int32>::value) {
+    if (std::is_same<IntType, int32_t>::value) {
       To32Bit(*output).slice(offset, size).device(gpu_device) =
           To32Bit(*inputs_flat[i]);
     } else {
@@ -156,7 +159,7 @@ void ConcatGPUImpl(const Eigen::GpuDevice& gpu_device,
     // on most processors
     // possibly due to decreasing occupancy
     // 4096 inputs is a lot, most code will take the smem path
-    const int32 kMaxSmemBytesPerformance = 16384;
+    const int32_t kMaxSmemBytesPerformance = 16384;
     if (smem_usage < smem_max && smem_usage < kMaxSmemBytesPerformance) {
       TF_CHECK_OK(GpuLaunchKernel(
           concat_variable_kernel<T, IntType, true>, config.block_count,
@@ -194,28 +197,32 @@ void ConcatGPUImpl(const Eigen::GpuDevice& gpu_device,
       const GpuDeviceArrayStruct<int32>& ptr_offsets, bool fixed_size, \
       int split_size, typename TTypes<T, 2>::Matrix* output);
 
-#define REGISTER_GPU64(T)                                              \
-  template void ConcatGPUImpl<T, int64>(                               \
-      const Eigen::GpuDevice& d,                                       \
-      const GpuDeviceArrayStruct<const T*>& input_ptrs,                \
-      const GpuDeviceArrayStruct<int64>& ptr_offsets, bool fixed_size, \
+#define REGISTER_GPU64(T)                                                \
+  template void ConcatGPUImpl<T, int64>(                                 \
+      const Eigen::GpuDevice& d,                                         \
+      const GpuDeviceArrayStruct<const T*>& input_ptrs,                  \
+      const GpuDeviceArrayStruct<int64_t>& ptr_offsets, bool fixed_size, \
       int split_size, typename TTypes<T, 2>::Matrix* output);
 
 TF_CALL_INTEGRAL_TYPES(REGISTER_GPUCONCAT32);  // int32 Needed for TensorLists.
-TF_CALL_bfloat16(REGISTER_GPUCONCAT32);
 TF_CALL_GPU_ALL_TYPES(REGISTER_GPUCONCAT32);
+TF_CALL_float8_e5m2(REGISTER_GPUCONCAT32);
+TF_CALL_float8_e4m3fn(REGISTER_GPUCONCAT32);
 
 TF_CALL_INTEGRAL_TYPES(REGISTER_GPUCONCAT64);  // int32 Needed for TensorLists.
-TF_CALL_bfloat16(REGISTER_GPUCONCAT64);
 TF_CALL_GPU_ALL_TYPES(REGISTER_GPUCONCAT64);
+TF_CALL_float8_e5m2(REGISTER_GPUCONCAT64);
+TF_CALL_float8_e4m3fn(REGISTER_GPUCONCAT64);
 
 TF_CALL_INTEGRAL_TYPES(REGISTER_GPU32);  // int32 Needed for TensorLists.
-TF_CALL_bfloat16(REGISTER_GPU32);
 TF_CALL_GPU_ALL_TYPES(REGISTER_GPU32);
+TF_CALL_float8_e5m2(REGISTER_GPU32);
+TF_CALL_float8_e4m3fn(REGISTER_GPU32);
 
 TF_CALL_INTEGRAL_TYPES(REGISTER_GPU64);  // int32 Needed for TensorLists.
-TF_CALL_bfloat16(REGISTER_GPU64);
 TF_CALL_GPU_ALL_TYPES(REGISTER_GPU64);
+TF_CALL_float8_e5m2(REGISTER_GPU64);
+TF_CALL_float8_e4m3fn(REGISTER_GPU64);
 
 #undef REGISTER_GPUCONCAT32
 #undef REGISTER_GPUCONCAT64

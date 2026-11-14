@@ -43,8 +43,8 @@ AllToAll::AllToAll()
     : col_ctx_(nullptr), col_params_(nullptr), done_(nullptr), counter_(0) {}
 
 StatusCallback AllToAll::CheckCounterAndCallDone() {
-  return [this](const Status& s) {
-    Status final_status;
+  return [this](const absl::Status& s) {
+    absl::Status final_status;
     {
       mutex_lock l(mu_);
       status_.Update(s);
@@ -75,17 +75,17 @@ StatusCallback AllToAll::CheckCounterAndCallDone() {
   };
 }
 
-Status AllToAll::InitializeCollectiveContext(
+absl::Status AllToAll::InitializeCollectiveContext(
     std::shared_ptr<CollectiveContext> col_ctx) {
   if (col_ctx->input->dim_size(0) != col_ctx->col_params->group.group_size) {
-    return errors::InvalidArgument("input to all-to-all first dimension size (",
-                                   col_ctx->input->dim_size(0),
-                                   ") must be the same as the group size (",
-                                   col_ctx->col_params->group.group_size, ")");
+    return absl::InvalidArgumentError(absl::StrCat(
+        "input to all-to-all first dimension size (",
+        col_ctx->input->dim_size(0), ") must be the same as the group size (",
+        col_ctx->col_params->group.group_size, ")"));
   }
   DCHECK(col_ctx->dev_mgr);
   col_ctx_ = col_ctx;
-  col_params_ = col_ctx->col_params;
+  col_params_ = col_ctx->col_params.get();
   return collective_util::InitializeDeviceAndLocality(
       col_ctx->dev_mgr, col_ctx->device_name, &col_ctx->device,
       &col_ctx->device_locality);
@@ -105,20 +105,25 @@ void AllToAll::Run(StatusCallback done) {
   }
   for (int i = 0; i < col_params_->group.group_size; ++i) {
     input_chunks_.push_back(col_ctx_->input->SubSlice(i));
-    output_chunks_.push_back(output_buffer_.SubSlice(i));
+    // Select output index based on user specified rank, if available.
+    int output_index = col_params_->group.members[i].rank;
+    output_chunks_.push_back(output_buffer_.SubSlice(output_index));
   }
+
   for (int i = 0; i < col_params_->group.group_size; ++i) {
-    DispatchSend(col_params_->default_rank, i, &input_chunks_[i],
-                 CheckCounterAndCallDone());
-    DispatchRecv(i, col_params_->default_rank, &output_chunks_[i],
+    auto default_rank = col_params_->default_rank;
+    // Issue send request from current device to all devices in group.
+    DispatchSend(default_rank, i, &input_chunks_[i], CheckCounterAndCallDone());
+    // Issue receive requests from all devices to current device.
+    DispatchRecv(i, default_rank, &output_chunks_[i],
                  CheckCounterAndCallDone());
   }
 }
 
 void AllToAll::DispatchSend(int src_rank, int target_rank, const Tensor* tensor,
                             const StatusCallback& done) {
-  string send_buf_key =
-      strings::StrCat(col_ctx_->exec_key, src_rank, target_rank);
+  std::string send_buf_key =
+      absl::StrCat(col_ctx_->exec_key, src_rank, target_rank);
   col_ctx_->col_exec->remote_access()->PostToPeer(
       col_params_->group.members[target_rank].device.name(),
       col_params_->group.members[target_rank].task, send_buf_key,
@@ -129,8 +134,8 @@ void AllToAll::DispatchSend(int src_rank, int target_rank, const Tensor* tensor,
 
 void AllToAll::DispatchRecv(int src_rank, int target_rank, Tensor* tensor,
                             const StatusCallback& done) {
-  string recv_buf_key =
-      strings::StrCat(col_ctx_->exec_key, src_rank, target_rank);
+  std::string recv_buf_key =
+      absl::StrCat(col_ctx_->exec_key, src_rank, target_rank);
   col_ctx_->col_exec->remote_access()->RecvFromPeer(
       col_params_->group.members[src_rank].device.name(),
       col_params_->group.members[src_rank].task,

@@ -1,11 +1,32 @@
-load("//tensorflow:tensorflow.bzl", "filegroup")
-load("//tensorflow/core/platform:rules_cc.bzl", "cc_library")
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
+load(
+    "@xla//xla/tsl/mkl:build_defs.bzl",
+    "if_mkl",
+)
 load(
     "//tensorflow:tensorflow.bzl",
     "tf_cc_test",
+    "tf_cc_tests",
 )
+load("//tensorflow:tensorflow.default.bzl", "filegroup")
+load("//tensorflow/core/platform:rules_cc.bzl", "cc_library")
 
 package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
     default_visibility = [
         "//tensorflow/core:__subpackages__",
     ],
@@ -18,7 +39,18 @@ package(
 cc_library(
     name = "mkl_graph_util",
     hdrs = ["mkl_graph_util.h"],
-    deps = ["@com_google_absl//absl/container:flat_hash_map"],
+    deps = [
+        "@com_google_absl//absl/base",
+        "@com_google_absl//absl/container:flat_hash_map",
+    ],
+)
+
+cc_library(
+    name = "zen_graph_util",
+    hdrs = ["zen_graph_util.h"],
+    deps = [
+        "@com_google_absl//absl/container:flat_hash_map",
+    ],
 )
 
 tf_cc_test(
@@ -38,6 +70,8 @@ tf_cc_test(
         "//tensorflow/core:ops",
         "//tensorflow/core:protos_all_cc",
         "//tensorflow/core:test",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings",
         "@com_google_googletest//:gtest_main",
     ],
 )
@@ -48,6 +82,7 @@ filegroup(
         "algorithm.h",
         "default_device.h",
         "graph.h",
+        "graph_debug_info_builder.h",
         "graph_def_builder.h",
         "graph_node_util.h",
         "node_builder.h",
@@ -61,6 +96,7 @@ filegroup(
     srcs = [
         "edgeset.h",
         "graph.h",
+        "graph_debug_info_builder.h",
         "graph_def_builder.h",
         "graph_node_util.h",
         "node_builder.h",
@@ -74,6 +110,7 @@ filegroup(
     srcs = [
         "edgeset.cc",
         "graph.cc",
+        "graph_debug_info_builder.cc",
         "graph_def_builder.cc",
         "graph_node_util.cc",
         "node_builder.cc",
@@ -98,6 +135,7 @@ filegroup(
         "default_device.h",
         "edgeset.h",
         "graph.h",
+        "graph_debug_info_builder.h",
         "graph_def_builder.h",
         "graph_node_util.h",
         "graph_partition.h",
@@ -132,14 +170,14 @@ filegroup(
     srcs = [
         "benchmark_testlib.h",
         "testlib.h",
-    ],
+    ] + if_mkl(["mkl_testlib.h"]),
 )
 
 filegroup(
     name = "testlib_srcs",
     srcs = [
         "testlib.cc",
-    ],
+    ] + if_mkl(["mkl_testlib.cc"]),
 )
 
 filegroup(
@@ -153,41 +191,49 @@ filegroup(
     name = "mobile_srcs_only_runtime",
     srcs = [
         "algorithm.cc",
+        "collective_order.cc",
+        "colors.cc",
+        "control_flow.cc",
+        "costmodel.cc",
+        "edgeset.cc",
+        "graph.cc",
+        "graph_debug_info_builder.cc",
+        "graph_def_builder.cc",
+        "graph_node_util.cc",
+        "graph_partition.cc",
+        "node_builder.cc",
+        "optimizer_cse.cc",
+        "subgraph.cc",
+        "tensor_id.cc",
+        "validate.cc",
+        "while_context.cc",
+    ],
+)
+
+filegroup(
+    name = "mobile_hdrs_only_runtime",
+    srcs = [
         "algorithm.h",
         "benchmark_testlib.h",
-        "collective_order.cc",
         "collective_order.h",
-        "colors.cc",
         "colors.h",
-        "control_flow.cc",
         "control_flow.h",
-        "costmodel.cc",
         "costmodel.h",
         "default_device.h",
-        "edgeset.cc",
         "edgeset.h",
-        "graph.cc",
         "graph.h",
-        "graph_def_builder.cc",
+        "graph_debug_info_builder.h",
         "graph_def_builder.h",
-        "graph_node_util.cc",
         "graph_node_util.h",
-        "graph_partition.cc",
         "graph_partition.h",
         "mkl_graph_util.h",
-        "node_builder.cc",
         "node_builder.h",
-        "optimizer_cse.cc",
         "optimizer_cse.h",
-        "subgraph.cc",
         "subgraph.h",
-        "tensor_id.cc",
         "tensor_id.h",
         "testlib.h",
         "types.h",
-        "validate.cc",
         "validate.h",
-        "while_context.cc",
         "while_context.h",
     ],
 )
@@ -204,6 +250,7 @@ exports_files(
         "control_flow_test.cc",
         "costmodel_test.cc",
         "edgeset_test.cc",
+        "graph_debug_info_builder_test.cc",
         "graph_def_builder_test.cc",
         "graph_partition_test.cc",
         "graph_test.cc",
@@ -214,4 +261,59 @@ exports_files(
         "validate_test.cc",
     ],
     visibility = ["//tensorflow/core:__pkg__"],
+)
+
+tf_cc_tests(
+    name = "higher_level_tests",
+    size = "small",
+    srcs = [
+        "algorithm_test.cc",
+        "control_flow_test.cc",
+        "costmodel_test.cc",
+        "edgeset_test.cc",
+        "graph_debug_info_builder_test.cc",
+        "graph_def_builder_test.cc",
+        "graph_partition_test.cc",
+        "graph_test.cc",
+        "node_builder_test.cc",
+        "optimizer_cse_test.cc",
+        "subgraph_test.cc",
+        "tensor_id_test.cc",
+        "validate_test.cc",
+    ],
+    linkopts = select({
+        "//tensorflow:macos": ["-headerpad_max_install_names"],
+        "//conditions:default": [],
+    }),
+    deps = [
+        "//tensorflow/cc:cc_ops",
+        "//tensorflow/cc:cc_ops_internal",
+        "//tensorflow/cc:function_ops",
+        "//tensorflow/cc:ops",
+        "//tensorflow/cc:scope",
+        "//tensorflow/cc:sendrecv_ops",
+        "//tensorflow/cc:while_loop",
+        "//tensorflow/core",
+        "//tensorflow/core:core_cpu",
+        "//tensorflow/core:core_cpu_internal",
+        "//tensorflow/core:direct_session_internal",
+        "//tensorflow/core:framework",
+        "//tensorflow/core:framework_internal",
+        "//tensorflow/core:lib",
+        "//tensorflow/core:lib_internal",
+        "//tensorflow/core:ops",
+        "//tensorflow/core:protos_all_cc",
+        "//tensorflow/core:test",
+        "//tensorflow/core:test_main",
+        "//tensorflow/core:testlib",
+        "//tensorflow/core/kernels:ops_util",
+        "//tensorflow/core/platform:regexp",
+        "//tensorflow/core/platform:status_matchers",
+        "//tensorflow/core/util:protos_test_cc",
+        "@com_google_absl//absl/base",
+        "@com_google_absl//absl/memory",
+        "@com_google_absl//absl/strings",
+        "@com_google_googletest//:gtest",
+        "@eigen_archive//:eigen3",
+    ],
 )

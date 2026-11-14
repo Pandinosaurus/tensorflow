@@ -13,9 +13,12 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "absl/strings/string_view.h"
-#include "pybind11/pybind11.h"
-#include "pybind11/pytypes.h"
+#include <cstdint>
+#include <string>
+
+#include "absl/strings/str_format.h"
+#include "pybind11/pybind11.h"  // from @pybind11
+#include "pybind11/pytypes.h"  // from @pybind11
 #include "tensorflow/core/lib/core/status.h"
 #include "tensorflow/core/lib/strings/stringprintf.h"
 #include "tensorflow/core/util/debug_events_writer.h"
@@ -23,18 +26,18 @@ limitations under the License.
 #include "tensorflow/python/lib/core/pybind11_proto.h"
 #include "tensorflow/python/lib/core/pybind11_status.h"
 
-PYBIND11_MODULE(_pywrap_debug_events_writer, m) {
+PYBIND11_MODULE(_pywrap_debug_events_writer, m, pybind11::mod_gil_not_used()) {
   namespace py = pybind11;
   using namespace tensorflow;         // NOLINT(build/namespaces)
   using namespace tensorflow::tfdbg;  // NOLINT(build/namespaces)
 
   m.def("Init",
         [](const std::string& dump_root, const std::string& tfdbg_run_id,
-           const int64 circular_buffer_size) {
+           const int64_t circular_buffer_size) {
           DebugEventsWriter* writer = DebugEventsWriter::GetDebugEventsWriter(
               dump_root, tfdbg_run_id, circular_buffer_size);
           if (!writer->Init().ok()) {
-            throw py::value_error(tensorflow::strings::Printf(
+            throw py::value_error(absl::StrFormat(
                 "Failed to initialize debug events writer at: %s",
                 dump_root.c_str()));
           }
@@ -108,16 +111,16 @@ PYBIND11_MODULE(_pywrap_debug_events_writer, m) {
   m.def("FlushNonExecutionFiles", [](const std::string& dump_root) {
     DebugEventsWriter* writer = nullptr;
     TF_CHECK_OK(DebugEventsWriter::LookUpDebugEventsWriter(dump_root, &writer));
-    writer->FlushNonExecutionFiles();
+    (void)writer->FlushNonExecutionFiles();
   });
   m.def("FlushExecutionFiles", [](const std::string& dump_root) {
     DebugEventsWriter* writer = nullptr;
     TF_CHECK_OK(DebugEventsWriter::LookUpDebugEventsWriter(dump_root, &writer));
-    writer->FlushExecutionFiles();
+    (void)writer->FlushExecutionFiles();
   });
   m.def("Close", [](const std::string& dump_root) {
     DebugEventsWriter* writer = nullptr;
     TF_CHECK_OK(DebugEventsWriter::LookUpDebugEventsWriter(dump_root, &writer));
-    writer->Close();
+    (void)writer->Close();
   });
 };

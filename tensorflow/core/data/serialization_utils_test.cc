@@ -15,21 +15,28 @@ limitations under the License.
 
 #include "tensorflow/core/data/serialization_utils.h"
 
-#include <functional>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "absl/container/flat_hash_set.h"
+#include "absl/status/statusor.h"
+#include "absl/strings/str_cat.h"
+#include "xla/tsl/platform/statusor.h"
+#include "xla/tsl/protobuf/error_codes.pb.h"
 #include "tensorflow/core/common_runtime/device_factory.h"
 #include "tensorflow/core/data/dataset_test_base.h"
 #include "tensorflow/core/data/dataset_utils.h"
+#include "tensorflow/core/data/test_utils.h"
 #include "tensorflow/core/framework/dataset.h"
 #include "tensorflow/core/framework/function.h"
 #include "tensorflow/core/framework/function.pb.h"
 #include "tensorflow/core/framework/node_def_builder.h"
 #include "tensorflow/core/framework/op.h"
 #include "tensorflow/core/framework/op_kernel.h"
+#include "tensorflow/core/framework/tensor_testutil.h"
 #include "tensorflow/core/framework/types.pb.h"
 #include "tensorflow/core/framework/variant.h"
 #include "tensorflow/core/lib/core/status_test_util.h"
@@ -45,60 +52,12 @@ namespace tensorflow {
 namespace data {
 namespace {
 
-class TestContext {
- public:
-  static Status Create(std::unique_ptr<TestContext>* result) {
-    *result = absl::WrapUnique<TestContext>(new TestContext());
-
-    SessionOptions options;
-    auto* device_count = options.config.mutable_device_count();
-    device_count->insert({"CPU", 1});
-    std::vector<std::unique_ptr<Device>> devices;
-    TF_RETURN_IF_ERROR(DeviceFactory::AddDevices(
-        options, "/job:localhost/replica:0/task:0", &devices));
-    (*result)->device_mgr_ =
-        absl::make_unique<StaticDeviceMgr>(std::move(devices));
-
-    FunctionDefLibrary proto;
-    (*result)->lib_def_ = absl::make_unique<FunctionLibraryDefinition>(
-        OpRegistry::Global(), proto);
-
-    OptimizerOptions opts;
-    (*result)->pflr_ = absl::make_unique<ProcessFunctionLibraryRuntime>(
-        (*result)->device_mgr_.get(), Env::Default(), /*config=*/nullptr,
-        TF_GRAPH_DEF_VERSION, (*result)->lib_def_.get(), opts);
-    (*result)->runner_ = [](const std::function<void()>& fn) { fn(); };
-    (*result)->params_.function_library =
-        (*result)->pflr_->GetFLR("/device:CPU:0");
-    (*result)->params_.device = (*result)->device_mgr_->ListDevices()[0];
-    (*result)->params_.runner = &(*result)->runner_;
-    (*result)->op_ctx_ =
-        absl::make_unique<OpKernelContext>(&(*result)->params_, 0);
-    (*result)->iter_ctx_ =
-        absl::make_unique<IteratorContext>((*result)->op_ctx_.get());
-    return Status::OK();
-  }
-
-  IteratorContext* iter_ctx() const { return iter_ctx_.get(); }
-
- private:
-  TestContext() = default;
-
-  std::unique_ptr<DeviceMgr> device_mgr_;
-  std::unique_ptr<FunctionLibraryDefinition> lib_def_;
-  std::unique_ptr<ProcessFunctionLibraryRuntime> pflr_;
-  std::function<void(std::function<void()>)> runner_;
-  OpKernelContext::Params params_;
-  std::unique_ptr<OpKernelContext> op_ctx_;
-  std::unique_ptr<IteratorContext> iter_ctx_;
-};
-
-string full_name(string key) { return FullName("Iterator:", key); }
+std::string full_name(std::string key) { return FullName("Iterator:", key); }
 
 TEST(SerializationUtilsTest, CheckpointElementsRoundTrip) {
   std::vector<std::vector<Tensor>> elements;
-  elements.push_back(CreateTensors<int32>(TensorShape({3}), {{1, 2, 3}}));
-  elements.push_back(CreateTensors<int32>(TensorShape({2}), {{4, 5}}));
+  elements.push_back(CreateTensors<int32_t>(TensorShape({3}), {{1, 2, 3}}));
+  elements.push_back(CreateTensors<int32_t>(TensorShape({2}), {{4, 5}}));
   VariantTensorDataWriter writer;
   tstring test_prefix = full_name("test_prefix");
   TF_ASSERT_OK(WriteElementsToCheckpoint(&writer, test_prefix, elements));
@@ -108,8 +67,8 @@ TEST(SerializationUtilsTest, CheckpointElementsRoundTrip) {
   VariantTensorDataReader reader(data);
   std::vector<std::vector<Tensor>> read_elements;
 
-  std::unique_ptr<TestContext> ctx;
-  TF_ASSERT_OK(TestContext::Create(&ctx));
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<TestContext> ctx,
+                          TestContext::Create());
   TF_ASSERT_OK(ReadElementsFromCheckpoint(ctx->iter_ctx(), &reader, test_prefix,
                                           &read_elements));
   ASSERT_EQ(elements.size(), read_elements.size());
@@ -120,7 +79,7 @@ TEST(SerializationUtilsTest, CheckpointElementsRoundTrip) {
     ASSERT_EQ(original.size(), read.size());
     for (int j = 0; j < original.size(); ++j) {
       EXPECT_EQ(original[j].NumElements(), read[j].NumElements());
-      EXPECT_EQ(original[j].flat<int32>()(0), read[j].flat<int32>()(0));
+      EXPECT_EQ(original[j].flat<int32_t>()(0), read[j].flat<int32_t>()(0));
     }
   }
 }
@@ -146,7 +105,7 @@ TEST(SerializationUtilsTest, VariantTensorDataRoundtrip) {
 
 TEST(SerializationUtilsTest, VariantTensorDataNonExistentKey) {
   VariantTensorData data;
-  strings::StrAppend(&data.metadata_, "key1", "@@");
+  absl::StrAppend(&data.metadata_, "key1", "@@");
   data.tensors_.push_back(Tensor(DT_INT64, {1}));
   std::vector<const VariantTensorData*> reader_data;
   reader_data.push_back(&data);
@@ -183,7 +142,7 @@ TEST(SerializationUtilsTest, VariantTensorDataRoundtripIteratorName) {
 
 TEST(SerializationUtilsTest, VariantTensorDataNonExistentKeyIteratorName) {
   VariantTensorData data;
-  strings::StrAppend(&data.metadata_, "key1", "@@");
+  absl::StrAppend(&data.metadata_, "key1", "@@");
   data.tensors_.push_back(Tensor(DT_INT64, {1}));
   std::vector<const VariantTensorData*> reader_data;
   reader_data.push_back(&data);
@@ -211,6 +170,236 @@ TEST(SerializationUtilsTest, VariantTensorDataWriteAfterFlushing) {
   EXPECT_EQ(error::FAILED_PRECONDITION,
             writer.WriteTensor(full_name("Tensor"), input_tensor).code());
 }
+
+TEST(SerializationUtilsTest, VariantTensorDataReaderOOB) {
+  VariantTensorData data;
+  data.metadata_ = "Iterator@@key1";
+  std::vector<const VariantTensorData*> reader_data;
+  reader_data.push_back(&data);
+  VariantTensorDataReader reader(reader_data);
+  int64_t val_int64;
+  EXPECT_EQ(reader.ReadScalar("Iterator", "key1", &val_int64).code(),
+            error::OUT_OF_RANGE);
+  Tensor val_tensor;
+  EXPECT_EQ(reader.ReadTensor("Iterator", "key1", &val_tensor).code(),
+            error::OUT_OF_RANGE);
+}
+
+TEST(SerializationUtilsTest, VariantTensorDataReaderEmptyMetadata) {
+  // Metadata that splits into no keys (empty or delimiter-only) must not cause
+  // the reader to index the first key out of bounds while building its maps.
+  for (const std::string& metadata :
+       {std::string(""), std::string("@@"), std::string("@@@@")}) {
+    VariantTensorData data;
+    data.metadata_ = metadata;
+    data.tensors_.push_back(Tensor(DT_INT64, {1}));
+    std::vector<const VariantTensorData*> reader_data;
+    reader_data.push_back(&data);
+    VariantTensorDataReader reader(reader_data);
+    EXPECT_FALSE(reader.Contains("Iterator", "key1"));
+    int64_t val_int64;
+    EXPECT_EQ(reader.ReadScalar("Iterator", "key1", &val_int64).code(),
+              error::NOT_FOUND);
+    Tensor val_tensor;
+    EXPECT_EQ(reader.ReadTensor("Iterator", "key1", &val_tensor).code(),
+              error::NOT_FOUND);
+  }
+}
+
+TEST(SerializationUtilsTest, VariantTensorDataReaderSkipsOnlyMalformedEntries) {
+  // A malformed entry must be skipped without affecting valid entries that are
+  // deserialized alongside it.
+  VariantTensorData malformed;
+  malformed.metadata_ = "@@";
+  malformed.tensors_.push_back(Tensor(DT_INT64, {1}));
+  VariantTensorData valid;
+  valid.metadata_ = "Iterator@@key1";
+  Tensor value(DT_INT64, {});
+  value.scalar<int64_t>()() = 42;
+  valid.tensors_.push_back(value);
+  std::vector<const VariantTensorData*> reader_data = {&malformed, &valid};
+  VariantTensorDataReader reader(reader_data);
+  EXPECT_TRUE(reader.Contains("Iterator", "key1"));
+  int64_t val_int64;
+  TF_ASSERT_OK(reader.ReadScalar("Iterator", "key1", &val_int64));
+  EXPECT_EQ(val_int64, 42);
+}
+
+TEST(SerializationUtilsTest, VariantTensorDataReaderSkipsNullEntries) {
+  // A null VariantTensorData pointer must be skipped without dereferencing it,
+  // leaving valid entries deserialized alongside it readable.
+  VariantTensorData valid;
+  valid.metadata_ = "Iterator@@key1";
+  Tensor value(DT_INT64, {});
+  value.scalar<int64_t>()() = 42;
+  valid.tensors_.push_back(value);
+  std::vector<const VariantTensorData*> reader_data = {nullptr, &valid};
+  VariantTensorDataReader reader(reader_data);
+  EXPECT_TRUE(reader.Contains("Iterator", "key1"));
+  int64_t val_int64;
+  TF_ASSERT_OK(reader.ReadScalar("Iterator", "key1", &val_int64));
+  EXPECT_EQ(val_int64, 42);
+}
+
+TEST(SerializationUtilsTest, VariantTensorDataReaderSingletonMetadata) {
+  // Metadata that splits into a single key (a name with no subkeys) must build
+  // an empty key map without indexing past it.
+  VariantTensorData data;
+  data.metadata_ = "Iterator";
+  data.tensors_.push_back(Tensor(DT_INT64, {1}));
+  std::vector<const VariantTensorData*> reader_data;
+  reader_data.push_back(&data);
+  VariantTensorDataReader reader(reader_data);
+  EXPECT_FALSE(reader.Contains("Iterator", "key1"));
+  int64_t val_int64;
+  EXPECT_EQ(reader.ReadScalar("Iterator", "key1", &val_int64).code(),
+            error::NOT_FOUND);
+  Tensor val_tensor;
+  EXPECT_EQ(reader.ReadTensor("Iterator", "key1", &val_tensor).code(),
+            error::NOT_FOUND);
+}
+
+class ParameterizedIteratorStateVariantTest
+    : public DatasetOpsTestBase,
+      public ::testing::WithParamInterface<std::vector<Tensor>> {
+ protected:
+  VariantTensorData GetVariantTensorData() const {
+    std::vector<Tensor> tensors = GetParam();
+    VariantTensorData data;
+    data.set_type_name(IteratorStateVariant::TypeName());
+    for (Tensor& tensor : tensors) {
+      *data.add_tensors() = std::move(tensor);
+    }
+    return data;
+  }
+
+  absl::StatusOr<VariantTensorData> EncodeAndDecode(
+      const VariantTensorData& data) const {
+    IteratorStateVariant encoder;
+    TF_RETURN_IF_ERROR(encoder.InitializeFromVariantData(
+        std::make_unique<VariantTensorData>(data)));
+    VariantTensorData encoded_data;
+    encoder.Encode(&encoded_data);
+
+    IteratorStateVariant decoder;
+    decoder.Decode(encoded_data);
+    return *decoder.GetData();
+  }
+
+  absl::StatusOr<VariantTensorData> DecodeUncompressed(
+      const VariantTensorData& data) const {
+    IteratorStateVariant decoder;
+    decoder.Decode(data);
+    return *decoder.GetData();
+  }
+};
+
+class ParemeterizedCheckpointIndicesTest
+    : public DatasetOpsTestBase,
+      public ::testing::WithParamInterface<absl::flat_hash_set<int64_t>> {
+ protected:
+  absl::flat_hash_set<int64_t> GetCheckpointIndices() const {
+    absl::flat_hash_set<int64_t> checkpoint_indices = GetParam();
+    return checkpoint_indices;
+  }
+};
+
+std::vector<std::vector<Tensor>> TestCases() {
+  return {
+      CreateTensors<int64_t>(TensorShape{1}, {{1}}),           // int64
+      CreateTensors<int64_t>(TensorShape{1}, {{1}, {2}}),      // multiple int64
+      CreateTensors<tstring>(TensorShape{1}, {{"a"}, {"b"}}),  // tstring
+      {CreateTensor<tstring>(TensorShape{1}, {"a"}),
+       CreateTensor<int64_t>(TensorShape{1}, {1})},  // mixed tstring/int64
+      {},                                            // empty
+      {CreateTensor<int64_t>(TensorShape{128, 128}),
+       CreateTensor<int64_t>(TensorShape{64, 2})},  // larger components
+  };
+}
+
+std::vector<absl::flat_hash_set<int64_t>> CheckpointIndicesTestCases() {
+  return {
+      {/*checkpoint_indices*/},
+      {/*checkpoint_indices*/ 0},
+      {/*checkpoint_indices*/ 0, 1},
+      {/*checkpoint_indices*/ 0, 1, 2},
+      {/*checkpoint_indices*/ 1, 3, 4},
+      {/*checkpoint_indices*/ 1, 2, 3, 4},
+      {/*checkpoint_indices*/ 0, 1, 2, 3, 4},
+  };
+}
+
+TEST_P(ParameterizedIteratorStateVariantTest, EncodeAndDecode) {
+  VariantTensorData data = GetVariantTensorData();
+  TF_ASSERT_OK_AND_ASSIGN(VariantTensorData result, EncodeAndDecode(data));
+
+  EXPECT_EQ(result.type_name(), data.type_name());
+  for (int i = 0; i < result.tensors_size(); ++i) {
+    test::ExpectEqual(result.tensors(i), data.tensors(i));
+  }
+}
+
+TEST_P(ParameterizedIteratorStateVariantTest, DecodeUncompressed) {
+  VariantTensorData data = GetVariantTensorData();
+  TF_ASSERT_OK_AND_ASSIGN(VariantTensorData result, DecodeUncompressed(data));
+
+  EXPECT_EQ(result.type_name(), data.type_name());
+  for (int i = 0; i < result.tensors_size(); ++i) {
+    test::ExpectEqual(result.tensors(i), data.tensors(i));
+  }
+}
+
+TEST_P(ParemeterizedCheckpointIndicesTest,
+       CheckpointElementsRoundTripUsingIndices) {
+  std::vector<std::vector<Tensor>> elements;
+  elements.push_back(CreateTensors<int32_t>(TensorShape({3}), {{1, 2, 3}}));
+  elements.push_back(CreateTensors<int32_t>(TensorShape({2}), {{4, 5}}));
+  elements.push_back(
+      CreateTensors<int32_t>(TensorShape({5}), {{6, 7, 8, 9, 10}}));
+  elements.push_back(
+      CreateTensors<int32_t>(TensorShape({4}), {{11, 12, 13, 14}}));
+  elements.push_back(CreateTensors<int32_t>(TensorShape({2}), {{15, 16}}));
+  VariantTensorDataWriter writer;
+  tstring test_prefix = full_name("test_prefix");
+  // Generate checkpoint for entire buffer
+  absl::flat_hash_set<int64_t> checkpoint_indices_write = {0, 1, 2, 3, 4};
+  TF_ASSERT_OK(WriteElementsToCheckpoint(&writer, test_prefix, elements));
+  // Update the elements at checkpoint indices
+  for (auto index : GetCheckpointIndices()) {
+    elements.at(index) = CreateTensors<int32_t>(TensorShape({1}), {{1}});
+  }
+  TF_ASSERT_OK(UpdateCheckpointElements(&writer, test_prefix, elements,
+                                        GetCheckpointIndices()));
+  std::vector<const VariantTensorData*> data;
+  writer.GetData(&data);
+
+  VariantTensorDataReader reader(data);
+  std::vector<std::vector<Tensor>> read_elements;
+
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<TestContext> ctx,
+                          TestContext::Create());
+  TF_ASSERT_OK(ReadElementsFromCheckpoint(ctx->iter_ctx(), &reader, test_prefix,
+                                          &read_elements));
+
+  ASSERT_EQ(elements.size(), read_elements.size());
+  // Check if checkpoint state of entire buffer is as expected
+  for (int index = 0; index < elements.size(); ++index) {
+    std::vector<Tensor>& original = elements[index];
+    std::vector<Tensor>& read = read_elements[index];
+
+    ASSERT_EQ(original.size(), read.size());
+    for (int j = 0; j < original.size(); ++j) {
+      EXPECT_EQ(original[j].NumElements(), read[j].NumElements());
+      EXPECT_EQ(original[j].flat<int32_t>()(0), read[j].flat<int32_t>()(0));
+    }
+  }
+}
+
+INSTANTIATE_TEST_SUITE_P(Instantiation, ParameterizedIteratorStateVariantTest,
+                         ::testing::ValuesIn(TestCases()));
+
+INSTANTIATE_TEST_SUITE_P(Instantiation, ParemeterizedCheckpointIndicesTest,
+                         ::testing::ValuesIn(CheckpointIndicesTestCases()));
 
 }  // namespace
 }  // namespace data

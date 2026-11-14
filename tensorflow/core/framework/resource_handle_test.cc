@@ -15,8 +15,11 @@ limitations under the License.
 
 #include "tensorflow/core/framework/resource_handle.h"
 
+#include <memory>
 #include <string>
 
+#include "tensorflow/core/framework/resource_handle.pb.h"
+#include "tensorflow/core/framework/tensor_shape.pb.h"
 #include "tensorflow/core/platform/test.h"
 
 namespace tensorflow {
@@ -34,7 +37,7 @@ class MockResource : public ResourceBase {
       *alive_ = false;
     }
   }
-  string DebugString() const override { return ""; }
+  std::string DebugString() const override { return ""; }
   bool* alive_;
   int payload_;
 };
@@ -60,6 +63,39 @@ TEST_F(ResourceHandleTest, RefCounting) {
     EXPECT_EQ(resource->RefCount(), 1);
   }
   EXPECT_FALSE(alive);
+}
+
+TEST_F(ResourceHandleTest, HandleNameDoesNotLeakAddress) {
+  auto resource = new MockResource(nullptr, 42);
+  auto handle = ResourceHandle::MakeRefCountingHandle(resource, "cpu", {}, {});
+  // Handle name must not contain a raw pointer representation.
+  // Previously the name was "Resource-<id>-at-0x<hex>" which leaked the
+  // heap address of the resource to callers via error messages.
+  EXPECT_EQ(handle.name().find("-at-"), std::string::npos)
+      << "Handle name must not embed raw pointer: " << handle.name();
+  EXPECT_EQ(handle.name().find("0x"), std::string::npos)
+      << "Handle name must not embed hex address: " << handle.name();
+  // Name should start with "Resource-"
+  EXPECT_EQ(handle.name().substr(0, 9), "Resource-");
+}
+
+TEST_F(ResourceHandleTest, SummarizeValue) {
+  ResourceHandleProto proto;
+  TensorShapeProto shape;
+  shape.add_dim()->set_size(4);
+  shape.add_dim()->set_size(8);
+  proto.set_device("cpu:0");
+  proto.set_container("test_container");
+  proto.set_name("test_var");
+  auto dtypes_and_shapes = proto.add_dtypes_and_shapes();
+  dtypes_and_shapes->set_dtype(DT_INT32);
+  dtypes_and_shapes->mutable_shape()->MergeFrom(shape);
+
+  auto handle = std::make_unique<ResourceHandle>(proto);
+  EXPECT_EQ(handle->SummarizeValue(),
+            "ResourceHandle(name=\"test_var\", device=\"cpu:0\", "
+            "container=\"test_container\", type=\"\", dtype and shapes : \"[ "
+            "DType enum: 3, Shape: [4,8] ]\")");
 }
 
 }  // namespace

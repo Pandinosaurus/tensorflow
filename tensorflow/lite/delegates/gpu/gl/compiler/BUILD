@@ -1,6 +1,24 @@
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_cc//cc:cc_test.bzl", "cc_test")
 load("//tensorflow/lite:special_rules.bzl", "tflite_portable_test_suite")
 
 package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:LICENSE"],
     default_visibility = ["//visibility:public"],
     licenses = ["notice"],
 )
@@ -24,6 +42,7 @@ cc_test(
     ],
     deps = [
         ":preprocessor",
+        "@com_google_absl//absl/strings:string_view",
         "@com_google_googletest//:gtest_main",
     ],
 )
@@ -35,6 +54,7 @@ cc_library(
     deps = [
         ":preprocessor",
         ":variable_accessor",
+        "//tensorflow/lite/delegates/gpu/common:access_type",
         "//tensorflow/lite/delegates/gpu/common:data_type",
         "//tensorflow/lite/delegates/gpu/common:types",
         "//tensorflow/lite/delegates/gpu/gl:object",
@@ -52,8 +72,10 @@ cc_test(
     ],
     deps = [
         ":object_accessor",
+        ":preprocessor",
         ":variable_accessor",
         "//tensorflow/lite/delegates/gpu/common:types",
+        "//tensorflow/lite/delegates/gpu/gl:object",
         "//tensorflow/lite/delegates/gpu/gl:variable",
         "@com_google_absl//absl/types:variant",
         "@com_google_googletest//:gtest_main",
@@ -104,6 +126,16 @@ cc_library(
         "//tensorflow/lite/delegates/gpu/gl:object",
         "@com_google_absl//absl/container:flat_hash_set",
         "@com_google_absl//absl/strings",
+    ],
+)
+
+cc_test(
+    name = "compiled_node_test",
+    srcs = ["compiled_node_test.cc"],
+    deps = [
+        ":compiled_node",
+        "//tensorflow/lite/delegates/gpu/gl:variable",
+        "@com_google_googletest//:gtest_main",
     ],
 )
 
@@ -167,6 +199,7 @@ cc_library(
         "//tensorflow/lite/delegates/gpu/common:model_transformer",
         "//tensorflow/lite/delegates/gpu/common:operations",
         "//tensorflow/lite/delegates/gpu/common:types",
+        "//tensorflow/lite/delegates/gpu/gl:node_shader",
         "@com_google_absl//absl/container:flat_hash_set",
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/types:any",
@@ -185,6 +218,9 @@ cc_test(
     deps = [
         ":compiled_node",
         ":fuse_auto_input",
+        "//tensorflow/lite/delegates/gpu/common:model",
+        "//tensorflow/lite/delegates/gpu/common:model_transformer",
+        "//tensorflow/lite/delegates/gpu/gl:node_shader",
         "@com_google_absl//absl/types:any",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
@@ -214,6 +250,7 @@ cc_test(
         "tflite_not_portable_ios",
     ],
     deps = [
+        ":preprocessor",
         ":variable_accessor",
         "//tensorflow/lite/delegates/gpu/common:types",
         "@com_google_googletest//:gtest_main",

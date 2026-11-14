@@ -21,13 +21,13 @@ limitations under the License.
 #include <numeric>
 #include <random>
 
-#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
+#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
 #include "tensorflow/core/lib/gtl/flatset.h"
 #include "tensorflow/core/lib/math/math_util.h"
 #include "tensorflow/core/lib/random/simple_philox.h"
 
 #if defined(TENSORFLOW_USE_CUSTOM_CONTRACTION_KERNEL)
-#include "tensorflow/core/kernels/eigen_contraction_kernel.h"
+#include "xla/tsl/framework/contraction/eigen_contraction_kernel.h"
 #endif
 
 namespace tensorflow {
@@ -92,7 +92,7 @@ void ModelWeights::UpdateDeltaWeights(
   }
 }
 
-Status ModelWeights::Initialize(OpKernelContext* const context) {
+absl::Status ModelWeights::Initialize(OpKernelContext* const context) {
   OpInputList sparse_indices_inputs;
   TF_RETURN_IF_ERROR(
       context->input_list("sparse_indices", &sparse_indices_inputs));
@@ -100,9 +100,9 @@ Status ModelWeights::Initialize(OpKernelContext* const context) {
   TF_RETURN_IF_ERROR(
       context->input_list("sparse_weights", &sparse_weights_inputs));
   if (sparse_indices_inputs.size() != sparse_weights_inputs.size())
-    return errors::InvalidArgument(
+    return absl::InvalidArgumentError(absl::StrCat(
         "sparse_indices and sparse_weights must have the same length, got ",
-        sparse_indices_inputs.size(), " and ", sparse_weights_inputs.size());
+        sparse_indices_inputs.size(), " and ", sparse_weights_inputs.size()));
   OpInputList dense_weights_inputs;
   TF_RETURN_IF_ERROR(
       context->input_list("dense_weights", &dense_weights_inputs));
@@ -111,19 +111,19 @@ Status ModelWeights::Initialize(OpKernelContext* const context) {
   TF_RETURN_IF_ERROR(context->output_list("out_delta_sparse_weights",
                                           &sparse_weights_outputs));
   if (sparse_weights_outputs.size() != sparse_weights_inputs.size())
-    return errors::InvalidArgument(
+    return absl::InvalidArgumentError(absl::StrCat(
         "out_delta_sparse_weights and sparse_weights must have the same "
         "length, got ",
-        sparse_weights_outputs.size(), " and ", sparse_weights_inputs.size());
+        sparse_weights_outputs.size(), " and ", sparse_weights_inputs.size()));
 
   OpOutputList dense_weights_outputs;
   TF_RETURN_IF_ERROR(
       context->output_list("out_delta_dense_weights", &dense_weights_outputs));
   if (dense_weights_outputs.size() != dense_weights_inputs.size())
-    return errors::InvalidArgument(
+    return absl::InvalidArgumentError(absl::StrCat(
         "out_delta_dense_weights and dense_weights must have the same length, "
         "got ",
-        dense_weights_outputs.size(), " and ", dense_weights_inputs.size());
+        dense_weights_outputs.size(), " and ", dense_weights_inputs.size()));
 
   for (int i = 0; i < sparse_weights_inputs.size(); ++i) {
     Tensor* delta_t;
@@ -156,7 +156,7 @@ Status ModelWeights::Initialize(OpKernelContext* const context) {
                   {1, weight_inputs[i].NumElements()}),
               deltas});
         }
-        return Status::OK();
+        return absl::OkStatus();
       };
 
   return initialize_weights(dense_weights_inputs, &dense_weights_outputs,
@@ -246,14 +246,14 @@ const ExampleStatistics Example::ComputeWxAndWeightedExampleNorm(
 }
 
 // Examples contains all the training examples that SDCA uses for a mini-batch.
-Status Examples::SampleAdaptiveProbabilities(
+absl::Status Examples::SampleAdaptiveProbabilities(
     const int num_loss_partitions, const Regularizations& regularization,
     const ModelWeights& model_weights,
     const TTypes<float>::Matrix example_state_data,
     const std::unique_ptr<DualLossUpdater>& loss_updater,
     const int num_weight_vectors) {
   if (num_weight_vectors != 1) {
-    return errors::InvalidArgument(
+    return absl::InvalidArgumentError(
         "Adaptive SDCA only works with binary SDCA, "
         "where num_weight_vectors should be 1.");
   }
@@ -262,7 +262,7 @@ Status Examples::SampleAdaptiveProbabilities(
     const Example& example = examples_[example_id];
     const double example_weight = example.example_weight();
     float label = example.example_label();
-    const Status conversion_status = loss_updater->ConvertLabel(&label);
+    const absl::Status conversion_status = loss_updater->ConvertLabel(&label);
     const ExampleStatistics example_statistics =
         example.ComputeWxAndWeightedExampleNorm(num_loss_partitions,
                                                 model_weights, regularization,
@@ -319,7 +319,7 @@ Status Examples::SampleAdaptiveProbabilities(
   for (int i = id; i < num_examples(); ++i) {
     sampled_count_[i] = examples_not_seen[i - id].first;
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 void Examples::RandomShuffle() {
@@ -331,38 +331,38 @@ void Examples::RandomShuffle() {
 }
 
 // TODO(sibyl-Aix6ihai): Refactor/shorten this function.
-Status Examples::Initialize(OpKernelContext* const context,
-                            const ModelWeights& weights,
-                            const int num_sparse_features,
-                            const int num_sparse_features_with_values,
-                            const int num_dense_features) {
+absl::Status Examples::Initialize(OpKernelContext* const context,
+                                  const ModelWeights& weights,
+                                  const int num_sparse_features,
+                                  const int num_sparse_features_with_values,
+                                  const int num_dense_features) {
   num_features_ = num_sparse_features + num_dense_features;
 
   OpInputList sparse_example_indices_inputs;
   TF_RETURN_IF_ERROR(context->input_list("sparse_example_indices",
                                          &sparse_example_indices_inputs));
   if (sparse_example_indices_inputs.size() != num_sparse_features)
-    return errors::InvalidArgument(
-        "Expected ", num_sparse_features,
-        " tensors in sparse_example_indices but got ",
-        sparse_example_indices_inputs.size());
+    return absl::InvalidArgumentError(
+        absl::StrCat("Expected ", num_sparse_features,
+                     " tensors in sparse_example_indices but got ",
+                     sparse_example_indices_inputs.size()));
   OpInputList sparse_feature_indices_inputs;
   TF_RETURN_IF_ERROR(context->input_list("sparse_feature_indices",
                                          &sparse_feature_indices_inputs));
   if (sparse_feature_indices_inputs.size() != num_sparse_features)
-    return errors::InvalidArgument(
-        "Expected ", num_sparse_features,
-        " tensors in sparse_feature_indices but got ",
-        sparse_feature_indices_inputs.size());
+    return absl::InvalidArgumentError(
+        absl::StrCat("Expected ", num_sparse_features,
+                     " tensors in sparse_feature_indices but got ",
+                     sparse_feature_indices_inputs.size()));
   OpInputList sparse_feature_values_inputs;
   if (num_sparse_features_with_values > 0) {
     TF_RETURN_IF_ERROR(context->input_list("sparse_feature_values",
                                            &sparse_feature_values_inputs));
     if (sparse_feature_values_inputs.size() != num_sparse_features_with_values)
-      return errors::InvalidArgument(
-          "Expected ", num_sparse_features_with_values,
-          " tensors in sparse_feature_values but got ",
-          sparse_feature_values_inputs.size());
+      return absl::InvalidArgumentError(
+          absl::StrCat("Expected ", num_sparse_features_with_values,
+                       " tensors in sparse_feature_values but got ",
+                       sparse_feature_values_inputs.size()));
   }
 
   const Tensor* example_weights_t;
@@ -370,7 +370,7 @@ Status Examples::Initialize(OpKernelContext* const context,
   auto example_weights = example_weights_t->flat<float>();
 
   if (example_weights.size() >= std::numeric_limits<int>::max()) {
-    return errors::InvalidArgument(strings::Printf(
+    return absl::InvalidArgumentError(absl::StrFormat(
         "Too many examples in a mini-batch: %zu > %d", example_weights.size(),
         std::numeric_limits<int>::max()));
   }
@@ -381,14 +381,21 @@ Status Examples::Initialize(OpKernelContext* const context,
   TF_RETURN_IF_ERROR(context->input("example_labels", &example_labels_t));
   auto example_labels = example_labels_t->flat<float>();
   if (example_labels.size() != num_examples) {
-    return errors::InvalidArgument("Expected ", num_examples,
-                                   " example labels but got ",
-                                   example_labels.size());
+    return absl::InvalidArgumentError(absl::StrCat("Expected ", num_examples,
+                                                   " example labels but got ",
+                                                   example_labels.size()));
   }
 
   OpInputList dense_features_inputs;
   TF_RETURN_IF_ERROR(
       context->input_list("dense_features", &dense_features_inputs));
+  for (int i = 0; i < dense_features_inputs.size(); ++i) {
+    if (!TensorShapeUtils::IsMatrix(dense_features_inputs[i].shape())) {
+      return absl::InvalidArgumentError(absl::StrCat(
+          "Dense features at index ", i, " must be rank 2 but is rank ",
+          dense_features_inputs[i].dims()));
+    }
+  }
 
   examples_.clear();
   examples_.resize(num_examples);
@@ -414,10 +421,10 @@ Status Examples::Initialize(OpKernelContext* const context,
   TF_RETURN_IF_ERROR(ComputeSquaredNormPerExample(
       worker_threads, num_examples, num_sparse_features, num_dense_features,
       &examples_));
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-Status Examples::CreateSparseFeatureRepresentation(
+absl::Status Examples::CreateSparseFeatureRepresentation(
     const DeviceBase::CpuWorkerThreads& worker_threads, const int num_examples,
     const int num_sparse_features, const ModelWeights& weights,
     const OpInputList& sparse_example_indices_inputs,
@@ -425,15 +432,15 @@ Status Examples::CreateSparseFeatureRepresentation(
     const OpInputList& sparse_feature_values_inputs,
     std::vector<Example>* const examples) {
   mutex mu;
-  Status result;  // Guarded by mu
+  absl::Status result;  // Guarded by mu
   auto parse_partition = [&](const int64_t begin, const int64_t end) {
     // The static_cast here is safe since begin and end can be at most
     // num_examples which is an int.
     for (int i = static_cast<int>(begin); i < end; ++i) {
       auto example_indices =
-          sparse_example_indices_inputs[i].template flat<int64>();
+          sparse_example_indices_inputs[i].template flat<int64_t>();
       auto feature_indices =
-          sparse_feature_indices_inputs[i].template flat<int64>();
+          sparse_feature_indices_inputs[i].template flat<int64_t>();
       if (example_indices.size() != feature_indices.size()) {
         mutex_lock l(mu);
         result = errors::InvalidArgument(
@@ -472,9 +479,9 @@ Status Examples::CreateSparseFeatureRepresentation(
               const int64_t feature_index = (*sparse_features->indices)(k);
               if (!weights.SparseIndexValid(i, feature_index)) {
                 mutex_lock l(mu);
-                result = errors::InvalidArgument(
+                result = absl::InvalidArgumentError(absl::StrCat(
                     "Found sparse feature indices out of valid range: ",
-                    (*sparse_features->indices)(k));
+                    (*sparse_features->indices)(k)));
                 return;
               }
             }
@@ -504,13 +511,13 @@ Status Examples::CreateSparseFeatureRepresentation(
   return result;
 }
 
-Status Examples::CreateDenseFeatureRepresentation(
+absl::Status Examples::CreateDenseFeatureRepresentation(
     const DeviceBase::CpuWorkerThreads& worker_threads, const int num_examples,
     const int num_dense_features, const ModelWeights& weights,
     const OpInputList& dense_features_inputs,
     std::vector<Example>* const examples) {
   mutex mu;
-  Status result;  // Guarded by mu
+  absl::Status result;  // Guarded by mu
   auto parse_partition = [&](const int64_t begin, const int64_t end) {
     // The static_cast here is safe since begin and end can be at most
     // num_examples which is an int.
@@ -522,9 +529,9 @@ Status Examples::CreateDenseFeatureRepresentation(
       }
       if (!weights.DenseIndexValid(i, dense_features.dimension(1) - 1)) {
         mutex_lock l(mu);
-        result = errors::InvalidArgument(
-            "More dense features than we have parameters for: ",
-            dense_features.dimension(1));
+        result = absl::InvalidArgumentError(
+            absl::StrCat("More dense features than we have parameters for: ",
+                         dense_features.dimension(1)));
         return;
       }
     }
@@ -536,17 +543,17 @@ Status Examples::CreateDenseFeatureRepresentation(
   return result;
 }
 
-Status Examples::ComputeSquaredNormPerExample(
+absl::Status Examples::ComputeSquaredNormPerExample(
     const DeviceBase::CpuWorkerThreads& worker_threads, const int num_examples,
     const int num_sparse_features, const int num_dense_features,
     std::vector<Example>* const examples) {
   mutex mu;
-  Status result;  // Guarded by mu
+  absl::Status result;  // Guarded by mu
   // Compute norm of examples.
   auto compute_example_norm = [&](const int64_t begin, const int64_t end) {
     // The static_cast here is safe since begin and end can be at most
     // num_examples which is an int.
-    gtl::FlatSet<int64> previous_indices;
+    gtl::FlatSet<int64_t> previous_indices;
     for (int example_id = static_cast<int>(begin); example_id < end;
          ++example_id) {
       double squared_norm = 0;
@@ -560,7 +567,7 @@ Status Examples::ComputeSquaredNormPerExample(
           if (previous_indices.insert(feature_index).second == false) {
             mutex_lock l(mu);
             result =
-                errors::InvalidArgument("Duplicate index in sparse vector.");
+                absl::InvalidArgumentError("Duplicate index in sparse vector.");
             return;
           }
           const double feature_value = sparse_features.values == nullptr

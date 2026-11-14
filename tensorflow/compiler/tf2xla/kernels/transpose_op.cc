@@ -18,16 +18,26 @@ limitations under the License.
 // handles all transposes, while Eigen needs a restricted DoTranspose
 // helper.
 
+#include <cstdint>
+#include <limits>
+#include <vector>
+
+#include "absl/container/inlined_vector.h"
+#include "absl/status/status.h"
 #include "tensorflow/compiler/tf2xla/lib/scatter.h"
-#include "tensorflow/compiler/tf2xla/type_util.h"
-#include "tensorflow/compiler/tf2xla/xla_helpers.h"
 #include "tensorflow/compiler/tf2xla/xla_op_kernel.h"
 #include "tensorflow/compiler/tf2xla/xla_op_registry.h"
-#include "tensorflow/compiler/xla/client/xla_builder.h"
-#include "tensorflow/compiler/xla/primitive_util.h"
+#include "xla/hlo/builder/xla_builder.h"
+#include "xla/primitive_util.h"
 #include "tensorflow/core/framework/bounds_check.h"
-#include "tensorflow/core/framework/kernel_def_builder.h"
-#include "tensorflow/core/framework/register_types.h"
+#include "tensorflow/core/framework/op_kernel.h"
+#include "tensorflow/core/framework/op_requires.h"
+#include "tensorflow/core/framework/tensor_shape.h"
+#include "tensorflow/core/framework/types.h"
+#include "tensorflow/core/framework/types.pb.h"
+#include "tensorflow/core/platform/errors.h"
+#include "tensorflow/core/platform/status.h"
+#include "tensorflow/core/platform/types.h"
 
 namespace tensorflow {
 namespace {
@@ -61,7 +71,11 @@ class TransposeOp : public XlaOpKernel {
     absl::InlinedVector<bool, 8> bits(dims);
     bool is_identity = true;
     for (int i = 0; i < dims; ++i) {
-      const int64_t d = perm[i];
+      int64_t d = perm[i];
+      // Wrap negative indices, matching the behavior of the non-XLA kernel.
+      if (d < 0) {
+        d += dims;
+      }
       OP_REQUIRES(
           ctx, 0 <= d && d < dims,
           errors::InvalidArgument(d, " is out of range [0 .. ", dims, ")"));
@@ -124,10 +138,10 @@ class InvertPermutationOp : public XlaOpKernel {
 
   void Compile(XlaOpKernelContext* ctx) override {
     DataType dtype = ctx->expected_output_dtype(0);
-    Status status;
+    absl::Status status;
     switch (dtype) {
       case DT_INT32:
-        InvertPermutation<int32>(ctx);
+        InvertPermutation<int32_t>(ctx);
         break;
       case DT_INT64:
         InvertPermutation<int64_t>(ctx);
@@ -159,7 +173,7 @@ class InvertPermutationOp : public XlaOpKernel {
     // TODO(b/32495713): Remove this when we can check whether Scatter is
     // constant. Right now, we always assume it is non-constant because we don't
     // check the embedded computation.
-    if (tensor_or_status.ValueOrDie().has_value()) {
+    if (tensor_or_status.value().has_value()) {
       std::vector<int64_t> perm;
       OP_REQUIRES_OK(ctx, ctx->ConstantInputAsIntVector(0, &perm));
 
@@ -184,10 +198,11 @@ class InvertPermutationOp : public XlaOpKernel {
           xla::Iota(ctx->builder(),
                     xla::primitive_util::NativeToPrimitiveType<T>(), size);
       auto result = XlaScatter(iota, iota, indices,
-                               /*indices_are_vectors=*/false, /*combiner=*/{},
-                               ctx->builder());
+                               /*indices_are_vectors=*/false,
+                               /*indices_are_sorted=*/false,
+                               /*combiner=*/{}, ctx->builder());
       OP_REQUIRES_OK(ctx, result.status());
-      ctx->SetOutput(0, result.ValueOrDie());
+      ctx->SetOutput(0, result.value());
     }
   }
 };

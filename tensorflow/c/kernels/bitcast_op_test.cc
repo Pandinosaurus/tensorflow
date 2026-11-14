@@ -13,13 +13,24 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include <cstdint>
+#include <initializer_list>
+#include <memory>
+#include <vector>
+
+#include "absl/container/inlined_vector.h"
+#include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
+#include "xla/tsl/protobuf/error_codes.pb.h"
 #include "tensorflow/core/framework/attr_value.pb.h"
 #include "tensorflow/core/framework/attr_value_util.h"
 #include "tensorflow/core/framework/fake_input.h"
 #include "tensorflow/core/framework/node_def.pb.h"
 #include "tensorflow/core/framework/node_def_builder.h"
+#include "tensorflow/core/framework/op_def.pb.h"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/shape_inference.h"
+#include "tensorflow/core/framework/types.pb.h"
 #include "tensorflow/core/platform/test.h"
 
 namespace tensorflow {
@@ -35,7 +46,7 @@ class DummyDevice : public DeviceBase {
 
 void TestBitcastOp(Tensor* input_tensor, DataType out_type,
                    TensorShape expected_shape, error::Code expected_code) {
-  Status status;
+  absl::Status status;
   NodeDef def;
   def.set_op("Bitcast");
   def.set_device(DEVICE_CPU);
@@ -50,7 +61,7 @@ void TestBitcastOp(Tensor* input_tensor, DataType out_type,
   (*def.mutable_attr())["type"] = outTypeAttr;
 
   def.add_input(
-      strings::StrCat("input1: ", DataTypeString(input_tensor->dtype())));
+      absl::StrCat("input1: ", DataTypeString(input_tensor->dtype())));
 
   std::unique_ptr<OpKernel> kernel =
       CreateOpKernel(DeviceType(DEVICE_CPU), nullptr, nullptr, def, 1, &status);
@@ -60,9 +71,9 @@ void TestBitcastOp(Tensor* input_tensor, DataType out_type,
   DummyDevice dummy_device(nullptr);
   params.device = &dummy_device;
   params.op_kernel = kernel.get();
-  gtl::InlinedVector<TensorValue, 4> inputs;
+  absl::InlinedVector<TensorValue, 4UL> inputs;
   inputs.emplace_back(input_tensor);
-  params.inputs = &inputs;
+  params.inputs = inputs;
 
   OpKernelContext ctx(&params);
   kernel->Compute(&ctx);
@@ -76,13 +87,13 @@ void TestBitcastOp(Tensor* input_tensor, DataType out_type,
 TEST(BitcastOpTest, TestUpcast) {
   Tensor int8_input(DT_UINT8, {8});
   for (int i = 0; i < 8; i++) {
-    int8_input.vec<uint8>()(i) = static_cast<uint8>(1);
+    int8_input.vec<uint8_t>()(i) = static_cast<uint8_t>(1);
   }
   TestBitcastOp(&int8_input, DT_UINT64, TensorShape(), error::OK);
 }
 
 TEST(BitcastOpTest, TestDowncast) {
-  Tensor int64_input(static_cast<uint64>(1));
+  Tensor int64_input(static_cast<uint64_t>(1));
   TestBitcastOp(&int64_input, DT_UINT8, TensorShape({8}), error::OK);
 }
 

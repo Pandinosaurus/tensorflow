@@ -16,6 +16,7 @@ limitations under the License.
 #include "tensorflow/core/framework/tensor_util.h"
 
 #include <cmath>
+#include <limits>
 #include <vector>
 
 #include "tensorflow/core/framework/tensor.h"
@@ -39,12 +40,12 @@ Tensor DeepCopy(const Tensor& other) {
 void DeepCopy(const Tensor& input, Tensor* output) {
   if (DataTypeCanUseMemcpy(input.dtype())) {
     if (input.NumElements() > 0) {
-      StringPiece input_data = input.tensor_data();
+      absl::string_view input_data = input.tensor_data();
 
       // We use StringPiece as a convenient map over the tensor buffer,
       // but we cast the type to get to the underlying buffer to do the
       // copy.
-      StringPiece output_data = output->tensor_data();
+      absl::string_view output_data = output->tensor_data();
       memcpy(const_cast<char*>(output_data.data()), input_data.data(),
              input_data.size());
     }
@@ -56,14 +57,14 @@ void DeepCopy(const Tensor& input, Tensor* output) {
   }
 }
 
-Status Concat(const gtl::ArraySlice<Tensor>& tensors, Tensor* result) {
+absl::Status Concat(const absl::Span<const Tensor> tensors, Tensor* result) {
   if (tensors.empty()) {
-    return errors::InvalidArgument("Cannot concatenate zero tensors");
+    return absl::InvalidArgumentError("Cannot concatenate zero tensors");
   }
   int64_t total_dim0_size = 0;
   for (const Tensor& tensor : tensors) {
     if (tensor.dims() == 0) {
-      return errors::InvalidArgument(
+      return absl::InvalidArgumentError(
           "Cannot concatenate a zero-dimensional tensor");
     }
     total_dim0_size += tensor.dim_size(0);
@@ -74,23 +75,23 @@ Status Concat(const gtl::ArraySlice<Tensor>& tensors, Tensor* result) {
   const DataType dtype = tensors[0].dtype();
   for (int i = 1; i < tensors.size(); ++i) {
     if (tensors[i].dtype() != dtype) {
-      return errors::InvalidArgument(
+      return absl::InvalidArgumentError(absl::StrCat(
           "Cannot concatenate tensors that have different data types.", " Got ",
           DataTypeString(dtype), " and ", DataTypeString(tensors[i].dtype()),
-          ".");
+          "."));
     }
   }
   *result = Tensor(dtype, shape);
 
-  // We use StringPiece as a convenient map over the tensor buffer,
-  // but we cast the type to get to the underlying buffer to do the
-  // copy.
-  StringPiece to_data = result->tensor_data();
-
   if (DataTypeCanUseMemcpy(dtype)) {
+    // We use StringPiece as a convenient map over the tensor buffer,
+    // but we cast the type to get to the underlying buffer to do the
+    // copy.
+    absl::string_view to_data = result->tensor_data();
+
     int64_t offset = 0;
     for (const Tensor& tensor : tensors) {
-      StringPiece from_data = tensor.tensor_data();
+      absl::string_view from_data = tensor.tensor_data();
       CHECK_LE(offset + from_data.size(), to_data.size());
       memcpy(const_cast<char*>(to_data.data()) + offset, from_data.data(),
              from_data.size());
@@ -99,10 +100,9 @@ Status Concat(const gtl::ArraySlice<Tensor>& tensors, Tensor* result) {
     }
   } else {
     if (dtype != DT_STRING) {
-      return errors::Internal("Unexpected data type");
+      return absl::InternalError("Unexpected data type");
     }
-    tstring* to_strings =
-        reinterpret_cast<tstring*>(const_cast<char*>(to_data.data()));
+    tstring* to_strings = result->unaligned_flat<tstring>().data();
 
     int64_t offset = 0;
     for (const Tensor& tensor : tensors) {
@@ -116,27 +116,27 @@ Status Concat(const gtl::ArraySlice<Tensor>& tensors, Tensor* result) {
     }
   }
 
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-Status Split(const Tensor& tensor, const gtl::ArraySlice<int64_t>& sizes,
-             std::vector<Tensor>* result) {
+absl::Status Split(const Tensor& tensor, const absl::Span<const int64_t> sizes,
+                   std::vector<Tensor>* result) {
   if (tensor.dims() == 0) {
-    return errors::InvalidArgument("Cannot split a zero-dimensional tensor");
+    return absl::InvalidArgumentError("Cannot split a zero-dimensional tensor");
   }
   int64_t total_size = 0;
   for (int64_t size : sizes) {
     total_size += size;
   }
   if (total_size != tensor.dim_size(0)) {
-    return errors::InvalidArgument(
+    return absl::InvalidArgumentError(
         "The values in 'sizes' do not sum to the zeroth-dimension size of "
         "'tensor'");
   }
 
-  StringPiece from_data = tensor.tensor_data();
-
   if (DataTypeCanUseMemcpy(tensor.dtype())) {
+    absl::string_view from_data = tensor.tensor_data();
+
     int64_t offset = 0;
     for (int64_t size : sizes) {
       TensorShape shape = tensor.shape();
@@ -147,7 +147,7 @@ Status Split(const Tensor& tensor, const gtl::ArraySlice<int64_t>& sizes,
       // We use StringPiece as a convenient map over the tensor buffer,
       // but we cast the type to get to the underlying buffer to do the
       // copy.
-      StringPiece to_data = split->tensor_data();
+      absl::string_view to_data = split->tensor_data();
       CHECK_LE(offset + to_data.size(), from_data.size());
       memcpy(const_cast<char*>(to_data.data()), from_data.data() + offset,
              to_data.size());
@@ -156,7 +156,7 @@ Status Split(const Tensor& tensor, const gtl::ArraySlice<int64_t>& sizes,
     }
   } else {
     if (tensor.dtype() != DT_STRING) {
-      return errors::Internal("Unexpected data type");
+      return absl::InternalError("Unexpected data type");
     }
     auto from_strings = tensor.flat<tstring>();
 
@@ -166,8 +166,7 @@ Status Split(const Tensor& tensor, const gtl::ArraySlice<int64_t>& sizes,
       shape.set_dim(0, size);
       result->emplace_back(tensor.dtype(), shape);
       Tensor& split = (*result)[result->size() - 1];
-      tstring* to_strings = reinterpret_cast<tstring*>(
-          const_cast<char*>(split.tensor_data().data()));
+      tstring* to_strings = split.unaligned_flat<tstring>().data();
 
       CHECK_LE(offset + split.NumElements(), tensor.NumElements());
       for (int i = 0; i < split.NumElements(); ++i) {
@@ -178,11 +177,11 @@ Status Split(const Tensor& tensor, const gtl::ArraySlice<int64_t>& sizes,
     }
   }
 
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 namespace internal {
-void SetTensorProtoShape(std::vector<size_t> shape,
+void SetTensorProtoShape(const absl::Span<const size_t> shape,
                          TensorShapeProto* shape_proto) {
   for (auto dim : shape) {
     shape_proto->mutable_dim()->Add()->set_size(dim);
@@ -196,6 +195,9 @@ bool CompressTensorContent(float min_compression_ratio,
   using FieldType = typename internal::TensorProtoHelper<T>::FieldType;
   const int64_t num_tensor_values = shape.num_elements();
   const int64_t num_bytes = tensor->tensor_content().size();
+  if (num_bytes % sizeof(T) != 0) {
+    return false;
+  }
   const int64_t num_raw_values = num_bytes / sizeof(T);
   if (num_raw_values != num_tensor_values) {
     // Invalid or too small.
@@ -232,23 +234,24 @@ bool CompressTensorContent(float min_compression_ratio,
     return false;
   }
   // Copy values to truncated repeated field.
-  if (sizeof(FieldType) == sizeof(T)) {
+  if constexpr (sizeof(FieldType) == sizeof(T)) {
     FieldType* dst_ptr =
         TypeHelper::AppendUninitialized(new_num_values, tensor);
     port::CopySubrangeToArray(tensor->tensor_content(), 0,
                               new_num_values * sizeof(T),
                               reinterpret_cast<char*>(dst_ptr));
     tensor->clear_tensor_content();
-  } else if (sizeof(T) > 1) {
+  } else if constexpr (sizeof(T) > 1) {
     // Copy raw bytes to temp array first, then cast.
-    gtl::InlinedVector<T, 64> tmp(new_num_values);
+    gtl::InlinedVector<T, 64> tmp;
+    if (new_num_values >= tmp.max_size()) return false;
+    tmp.resize(new_num_values);
+
     port::CopySubrangeToArray(tensor->tensor_content(), 0,
                               new_num_values * sizeof(T),
                               reinterpret_cast<char*>(tmp.data()));
     tensor->clear_tensor_content();
-    const T* begin = tmp.begin();
-    const T* end = tmp.end();
-    TypeHelper::AddValues(begin, end, tensor);
+    TypeHelper::AddValues(tmp.begin(), tmp.end(), tensor);
   } else {
     // Copy and cast, one byte at a time.
     for (int64_t i = 0; i < new_num_values; ++i) {
@@ -280,14 +283,12 @@ inline bool PackedValuesNotEqual(const std::complex<RealType>& a,
 }
 
 // Integer can't be negative zero.
-template <typename T,
-          typename std::enable_if<std::is_integral<T>::value>::type* = nullptr>
+template <typename T, std::enable_if_t<std::is_integral_v<T>>* = nullptr>
 static bool IsNegativeZero(T value) {
   return false;
 }
 
-template <typename T,
-          typename std::enable_if<!std::is_integral<T>::value>::type* = nullptr>
+template <typename T, std::enable_if_t<!std::is_integral_v<T>>* = nullptr>
 static bool IsNegativeZero(T value) {
   return value == T(0) && std::signbit(value);
 }
@@ -303,10 +304,10 @@ static bool IsNegativeZero(Eigen::QUInt16 value) { return false; }
 static bool IsNegativeZero(Eigen::QInt16 value) { return false; }
 static bool IsNegativeZero(Eigen::QInt32 value) { return false; }
 static bool IsNegativeZero(Eigen::half value) {
-  return IsNegativeZero<float>(value);
+  return IsNegativeZero<float>(static_cast<float>(value));
 }
 static bool IsNegativeZero(Eigen::bfloat16 value) {
-  return IsNegativeZero<float>(value);
+  return IsNegativeZero<float>(static_cast<float>(value));
 }
 
 template <typename T>
@@ -317,11 +318,15 @@ bool CompressRepeatedField(float min_compression_ratio,
   const int64_t num_tensor_values = shape.num_elements();
   const int64_t num_proto_values = TypeHelper::NumValues(*tensor);
 
-  // Notice that for complex types the tensor is stored as an array of up to
-  // 2 * num_tensor_values real values (real and imaginary parts), possibly
-  // truncated. A 0-splat does not need any value present and is maximally
-  // compressed.
-  if (num_proto_values == 0) return false;
+  // NumValues counts logical elements, including complex values stored as
+  // pairs of real and imaginary components. A 0-splat needs no explicit values
+  // and is already maximally compressed. Validate bounds before scanning or
+  // changing the repeated field.
+  if (num_proto_values == 0 || num_proto_values > num_tensor_values ||
+      num_tensor_values > std::numeric_limits<int64_t>::max() /
+                              static_cast<int64_t>(sizeof(T))) {
+    return false;
+  }
 
   const T last_value = TypeHelper::GetValue(num_proto_values - 1, *tensor);
   int64_t last_index = 0;
@@ -342,7 +347,8 @@ bool CompressRepeatedField(float min_compression_ratio,
   const int64_t num_truncated_proto_values = last_index + 1;
   const int64_t num_bytes_as_field =
       num_truncated_proto_values * sizeof(FieldType);
-  const int64_t num_bytes_as_tensor_content = num_tensor_values * sizeof(T);
+  const int64_t num_bytes_as_tensor_content =
+      num_tensor_values * static_cast<int64_t>(sizeof(T));
   const int64_t num_bytes_before = num_proto_values * sizeof(FieldType);
   if (std::min(num_bytes_as_field, num_bytes_as_tensor_content) >
       static_cast<int64_t>(num_bytes_before / min_compression_ratio)) {
@@ -371,7 +377,10 @@ template <typename T>
 bool CompressTensorProtoInPlaceImpl(int64_t min_num_elements,
                                     float min_compression_ratio,
                                     TensorProto* tensor) {
-  const TensorShape shape(tensor->tensor_shape());
+  TensorShape shape;
+  if (!TensorShape::BuildTensorShape(tensor->tensor_shape(), &shape).ok()) {
+    return false;
+  }
   const int64_t num_tensor_values = shape.num_elements();
   if (num_tensor_values < min_num_elements) {
     return false;
@@ -424,20 +433,21 @@ bool CompressTensorProtoInPlace(int64_t min_num_elements,
 
 #undef HANDLE_COMPRESS_CASE
 
-Status MakeShape(const Tensor& shape, TensorShape* out) {
+absl::Status MakeShape(const Tensor& shape, TensorShape* out) {
   if (!TensorShapeUtils::IsVector(shape.shape())) {
-    return errors::InvalidArgument(
-        "shape must be a vector of {int32,int64}, got shape ",
-        shape.shape().DebugString());
+    return absl::InvalidArgumentError(
+        absl::StrCat("shape must be a vector of {int32,int64}, got shape ",
+                     shape.shape().DebugString()));
   }
   if (shape.dtype() == DataType::DT_INT32) {
-    auto vec = shape.flat<int32>();
+    auto vec = shape.flat<int32_t>();
     return TensorShapeUtils::MakeShape(vec.data(), vec.size(), out);
   } else if (shape.dtype() == DataType::DT_INT64) {
     auto vec = shape.flat<int64_t>();
     return TensorShapeUtils::MakeShape(vec.data(), vec.size(), out);
   } else {
-    return errors::InvalidArgument("shape must be a vector of {int32,int64}.");
+    return absl::InvalidArgumentError(
+        "shape must be a vector of {int32,int64}.");
   }
 }
 

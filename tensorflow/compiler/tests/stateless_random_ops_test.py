@@ -14,38 +14,61 @@
 # ==============================================================================
 """Tests for stateless random-number generation ops."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import functools
+
 from absl.testing import parameterized
 import numpy as np
 
 from tensorflow.compiler.tests import xla_test
+from tensorflow.python.client import device_lib
 from tensorflow.python.eager import def_function
 from tensorflow.python.framework import config
 from tensorflow.python.framework import dtypes
+from tensorflow.python.framework import errors
 from tensorflow.python.framework import ops
 from tensorflow.python.framework import test_util
 from tensorflow.python.kernel_tests.random import util as \
 random_test_util
 from tensorflow.python.ops import array_ops
+from tensorflow.python.ops import gen_stateless_random_ops
 from tensorflow.python.ops import gen_stateless_random_ops_v2
 from tensorflow.python.ops import math_ops
+from tensorflow.python.ops import random_ops_util
 from tensorflow.python.ops import stateless_random_ops as stateless
 from tensorflow.python.ops import variables
 from tensorflow.python.platform import test
+
+
+def xla_device():
+  devices = device_lib.list_local_devices()
+
+  def find_type(device_type):
+    for d in devices:
+      if d.device_type == device_type:
+        return d
+    return None
+
+  d = find_type('TPU') or find_type('XLA_GPU') or find_type('XLA_CPU')
+  if d is None:
+    raise ValueError('Cannot find any XLA device. Available devices:\n%s' %
+                     devices)
+  return d
+
+
+def _allowed_types(include_int=False):
+  allowed_types = {
+      dtypes.float64, dtypes.float32, dtypes.float16, dtypes.bfloat16
+  }
+  if include_int:
+    allowed_types.update({dtypes.int32, dtypes.int64})
+  return allowed_types
 
 
 class StatelessRandomOpsTest(xla_test.XLATestCase, parameterized.TestCase):
   """Test cases for stateless random-number generator operators."""
 
   def _random_types(self, include_int=False):
-    allowed_types = {dtypes.float64, dtypes.float32, dtypes.bfloat16}
-    if include_int:
-      allowed_types.update({dtypes.int32, dtypes.int64})
-    return self.all_tf_types & allowed_types
+    return self.all_tf_types & _allowed_types(include_int)
 
   @test_util.run_v2_only
   def testForcedCompile(self):
@@ -86,30 +109,40 @@ class StatelessRandomOpsTest(xla_test.XLATestCase, parameterized.TestCase):
   @parameterized.named_parameters(
       ('_%s_%s' % (op_id, alg_id), op, alg_group)  # pylint: disable=g-complex-comprehension
       for alg_id, alg_group in enumerate([
-          [stateless.Algorithm.PHILOX,
-           stateless.Algorithm.PHILOX.value,
-           'philox'],
-          [stateless.Algorithm.THREEFRY,
-           stateless.Algorithm.THREEFRY.value,
-           'threefry'],
-          [stateless.Algorithm.AUTO_SELECT,
-           stateless.Algorithm.AUTO_SELECT.value,
-           'auto_select',
-           None],
+          [
+              random_ops_util.Algorithm.PHILOX,
+              random_ops_util.Algorithm.PHILOX.value,
+              'philox',
+          ],
+          [
+              random_ops_util.Algorithm.THREEFRY,
+              random_ops_util.Algorithm.THREEFRY.value,
+              'threefry',
+          ],
+          [
+              random_ops_util.Algorithm.AUTO_SELECT,
+              random_ops_util.Algorithm.AUTO_SELECT.value,
+              'auto_select',
+              None,
+          ],
       ])
       for op_id, op in enumerate([
           stateless.stateless_random_normal,
           stateless.stateless_truncated_normal,
           functools.partial(
-              stateless.stateless_random_uniform, dtype=dtypes.uint32,
-              minval=None, maxval=None),
+              stateless.stateless_random_uniform,
+              dtype=dtypes.uint32,
+              minval=None,
+              maxval=None,
+          ),
           functools.partial(
-              stateless.stateless_random_uniform, dtype=dtypes.int32,
-              maxval=100),
+              stateless.stateless_random_uniform, dtype=dtypes.int32, maxval=100
+          ),
           functools.partial(
-              stateless.stateless_random_uniform, dtype=dtypes.float32),
+              stateless.stateless_random_uniform, dtype=dtypes.float32
+          ),
       ])
-      )
+  )
   @test_util.run_v2_only
   def testAlg(self, op, alg_group):
     """Tests all values of `alg`."""
@@ -148,28 +181,114 @@ class StatelessRandomOpsTest(xla_test.XLATestCase, parameterized.TestCase):
       y = sess.run(x, {seed_t: [0x12345678, 0xabcdef1]})
       self.assertAllEqual([1024, 32000], y.shape)
 
-  def testDeterminism(self):
+  @parameterized.named_parameters(
+      (f'_{op_name}_{shape}_{dtype.name}', stateless_op, shape, dtype)  # pylint: disable=g-complex-comprehension
+      for dtype in _allowed_types() for shape in ((), (3,), (2, 5))
+      for op_name, stateless_op in (
+          ('uniform', stateless.stateless_random_uniform),
+          ('normal', stateless.stateless_random_normal),
+      ))
+  def testDeterminism(self, stateless_op, shape, dtype):
     # Stateless values should be equal iff the seeds are equal (roughly)
+    seeds = [(x, y) for x in range(-2, 3) for y in range(-2, 3)] * 3  # pylint: disable=g-complex-comprehension
     with self.session(), self.test_scope():
       seed_t = array_ops.placeholder(dtypes.int32, shape=[2])
-      seeds = [(x, y) for x in range(-2, 3) for y in range(-2, 3)] * 3  # pylint: disable=g-complex-comprehension
-      for stateless_op in [
-          stateless.stateless_random_uniform, stateless.stateless_random_normal
-      ]:
-        for shape in (), (3,), (2, 5):
-          for dtype in self._random_types():
-            # Skip bfloat16. The result of bfloat16 is truncated from 32-bit
-            # result. With different seeds, the 32-bit results are different,
-            # but the truncated 16-bit results might be the same.
-            if dtype == dtypes.bfloat16:
-              continue
-            pure = stateless_op(shape, seed=seed_t, dtype=dtype)
-            values = [(seed, pure.eval(feed_dict={
-                seed_t: seed
-            })) for seed in seeds]
-            for s0, v0 in values:
-              for s1, v1 in values:
-                self.assertEqual(s0 == s1, np.all(v0 == v1))
+      pure = stateless_op(shape, seed=seed_t, dtype=dtype)
+      values = [(seed, pure.eval(feed_dict={seed_t: seed})) for seed in seeds]
+      for s0, v0 in values:
+        for s1, v1 in values:
+          if s0 == s1:
+            self.assertAllEqual(v0, v1)
+          else:
+            # The resolutions of float16 and bfloat16 are too low, so
+            # in some cases (e.g. scalar shape) different seeds may
+            # lead to the same output. So we skip those dtypes.
+            if not (dtype in (dtypes.bfloat16, dtypes.float16) and shape == ()):  # pylint: disable=g-explicit-bool-comparison
+              self.assertNotAllEqual(v0, v1)
+
+  def testGetKeyCounterMatchesTfKernel(self):
+    if xla_device().device_type == 'TPU':
+      self.skipTest('XLA uses Philox like the TF kernels only on CPU and GPU.')
+    with self.session() as sess:
+      for seed_dtype, seeds in (
+          (dtypes.int32, ([1, 2], [-1, 7], [2**31 - 1, -(2**31)])),
+          (dtypes.int64, ([1, 2], [-1, 7], [2**40 + 3, -(2**35)])),
+      ):
+        seed_t = array_ops.placeholder(seed_dtype, shape=[2])
+        with ops.device('CPU'):
+          expected = (
+              gen_stateless_random_ops_v2.stateless_random_get_key_counter(
+                  seed_t
+              )
+          )
+        with self.test_scope():
+          actual = gen_stateless_random_ops_v2.stateless_random_get_key_counter(
+              seed_t
+          )
+        for seed in seeds:
+          (expected_key, expected_counter), (actual_key, actual_counter) = (
+              sess.run([expected, actual], {seed_t: seed})
+          )
+          self.assertAllEqual(expected_key, actual_key)
+          self.assertAllEqual(expected_counter, actual_counter)
+
+  @parameterized.named_parameters(  # pylint: disable=g-complex-comprehension
+      (f'_{op_name}_{dtype.name}', op, exact, dtype)
+      for dtype in _allowed_types()
+      for op_name, op, exact in (
+          ('uniform', stateless.stateless_random_uniform, True),
+          ('normal', stateless.stateless_random_normal, False),
+          (
+              'uniform_philox',
+              functools.partial(
+                  stateless.stateless_random_uniform, alg='philox'
+              ),
+              True,
+          ),
+          (
+              'normal_philox',
+              functools.partial(
+                  stateless.stateless_random_normal, alg='philox'
+              ),
+              False,
+          ),
+          (
+              'uniform_v1',
+              gen_stateless_random_ops.stateless_random_uniform,
+              True,
+          ),
+          (
+              'normal_v1',
+              gen_stateless_random_ops.stateless_random_normal,
+              False,
+          ),
+      )
+  )
+  def testMatchesTfKernel(self, op, exact, dtype):
+    if xla_device().device_type == 'TPU':
+      self.skipTest('XLA uses Philox like the TF kernels only on CPU and GPU.')
+    with self.session() as sess:
+      seed_t = array_ops.placeholder(dtypes.int32, shape=[2])
+      for shape in ([], [0], [3, 7]):
+        with ops.device('CPU'):
+          expected = op(shape, seed=seed_t, dtype=dtype)
+        with self.test_scope():
+          actual = op(shape, seed=seed_t, dtype=dtype)
+        for seed in ([1, 2], [0, 0], [-1, 7], [123456, -5]):
+          expected_value, actual_value = sess.run(
+              [expected, actual], {seed_t: seed}
+          )
+          if exact:
+            self.assertAllEqual(expected_value, actual_value)
+          else:
+            # Normal values go through sin, cos and log, which can
+            # round differently in XLA.
+            self.assertAllCloseAccordingToType(
+                expected_value,
+                actual_value,
+                float_rtol=1e-5,
+                float_atol=1e-5,
+            )
 
   def testRandomUniformIsInRange(self):
     with self.session() as sess, self.test_scope():
@@ -184,26 +303,80 @@ class StatelessRandomOpsTest(xla_test.XLATestCase, parameterized.TestCase):
         self.assertTrue(np.all(y >= 0))
         self.assertTrue(np.all(y < maxval))
 
-  def testDistributionOfStatelessRandomUniform(self):
+  def testUniformIntEmptyRangeRaises(self):
+    # minval == maxval is an empty range. The CPU/eager kernel
+    # (StatelessRandomUniformIntOp in
+    # tensorflow/core/kernels/stateless_random_ops_v2.cc) rejects this; the
+    # XLA op used to silently compile it and return garbage instead.
+    with self.session():
+      with self.test_scope():
+
+        @def_function.function(jit_compile=True)
+        def f():
+          return stateless.stateless_random_uniform(
+              shape=[2], seed=[1, 2], minval=0, maxval=0, dtype=dtypes.int32
+          )
+
+        with self.assertRaisesRegex(
+            errors.InvalidArgumentError, 'Need minval < maxval'
+        ):
+          self.evaluate(f())
+
+  @parameterized.named_parameters(
+      (f'_{alg.name}_{dtype.name}_{seed}', alg, dtype, seed)  # pylint: disable=g-complex-comprehension
+      for seed in ([1, 2], [12, 23], [123, 456], [565656, 121212])
+      for dtype in _allowed_types(include_int=True)
+      for alg in list(random_ops_util.Algorithm)
+  )
+  def testDistributionOfStatelessRandomUniform(self, alg, dtype, seed):
     """Use Pearson's Chi-squared test to test for uniformity."""
+    philox = random_ops_util.Algorithm.PHILOX
+    auto_select = random_ops_util.Algorithm.AUTO_SELECT
+    device = xla_device()
+    if 'CPU' in device.device_type:
+      device_type = 'CPU'
+    elif 'GPU' in device.device_type:
+      device_type = 'GPU'
+    elif device.device_type == 'TPU':
+      device_type = 'TPU'
+    else:
+      device_type = None
+    bad_combos1 = [
+        (dtypes.int32, [123, 456]),
+        (dtypes.int64, [123, 456]),
+        (dtypes.float16, [565656, 121212]),
+        (dtypes.bfloat16, [1, 2]),
+    ]
+    bad_combos2 = [
+        (dtypes.int32, [1, 2]),
+        (dtypes.int32, [12, 23]),
+    ]
+    # TODO(b/244649364): Investigate why these combinations fail.
+    if (device_type in ('CPU', 'GPU') and alg in (philox, auto_select) and
+        (dtype, seed) in bad_combos1 or device_type == 'TPU' and
+        (alg == philox and
+         (dtype, seed) in bad_combos1 or alg == auto_select and
+         (dtype, seed) in bad_combos2)):
+      self.skipTest(
+          'This (device, alg, dtype, seed) combination fails (b/244649364).')
     with self.session() as sess, self.test_scope():
-      for dtype in self._random_types(include_int=True):
-        seed_t = array_ops.placeholder(dtypes.int32, shape=[2])
-        n = 1000
-        maxval = 1
-        if dtype.is_integer:
-          maxval = 100
-        x = stateless.stateless_random_uniform(
-            shape=[n], seed=seed_t, maxval=maxval, dtype=dtype)
-        y = sess.run(x, {seed_t: [565656, 121212]})
-        # Convert y to float and normalize its value to range [0, 1) when
-        # maxval != 1.
-        y = y.astype(float) / maxval
-        # Tests that the values are distributed amongst 10 bins with equal
-        # probability. 16.92 is the Chi^2 value for 9 degrees of freedom with
-        # p=0.05. This test is probabilistic and would be flaky if the random
-        # seed were not fixed.
-        self.assertLess(random_test_util.chi_squared(y, 10), 16.92)
+      seed_t = array_ops.placeholder(dtypes.int32, shape=[2])
+      n = 1000
+      maxval = 1
+      if dtype.is_integer:
+        maxval = 100
+      x = stateless.stateless_random_uniform(
+          shape=[n], seed=seed_t, maxval=maxval, dtype=dtype, alg=alg)
+      y = sess.run(x, {seed_t: seed})
+      # Convert y to float and normalize its value to range [0, 1) when
+      # maxval != 1.
+      y = y.astype(float) / maxval
+      # Tests that the values are distributed amongst 10 bins with equal
+      # probability. 27.88 is the Chi^2 value for 9 degrees of freedom with
+      # p=0.001. This test is probabilistic and would be flaky if the random
+      # seed were not fixed.
+      bins = 10
+      self.assertLess(random_test_util.chi_squared(y, bins), 27.88)
 
   def testRandomNormalIsFinite(self):
     with self.session() as sess, self.test_scope():
@@ -214,32 +387,175 @@ class StatelessRandomOpsTest(xla_test.XLATestCase, parameterized.TestCase):
         y = sess.run(x, {seed_t: [0x12345678, 0xabcdef1]})
         self.assertTrue(np.all(np.isfinite(y)))
 
-  def testDistributionOfStatelessRandomNormal(self):
+  @parameterized.named_parameters(
+      (f'_{dtype.name}_{seed}', dtype, seed)  # pylint: disable=g-complex-comprehension
+      for seed in ([1, 2], [12, 23], [25252, 314159])
+      for dtype in _allowed_types()
+  )
+  def testDistributionOfStatelessRandomNormal(self, dtype, seed):
     """Use Anderson-Darling test to test distribution appears normal."""
     with self.session() as sess, self.test_scope():
-      for dtype in self._random_types():
-        seed_t = array_ops.placeholder(dtypes.int32, shape=[2])
-        n = 1000
-        x = stateless.stateless_random_normal(
-            shape=[n], seed=seed_t, dtype=dtype)
-        y = sess.run(x, {seed_t: [25252, 314159]})
-        # The constant 2.492 is the 5% critical value for the Anderson-Darling
-        # test where the mean and variance are known. This test is probabilistic
-        # so to avoid flakiness the seed is fixed.
-        self.assertLess(
-            random_test_util.anderson_darling(y.astype(float)), 2.492)
+      seed_t = array_ops.placeholder(dtypes.int32, shape=[2])
+      n = 1000
+      x = stateless.stateless_random_normal(shape=[n], seed=seed_t, dtype=dtype)
+      y = sess.run(x, {seed_t: seed})
+      # The constant 2.492 is the 5% critical value for the Anderson-Darling
+      # test where the mean and variance are known. This test is probabilistic
+      # so to avoid flakiness the seed is fixed.
+      self.assertLess(random_test_util.anderson_darling(y.astype(float)), 2.492)
 
-  def testTruncatedNormal(self):
-    for dtype in self._random_types():
+  @parameterized.named_parameters(
+      (f'_{dtype.name}', dtype) for dtype in _allowed_types())
+  def testTruncatedNormal(self, dtype):
+    with self.session() as sess, self.test_scope():
+      seed_t = array_ops.placeholder(dtypes.int32, shape=[2])
+      n = 10000000
+      x = stateless.stateless_truncated_normal(
+          shape=[n], seed=seed_t, dtype=dtype)
+      y = sess.run(x, {seed_t: [0x12345678, 0xabcdef1]})
+      if dtype == dtypes.float16:
+        mean_atol = 2e-3
+      else:
+        mean_atol = 5e-4
+
+      if dtype == dtypes.float16:
+        median_atol = 2e-3
+      else:
+        median_atol = 8e-4
+
+      if dtype == dtypes.bfloat16:
+        variance_rtol = 6e-3
+      elif dtype == dtypes.float16:
+        variance_rtol = 3e-3
+      else:
+        variance_rtol = 1e-3
+
+      random_test_util.test_truncated_normal(
+          self.assertEqual,
+          self.assertAllClose,
+          n,
+          y,
+          mean_atol=mean_atol,
+          median_atol=median_atol,
+          variance_rtol=variance_rtol)
+
+  def _testParameterizedTruncatedNormal(self,
+                                        means,
+                                        stddevs,
+                                        minvals,
+                                        maxvals,
+                                        variance_rtol=None):
+    n = int(1e7)
+    for dtype in self._random_types() - {dtypes.bfloat16}:
+      with self.session() as sess, self.test_scope():
+        np_dtype = dtype.as_numpy_dtype
+        means_dt = float(np.asarray(means, dtype=np_dtype))
+        stddevs_dt = float(np.asarray(stddevs, dtype=np_dtype))
+        minvals_dt = float(np.asarray(minvals, dtype=np_dtype))
+        maxvals_dt = float(np.asarray(maxvals, dtype=np_dtype))
+        seed_t = array_ops.placeholder(dtypes.int32, shape=[2])
+        x = stateless.stateless_parameterized_truncated_normal(
+            shape=[n],
+            seed=seed_t,
+            means=ops.convert_to_tensor(means_dt, dtype=dtype),
+            stddevs=ops.convert_to_tensor(stddevs_dt, dtype=dtype),
+            minvals=ops.convert_to_tensor(minvals_dt, dtype=dtype),
+            maxvals=ops.convert_to_tensor(maxvals_dt, dtype=dtype),
+        )
+        y = sess.run(x, {seed_t: [0x12345678, 0xabcdef1]})
+        mean_atol = 4e-3 if dtype == dtypes.float16 else 1e-3
+        median_atol = 4e-3 if dtype == dtypes.float16 else 1e-3
+        var_rtol = variance_rtol
+        if var_rtol is None:
+          var_rtol = 1e-2 if dtype == dtypes.float16 else 1e-3
+        elif dtype == dtypes.float16:
+          var_rtol = max(var_rtol, 5e-2)
+        random_test_util.test_truncated_normal(
+            self.assertEqual,
+            self.assertAllClose,
+            n,
+            y,
+            means=means_dt,
+            stddevs=stddevs_dt,
+            minvals=minvals_dt,
+            maxvals=maxvals_dt,
+            mean_atol=mean_atol,
+            median_atol=median_atol,
+            variance_rtol=var_rtol,
+        )
+
+  def testParameterizedTruncatedNormalDefault(self):
+    self._testParameterizedTruncatedNormal(0., 1., -2., 2.)
+
+  def testParameterizedTruncatedNormalShifted(self):
+    self._testParameterizedTruncatedNormal(-1., 1., -2., 2.)
+
+  def testParameterizedTruncatedNormalRightTail(self):
+    self._testParameterizedTruncatedNormal(0., 1., 4., 20., variance_rtol=2e-2)
+
+  def testParameterizedTruncatedNormalLeftTail(self):
+    self._testParameterizedTruncatedNormal(
+        0., 1., -20., -4., variance_rtol=5e-2)
+
+  def testParameterizedTruncatedNormalLeftTailTwoSidedBounds(self):
+    self._testParameterizedTruncatedNormal(
+        0., 1., -6., -3., variance_rtol=5e-2)
+
+  def testParameterizedTruncatedNormalFarRightTail(self):
+    self._testParameterizedTruncatedNormal(
+        0.0, 1.0, 6.0, 7.0, variance_rtol=2e-2
+    )
+
+  def testParameterizedTruncatedNormalFarLeftTail(self):
+    self._testParameterizedTruncatedNormal(
+        0.0, 1.0, -7.0, -6.0, variance_rtol=2e-2
+    )
+
+  def testParameterizedTruncatedNormalAsymptoticRightTail(self):
+    self._testParameterizedTruncatedNormal(
+        0.0, 1.0, 8.0, 9.0, variance_rtol=2e-2
+    )
+
+  def testParameterizedTruncatedNormalAsymptoticLeftTail(self):
+    self._testParameterizedTruncatedNormal(
+        0.0, 1.0, -9.0, -8.0, variance_rtol=2e-2
+    )
+
+  def testParameterizedTruncatedNormalExtremeNormalizedBounds(self):
+    for dtype in self._random_types() - {dtypes.bfloat16}:
       with self.session() as sess, self.test_scope():
         seed_t = array_ops.placeholder(dtypes.int32, shape=[2])
-        n = 10000000
-        x = stateless.stateless_truncated_normal(
-            shape=[n], seed=seed_t, dtype=dtype)
-        y = sess.run(x, {seed_t: [0x12345678, 0xabcdef1]})
-        random_test_util.test_truncated_normal(
-            self.assertEqual, self.assertAllClose, n, y,
-            variance_rtol=6e-3 if dtype == dtypes.bfloat16 else 1e-3)
+        x = stateless.stateless_parameterized_truncated_normal(
+            shape=[1000],
+            seed=seed_t,
+            means=ops.convert_to_tensor(0.0, dtype=dtype),
+            stddevs=ops.convert_to_tensor(1e-3, dtype=dtype),
+            minvals=ops.convert_to_tensor(70.0, dtype=dtype),
+            maxvals=ops.convert_to_tensor(80.0, dtype=dtype),
+        )
+        y = sess.run(x, {seed_t: [0x12345678, 0xABCDEF1]})
+        self.assertAllClose(y, np.full([1000], 70.0, dtype=y.dtype))
+
+  def testParameterizedTruncatedNormalSmallStddev(self):
+    self._testParameterizedTruncatedNormal(0., 0.1, 0.05, 0.10)
+
+  def testParameterizedTruncatedNormalBroadcast(self):
+    with self.session() as sess, self.test_scope():
+      seed_t = array_ops.placeholder(dtypes.int32, shape=[2])
+      means = array_ops.zeros([2], dtype=dtypes.float32)
+      stddevs = array_ops.ones([3, 1], dtype=dtypes.float32)
+      minvals = -array_ops.ones([5, 1, 1], dtype=dtypes.float32)
+      maxvals = array_ops.ones([7, 1, 1, 1], dtype=dtypes.float32)
+      shape = [11, 7, 5, 3, 2]
+      x = stateless.stateless_parameterized_truncated_normal(
+          shape=shape,
+          seed=seed_t,
+          means=means,
+          stddevs=stddevs,
+          minvals=minvals,
+          maxvals=maxvals)
+      y = sess.run(x, {seed_t: [0x12345678, 0xabcdef1]})
+      self.assertEqual((11, 7, 5, 3, 2), y.shape)
 
 
 class StatelessRandomOpsBenchmark(test.Benchmark):
@@ -258,6 +574,10 @@ class StatelessRandomOpsBenchmark(test.Benchmark):
 
     xla_test.Benchmark(self, builder_fn, use_xla_jit=use_xla_jit, device='cpu')
 
+  def benchmarkUniformF16(self):
+    self._benchmarkUniform(
+        'uniform_f16', dtype=dtypes.float16, use_xla_jit=False)
+
   def benchmarkUniformF32(self):
     self._benchmarkUniform(
         'uniform_f32', dtype=dtypes.float32, use_xla_jit=False)
@@ -265,6 +585,10 @@ class StatelessRandomOpsBenchmark(test.Benchmark):
   def benchmarkUniformF64(self):
     self._benchmarkUniform(
         'uniform_f64', dtype=dtypes.float64, use_xla_jit=False)
+
+  def benchmarkUniformF16XLA(self):
+    self._benchmarkUniform(
+        'uniform_f16', dtype=dtypes.float16, use_xla_jit=True)
 
   def benchmarkUniformF32XLA(self):
     self._benchmarkUniform(

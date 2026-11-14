@@ -28,7 +28,19 @@ def FreezeVariablesTestPass : Pass<"tf-freeze-variables-test-pass",
   let constructor = "::mlir::tf_test::CreateFreezeVariableTestPass()";
 }
 
-def TestTensorFlowLowerTFPass : Pass<"test-tf-lower-tf", "FuncOp"> {
+def InitTextFileToImportTestPass : Pass<"tf-init-text-file-to-import-test",
+  "ModuleOp"> {
+  let summary = "generate a temporary file and invoke InitTextFileToImportPass";
+  let constructor = "::mlir::tf_test::CreateInitTextFileToImportTestPass()";
+}
+
+def InitTextFileToImportSavedModelTestPass : Pass<"tf-init-text-file-to-import-saved-model-test",
+  "ModuleOp"> {
+  let summary = "mimick a saved model and invoke InitTextFileToImportPass";
+  let constructor = "::mlir::tf_test::CreateInitTextFileToImportSavedModelTestPass()";
+}
+
+def TestTensorFlowLowerTFPass : Pass<"test-tf-lower-tf", "mlir::func::FuncOp"> {
   let summary = "Test pass for TF->TF lowerings";
   let constructor = "::mlir::tf_test::CreateTestTFLowerTFPass()";
 
@@ -40,26 +52,13 @@ def TestTensorFlowLowerTFPass : Pass<"test-tf-lower-tf", "FuncOp"> {
   ];
 }
 
-def TestTensorFlowVisitorUtil : FunctionPass<"tf-test-visitor-util"> {
-  let summary = "Test pass for TF visitor utils";
-  let description = [{
-    Add remarks that trace order of visiting operations using TF visitor
-    utilities.
-  }];
-  let constructor = "::mlir::tf_test::CreateTestVisitorUtilPass()";
+def TestResourceAliasAnalysis : Pass<"tf-test-resource-alias-analysis", "mlir::func::FuncOp"> {
+  let summary = "Add remarks based on resource alias analysis result, for "
+    "testing purpose.";
+  let constructor = "::mlir::tf_test::CreateTestResourceAliasAnalysisPass()";
 }
 
-def TestTensorFlowVisitorUtilInterrupt :
-  FunctionPass<"tf-test-visitor-util-interrupt"> {
-  let summary = "Test pass for TF visitor utils with interruption";
-  let description = [{
-    Add remarks that trace order of visiting operations using TF visitor
-    utilities, interrupt version.
-  }];
-  let constructor = "::mlir::tf_test::CreateTestVisitorUtilInterruptPass()";
-}
-
-def TestClusteringPolicyPass : Pass<"tf-test-clustering-policy", "FuncOp"> {
+def TestClusteringPolicyPass : Pass<"tf-test-clustering-policy", "mlir::func::FuncOp"> {
   let summary = "Test pass for clustering based on the user defined policy";
   let constructor = "::mlir::tf_test::CreateTestClusteringPolicyPass()";
 }
@@ -71,4 +70,37 @@ def TestSideEffectAnalysisPass : Pass<"tf-test-side-effect-analysis", "ModuleOp"
     the SideEffectAnalysis result. For testing purpose only.
   }];
   let constructor = "::mlir::tf_test::CreateTestSideEffectAnalysisPass()";
+}
+
+def LiftVariablesInvalidSessionTestPass : Pass<"tf-saved-model-lift-variables-invalid-session-test", "ModuleOp"> {
+  let summary = "Lift variables and save them as global tensors with an invalid "
+           "session";
+  let constructor = "mlir::tf_test::CreateLiftVariablesInvalidSessionTestPass()";
+}
+
+def LiftVariablesTestPass : Pass<"tf-saved-model-lift-variables-test", "ModuleOp"> {
+  let summary = "Lift variables and save them as global tensors";
+  let constructor = "mlir::tf_test::CreateLiftVariablesTestPass()";
+
+  let options = [
+    Option<"import_variables_as_dense_resources_", "import-variables-as-dense-resources", "bool", /*default=*/"false",
+           "Import variables as dense resources">,
+  ];
+}
+
+def InitializeVariablesInSessionInitializerPass : Pass<"tf-saved-model-initialize-variables-in-session-init", "ModuleOp"> {
+  let summary = "Initialize variables in session initializer function.";
+
+  let constructor = "mlir::tf_test::CreateInitializeVariablesInSessionInitializerTestPass()";
+}
+
+def ResourceAnalyzerTestPass : Pass<"tf-resource-analyzer-test", "ModuleOp"> {
+  let summary = "Test pass for resource analysis.";
+
+  let description = [{
+    Test pass for ResourceAnalyzer, which analyzes whether a resource value is
+    potentially written.
+  }];
+
+  let constructor = "::mlir::tf_test::CreateResourceAnalyzerTestPass()";
 }

@@ -63,7 +63,7 @@ class GatherNdSliceGenerator {
     return out_of_bounds;
   }
 
-  EIGEN_DEVICE_FUNC EIGEN_ALWAYS_INLINE int32
+  EIGEN_DEVICE_FUNC EIGEN_ALWAYS_INLINE int32_t
   operator()(const Eigen::array<Eigen::DenseIndex, 1>& loc_array) const {
     const Index loc = loc_array[0];
     Eigen::array<Eigen::DenseIndex, IXDIM + 1> ix;
@@ -78,7 +78,7 @@ class GatherNdSliceGenerator {
       std::copy_n(&Tparams_(ix), slice_size_, &Tout_(ix_out));
     }
 
-    return static_cast<int32>(0);  // Return something...
+    return static_cast<int32_t>(0);  // Return something...
   }
 
  private:
@@ -96,7 +96,7 @@ namespace functor {
 template <typename T, typename Index, int IXDIM>
 struct GatherNdSlice<CPUDevice, T, Index, IXDIM> {
   Index operator()(const CPUDevice& d, const Index slice_size,
-                   typename TTypes<int32>::Scalar Tscratch,
+                   typename TTypes<int32_t>::Scalar Tscratch,
                    typename TTypes<T, IXDIM + 1>::ConstTensor Tparams,
                    typename TTypes<Index>::ConstMatrix Tindices,
                    typename TTypes<T>::Matrix Tout) {
@@ -123,20 +123,24 @@ struct GatherNdSlice<CPUDevice, T, Index, IXDIM> {
   }
 };
 
-#define REGISTER_GATHER_ND_FULL(T, Index)                                     \
-  template Index GatherNdSlice<CPUDevice, T, Index, CPU_PROVIDED_IXDIM>::     \
-  operator()(const CPUDevice& d, const Index slice_size,                      \
-             typename TTypes<int32>::Scalar Tscratch,                         \
-             typename TTypes<T, CPU_PROVIDED_IXDIM + 1>::ConstTensor Tparams, \
-             typename TTypes<Index>::ConstMatrix Tindices,                    \
-             typename TTypes<T>::Matrix Tout);
+#define REGISTER_GATHER_ND_FULL(T, Index)                              \
+  template Index                                                       \
+  GatherNdSlice<CPUDevice, T, Index, CPU_PROVIDED_IXDIM>::operator()(  \
+      const CPUDevice& d, const Index slice_size,                      \
+      typename TTypes<int32>::Scalar Tscratch,                         \
+      typename TTypes<T, CPU_PROVIDED_IXDIM + 1>::ConstTensor Tparams, \
+      typename TTypes<Index>::ConstMatrix Tindices,                    \
+      typename TTypes<T>::Matrix Tout);
 
 #define REGISTER_GATHER_ND_CPU(type)    \
+  REGISTER_GATHER_ND_FULL(type, int16); \
   REGISTER_GATHER_ND_FULL(type, int32); \
   REGISTER_GATHER_ND_FULL(type, int64)
 
 TF_CALL_ALL_TYPES(REGISTER_GATHER_ND_CPU);
 TF_CALL_QUANTIZED_TYPES(REGISTER_GATHER_ND_CPU);
+TF_CALL_float8_e5m2(REGISTER_GATHER_ND_CPU);
+TF_CALL_float8_e4m3fn(REGISTER_GATHER_ND_CPU);
 
 }  // namespace functor
 

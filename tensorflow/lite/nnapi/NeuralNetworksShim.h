@@ -22,8 +22,11 @@ limitations under the License.
 
 #include "tensorflow/lite/nnapi/NeuralNetworksTypes.h"
 
-// This interface is now deprecated. You should use instead
-// nnapi_implementation.
+// WARNING: this header file is DEPRECATED.
+// See https://developer.android.com/ndk/guides/neuralnetworks/migration-guide.
+
+// (Prior to that, this interface was already deprecated in favour of
+// nnapi_implementation.)
 
 // TODO(b/123017568): Update all current usages of this file.
 
@@ -39,8 +42,8 @@ limitations under the License.
 #define EXECUTE_FUNCTION_RETURN(...) return fn != nullptr ? fn(__VA_ARGS__) : 0;
 
 inline void* loadLibrary(const char* name) {
-  // TODO: change RTLD_LOCAL? Assumes there can be multiple instances of nn
-  // api RT
+  // TODO(karimnosseir): change RTLD_LOCAL? Assumes there can be multiple
+  // instances of nn api RT
   void* handle = nullptr;
 #ifdef __ANDROID__
   handle = dlopen(name, RTLD_LAZY | RTLD_LOCAL);

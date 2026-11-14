@@ -49,8 +49,7 @@ void DeepCopy(const Tensor& input, Tensor* output);
 // REQUIRES: Each member of 'tensors' must point to data stored in CPU memory.
 // REQUIRES: Each member of 'tensors' must be a Tensor of a copy-able type if it
 //           is not appropriately memory-aligned.
-Status Concat(const gtl::ArraySlice<Tensor>& tensors,
-              Tensor* result) TF_MUST_USE_RESULT;
+absl::Status Concat(absl::Span<const Tensor> tensors, Tensor* result);
 
 // Splits 'tensor' into 'sizes.size()' individual tensors, along the 0th
 // dimension. The ith output tensor has 0th-dimension size 'sizes[i]'.
@@ -62,11 +61,11 @@ Status Concat(const gtl::ArraySlice<Tensor>& tensors,
 //           appropriately memory-aligned.
 //
 // Split() and Concat() are inverse operations.
-Status Split(const Tensor& tensor, const gtl::ArraySlice<int64_t>& sizes,
-             std::vector<Tensor>* result) TF_MUST_USE_RESULT;
+absl::Status Split(const Tensor& tensor, absl::Span<const int64_t> sizes,
+                   std::vector<Tensor>* result);
 
 namespace internal {
-void SetTensorProtoShape(std::vector<size_t> shape,
+void SetTensorProtoShape(absl::Span<const size_t> shape,
                          TensorShapeProto* shape_proto);
 
 template <typename Type>
@@ -95,14 +94,14 @@ class TensorProtoFieldHelper : public std::false_type {};
 // values in TensorProto. See tensorflow/core/framework/tensor.proto.
 DEFINE_PROTO_FIELD_HELPER(float, float);
 DEFINE_PROTO_FIELD_HELPER(double, double);
-DEFINE_PROTO_FIELD_HELPER(int8, int);
-DEFINE_PROTO_FIELD_HELPER(uint8, int);
-DEFINE_PROTO_FIELD_HELPER(int16, int);
-DEFINE_PROTO_FIELD_HELPER(uint16, int);
-DEFINE_PROTO_FIELD_HELPER(int32, int);
-DEFINE_PROTO_FIELD_HELPER(uint32, uint32);
+DEFINE_PROTO_FIELD_HELPER(int8_t, int);
+DEFINE_PROTO_FIELD_HELPER(uint8_t, int);
+DEFINE_PROTO_FIELD_HELPER(int16_t, int);
+DEFINE_PROTO_FIELD_HELPER(uint16_t, int);
+DEFINE_PROTO_FIELD_HELPER(int32_t, int);
+DEFINE_PROTO_FIELD_HELPER(uint32_t, uint32);
 DEFINE_PROTO_FIELD_HELPER(int64_t, int64);
-DEFINE_PROTO_FIELD_HELPER(uint64, uint64);
+DEFINE_PROTO_FIELD_HELPER(uint64_t, uint64);
 DEFINE_PROTO_FIELD_HELPER(bool, bool);
 DEFINE_PROTO_FIELD_HELPER(qint8, int);
 DEFINE_PROTO_FIELD_HELPER(quint8, int);
@@ -143,13 +142,13 @@ struct CopyHelper<Eigen::half> {
   template <typename SrcIter>
   static void ToArray(SrcIter begin, SrcIter end, Eigen::half* dst) {
     std::transform(begin, end, dst, [](int x) -> Eigen::half {
-      return Eigen::numext::bit_cast<Eigen::half>(static_cast<uint16>(x));
+      return Eigen::numext::bit_cast<Eigen::half>(static_cast<uint16_t>(x));
     });
   }
   template <typename SrcIter, typename DstIter>
   static void FromArray(SrcIter begin, SrcIter end, DstIter dst) {
     std::transform(begin, end, dst, [](Eigen::half h) -> int {
-      return static_cast<int>(Eigen::numext::bit_cast<uint16>(h));
+      return static_cast<int>(Eigen::numext::bit_cast<uint16_t>(h));
     });
   }
 };
@@ -159,13 +158,13 @@ struct CopyHelper<bfloat16> {
   template <typename SrcIter>
   static void ToArray(SrcIter begin, SrcIter end, bfloat16* dst) {
     std::transform(begin, end, dst, [](int x) -> bfloat16 {
-      return Eigen::numext::bit_cast<bfloat16>(static_cast<uint16>(x));
+      return Eigen::numext::bit_cast<bfloat16>(static_cast<uint16_t>(x));
     });
   }
   template <typename SrcIter, typename DstIter>
   static void FromArray(SrcIter begin, SrcIter end, DstIter dst) {
     std::transform(begin, end, dst, [](bfloat16 bf16) -> int {
-      return static_cast<int>(Eigen::numext::bit_cast<uint16>(bf16));
+      return static_cast<int>(Eigen::numext::bit_cast<uint16_t>(bf16));
     });
   }
 };
@@ -246,10 +245,10 @@ class TensorProtoHelper : public std::true_type {
 
 // Specialization for string.
 template <>
-class TensorProtoHelper<string> : public std::true_type {
+class TensorProtoHelper<std::string> : public std::true_type {
  public:
   static DataType GetDataType() { return DataType::DT_STRING; }
-  static void AddValue(const string& value, TensorProto* proto) {
+  static void AddValue(const std::string& value, TensorProto* proto) {
     *proto->mutable_string_val()->Add() = value;
   }
   template <typename IterType>
@@ -265,29 +264,53 @@ class TensorProtoHelper<string> : public std::true_type {
   }
 };
 
-}  // namespace internal
-
-// Creates a 'TensorProto' with specified shape and values.
-// The dtype and a field to represent data values of the returned 'TensorProto'
-// are determined based on type of the 'values' parameter.
-template <typename Type>
-typename std::enable_if<internal::TensorProtoHelper<Type>::value,
-                        TensorProto>::type
-CreateTensorProto(const std::vector<Type>& values,
-                  const std::vector<size_t>& shape) {
+template <typename Type, typename IterType>
+std::enable_if_t<internal::TensorProtoHelper<Type>::value, TensorProto>
+CreateTensorProto(IterType values_begin, IterType values_end,
+                  const size_t values_size,
+                  const absl::Span<const size_t> shape) {
   TensorProto tensor;
   TensorShapeProto tensor_shape_proto;
   internal::SetTensorProtoShape(shape, &tensor_shape_proto);
-  if (TensorShape(tensor_shape_proto).num_elements() != values.size()) {
-    LOG(ERROR) << "Shape and number of values (" << values.size()
+  if (TensorShape(tensor_shape_proto).num_elements() != values_size) {
+    LOG(ERROR) << "Shape and number of values (" << values_size
                << ") are incompatible.";
     return tensor;
   }
   using TypeHelper = internal::TensorProtoHelper<Type>;
   tensor.set_dtype(TypeHelper::GetDataType());
-  tensor.mutable_tensor_shape()->Swap(&tensor_shape_proto);
-  TypeHelper::AddValues(values.begin(), values.end(), &tensor);
+  *tensor.mutable_tensor_shape() = std::move(tensor_shape_proto);
+  TypeHelper::AddValues(values_begin, values_end, &tensor);
   return tensor;
+}
+
+}  // namespace internal
+
+// Creates a 'TensorProto' with the specified shape and values. The dtype and a
+// field to represent data values of the returned 'TensorProto' are determined
+// based on Type. Note that unless the argument provided to `values` is already
+// an absl::Span, `Type` will need to be provided as a template parameter--the
+// compiler can't infer it:
+//   auto proto = CreateTensorProtoSpan<float>(my_array, shape);
+template <typename Type>
+std::enable_if_t<internal::TensorProtoHelper<Type>::value, TensorProto>
+CreateTensorProtoSpan(const absl::Span<const Type> values,
+                      const absl::Span<const size_t> shape) {
+  return internal::CreateTensorProto<Type>(values.begin(), values.end(),
+                                           values.size(), shape);
+}
+
+// Version of the above that's more convenient if `values` is an std::vector, in
+// which case Type can automatically be inferred:
+//   auto proto = CreateTensorProto(my_vector, shape);
+template <typename Type>
+std::enable_if_t<internal::TensorProtoHelper<Type>::value, TensorProto>
+CreateTensorProto(const std::vector<Type>& values,
+                  const absl::Span<const size_t> shape) {
+  // This awkward iterator passing is essentially just to support vector<bool>,
+  // otherwise we could just represent the vector as a Span.
+  return internal::CreateTensorProto<Type>(values.begin(), values.end(),
+                                           values.size(), shape);
 }
 
 // Converts values in tensor to run-length encoded compressed form.
@@ -324,7 +347,7 @@ inline bool CompressTensorProtoInPlace(TensorProto* tensor) {
 
 // Make a TensorShape from the contents of shape_t. Shape_t must be a
 // 1-dimensional tensor of type int32 or int64.
-Status MakeShape(const Tensor& shape_t, TensorShape* out);
+absl::Status MakeShape(const Tensor& shape_t, TensorShape* out);
 
 }  // namespace tensor
 }  // namespace tensorflow

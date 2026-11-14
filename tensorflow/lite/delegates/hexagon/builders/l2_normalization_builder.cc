@@ -16,9 +16,7 @@ limitations under the License.
 
 #include <stdint.h>
 
-#include <limits>
-
-#include "tensorflow/lite/c/builtin_op_data.h"
+#include "tensorflow/lite/core/c/builtin_op_data.h"
 #include "tensorflow/lite/delegates/hexagon/hexagon_nn/hexagon_nn.h"
 #include "tensorflow/lite/kernels/kernel_util.h"
 
@@ -57,7 +55,7 @@ TfLiteStatus L2NormalizationOpBuilder::RegisterOutputs(
   return kTfLiteOk;
 }
 
-L2NormalizationOpBuilder::~L2NormalizationOpBuilder() {}
+L2NormalizationOpBuilder::~L2NormalizationOpBuilder() = default;
 
 OpBuilder* CreateL2NormalizationBuilder(GraphBuilder* graph_builder,
                                         int op_type) {

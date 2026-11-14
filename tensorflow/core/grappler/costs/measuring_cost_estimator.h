@@ -52,21 +52,22 @@ class MeasuringCostEstimator : public CostEstimator {
 
   // Initializes the estimator for the specified grappler item.
   // This implementation always returns OK.
-  Status Initialize(const GrapplerItem& item) override;
+  absl::Status Initialize(const GrapplerItem& item) override;
 
   // Runs the optimized version of the graph on the cluster, measures
   // the runtimes of each operation, and annotates the CostGraphDef of
   // RunMetadata with the corresponding measurements.
   // Returns the average latency for the whole graph.
-  Status PredictCosts(const GraphDef& optimized_graph,
-                      RunMetadata* run_metadata, Costs* cost) const override;
+  absl::Status PredictCosts(const GraphDef& optimized_graph,
+                            RunMetadata* run_metadata,
+                            Costs* cost) const override;
 
  private:
   Cluster* cluster_;  // Not owned.
   int measurement_steps_;
   int measurement_threads_;
-  std::vector<std::pair<string, Tensor>> feed_;
-  std::vector<string> fetch_;
+  std::vector<std::pair<std::string, Tensor>> feed_;
+  std::vector<std::string> fetch_;
   std::unique_ptr<thread::ThreadPool> thread_pool_;
 };
 

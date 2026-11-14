@@ -1,11 +1,25 @@
+// Copyright 2026 Google Inc. All Rights Reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+// ==============================================================================
 // RUN: tf-opt %s -tf-layout-assignment -verify-diagnostics | FileCheck %s --dump-input=always
 
 module attributes {
-  tf.devices = {"/device:GPU:0" = {cc_major = 6 : i32, cc_minor = 0 : i32}}
+  tf.devices = {"/device:GPU:0" = #tf_type.gpu_device_metadata<cc_major = 6, cc_minor = 0>}
 } {
 
 // CHECK-LABEL: func @transposeConv2D_3x3_f16
-func @transposeConv2D_3x3_f16(%input: tensor<1x28x28x64xf16>, %filter: tensor<3x3x64x64xf16>) -> tensor<1x26x26x64xf16> {
+func.func @transposeConv2D_3x3_f16(%input: tensor<1x28x28x64xf16>, %filter: tensor<3x3x64x64xf16>) -> tensor<1x26x26x64xf16> {
   // cuDNN prefers NCHW data format for spatial convolutions in f16 before
   // compute capability 7.0 (NVIDIA Tensor Cores).
 
@@ -19,11 +33,11 @@ func @transposeConv2D_3x3_f16(%input: tensor<1x28x28x64xf16>, %filter: tensor<3x
        } : (tensor<1x28x28x64xf16>, tensor<3x3x64x64xf16>)
         -> tensor<1x26x26x64xf16>
 
-  return %0 : tensor<1x26x26x64xf16>
+  func.return %0 : tensor<1x26x26x64xf16>
 }
 
 // CHECK-LABEL: func @transposeConv2DBackpropFilter_f16
-func @transposeConv2DBackpropFilter_f16(
+func.func @transposeConv2DBackpropFilter_f16(
   %input:        tensor<1x28x28x64xf16>,
   %filter_size:  tensor<4xi32>,
   %out_backprop: tensor<1x28x28x64xf16>
@@ -39,11 +53,11 @@ func @transposeConv2DBackpropFilter_f16(
        } : (tensor<1x28x28x64xf16>, tensor<4xi32>, tensor<1x28x28x64xf16>)
         -> tensor<1x1x64x64xf16>
 
-  return %0 : tensor<1x1x64x64xf16>
+  func.return %0 : tensor<1x1x64x64xf16>
 }
 
 // CHECK-LABEL: func @transposeConv2DBackpropInput_f16
-func @transposeConv2DBackpropInput_f16(
+func.func @transposeConv2DBackpropInput_f16(
   %input_size:   tensor<4xi32>,
   %filter:       tensor<1x28x28x64xf16>,
   %out_backprop: tensor<1x28x28x64xf16>
@@ -59,11 +73,11 @@ func @transposeConv2DBackpropInput_f16(
        } : (tensor<4xi32>, tensor<1x28x28x64xf16>, tensor<1x28x28x64xf16>)
         -> tensor<1x28x28x64xf16>
 
-  return %0 : tensor<1x28x28x64xf16>
+  func.return %0 : tensor<1x28x28x64xf16>
 }
 
 // CHECK-LABEL: func @transposeFusedBatchNormV3_f32
-func @transposeFusedBatchNormV3_f32(
+func.func @transposeFusedBatchNormV3_f32(
   %arg0: tensor<1x28x28x64xf32>,
   %arg1: tensor<64xf32>
 ) -> tensor<1x28x28x64xf32> {
@@ -84,11 +98,11 @@ func @transposeFusedBatchNormV3_f32(
        -> (tensor<1x28x28x64xf32>, tensor<64xf32>, tensor<64xf32>,
            tensor<64xf32>, tensor<64xf32>, tensor<64xf32>)
 
-  return %y : tensor<1x28x28x64xf32>
+  func.return %y : tensor<1x28x28x64xf32>
 }
 
 // CHECK-LABEL: func @transposeFusedBatchNormV3_f16
-func @transposeFusedBatchNormV3_f16(
+func.func @transposeFusedBatchNormV3_f16(
   %arg0: tensor<1x28x28x64xf16>,
   %arg1: tensor<64xf32>
 ) -> tensor<1x28x28x64xf16> {
@@ -109,11 +123,11 @@ func @transposeFusedBatchNormV3_f16(
        -> (tensor<1x28x28x64xf16>, tensor<64xf32>, tensor<64xf32>,
            tensor<64xf32>, tensor<64xf32>, tensor<64xf32>)
 
-  return %y : tensor<1x28x28x64xf16>
+  func.return %y : tensor<1x28x28x64xf16>
 }
 
 // CHECK-LABEL: func @transposeFusedBatchNormGradV3_f32
-func @transposeFusedBatchNormGradV3_f32(
+func.func @transposeFusedBatchNormGradV3_f32(
   %arg0: tensor<1x28x28x64xf32>,
   %arg1: tensor<1x28x28x64xf32>,
   %arg2: tensor<64xf32>
@@ -135,11 +149,11 @@ func @transposeFusedBatchNormGradV3_f32(
        -> (tensor<1x28x28x64xf32>,
            tensor<64xf32>, tensor<64xf32>, tensor<64xf32>, tensor<64xf32>)
 
-  return %x_backprop : tensor<1x28x28x64xf32>
+  func.return %x_backprop : tensor<1x28x28x64xf32>
 }
 
 // CHECK-LABEL: func @transposeFusedBatchNormGradV3_f16
-func @transposeFusedBatchNormGradV3_f16(
+func.func @transposeFusedBatchNormGradV3_f16(
   %arg0: tensor<1x28x28x64xf16>,
   %arg1: tensor<1x28x28x64xf16>,
   %arg2: tensor<64xf32>
@@ -161,7 +175,7 @@ func @transposeFusedBatchNormGradV3_f16(
        -> (tensor<1x28x28x64xf16>,
            tensor<64xf32>, tensor<64xf32>, tensor<64xf32>, tensor<64xf32>)
 
-  return %x_backprop : tensor<1x28x28x64xf16>
+  func.return %x_backprop : tensor<1x28x28x64xf16>
 }
 
 }

@@ -14,7 +14,12 @@ limitations under the License.
 ==============================================================================*/
 #include "tensorflow/core/runtime_fallback/util/attr_util.h"
 
+#include <algorithm>
 #include <cstdlib>
+#include <cstring>
+#include <string>
+#include <utility>
+#include <vector>
 
 #include "absl/strings/numbers.h"
 #include "absl/strings/str_split.h"
@@ -49,7 +54,6 @@ using ::tfrt::HostContext;
 using ::tfrt::OpAttrsRawEntry;
 using ::tfrt::OpAttrsRef;
 using ::tfrt::OpAttrType;
-using ::tfrt::SmallVector;
 using ::tfrt::string_view;
 
 llvm::Expected<tensorflow::Tensor> DecodeDenseAttrToTfTensor(
@@ -62,7 +66,7 @@ llvm::Expected<tensorflow::Tensor> DecodeDenseAttrToTfTensor(
         dht.takeError());
   }
 
-  return tfrt::TFRTTensorToTFTensor(*dht, host);
+  return tfrt::TFRTTensorToTFTensor(*dht);
 }
 
 llvm::Error FillAttrValueMapUsingArray(const OpAttrsRawEntry& entry,
@@ -120,10 +124,10 @@ llvm::Error FillAttrValueMapUsingArray(const OpAttrsRawEntry& entry,
       // DTypes in BEF attributes are tfrt::DType enums. So we need
       // to convert then to tensorflow data types first.
       auto bef_dtypes =
-          llvm::makeArrayRef(static_cast<const tfrt::DType*>(op_attr.GetData()),
-                             op_attr.element_count);
+          llvm::ArrayRef(static_cast<const tfrt::DType*>(op_attr.GetData()),
+                         op_attr.element_count);
 
-      SmallVector<tensorflow::DataType, 4> tf_dtypes;
+      llvm::SmallVector<tensorflow::DataType, 4> tf_dtypes;
       tf_dtypes.reserve(bef_dtypes.size());
       for (auto bef_dtype : bef_dtypes) {
         tf_dtypes.push_back(ConvertBefAttrTypeToTfDataType(bef_dtype));
@@ -263,28 +267,28 @@ llvm::Error FillAttrValueMapUsingScalar(const OpAttrsRawEntry& entry,
 
 }  // namespace
 
-Status ParseTfDataType(absl::string_view dtype, DataType* data_type) {
+absl::Status ParseTfDataType(absl::string_view dtype, DataType* data_type) {
   if (dtype == "DT_INT8") {
     *data_type = DataType::DT_INT8;
-    return Status::OK();
+    return absl::OkStatus();
   } else if (dtype == "DT_INT32") {
     *data_type = DataType::DT_INT32;
-    return Status::OK();
+    return absl::OkStatus();
   } else if (dtype == "DT_INT64") {
     *data_type = DataType::DT_INT64;
-    return Status::OK();
+    return absl::OkStatus();
   } else if (dtype == "DT_HALF") {
     *data_type = DataType::DT_HALF;
-    return Status::OK();
+    return absl::OkStatus();
   } else if (dtype == "DT_FLOAT") {
     *data_type = DataType::DT_FLOAT;
-    return Status::OK();
+    return absl::OkStatus();
   } else if (dtype == "DT_DOUBLE") {
     *data_type = DataType::DT_DOUBLE;
-    return Status::OK();
+    return absl::OkStatus();
   } else {
-    return errors::InvalidArgument("Unsupported dtype, ", std::string(dtype),
-                                   " in ParseTfDataType.");
+    return absl::InvalidArgumentError(
+        absl::StrCat("Unsupported dtype, ", dtype, " in ParseTfDataType."));
   }
 }
 
@@ -425,30 +429,30 @@ tfrt::DType ConvertTfDataTypeToBefAttrType(DataType data_type) {
   }
 }
 
-Status ParseBoolAttrValue(absl::string_view attr_value, bool* bool_val) {
+absl::Status ParseBoolAttrValue(absl::string_view attr_value, bool* bool_val) {
   if (attr_value == "false") {
     *bool_val = false;
-    return Status::OK();
+    return absl::OkStatus();
   } else if (attr_value == "true") {
     *bool_val = true;
-    return Status::OK();
+    return absl::OkStatus();
   } else {
-    return errors::InvalidArgument("Could not parse bool from \"", attr_value,
-                                   "\"");
+    return absl::InvalidArgumentError(
+        absl::StrCat("Could not parse bool from \"", attr_value, "\""));
   }
 }
 
-Status ParseIntAttrValue(absl::string_view attr_value, int64_t* int_val) {
+absl::Status ParseIntAttrValue(absl::string_view attr_value, int64_t* int_val) {
   bool success = absl::SimpleAtoi(attr_value, int_val);
   if (!success) {
-    return errors::InvalidArgument("Could not parse int from \"", attr_value,
-                                   "\"");
+    return absl::InvalidArgumentError(
+        absl::StrCat("Could not parse int from \"", attr_value, "\""));
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-Status ParseTensorAttrValue(absl::string_view attr_value,
-                            tensorflow::Tensor* tensor) {
+absl::Status ParseTensorAttrValue(absl::string_view attr_value,
+                                  tensorflow::Tensor* tensor) {
   if (std::is_base_of<tensorflow::protobuf::Message,
                       tensorflow::TensorProto>()) {
     tensorflow::TensorProto tensor_proto;
@@ -460,26 +464,26 @@ Status ParseTensorAttrValue(absl::string_view attr_value,
     if (protobuf::TextFormat::ParseFromString(
             static_cast<std::string>(attr_value), message) &&
         tensor->FromProto(tensor_proto)) {
-      return Status::OK();
+      return absl::OkStatus();
     } else {
-      return errors::InvalidArgument("Could not parse tensor value from \"",
-                                     attr_value, "\"");
+      return absl::InvalidArgumentError(absl::StrCat(
+          "Could not parse tensor value from \"", attr_value, "\""));
     }
   } else {
     // TextFormat does not work with portable proto implementations.
-    return errors::InvalidArgument(
+    return absl::InvalidArgumentError(
         "Tensor attributes are not supported on mobile.");
   }
 }
 
-Status ParseTensorShapeAttrValue(absl::string_view attr_value,
-                                 std::vector<int64_t>* shape_val) {
+absl::Status ParseTensorShapeAttrValue(absl::string_view attr_value,
+                                       std::vector<int64_t>* shape_val) {
   if (attr_value.size() < 2 || attr_value[0] != '[' ||
       attr_value[attr_value.size() - 1] != ']') {
-    return errors::InvalidArgument(
+    return absl::InvalidArgumentError(absl::StrCat(
         "Tensor shape attribute must be a string of the form [1,2...], instead "
         "got \"",
-        attr_value, "\"");
+        attr_value, "\""));
   }
   absl::string_view attr_value_trunc =
       attr_value.substr(1, attr_value.size() - 2);
@@ -489,12 +493,13 @@ Status ParseTensorShapeAttrValue(absl::string_view attr_value,
   for (auto it = container.begin(); it != container.end(); ++it) {
     int64_t int_val;
     if (!ParseIntAttrValue(*it, &int_val).ok()) {
-      return errors::InvalidArgument("Failed to parse an integer value from ",
-                                     *it, " while parsing shape.");
+      return absl::InvalidArgumentError(
+          absl::StrCat("Failed to parse an integer value from ", *it,
+                       " while parsing shape."));
     }
     shape_val->push_back(int_val);
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 bool IsUnusedAttribute(absl::string_view attr_name) {
@@ -544,8 +549,8 @@ tensorflow::Tensor CreateTfTensorFromDenseAttr(tfrt::DenseAttr attr) {
   return tensor;
 }
 
-Status SetUpScalarAttr(tfrt::TypedAttrBase bef_attr,
-                       tensorflow::AttrValue* tf_attr) {
+absl::Status SetUpScalarAttr(tfrt::TypedAttrBase bef_attr,
+                             tensorflow::AttrValue* tf_attr) {
   if (auto shape_attr = bef_attr.dyn_cast<tfrt::ShapeAttr>()) {
     if (shape_attr.HasRank()) {
       tensorflow::PartialTensorShape tf_shape(shape_attr.GetShape());
@@ -569,17 +574,17 @@ Status SetUpScalarAttr(tfrt::TypedAttrBase bef_attr,
     tf_attr->set_s(string_attr.GetValue().data(),
                    string_attr.GetValue().size());
   } else {
-    return tensorflow::errors::Internal("Failed to set up attribute.");
+    return absl::InternalError("Failed to set up attribute.");
   }
 
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-Status SetUpScalarFunctionAttr(tfrt::StringAttr func_attr,
-                               tensorflow::AttrValue& tf_attr) {
+absl::Status SetUpScalarFunctionAttr(tfrt::StringAttr func_attr,
+                                     tensorflow::AttrValue& tf_attr) {
   tfrt::string_view func_name = func_attr.GetValue();
   tf_attr.mutable_func()->set_name(func_name.data(), func_name.size());
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 void AddShapeToAttrList(tfrt::ShapeAttr shape,
@@ -599,8 +604,8 @@ void AddTensorToAttrList(tfrt::DenseAttr dense_attr,
   tf_tensor.AsProtoTensorContent(list->add_tensor());
 }
 
-Status SetUpListAttr(tfrt::AggregateAttr aggregate_attr,
-                     tensorflow::AttrValue* tf_attr) {
+absl::Status SetUpListAttr(tfrt::AggregateAttr aggregate_attr,
+                           tensorflow::AttrValue* tf_attr) {
   auto* list = tf_attr->mutable_list();
   for (int i = 0; i < aggregate_attr.GetNumElements(); ++i) {
     auto base = aggregate_attr.GetAttribute(i);
@@ -611,19 +616,19 @@ Status SetUpListAttr(tfrt::AggregateAttr aggregate_attr,
     } else if (auto string_attr = base.dyn_cast<tfrt::StringAttr>()) {
       list->add_s(string_attr.GetValue().data(), string_attr.GetValue().size());
     } else {
-      return tensorflow::errors::Internal("Failed to set up list attr.");
+      return absl::InternalError("Failed to set up list attr.");
     }
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-Status SetUpListAttr(tfrt::ArrayAttr array_attr,
-                     tensorflow::AttrValue* tf_attr) {
+absl::Status SetUpListAttr(tfrt::ArrayAttr array_attr,
+                           tensorflow::AttrValue* tf_attr) {
   auto* list = tf_attr->mutable_list();
 
   // Handle an empty array case.
   if (array_attr.GetNumElements() == 0) {
-    return Status::OK();
+    return absl::OkStatus();
   }
 
   tfrt::BEFAttributeType element_type = array_attr.GetElementType();
@@ -634,22 +639,22 @@ Status SetUpListAttr(tfrt::ArrayAttr array_attr,
         for (auto value : array_attr.GetValue<bool>()) {
           list->add_b(value);
         }
-        return Status::OK();
+        return absl::OkStatus();
       }
       case tfrt::DType::I64: {
         for (auto value : array_attr.GetValue<int64_t>()) {
           list->add_i(value);
         }
-        return Status::OK();
+        return absl::OkStatus();
       }
       case tfrt::DType::F32: {
         for (auto value : array_attr.GetValue<float>()) {
           list->add_f(value);
         }
-        return Status::OK();
+        return absl::OkStatus();
       }
       default:
-        return tensorflow::errors::Internal(
+        return absl::InternalError(
             StrCat("Failed to set up list attr: unsupported dtype: ",
                    tfrt::DType(dtype)));
     }
@@ -657,17 +662,17 @@ Status SetUpListAttr(tfrt::ArrayAttr array_attr,
     for (auto value : array_attr.GetValue<tfrt::DType>()) {
       list->add_type(ConvertBefAttrTypeToTfDataType(value));
     }
-    return Status::OK();
+    return absl::OkStatus();
   }
 
-  return tensorflow::errors::Internal("Failed to set up list attr.");
+  return absl::InternalError("Failed to set up list attr.");
 }
 
 }  // namespace
 
-Status SetUpAttrValueMap(tfrt::AggregateAttr op_attr_array,
-                         tfrt::AggregateAttr op_func_attr_array,
-                         tensorflow::AttrValueMap* attr_value_map) {
+absl::Status SetUpAttrValueMap(tfrt::AggregateAttr op_attr_array,
+                               tfrt::AggregateAttr op_func_attr_array,
+                               tensorflow::AttrValueMap* attr_value_map) {
   auto obtain_name_attr_pair =
       [](tfrt::AggregateAttr attr_array,
          int i) -> std::pair<std::string, tfrt::TypedAttrBase> {
@@ -701,7 +706,7 @@ Status SetUpAttrValueMap(tfrt::AggregateAttr op_attr_array,
     TF_RETURN_IF_ERROR(SetUpScalarFunctionAttr(attr_value, tf_attr));
   }
 
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 }  // namespace tfd

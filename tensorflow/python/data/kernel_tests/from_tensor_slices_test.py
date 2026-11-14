@@ -13,22 +13,22 @@
 # limitations under the License.
 # ==============================================================================
 """Tests for `tf.data.Dataset.from_tensor_slices()."""
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import collections
+from typing import Callable, Optional
 
 from absl.testing import parameterized
 import numpy as np
 
+from tensorflow.python.data.experimental.ops import global_shuffle_op
 from tensorflow.python.data.experimental.ops import random_access
 from tensorflow.python.data.kernel_tests import checkpoint_test_base
 from tensorflow.python.data.kernel_tests import test_base
 from tensorflow.python.data.ops import dataset_ops
+from tensorflow.python.data.ops import options as options_lib
 from tensorflow.python.framework import combinations
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import errors
+from tensorflow.python.framework import ops
 from tensorflow.python.framework import sparse_tensor
 from tensorflow.python.framework import tensor_shape
 from tensorflow.python.ops.ragged import ragged_factory_ops
@@ -66,6 +66,23 @@ class FromTensorSlicesTest(test_base.DatasetTestBase, parameterized.TestCase):
         self.assertAllEqual(component[i], result_component)
     with self.assertRaises(errors.OutOfRangeError):
       results = self.evaluate(get_next())
+
+  @combinations.generate(test_base.default_test_combinations())
+  def testFromTensorSlicesHostPlacement(self):
+    x = np.arange(10, dtype=np.int64)
+    with ops.device("/device:GPU:0"):
+      dataset = dataset_ops.DatasetV2.from_tensor_slices(x)
+    for t in dataset._tensors:  # pylint: disable=protected-access
+      self.assertIn("CPU", t.device)
+    self.assertDatasetProduces(dataset, expected_output=list(x))
+
+  @combinations.generate(test_base.graph_only_combinations())
+  def testFromTensorSlicesExistingTensorPlacementPreserved(self):
+    with ops.device("/device:GPU:0"):
+      x = ops.convert_to_tensor(np.arange(10, dtype=np.int64))
+    dataset = dataset_ops.DatasetV2.from_tensor_slices(x)
+    for t in dataset._tensors:  # pylint: disable=protected-access
+      self.assertIn("GPU", t.device)
 
   @combinations.generate(test_base.default_test_combinations())
   def testFromTensorSlicesDataset(self):
@@ -372,21 +389,27 @@ class FromTensorSlicesRandomAccessTest(test_base.DatasetTestBase,
 class FromTensorSlicesCheckpointTest(checkpoint_test_base.CheckpointTestBase,
                                      parameterized.TestCase):
 
-  def _build_tensor_slices_dataset(self, components):
-    return dataset_ops.Dataset.from_tensor_slices(components)
+  def _build_tensor_slices_dataset(self, components, options=None):
+    dataset = dataset_ops.Dataset.from_tensor_slices(components)
+    if options:
+      dataset = dataset.with_options(options)
+    return dataset
 
   @combinations.generate(
-      combinations.times(test_base.default_test_combinations(),
-                         checkpoint_test_base.default_test_combinations()))
-  def test(self, verify_fn):
+      combinations.times(
+          test_base.default_test_combinations(),
+          checkpoint_test_base.default_test_combinations(),
+          combinations.combine(symbolic_checkpoint=[False, True])))
+  def test(self, verify_fn, symbolic_checkpoint):
     # Equal length components
     components = (np.tile(np.array([[1], [2], [3], [4]]),
                           20), np.tile(np.array([[12], [13], [14], [15]]),
                                        22), np.array([37.0, 38.0, 39.0, 40.0]))
-
+    options = options_lib.Options()
+    options.experimental_symbolic_checkpoint = symbolic_checkpoint
     verify_fn(
         self,
-        lambda: self._build_tensor_slices_dataset(components),
+        lambda: self._build_tensor_slices_dataset(components, options),
         num_outputs=4)
 
   @combinations.generate(
@@ -399,6 +422,77 @@ class FromTensorSlicesCheckpointTest(checkpoint_test_base.CheckpointTestBase,
         self,
         lambda: self._build_tensor_slices_dataset(dict_components),
         num_outputs=3)
+
+
+class FromTensorSlicesGlobalShuffleTest(
+    test_base.DatasetTestBase, parameterized.TestCase):
+
+  @combinations.generate(
+      combinations.times(
+          test_base.default_test_combinations(),
+          combinations.combine(
+              dataset_range=[10, 100],
+              repetitions=[1, 3],
+              seed=[None, 19],
+              reshuffle_each_iteration=[True, False])))
+  def testGlobalShuffleTensorSlicesDataset(
+      self,
+      dataset_range: int,
+      repetitions: int,
+      seed: Optional[int],
+      reshuffle_each_iteration: bool):
+    dataset = dataset_ops.Dataset.from_tensor_slices(list(range(dataset_range)))
+    if repetitions > 1:
+      dataset = dataset.repeat(repetitions)
+    dataset = global_shuffle_op._global_shuffle(
+        dataset, seed=seed, reshuffle_each_iteration=reshuffle_each_iteration)
+    dataset_output = self.getDatasetOutput(
+        dataset, requires_initialization=True)
+
+    expected = list(range(dataset_range)) * repetitions
+    self.assertCountEqual(dataset_output, expected)
+    self.assertNotEqual(dataset_output, expected)
+    self.assertLen(expected, self.evaluate(dataset.cardinality()))
+
+
+class FromTensorSlicesGlobalShuffleCheckpointTest(
+    checkpoint_test_base.CheckpointTestBase, parameterized.TestCase):
+
+  @combinations.generate(
+      combinations.times(
+          test_base.default_test_combinations(),
+          checkpoint_test_base.default_test_combinations(),
+          combinations.combine(
+              dataset_range=[10],
+              repetitions=[1, 3],
+              reshuffle_each_iteration=[True, False],
+              symbolic_checkpoint=[True, False])))
+  def testGlobalShuffleTensorSlicesDataset(
+      self,
+      verify_fn: Callable[..., None],
+      dataset_range: int,
+      repetitions: int,
+      reshuffle_each_iteration: bool,
+      symbolic_checkpoint: bool):
+
+    def _build_dataset() -> dataset_ops.Dataset:
+      dataset = dataset_ops.Dataset.from_tensor_slices(
+          list(range(dataset_range)))
+      if repetitions > 1:
+        dataset = dataset.repeat(repetitions)
+      dataset = global_shuffle_op._global_shuffle(
+          dataset, seed=42, reshuffle_each_iteration=reshuffle_each_iteration)
+      if symbolic_checkpoint:
+        options = options_lib.Options()
+        options.experimental_symbolic_checkpoint = symbolic_checkpoint
+        dataset = dataset.with_options(options)
+      return dataset
+
+    verify_fn(
+        self,
+        _build_dataset,
+        num_outputs=dataset_range * repetitions,
+        assert_items_equal=reshuffle_each_iteration)
 
 
 if __name__ == "__main__":

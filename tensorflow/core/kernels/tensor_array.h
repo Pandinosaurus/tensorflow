@@ -17,6 +17,7 @@ limitations under the License.
 #define TENSORFLOW_CORE_KERNELS_TENSOR_ARRAY_H_
 
 #include <limits.h>
+
 #include <vector>
 
 #include "tensorflow/core/framework/op_kernel.h"
@@ -41,8 +42,8 @@ namespace tensor_array {
 
 // Full implementations are in tensor_array.cc
 template <typename Device, typename T>
-Status AddToTensor(OpKernelContext* ctx, Tensor* sum, const Tensor* current,
-                   const Tensor* add) {
+absl::Status AddToTensor(OpKernelContext* ctx, Tensor* sum,
+                         const Tensor* current, const Tensor* add) {
   return errors::InvalidArgument(
       "tensor_array::AddToTensor type not supported: ",
       DataTypeString(DataTypeToEnum<T>::value));
@@ -69,7 +70,7 @@ TF_CALL_COMPLEX_TYPES(TENSOR_ARRAY_WRITE_OR_ADD_GPU);
 #undef TENSOR_ARRAY_WRITE_OR_ADD
 
 template <typename Device, typename T>
-Status TensorSetZero(OpKernelContext* ctx, Tensor* value) {
+absl::Status TensorSetZero(OpKernelContext* ctx, Tensor* value) {
   return errors::InvalidArgument(
       "tensor_array::TensorSetZero type not supported: ",
       DataTypeString(DataTypeToEnum<T>::value));
@@ -135,8 +136,9 @@ class TensorArray : public ResourceBase {
   // 'N' elements.  While the underlying storage is a std::vector and
   // can hold more than MAX_INT entries, in practice we do not expect
   // users to construct this many Tensors for storage in a TensorArray.
-  TensorArray(const string& key, const DataType& dtype, const Tensor& handle,
-              int32_t N, const PartialTensorShape& element_shape,
+  TensorArray(const std::string& key, const DataType& dtype,
+              const Tensor& handle, int32_t N,
+              const PartialTensorShape& element_shape,
               bool identical_element_shapes, bool dynamic_size,
               bool multiple_writes_aggregate, bool is_grad, int32_t marked_size,
               bool clear_after_read)
@@ -184,24 +186,25 @@ class TensorArray : public ResourceBase {
   // Note, value is passed as a pointer because we its underlying
   // Tensor's shape is accessed.  Otherwise it is not modified.
   template <typename Device, typename T>
-  Status WriteOrAggregate(OpKernelContext* ctx, const int32_t index,
-                          const Tensor* value) {
+  absl::Status WriteOrAggregate(OpKernelContext* ctx, const int32_t index,
+                                const Tensor* value) {
     mutex_lock l(mu_);
     return LockedWriteOrAggregate<Device, T>(ctx, index, value);
   }
 
   template <typename Device, typename T>
-  Status WriteOrAggregateMany(OpKernelContext* ctx,
-                              const std::vector<int32>& indices,
-                              std::vector<Tensor>* values) {
+  absl::Status WriteOrAggregateMany(OpKernelContext* ctx,
+                                    const std::vector<int32_t>& indices,
+                                    std::vector<Tensor>* values) {
     mutex_lock l(mu_);
     int32_t i = 0;
     for (const int32_t ix : indices) {
-      Status s = LockedWriteOrAggregate<Device, T>(ctx, ix, &(*values)[i]);
+      absl::Status s =
+          LockedWriteOrAggregate<Device, T>(ctx, ix, &(*values)[i]);
       ++i;
       TF_RETURN_IF_ERROR(s);
     }
-    return Status::OK();
+    return absl::OkStatus();
   }
 
   // Read from index 'index' into Tensor 'value'.
@@ -220,24 +223,25 @@ class TensorArray : public ResourceBase {
   //    the returned '*value'.
   //  * The index is marked as read (it cannot be rewritten to).
   template <typename Device, typename T>
-  Status Read(OpKernelContext* ctx, const int32_t index, Tensor* value) {
+  absl::Status Read(OpKernelContext* ctx, const int32_t index, Tensor* value) {
     mutex_lock l(mu_);
     return LockedRead<Device, T>(ctx, index, value);
   }
 
   template <typename Device, typename T>
-  Status ReadMany(OpKernelContext* ctx, const std::vector<int32>& indices,
-                  std::vector<Tensor>* values) {
+  absl::Status ReadMany(OpKernelContext* ctx,
+                        const std::vector<int32_t>& indices,
+                        std::vector<Tensor>* values) {
     mutex_lock l(mu_);
     values->clear();
     values->resize(indices.size());
     int32_t i = 0;
     for (const int32_t ix : indices) {
-      Status s = LockedRead<Device, T>(ctx, ix, &(*values)[i]);
+      absl::Status s = LockedRead<Device, T>(ctx, ix, &(*values)[i]);
       ++i;
       if (!s.ok()) return s;
     }
-    return Status::OK();
+    return absl::OkStatus();
   }
 
   DataType ElemType() const { return dtype_; }
@@ -247,21 +251,21 @@ class TensorArray : public ResourceBase {
     return element_shape_;
   }
 
-  Status SetElemShape(const PartialTensorShape& candidate) {
+  absl::Status SetElemShape(const PartialTensorShape& candidate) {
     mutex_lock l(mu_);
     PartialTensorShape new_element_shape_;
-    Status s = element_shape_.MergeWith(candidate, &new_element_shape_);
+    absl::Status s = element_shape_.MergeWith(candidate, &new_element_shape_);
     if (!s.ok()) {
       return s;
     }
     element_shape_ = new_element_shape_;
-    return Status::OK();
+    return absl::OkStatus();
   }
 
-  string DebugString() const override {
+  std::string DebugString() const override {
     mutex_lock l(mu_);
     CHECK(!closed_);
-    return strings::StrCat("TensorArray[", tensors_.size(), "]");
+    return absl::StrCat("TensorArray[", tensors_.size(), "]");
   }
 
   bool IsClosed() {
@@ -270,37 +274,37 @@ class TensorArray : public ResourceBase {
   }
 
   // Return the size of the TensorArray.
-  Status Size(int32* size) {
+  absl::Status Size(int32_t* size) {
     mutex_lock l(mu_);
     TF_RETURN_IF_ERROR(LockedReturnIfClosed());
     *size = tensors_.size();
-    return Status::OK();
+    return absl::OkStatus();
   }
 
   // Record the size of the TensorArray after an unpack or split.
-  Status SetMarkedSize(int32_t size) {
+  absl::Status SetMarkedSize(int32_t size) {
     mutex_lock l(mu_);
     TF_RETURN_IF_ERROR(LockedReturnIfClosed());
     if (!is_grad_) {
       marked_size_ = size;
     }
-    return Status::OK();
+    return absl::OkStatus();
   }
 
   // Return the marked size of the TensorArray.
-  Status MarkedSize(int32* size) {
+  absl::Status MarkedSize(int32_t* size) {
     mutex_lock l(mu_);
     TF_RETURN_IF_ERROR(LockedReturnIfClosed());
     *size = marked_size_;
-    return Status::OK();
+    return absl::OkStatus();
   }
 
   // Return the size that should be used by pack or concat op.
-  Status PackOrConcatSize(int32* size) {
+  absl::Status PackOrConcatSize(int32_t* size) {
     mutex_lock l(mu_);
     TF_RETURN_IF_ERROR(LockedReturnIfClosed());
     *size = is_grad_ ? marked_size_ : tensors_.size();
-    return Status::OK();
+    return absl::OkStatus();
   }
 
   // Once a TensorArray is being used for gradient calculations, it
@@ -331,7 +335,8 @@ class TensorArray : public ResourceBase {
   // zero-tensors, which will be replaced by future aggregate writes,
   // or instantiated by future reads.  Requires a non-const pointer
   // to the rhs to access its mutex.
-  Status CopyShapesFrom(TensorArray* rhs, const TensorShape* shape_to_prepend);
+  absl::Status CopyShapesFrom(TensorArray* rhs,
+                              const TensorShape* shape_to_prepend);
 
   // Clear the TensorArray, including any Tensor references, and mark as closed.
   void ClearAndMarkClosed() {
@@ -349,27 +354,28 @@ class TensorArray : public ResourceBase {
   }
 
  private:
-  Status LockedWrite(OpKernelContext* ctx, const int32_t index, Tensor* value)
+  absl::Status LockedWrite(OpKernelContext* ctx, const int32_t index,
+                           Tensor* value) TF_EXCLUSIVE_LOCKS_REQUIRED(mu_);
+
+  template <typename Device, typename T>
+  absl::Status LockedWriteOrAggregate(OpKernelContext* ctx, const int32_t index,
+                                      const Tensor* value)
       TF_EXCLUSIVE_LOCKS_REQUIRED(mu_);
 
   template <typename Device, typename T>
-  Status LockedWriteOrAggregate(OpKernelContext* ctx, const int32_t index,
-                                const Tensor* value)
-      TF_EXCLUSIVE_LOCKS_REQUIRED(mu_);
+  absl::Status LockedRead(OpKernelContext* ctx, const int32_t index,
+                          Tensor* value) TF_EXCLUSIVE_LOCKS_REQUIRED(mu_);
 
-  template <typename Device, typename T>
-  Status LockedRead(OpKernelContext* ctx, const int32_t index, Tensor* value)
-      TF_EXCLUSIVE_LOCKS_REQUIRED(mu_);
-
-  Status LockedReturnIfClosed() const TF_EXCLUSIVE_LOCKS_REQUIRED(mu_) {
+  absl::Status LockedReturnIfClosed() const TF_EXCLUSIVE_LOCKS_REQUIRED(mu_) {
     if (closed_) {
-      return errors::InvalidArgument("TensorArray ", handle_.vec<tstring>()(1),
-                                     " has already been closed.");
+      return absl::InvalidArgumentError(
+          absl::StrCat("TensorArray ", handle_.vec<tstring>()(1),
+                       " has already been closed."));
     }
-    return Status::OK();
+    return absl::OkStatus();
   }
 
-  const string key_;
+  const std::string key_;
 
   const DataType dtype_;
   Tensor handle_;
@@ -398,7 +404,7 @@ class TensorArray : public ResourceBase {
 
   // The size of the TensorArray after a (legacy) unpack or split is performed.
   // -1 if there has been no unpack or split performed on the TensorArray.
-  int32 marked_size_;
+  int32_t marked_size_;
 
   // The shape of each element in the TensorArray, may be partially known or not
   // known at all.
@@ -437,15 +443,15 @@ class TensorArray : public ResourceBase {
 };
 
 template <typename Device, typename T>
-Status TensorArray::LockedWriteOrAggregate(OpKernelContext* ctx,
-                                           const int32_t index,
-                                           const Tensor* value) {
+absl::Status TensorArray::LockedWriteOrAggregate(OpKernelContext* ctx,
+                                                 const int32_t index,
+                                                 const Tensor* value) {
   TF_RETURN_IF_ERROR(LockedReturnIfClosed());
   size_t index_size = static_cast<size_t>(index);
   if (index < 0 || (!dynamic_size_ && index_size >= tensors_.size())) {
-    return errors::InvalidArgument(
+    return absl::InvalidArgumentError(absl::StrCat(
         "TensorArray ", handle_.vec<tstring>()(1), ": Tried to write to index ",
-        index, " but array is not resizeable and size is: ", tensors_.size());
+        index, " but array is not resizeable and size is: ", tensors_.size()));
   }
   if (dynamic_size_) {
     // We must grow the internal TensorArray
@@ -459,35 +465,37 @@ Status TensorArray::LockedWriteOrAggregate(OpKernelContext* ctx,
   TensorAndState& t = tensors_[index];
 
   if (value->dtype() != dtype_) {
-    return errors::InvalidArgument(
+    return absl::InvalidArgumentError(absl::StrCat(
         "TensorArray ", handle_.vec<tstring>()(1),
         ": Could not write to TensorArray index ", index,
         " because the value dtype is ", DataTypeString(value->dtype()),
-        " but TensorArray dtype is ", DataTypeString(dtype_), ".");
+        " but TensorArray dtype is ", DataTypeString(dtype_), "."));
   }
   if (!element_shape_.IsCompatibleWith(value->shape())) {
-    return errors::InvalidArgument(
+    return absl::InvalidArgumentError(absl::StrCat(
         "TensorArray ", handle_.vec<tstring>()(1),
         ": Could not write to TensorArray index ", index,
         " because the value shape is ", value->shape().DebugString(),
         " which is incompatible with the TensorArray's inferred element "
         "shape: ",
-        element_shape_.DebugString(), " (consider setting infer_shape=False).");
+        element_shape_.DebugString(),
+        " (consider setting infer_shape=False)."));
   } else if (identical_element_shapes_ && !element_shape_.IsFullyDefined()) {
     element_shape_ = PartialTensorShape(value->shape().dim_sizes());
   }
 
   if (t.read) {
-    return errors::InvalidArgument("TensorArray ", handle_.vec<tstring>()(1),
-                                   ": Could not write to TensorArray index ",
-                                   index, " because it has already been read.");
+    return absl::InvalidArgumentError(
+        absl::StrCat("TensorArray ", handle_.vec<tstring>()(1),
+                     ": Could not write to TensorArray index ", index,
+                     " because it has already been read."));
   }
 
   if (!multiple_writes_aggregate_ && t.written) {
-    return errors::InvalidArgument("TensorArray ", handle_.vec<tstring>()(1),
-                                   ": Could not write to TensorArray index ",
-                                   index,
-                                   " because it has already been written to.");
+    return absl::InvalidArgumentError(
+        absl::StrCat("TensorArray ", handle_.vec<tstring>()(1),
+                     ": Could not write to TensorArray index ", index,
+                     " because it has already been written to."));
   }
 
   if (t.written) {
@@ -495,11 +503,11 @@ Status TensorArray::LockedWriteOrAggregate(OpKernelContext* ctx,
 
     // Check that value shape matches t.shape
     if (value->shape() != t.shape) {
-      return errors::InvalidArgument(
+      return absl::InvalidArgumentError(absl::StrCat(
           "TensorArray ", handle_.vec<tstring>()(1),
           ": Could not aggregate to TensorArray index ", index,
           " because the existing shape is ", t.shape.DebugString(),
-          " but the new input shape is ", value->shape().DebugString(), ".");
+          " but the new input shape is ", value->shape().DebugString(), "."));
     }
 
     if (!t.tensor.IsInitialized() || t.tensor.NumElements() == 0) {
@@ -507,21 +515,21 @@ Status TensorArray::LockedWriteOrAggregate(OpKernelContext* ctx,
       // was just a shape, which just means zeros.  So all we must do in this
       // case is copy the reference over and return early.
       t.tensor = *value;
-      return Status::OK();
+      return absl::OkStatus();
     }
 
     Tensor* existing_t = &t.tensor;
 
     if (t.local_copy) {
-      Status s = tensor_array::AddToTensor<Device, T>(ctx, existing_t,
-                                                      existing_t, value);
+      absl::Status s = tensor_array::AddToTensor<Device, T>(ctx, existing_t,
+                                                            existing_t, value);
       TF_RETURN_IF_ERROR(s);
     } else {
       Tensor local_tensor;
       TF_RETURN_IF_ERROR(
           ctx->allocate_temp(dtype_, existing_t->shape(), &local_tensor));
-      Status s = tensor_array::AddToTensor<Device, T>(ctx, &local_tensor,
-                                                      existing_t, value);
+      absl::Status s = tensor_array::AddToTensor<Device, T>(ctx, &local_tensor,
+                                                            existing_t, value);
       TF_RETURN_IF_ERROR(s);
       t.tensor = local_tensor;
       t.local_copy = true;
@@ -535,17 +543,18 @@ Status TensorArray::LockedWriteOrAggregate(OpKernelContext* ctx,
     t.shape = value->shape();
     t.written = true;
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 template <typename Device, typename T>
-Status TensorArray::LockedRead(OpKernelContext* ctx, const int32_t index,
-                               Tensor* value) {
+absl::Status TensorArray::LockedRead(OpKernelContext* ctx, const int32_t index,
+                                     Tensor* value) {
   TF_RETURN_IF_ERROR(LockedReturnIfClosed());
   if ((index < 0) ||
       (!is_grad_ && (static_cast<size_t>(index) >= tensors_.size()))) {
-    return errors::InvalidArgument("Tried to read from index ", index,
-                                   " but array size is: ", tensors_.size());
+    return absl::InvalidArgumentError(
+        absl::StrCat("Tried to read from index ", index,
+                     " but array size is: ", tensors_.size()));
   }
   size_t index_t = static_cast<size_t>(index);
   if ((is_grad_ && (index_t >= tensors_.size() || !tensors_[index].written)) ||
@@ -562,7 +571,7 @@ Status TensorArray::LockedRead(OpKernelContext* ctx, const int32_t index,
       // the global element_shape_ to fill in zeros on read.
       element_shape = tensors_[index].shape;
     } else if (!element_shape_.IsFullyDefined()) {
-      return errors::InvalidArgument(
+      return absl::InvalidArgumentError(absl::StrCat(
           "TensorArray ", handle_.vec<tstring>()(1),
           ": Could not read from TensorArray index ", index,
           ".  Furthermore, the element shape is not fully defined: ",
@@ -572,7 +581,7 @@ Status TensorArray::LockedRead(OpKernelContext* ctx, const int32_t index,
           "set the full "
           "element_shape property on the forward TensorArray, the proper "
           "all-zeros tensor "
-          "will be returned instead of incurring this error.");
+          "will be returned instead of incurring this error."));
     } else {
       element_shape_.AsTensorShape(&element_shape);  // Always succeeds.
     }
@@ -593,11 +602,12 @@ Status TensorArray::LockedRead(OpKernelContext* ctx, const int32_t index,
   TensorAndState& t = tensors_[index];
 
   if (t.cleared) {
-    return errors::InvalidArgument("TensorArray ", handle_.vec<tstring>()(1),
-                                   ": Could not read index ", index,
-                                   " twice because it was cleared after a "
-                                   "previous read (perhaps try setting "
-                                   "clear_after_read = false?).");
+    return absl::InvalidArgumentError(
+        absl::StrCat("TensorArray ", handle_.vec<tstring>()(1),
+                     ": Could not read index ", index,
+                     " twice because it was cleared after a "
+                     "previous read (perhaps try setting "
+                     "clear_after_read = false?)."));
   }
 
   if (!t.tensor.IsInitialized() || t.tensor.NumElements() == 0) {
@@ -605,7 +615,7 @@ Status TensorArray::LockedRead(OpKernelContext* ctx, const int32_t index,
     // return zeros of the appropriate shape.
     TF_RETURN_IF_ERROR(ctx->allocate_temp(dtype_, t.shape, &t.tensor));
     if (t.shape.num_elements() > 0) {
-      Status s = tensor_array::TensorSetZero<Device, T>(ctx, &t.tensor);
+      absl::Status s = tensor_array::TensorSetZero<Device, T>(ctx, &t.tensor);
       if (!s.ok()) return s;
     }
   }
@@ -618,7 +628,7 @@ Status TensorArray::LockedRead(OpKernelContext* ctx, const int32_t index,
     t.cleared = true;
   }
   t.read = true;
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 }  // namespace tensorflow

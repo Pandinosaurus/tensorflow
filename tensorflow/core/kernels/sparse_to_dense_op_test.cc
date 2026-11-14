@@ -13,9 +13,11 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include <cstdint>
 #include <functional>
 #include <vector>
 
+#include "absl/status/status.h"
 #include "tensorflow/core/common_runtime/device.h"
 #include "tensorflow/core/common_runtime/device_factory.h"
 #include "tensorflow/core/framework/allocator.h"
@@ -55,9 +57,9 @@ TEST_F(SparseToDenseTest, OneD_OneValue) {
   MakeOp(1, DT_INT32, DT_FLOAT);
 
   // sparse_indices
-  AddInputFromArray<int32>(TensorShape({3}), {1, 3, 4});
+  AddInputFromArray<int32_t>(TensorShape({3}), {1, 3, 4});
   // output_shape
-  AddInputFromArray<int32>(TensorShape({1}), {5});
+  AddInputFromArray<int32_t>(TensorShape({1}), {5});
   // sparse_values
   AddInputFromArray<float>(TensorShape({}), {2});
   // default_value
@@ -93,9 +95,9 @@ TEST_F(SparseToDenseTest, OneD_MultValues) {
   MakeOp(1, DT_INT32, DT_FLOAT);
 
   // sparse_indices
-  AddInputFromArray<int32>({3}, {1, 3, 4});
+  AddInputFromArray<int32_t>({3}, {1, 3, 4});
   // output_shape
-  AddInputFromArray<int32>({1}, {5});
+  AddInputFromArray<int32_t>({1}, {5});
   // sparse_values
   AddInputFromArray<float>({3}, {3, 4, 5});
   // default_value
@@ -112,9 +114,9 @@ TEST_F(SparseToDenseTest, TwoD_OneValue) {
   MakeOp(2, DT_INT32, DT_FLOAT);
 
   // sparse_indices
-  AddInputFromArray<int32>(TensorShape({3, 2}), {0, 1, 0, 2, 2, 3});
+  AddInputFromArray<int32_t>(TensorShape({3, 2}), {0, 1, 0, 2, 2, 3});
   // output_shape
-  AddInputFromArray<int32>(TensorShape({2}), {3, 4});
+  AddInputFromArray<int32_t>(TensorShape({2}), {3, 4});
   // sparse_values
   AddInputFromArray<float>(TensorShape({}), {2});
   // default_value
@@ -134,9 +136,9 @@ TEST_F(SparseToDenseTest, TwoD_MultValues) {
   MakeOp(2, DT_INT32, DT_FLOAT);
 
   // sparse_indices
-  AddInputFromArray<int32>(TensorShape({3, 2}), {0, 1, 0, 2, 2, 3});
+  AddInputFromArray<int32_t>(TensorShape({3, 2}), {0, 1, 0, 2, 2, 3});
   // output_shape
-  AddInputFromArray<int32>(TensorShape({2}), {3, 4});
+  AddInputFromArray<int32_t>(TensorShape({2}), {3, 4});
   // sparse_values
   AddInputFromArray<float>(TensorShape({3}), {3, 4, 5});
   // default_value
@@ -156,9 +158,9 @@ TEST_F(SparseToDenseTest, ThreeD_OneValue) {
   MakeOp(3, DT_INT32, DT_FLOAT);
 
   // sparse_indices
-  AddInputFromArray<int32>(TensorShape({3, 3}), {0, 1, 1, 0, 2, 0, 2, 3, 1});
+  AddInputFromArray<int32_t>(TensorShape({3, 3}), {0, 1, 1, 0, 2, 0, 2, 3, 1});
   // output_shape
-  AddInputFromArray<int32>(TensorShape({3}), {3, 4, 2});
+  AddInputFromArray<int32_t>(TensorShape({3}), {3, 4, 2});
   // sparse_values
   AddInputFromArray<float>(TensorShape({}), {2});
   // default_value
@@ -178,9 +180,9 @@ TEST_F(SparseToDenseTest, ThreeD_MultValues) {
   MakeOp(3, DT_INT32, DT_FLOAT);
 
   // sparse_indices
-  AddInputFromArray<int32>(TensorShape({3, 3}), {0, 1, 1, 0, 2, 0, 2, 3, 1});
+  AddInputFromArray<int32_t>(TensorShape({3, 3}), {0, 1, 1, 0, 2, 0, 2, 3, 1});
   // output_shape
-  AddInputFromArray<int32>(TensorShape({3}), {3, 4, 2});
+  AddInputFromArray<int32_t>(TensorShape({3}), {3, 4, 2});
   // sparse_values
   AddInputFromArray<float>(TensorShape({3}), {3, 4, 5});
   // default_value
@@ -196,6 +198,74 @@ TEST_F(SparseToDenseTest, ThreeD_MultValues) {
   test::ExpectTensorEqual<float>(expected, *GetOutput(0));
 }
 
+// A valid scalar output with a single index row.
+TEST_F(SparseToDenseTest, ZeroD_OneValue) {
+  MakeOp(0, DT_INT64, DT_FLOAT);
+
+  // sparse_indices
+  AddInputFromArray<int64_t>(TensorShape({1, 0}), {});
+  // output_shape
+  AddInputFromArray<int64_t>(TensorShape({0}), {});
+  // sparse_values
+  AddInputFromArray<float>(TensorShape({}), {7});
+  // default_value
+  AddInputFromArray<float>(TensorShape({}), {-2});
+
+  TF_ASSERT_OK(RunOpKernel());
+
+  Tensor expected(allocator(), DT_FLOAT, {});
+  test::FillValues<float>(&expected, {7});
+  test::ExpectTensorEqual<float>(expected, *GetOutput(0));
+}
+
+TEST_F(SparseToDenseTest, ZeroD_EmptyIndices) {
+  MakeOp(0, DT_INT64, DT_FLOAT);
+
+  AddInputFromArray<int64_t>(TensorShape({0, 0}), {});
+  AddInputFromArray<int64_t>(TensorShape({0}), {});
+  AddInputFromArray<float>(TensorShape({}), {7});
+  AddInputFromArray<float>(TensorShape({}), {-2});
+
+  TF_ASSERT_OK(RunOpKernel());
+
+  Tensor expected(allocator(), DT_FLOAT, {});
+  test::FillValues<float>(&expected, {-2});
+  test::ExpectTensorEqual<float>(expected, *GetOutput(0));
+}
+
+TEST_F(SparseToDenseTest, ZeroD_OneValue_TwoIndices) {
+  MakeOp(0, DT_INT64, DT_FLOAT);
+
+  AddInputFromArray<int64_t>(TensorShape({2, 0}), {});
+  AddInputFromArray<int64_t>(TensorShape({0}), {});
+  AddInputFromArray<float>(TensorShape({}), {7});
+  AddInputFromArray<float>(TensorShape({}), {-2});
+
+  absl::Status status = RunOpKernel();
+  EXPECT_TRUE(absl::IsInvalidArgument(status)) << status;
+  EXPECT_THAT(status.message(),
+              ::testing::HasSubstr("should have at most 1 row"));
+}
+
+TEST_F(SparseToDenseTest, ZeroD_OneValue_TooManyIndices) {
+  MakeOp(0, DT_INT64, DT_FLOAT);
+
+  // sparse_indices has no columns, so it holds no data for any of its rows.
+  // More than one row is invalid for a scalar output.
+  AddInputFromArray<int64_t>(TensorShape({int64_t{1} << 40, 0}), {});
+  // output_shape
+  AddInputFromArray<int64_t>(TensorShape({0}), {});
+  // sparse_values
+  AddInputFromArray<float>(TensorShape({}), {7});
+  // default_value
+  AddInputFromArray<float>(TensorShape({}), {-2});
+
+  absl::Status status = RunOpKernel();
+  EXPECT_TRUE(absl::IsInvalidArgument(status)) << status;
+  EXPECT_THAT(status.message(),
+              ::testing::HasSubstr("should have at most 1 row"));
+}
+
 }  // namespace
 
 static void BM_SparseToDense(::testing::benchmark::State& state) {
@@ -209,14 +279,14 @@ static void BM_SparseToDense(::testing::benchmark::State& state) {
   std::unique_ptr<Device> device(
       DeviceFactory::NewDevice("CPU", {}, "/job:a/replica:0/task:0"));
 
-  gtl::InlinedVector<TensorValue, 4> inputs;
+  absl::InlinedVector<TensorValue, 4UL> inputs;
 
   // Create a dense tensor with dims [1, ..., 1, N]
   Tensor output_shape(DT_INT32, TensorShape({NDIM}));
   Tensor sparse_indices(DT_INT64, TensorShape({N, NDIM}));
   Tensor sparse_values(DT_FLOAT, TensorShape({N}));
   Tensor default_value(DT_FLOAT, TensorShape({}));
-  auto output_shape_t = output_shape.vec<int32>();
+  auto output_shape_t = output_shape.vec<int32_t>();
   for (int d = 0; d < NDIM; ++d) {
     output_shape_t(d) = (d == IndexDim) ? N : 3;
   }
@@ -240,7 +310,7 @@ static void BM_SparseToDense(::testing::benchmark::State& state) {
                   .Input(FakeInput(DT_FLOAT))
                   .Finalize(&sparse_node_def));
 
-  Status status;
+  absl::Status status;
   std::unique_ptr<OpKernel> op(CreateOpKernel(DEVICE_CPU, device.get(),
                                               cpu_allocator(), sparse_node_def,
                                               TF_GRAPH_DEF_VERSION, &status));
@@ -248,7 +318,7 @@ static void BM_SparseToDense(::testing::benchmark::State& state) {
   OpKernelContext::Params params;
   params.device = device.get();
   params.frame_iter = FrameAndIter(0, 0);
-  params.inputs = &inputs;
+  params.inputs = inputs;
   params.op_kernel = op.get();
   std::vector<AllocatorAttributes> attrs;
   test::SetOutputAttrs(&params, &attrs);

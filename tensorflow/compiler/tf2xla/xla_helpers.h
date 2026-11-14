@@ -18,17 +18,31 @@ limitations under the License.
 #ifndef TENSORFLOW_COMPILER_TF2XLA_XLA_HELPERS_H_
 #define TENSORFLOW_COMPILER_TF2XLA_XLA_HELPERS_H_
 
+#include <string>
+
 #include "absl/types/optional.h"
 #include "absl/types/span.h"
 #include "tensorflow/compiler/tf2xla/host_compute_metadata.pb.h"
-#include "tensorflow/compiler/xla/client/xla_builder.h"
-#include "tensorflow/compiler/xla/executable_run_options.h"
-#include "tensorflow/compiler/xla/service/computation_placer.h"
-#include "tensorflow/compiler/xla/service/hlo_sharding.h"
+#include "xla/executable_run_options.h"
+#include "xla/hlo/builder/xla_builder.h"
+#include "xla/hlo/ir/hlo_sharding.h"
+#include "xla/hlo/translate/mhlo_to_hlo/layout_util.h"
+#include "xla/service/device_assignment.h"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/tensor.h"
 
 namespace tensorflow {
+
+using XlaLayoutPreference = mlir::XlaLayoutPreference;
+
+inline std::string GetDeviceToHostChannelName(absl::string_view channel_key,
+                                              int index) {
+  return absl::StrCat(channel_key, "_dtoh_", index);
+}
+inline std::string GetHostToDeviceChannelName(absl::string_view channel_key,
+                                              int index) {
+  return absl::StrCat(channel_key, "_htod_", index);
+}
 
 // Helper methods for building XLA computations.
 class XlaHelpers {
@@ -54,19 +68,20 @@ class XlaHelpers {
 
   // Reshapes literal 'input' to have 'shape'. Both the original shape and
   // 'shape' must contain the same number of elements.
-  static Status ReshapeLiteral(const xla::Literal& input,
-                               absl::Span<const int64_t> shape,
-                               xla::Literal* output);
+  static absl::Status ReshapeLiteral(const xla::Literal& input,
+                                     absl::Span<const int64_t> shape,
+                                     xla::Literal* output);
 
   // Converts `indices` into a one-hot representation. `depth` is the size
   // of the new axis to add. `axis` is the position at which to add the new
   // axis. `indices_shape` is the shape of `indices`. `on_value` and
   // `off_value` represent the values to use for the on and off positions,
   // respectively.
-  static Status OneHot(xla::XlaBuilder* builder, int64_t depth, int axis,
-                       DataType index_type, const TensorShape& indices_shape,
-                       const xla::XlaOp& indices, const xla::XlaOp& on_value,
-                       const xla::XlaOp& off_value, xla::XlaOp* one_hot);
+  static absl::Status OneHot(xla::XlaBuilder* builder, int64_t depth, int axis,
+                             DataType index_type,
+                             const TensorShape& indices_shape,
+                             xla::XlaOp indices, xla::XlaOp on_value,
+                             xla::XlaOp off_value, xla::XlaOp* one_hot);
 
   // Certain DataTypes should use increased precision DataTypes when performing
   // reductions.  This function remaps a given DataType to a higher precision
@@ -75,29 +90,16 @@ class XlaHelpers {
 
   // A helper for creating a ConvertElementType xla op given a DataType rather
   // than the xla::PrimitiveType.
-  static xla::XlaOp ConvertElementType(const xla::XlaOp& operand,
+  static xla::XlaOp ConvertElementType(xla::XlaOp operand,
                                        const DataType new_element_type);
 
-  typedef std::function<StatusOr<xla::Shape>(const TensorShape&, DataType,
-                                             bool)>
+  typedef std::function<absl::StatusOr<xla::Shape>(const TensorShape&, DataType,
+                                                   bool, XlaLayoutPreference)>
       ShapeRepresentationFn;
 };
 
 // Creates an identity shape representation function.
 XlaHelpers::ShapeRepresentationFn IdentityShapeRepresentationFn();
-
-// Rewrites the layout of xla_shape if there is tiled sharding.
-Status RewriteLayoutWithShardedShape(
-    const absl::optional<xla::HloSharding>& sharding, bool use_fast_memory,
-    XlaHelpers::ShapeRepresentationFn shape_representation_fn,
-    xla::Shape* xla_shape);
-
-// Adds reshapes to fix the layout of an output, if a shape_representation_fn or
-// sharding is present.
-StatusOr<xla::XlaOp> ReshapeWithCorrectRepresentationAndSharding(
-    xla::XlaBuilder* builder, xla::XlaOp original, xla::Shape original_shape,
-    XlaHelpers::ShapeRepresentationFn shape_representation_fn,
-    absl::optional<xla::OpSharding> sharding, bool fast_mem);
 
 struct XlaOutputDescription {
   // Type and shape of the output. The shape is the unflattened shape.
@@ -134,7 +136,7 @@ struct XlaResourceUpdate {
   bool modified;
 
   // If the resource is a TensorArray, the set of gradients read or written.
-  std::set<string> tensor_array_gradients_accessed;
+  std::set<std::string> tensor_array_gradients_accessed;
 };
 
 struct XlaCompilationResult {
@@ -170,36 +172,42 @@ struct XlaCompilationResult {
   // The XLA computation built from the tensorflow subgraph.
   std::shared_ptr<xla::XlaComputation> computation;
 
-  // Meta-info about encountered CollectiveReduceV2Ops.
-  struct CollectiveReduceV2OpInfo {
+  // Meta-info about encountered collective ops.
+  struct CollectiveInfo {
     int group_key;
     int group_size;
+    int next_id;
+
+    template <typename H>
+    friend H AbslHashValue(H h, const CollectiveInfo& info) {
+      return H::combine(std::move(h), info.group_key, info.group_size,
+                        info.next_id);
+    }
+
+    friend bool operator==(const CollectiveInfo& lhs,
+                           const CollectiveInfo& rhs) {
+      return lhs.group_key == rhs.group_key &&
+             lhs.group_size == rhs.group_size && lhs.next_id == rhs.next_id;
+    }
   };
 
-  // Group keys of the collectives encountered during the translation.
-  // Mapping from group keys to group sizes.
-  absl::optional<CollectiveReduceV2OpInfo> collective_reduce_info;
+  // Information of the collectives encountered during the translation.
+  std::optional<CollectiveInfo> collective_info;
 };
 
-// Resolves the device assignment based on CollectiveReduceV2OpInfo.
-// CollectiveReduceV2OpInfo records collective ops in the cluster. Note that
+// Resolves the device assignment based on CollectiveInfo.
+// CollectiveInfo records collective ops in the cluster. Note that
 // this relies on a rendezvous and blocks until all replicas are there.
 //
 // Takes several extra configuration objects by reference since
 // xla::ExecutableRunOptions does not take ownership; these are configured and
 // bundled into `run_options` if applicable.
-Status ResolveDeviceAssignment(
+absl::Status ResolveDeviceAssignment(
     OpKernelContext* ctx,
-    const absl::optional<XlaCompilationResult::CollectiveReduceV2OpInfo>&
-        collective_reduce_info,
+    const XlaCompilationResult::CollectiveInfo& collective_info,
     xla::ExecutableRunOptions& run_options,
     xla::DeviceAssignment& device_assignment,
     xla::gpu::GpuExecutableRunOptions& gpu_options);
-
-// Generate a message with a definition location based on a provided stack
-// trace, or an empty one if the stack trace is empty.
-std::string DefinitionLocationMsg(
-    const absl::optional<ManagedStackTrace>& stack_trace);
 
 }  // end namespace tensorflow
 

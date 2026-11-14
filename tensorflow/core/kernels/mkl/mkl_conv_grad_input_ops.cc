@@ -25,36 +25,33 @@ limitations under the License.
 #include <algorithm>
 #include <vector>
 
-#include "mkldnn.hpp"
-#include "tensorflow/core/framework/numeric_op.h"
-#include "tensorflow/core/framework/op_kernel.h"
-#include "tensorflow/core/framework/register_types.h"
-#include "tensorflow/core/framework/tensor.h"
+#include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
 #include "tensorflow/core/framework/tensor_shape.h"
-#include "tensorflow/core/framework/tensor_slice.h"
 #include "tensorflow/core/framework/tensor_util.h"
-#include "tensorflow/core/kernels/conv_grad_ops.h"
 #include "tensorflow/core/kernels/conv_grad_shape_utils.h"
 #include "tensorflow/core/kernels/mkl/mkl_conv_ops.h"
-#include "tensorflow/core/kernels/ops_util.h"
-#include "tensorflow/core/lib/core/errors.h"
-#include "tensorflow/core/lib/gtl/array_slice.h"
-#include "tensorflow/core/platform/logging.h"
-#include "tensorflow/core/platform/macros.h"
-#include "tensorflow/core/util/mkl_util.h"
-#include "tensorflow/core/util/padding.h"
-#include "tensorflow/core/util/tensor_format.h"
 #include "tensorflow/core/util/use_cudnn.h"
 #include "tensorflow/core/util/work_sharder.h"
+#if defined(DNNL_AARCH64_USE_ACL) && defined(ENABLE_ONEDNN_OPENMP)
+#include "tensorflow/core/platform/mutex.h"
+#endif
 
-using mkldnn::convolution_backward_data;
-using mkldnn::prop_kind;
-using mkldnn::stream;
+using dnnl::convolution_backward_data;
+using dnnl::prop_kind;
+using dnnl::stream;
 
 namespace tensorflow {
+#ifndef ENABLE_ONEDNN_V3
+#define SET_MKL_LAYOUT(md) SetMklLayout(&md)
+#else
+#define SET_MKL_LAYOUT(md) SetMklLayout(md)
+#endif  // !ENABLE_ONEDNN_V3
 
-using ConvBwdDataDesc = mkldnn::convolution_backward_data::desc;
-using ConvBwdDataPd = mkldnn::convolution_backward_data::primitive_desc;
+#ifndef ENABLE_ONEDNN_V3
+using ConvBwdDataDesc = dnnl::convolution_backward_data::desc;
+#endif  // !ENABLE_ONEDNN_V3
+using ConvBwdDataPd = dnnl::convolution_backward_data::primitive_desc;
 
 // Utility classes for enabling primitive reuse for conv bwd input.
 struct MklConvBwdInputParams {
@@ -106,8 +103,11 @@ class MklConvBwdInputPrimitive : public MklPrimitive {
   void Execute(const T* diff_src_data, const T* filter_data,
                const T* diff_dst_data,
                std::shared_ptr<stream> bwd_input_stream) {
-#ifndef ENABLE_ONEDNN_OPENMP
-    // TODO: Create a common function and avoid the duplicate code
+#if defined(DNNL_AARCH64_USE_ACL) && defined(ENABLE_ONEDNN_OPENMP)
+    mutex_lock lock(primitive_execution_mu_);
+#endif
+#if !defined(ENABLE_ONEDNN_OPENMP) && !defined(ENABLE_ONEDNN_V3)
+    // TODO(intel-tf): Create a common function and avoid the duplicate code
     context_.diff_src_mem->set_data_handle(
         static_cast<T*>(const_cast<T*>(diff_src_data)), *bwd_input_stream);
     context_.filter_mem->set_data_handle(
@@ -121,7 +121,7 @@ class MklConvBwdInputPrimitive : public MklPrimitive {
         static_cast<T*>(const_cast<T*>(filter_data)));
     context_.diff_dst_mem->set_data_handle(
         static_cast<T*>(const_cast<T*>(diff_dst_data)));
-#endif  // !ENABLE_ONEDNN_OPENMP
+#endif  // !ENABLE_ONEDNN_OPENMP && !ENABLE_ONEDNN_V3
     execute_primitives(context_.bwd_input_primitives, bwd_input_stream,
                        context_.bwd_input_primitives_args);
 
@@ -140,20 +140,24 @@ class MklConvBwdInputPrimitive : public MklPrimitive {
   // Primitive reuse context for conv bwd input.
   struct ConvBwdInputContext {
     // MKL-DNN memory.
-    std::shared_ptr<mkldnn::memory> diff_src_mem;
-    std::shared_ptr<mkldnn::memory> filter_mem;
-    std::shared_ptr<mkldnn::memory> diff_dst_mem;
+    std::shared_ptr<dnnl::memory> diff_src_mem;
+    std::shared_ptr<dnnl::memory> filter_mem;
+    std::shared_ptr<dnnl::memory> diff_dst_mem;
 
     // Conv backward input primitive descriptor and descriptor.
     std::shared_ptr<ConvBwdDataPd> bwd_input_pd;
+#ifndef ENABLE_ONEDNN_V3
     std::shared_ptr<ConvBwdDataDesc> bwd_input_desc;
+#endif  // !ENABLE_ONEDNN_V3
 
     // Primitive descriptor and descriptor for conv fwd
     std::shared_ptr<ConvFwdPd> fwd_pd;
+#ifndef ENABLE_ONEDNN_V3
     std::shared_ptr<ConvFwdDesc> fwd_desc;
+#endif  // !ENABLE_ONEDNN_V3
 
     // Conv bwd input primitive.
-    std::shared_ptr<mkldnn::primitive> conv_bwd_input;
+    std::shared_ptr<dnnl::primitive> conv_bwd_input;
 
     // Memory descriptors: forward & backward share the same descriptors.
     std::shared_ptr<memory::desc> diff_src_md;
@@ -161,7 +165,7 @@ class MklConvBwdInputPrimitive : public MklPrimitive {
     std::shared_ptr<memory::desc> diff_dst_md;
 
     // MKL-DNN pipeline for executing primitives.
-    std::vector<mkldnn::primitive> bwd_input_primitives;
+    std::vector<dnnl::primitive> bwd_input_primitives;
     std::vector<std::unordered_map<int, memory>> bwd_input_primitives_args;
 
     ConvBwdInputContext()
@@ -169,13 +173,18 @@ class MklConvBwdInputPrimitive : public MklPrimitive {
           filter_mem(nullptr),
           diff_dst_mem(nullptr),
           bwd_input_pd(nullptr),
+#ifndef ENABLE_ONEDNN_V3
           bwd_input_desc(nullptr),
+#endif  // !ENABLE_ONEDNN_V3
           fwd_pd(nullptr),
+#ifndef ENABLE_ONEDNN_V3
           fwd_desc(nullptr),
+#endif  // !ENABLE_ONEDNN_V3
           conv_bwd_input(nullptr),
           diff_src_md(nullptr),
           filter_md(nullptr),
-          diff_dst_md(nullptr) {}
+          diff_dst_md(nullptr) {
+    }
   };
 
   void Setup(const MklConvBwdInputParams& convBwdInputDims) {
@@ -198,14 +207,15 @@ class MklConvBwdInputPrimitive : public MklPrimitive {
                                               memory::format_tag::any));
 
     // Create descriptors for both conv fwd and conv bwd input.
+#ifndef ENABLE_ONEDNN_V3
     context_.bwd_input_desc.reset(new ConvBwdDataDesc(
-        mkldnn::algorithm::convolution_direct, *context_.diff_src_md,
+        dnnl::algorithm::convolution_direct, *context_.diff_src_md,
         *context_.filter_md, *context_.diff_dst_md, convBwdInputDims.strides,
         convBwdInputDims.dilations, convBwdInputDims.padding_left,
         convBwdInputDims.padding_right));
 
     context_.fwd_desc.reset(new ConvFwdDesc(
-        prop_kind::forward, mkldnn::algorithm::convolution_direct,
+        prop_kind::forward, dnnl::algorithm::convolution_direct,
         *context_.diff_src_md, *context_.filter_md, *context_.diff_dst_md,
         convBwdInputDims.strides, convBwdInputDims.dilations,
         convBwdInputDims.padding_left, convBwdInputDims.padding_right));
@@ -214,6 +224,19 @@ class MklConvBwdInputPrimitive : public MklPrimitive {
     context_.fwd_pd.reset(new ConvFwdPd(*context_.fwd_desc, cpu_engine_));
     context_.bwd_input_pd.reset(new ConvBwdDataPd(
         *context_.bwd_input_desc, cpu_engine_, *context_.fwd_pd));
+#else
+    context_.fwd_pd.reset(new ConvFwdPd(
+        cpu_engine_, prop_kind::forward, dnnl::algorithm::convolution_direct,
+        *context_.diff_src_md, *context_.filter_md, *context_.diff_dst_md,
+        convBwdInputDims.strides, convBwdInputDims.dilations,
+        convBwdInputDims.padding_left, convBwdInputDims.padding_right));
+
+    context_.bwd_input_pd.reset(new ConvBwdDataPd(
+        cpu_engine_, dnnl::algorithm::convolution_direct, *context_.diff_src_md,
+        *context_.filter_md, *context_.diff_dst_md, convBwdInputDims.strides,
+        convBwdInputDims.dilations, convBwdInputDims.padding_left,
+        convBwdInputDims.padding_right, *context_.fwd_pd));
+#endif  // !ENABLE_ONEDNN_V3
 
     // Create memory using dummy data.
     context_.diff_src_mem.reset(new memory(
@@ -227,14 +250,17 @@ class MklConvBwdInputPrimitive : public MklPrimitive {
     context_.conv_bwd_input.reset(
         new convolution_backward_data(*context_.bwd_input_pd));
     context_.bwd_input_primitives_args.push_back(
-        {{MKLDNN_ARG_DIFF_DST, *context_.diff_dst_mem},
-         {MKLDNN_ARG_WEIGHTS, *context_.filter_mem},
-         {MKLDNN_ARG_DIFF_SRC, *context_.diff_src_mem}});
+        {{DNNL_ARG_DIFF_DST, *context_.diff_dst_mem},
+         {DNNL_ARG_WEIGHTS, *context_.filter_mem},
+         {DNNL_ARG_DIFF_SRC, *context_.diff_src_mem}});
 
     context_.bwd_input_primitives.push_back(*context_.conv_bwd_input);
   }
 
   struct ConvBwdInputContext context_;
+#if defined(DNNL_AARCH64_USE_ACL) && defined(ENABLE_ONEDNN_OPENMP)
+  mutex primitive_execution_mu_;
+#endif
 };
 
 template <typename T>
@@ -285,6 +311,11 @@ class MklConvBwdInputPrimitiveFactory : public MklPrimitiveFactory<T> {
     if (convBwdInputDims.native_format) {
       key_creator.AddAsKey(convBwdInputDims.tf_fmt);
     }
+#ifdef DNNL_AARCH64_USE_ACL
+    // Scratchpad memory for this primitive is cached per thread.
+    // Make sure each thread creates its own primitive.
+    key_creator.AddAsKey(std::this_thread::get_id());
+#endif
     return key_creator.GetKey();
   }
 
@@ -316,6 +347,17 @@ class MklConvCustomBackpropInputOp
       const Tensor& filter_tensor = MklGetInput(context, kFilterIdx);
       const Tensor& diff_dst_tensor = MklGetInput(context, kOutbpropIdx);
 
+      OP_REQUIRES(context,
+                  diff_dst_tensor.dims() == 4 || diff_dst_tensor.dims() == 5,
+                  absl::InvalidArgumentError(
+                      absl::StrCat("out_backprop must be 4 or 5-dimensional, "
+                                   "got: ",
+                                   diff_dst_tensor.dims())));
+
+      if (std::is_same<T, float>::value) {
+        (void)SetFPMathMode();
+      }
+
       MklDnnShape src_mkl_shape, filter_mkl_shape, diff_dst_mkl_shape;
       GetMklShape(context, kInputIdx, &src_mkl_shape, native_format);
       GetMklShape(context, kFilterIdx, &filter_mkl_shape, native_format);
@@ -323,13 +365,42 @@ class MklConvCustomBackpropInputOp
       // Allow operator-specific sanity checking of shapes.
       ValidateMklShapes(src_mkl_shape, filter_mkl_shape, diff_dst_mkl_shape);
 
+      // This class backs Conv2D, Conv3D and depthwise backprop-input (see the
+      // registrations at the bottom of this file), so the expected element
+      // count follows the rank of out_backprop, already checked above. Only
+      // the two-value case is validated below; every other count would reach
+      // MakeInputTfShape unchecked and could build a shape of the wrong rank.
+      // IsVector is checked first because dim_size(0) is not defined on a
+      // rank-0 tensor.
+      OP_REQUIRES(
+          context, TensorShapeUtils::IsVector(src_tensor.shape()),
+          absl::InvalidArgumentError(absl::StrCat(
+              this->type_string(), ": input_sizes input must be 1-dim, not ",
+              src_tensor.dims())));
+      const int dst_dims = diff_dst_tensor.dims();
+      const bool dst_is_4d = (dst_dims == 4);
+      OP_REQUIRES(
+          context,
+          src_tensor.dim_size(0) == dst_dims ||
+              (dst_is_4d && src_tensor.dim_size(0) == 2),
+          absl::InvalidArgumentError(
+              dst_is_4d
+                  ? absl::StrCat(this->type_string(),
+                                 " requires input_sizes to contain 4 values or "
+                                 "2 values, but got: ",
+                                 src_tensor.dim_size(0))
+                  : absl::StrCat(this->type_string(),
+                                 " requires input_sizes to contain 5 values, "
+                                 "but got: ",
+                                 src_tensor.dim_size(0))));
+
       // Allow operator-specific generation of shapes.
       // E.g., ConvBackpropFilter gets filter as filter_sizes. It is a
       // tensor containing shape of filter. So filter.shape() is not
       // a correct way to get filter shape. These operator-specific calls
       // allow this class to handle this case.
       TensorShape src_tf_shape;
-      if (src_tensor.dim_size(0) == 2) {
+      if (dst_is_4d && src_tensor.dim_size(0) == 2) {
         OP_REQUIRES_OK(context, Conv2DBackpropComputeInputShape(
                                     src_tensor, filter_tensor.shape(),
                                     diff_dst_tensor.shape(), this->data_format_,
@@ -393,7 +464,7 @@ class MklConvCustomBackpropInputOp
 
       auto mkl_fmt_tag = MklTensorFormatToMklDnnDataFormat(tf_fmt);
       OP_REQUIRES(context, mkl_fmt_tag != memory::format_tag::undef,
-                  errors::InvalidArgument("Invalid data format"));
+                  absl::InvalidArgumentError("Invalid data format"));
 
       // If filter is in MKL layout, then simply grab filter layout;
       // otherwise, construct filter in TF layout.
@@ -432,6 +503,12 @@ class MklConvCustomBackpropInputOp
                           (MklPrimitiveFactory<T>::IsLegacyPlatform() ||
                            IsConv1x1StrideNot1(fwd_filter_dims, strides));
 
+      // Create the oneDNN wrapper over Eigen threadpool and set max threads
+      // in oneDNN.
+      Eigen::ThreadPoolInterface* eigen_interface =
+          EigenThreadPoolFromTfContext(context);
+      tsl::OneDnnThreadPool eigen_tp(eigen_interface,
+                                     ThreadPoolUseCallerThread());
       MklConvBwdInputPrimitive<T>* conv_bwd_input =
           MklConvBwdInputPrimitiveFactory<T>::Get(convBwdInputDims,
                                                   do_not_cache);
@@ -444,7 +521,7 @@ class MklConvCustomBackpropInputOp
       // Allocate output tensor.
       MklDnnShape diff_src_mkl_shape;
       diff_src_mkl_shape.SetMklTensor(true);
-      diff_src_mkl_shape.SetMklLayout(&diff_src_pd);
+      diff_src_mkl_shape.SET_MKL_LAYOUT(diff_src_pd);
       diff_src_mkl_shape.SetElemType(MklDnnType<T>());
       diff_src_mkl_shape.SetTfLayout(bwd_diff_src_dims.size(),
                                      bwd_diff_src_dims, bwd_diff_src_format);
@@ -484,7 +561,7 @@ class MklConvCustomBackpropInputOp
       }
 
       std::shared_ptr<stream> bwd_cpu_stream;
-      MklDnnThreadPool eigen_tp(context);
+
       bwd_cpu_stream.reset(
           CreateStream(&eigen_tp, conv_bwd_input->GetEngine()));
       // Execute conv bwd input primitive.
@@ -495,13 +572,13 @@ class MklConvCustomBackpropInputOp
       if (do_not_cache) {
         delete conv_bwd_input;
       }
-    } catch (mkldnn::error& e) {
+    } catch (dnnl::error& e) {
       string error_msg = "Status: " + std::to_string(e.status) +
                          ", message: " + string(e.message) + ", in file " +
                          string(__FILE__) + ":" + std::to_string(__LINE__);
-      OP_REQUIRES_OK(
-          context,
-          errors::Aborted("Operation received an exception:", error_msg));
+      OP_REQUIRES_OK(context,
+                     absl::AbortedError(absl::StrCat(
+                         "Operation received an exception:", error_msg)));
     }
   }
 
@@ -522,14 +599,46 @@ class MklConvCustomBackpropInputOp
         << "ConvBackpropInput: input should not be in MKL Layout";
   }
 
+  // Handle dynamic shape of input tensor.
+  template <typename TShape>
+  std::vector<int64> HandleDynamicShape(const Tensor& input_tensor,
+                                        OpKernelContext* context) {
+    // Returns a vector with the explicit shape if dynamic, or an empty vector
+    // otherwise.
+    std::vector<int64> explicit_shape;
+    auto shape_vec = input_tensor.flat<TShape>();
+
+    if (shape_vec(0) == -1) {
+      const Tensor& diff_dst_tensor = MklGetInput(context, kOutbpropIdx);
+      int64 batch_size = diff_dst_tensor.dim_size(0);
+      for (int i = 0; i < input_tensor.NumElements(); i++) {
+        TShape val = shape_vec(i);
+        explicit_shape.push_back(val == -1 ? batch_size : val);
+      }
+    }
+    return explicit_shape;
+  }
+
   // Get TensorFlow shape of input tensor.
   TensorShape MakeInputTfShape(OpKernelContext* context,
                                const Tensor& input_tensor) {
     TensorShape input_tf_shape;
     CHECK_EQ(TensorShapeUtils::IsVector(input_tensor.shape()), true);
-    // Conv[2D|3D]BackpropInputV2 supports both DT_INT32 and DT_INT64
-    // output_shape tensor::MakeShape is able to handle both DT_INT32 and
-    // DT_INT64 for input_tensor.
+
+    if (input_tensor.NumElements() > 0) {
+      std::vector<int64> explicit_shape;
+
+      if (input_tensor.dtype() == DT_INT32) {
+        explicit_shape = HandleDynamicShape<int32>(input_tensor, context);
+      } else if (input_tensor.dtype() == DT_INT64) {
+        explicit_shape = HandleDynamicShape<int64>(input_tensor, context);
+      }
+
+      if (!explicit_shape.empty()) {
+        return TensorShape(explicit_shape);
+      }
+    }
+
     TF_CHECK_OK(tensor::MakeShape(input_tensor, &input_tf_shape));
     return input_tf_shape;
   }
@@ -558,7 +667,7 @@ class MklConvCustomBackpropInputOp
     return data_format;
   }
 
-  // TODO(bhavanis): Move this function to mkl_util.h since it is common to
+  // TODO(intel-tf): Move this function to mkl_util.h since it is common to
   // both the forward and backward implementations
   void AllocateOutputTensor(OpKernelContext* context,
                             const ConvBwdDataPd& conv_pd,
@@ -573,7 +682,7 @@ class MklConvCustomBackpropInputOp
     // Allocate shape of MKL tensor.
     MklDnnShape output_mkl_shape;
     output_mkl_shape.SetMklTensor(true);
-    output_mkl_shape.SetMklLayout(&dst_pd);
+    output_mkl_shape.SET_MKL_LAYOUT(dst_pd);
     output_mkl_shape.SetElemType(MklDnnType<T>());
     output_mkl_shape.SetTfLayout(output_dims_mkl_order.size(),
                                  output_dims_mkl_order, output_tf_format);
@@ -627,8 +736,10 @@ class MklConvCustomBackpropInputOp
 
 TF_CALL_float(REGISTER_MKL_CPU_KERNELS);
 TF_CALL_bfloat16(REGISTER_MKL_CPU_KERNELS);
+TF_CALL_half(REGISTER_MKL_CPU_KERNELS);
 
 #undef REGISTER_MKL_CPU_KERNELS
+#undef SET_MKL_LAYOUT
 
 }  // namespace tensorflow
 #endif  // INTEL_MKL

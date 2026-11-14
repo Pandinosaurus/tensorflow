@@ -1,10 +1,24 @@
-# buildifier: disable=same-origin-load
-load("//tensorflow:tensorflow.bzl", "get_compatible_with_portable")
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
 
-# buildifier: disable=same-origin-load
-load("//tensorflow:tensorflow.bzl", "pybind_extension")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_cc//cc:cc_test.bzl", "cc_test")
+load("//tensorflow:tensorflow.default.bzl", "get_compatible_with_portable", "pybind_extension")
 
 package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:LICENSE"],
     default_visibility = [
         "//visibility:public",
     ],
@@ -22,15 +36,10 @@ cc_library(
     compatible_with = get_compatible_with_portable(),
     deps = [
         "//tensorflow/lite:framework",
-        "//tensorflow/lite/c:common",
+        "//tensorflow/lite/core/c:common",
         "//tensorflow/lite/kernels:kernel_util",
-        "//tensorflow/lite/kernels:padding",
-        "//tensorflow/lite/kernels/internal:common",
-        "//tensorflow/lite/kernels/internal:compatibility",
         "//tensorflow/lite/kernels/internal:tensor",
-        "//tensorflow/lite/kernels/internal:tensor_utils",
         "//tensorflow/lite/kernels/internal:types",
-        "@flatbuffers",
     ],
 )
 
@@ -58,10 +67,11 @@ cc_test(
     deps = [
         ":bcast_grad_args_op",
         "//tensorflow/lite:framework",
+        "//tensorflow/lite/core:framework_stable",
         "//tensorflow/lite/kernels:test_main",
         "//tensorflow/lite/kernels:test_util",
-        "//tensorflow/lite/testing:util",
-        "@flatbuffers",
+        "//tensorflow/lite/schema:schema_fbs",
+        "@com_google_googletest//:gtest",
     ],
 )
 
@@ -72,12 +82,14 @@ pybind_extension(
     ],
     hdrs = ["gradient_ops.h"],
     additional_exported_symbols = ["GradientOpsRegisterer"],
+    enable_stub_generation = True,
     link_in_framework = True,
-    module_name = "pywrap_gradient_ops",
+    pytype_srcs = [
+        "pywrap_gradient_ops.pyi",
+    ],
     deps = [
         ":gradient_ops",
         "//tensorflow/lite:mutable_op_resolver",
-        "//third_party/python_runtime:headers",
         "@pybind11",
     ],
 )

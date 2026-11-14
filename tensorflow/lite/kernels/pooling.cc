@@ -19,8 +19,8 @@ limitations under the License.
 
 #include <cstdlib>
 
-#include "tensorflow/lite/c/builtin_op_data.h"
-#include "tensorflow/lite/c/common.h"
+#include "tensorflow/lite/core/c/builtin_op_data.h"
+#include "tensorflow/lite/core/c/common.h"
 #include "tensorflow/lite/kernels/internal/compatibility.h"
 #include "tensorflow/lite/kernels/internal/optimized/optimized_ops.h"
 #include "tensorflow/lite/kernels/internal/reference/integer_ops/pooling.h"
@@ -95,6 +95,7 @@ TfLiteStatus GenericPrepare(TfLiteContext* context, TfLiteNode* node) {
       params->stride_height, params->stride_width, 1, 1, height, width,
       params->filter_height, params->filter_width, padding, &out_height,
       &out_width);
+  TF_LITE_ENSURE_STATUS(ValidatePaddingValuesForInt16(data->padding));
 
   if (input->type == kTfLiteUInt8 || input->type == kTfLiteInt8) {
     if (pool_type == kAverage || pool_type == kMax) {
@@ -153,8 +154,8 @@ TfLiteStatus AverageEvalQuantizedUint8(TfLiteContext* context, TfLiteNode* node,
                                        TfLiteTensor* output) {
   int32_t activation_min;
   int32_t activation_max;
-  (void)CalculateActivationRangeQuantized(context, params->activation, output,
-                                          &activation_min, &activation_max);
+  TF_LITE_ENSURE_STATUS(CalculateActivationRangeQuantized(
+      context, params->activation, output, &activation_min, &activation_max));
 #define TF_LITE_AVERAGE_POOL(type)                                            \
   tflite::PoolParams op_params;                                               \
   op_params.stride_height = params->stride_height;                            \
@@ -458,8 +459,8 @@ TfLiteStatus L2Eval(TfLiteContext* context, TfLiteNode* node) {
     // We don't have a quantized implementation, so just fall through to the
     // 'default' case.
     default:
-      context->ReportError(context, "Type %d not currently supported.",
-                           input->type);
+      TF_LITE_KERNEL_LOG(context, "Type %d not currently supported.",
+                         input->type);
       return kTfLiteError;
   }
   return kTfLiteOk;

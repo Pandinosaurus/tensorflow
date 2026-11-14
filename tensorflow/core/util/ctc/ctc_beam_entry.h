@@ -21,7 +21,7 @@ limitations under the License.
 #include <memory>
 #include <vector>
 
-#include "third_party/eigen3/Eigen/Core"
+#include "Eigen/Core"  // from @eigen_archive
 #include "tensorflow/core/lib/gtl/flatmap.h"
 #include "tensorflow/core/platform/logging.h"
 #include "tensorflow/core/platform/macros.h"
@@ -63,7 +63,7 @@ struct BeamEntry {
   // BeamRoot<CTCBeamState>::AddEntry() serves as the factory method.
   friend BeamEntry<T, CTCBeamState>* BeamRoot<T, CTCBeamState>::AddEntry(
       BeamEntry<T, CTCBeamState>* p, int l);
-  inline bool Active() const { return newp.total != kLogZero<T>(); }
+  bool Active() const { return newp.total != kLogZero<T>(); }
   // Return the child at the given index, or construct a new one in-place if
   // none was found.
   BeamEntry<T, CTCBeamState>& GetChild(int ind) {
@@ -107,7 +107,8 @@ struct BeamEntry {
   BeamEntry(BeamEntry* p, int l, BeamRoot<T, CTCBeamState>* beam_root)
       : parent(p), label(l), beam_root(beam_root) {}
   BeamRoot<T, CTCBeamState>* beam_root;
-  TF_DISALLOW_COPY_AND_ASSIGN(BeamEntry);
+  BeamEntry(const BeamEntry&) = delete;
+  void operator=(const BeamEntry&) = delete;
 };
 
 // This class owns all instances of BeamEntry.  This is used to avoid recursive
@@ -137,9 +138,9 @@ class BeamRoot {
 template <class T, class CTCBeamState = EmptyBeamState>
 class BeamComparer {
  public:
-  virtual ~BeamComparer() {}
-  virtual bool inline operator()(const BeamEntry<T, CTCBeamState>* a,
-                                 const BeamEntry<T, CTCBeamState>* b) const {
+  virtual ~BeamComparer() = default;
+  virtual bool operator()(const BeamEntry<T, CTCBeamState>* a,
+                          const BeamEntry<T, CTCBeamState>* b) const {
     return a->newp.total > b->newp.total;
   }
 };

@@ -1,26 +1,42 @@
-load("//tensorflow:tensorflow.bzl", "filegroup")
-load("//tensorflow:tensorflow.bzl", "py_strict_binary")
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
+load("@xla//third_party/rules_python/python:py_binary.bzl", "py_binary")
+load("//tensorflow:tensorflow.default.bzl", "filegroup")
 
 package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
     licenses = ["notice"],
 )
 
 # Run this binary manually, with an argument pointing to the testdata/
 # directory, to generate the test files used by the filegroup rule below.
-py_strict_binary(
+py_binary(
     name = "gen_saved_models",
     srcs = ["gen_saved_models.py"],
-    python_version = "PY3",
+    strict_deps = True,
     deps = [
-        "//tensorflow/python:constant_op",
-        "//tensorflow/python:control_flow_ops",
-        "//tensorflow/python:dtypes",
-        "//tensorflow/python:resource_variable_ops",
-        "//tensorflow/python:tensor_spec",
-        "//tensorflow/python:variables",
         "//tensorflow/python/compat:v2_compat",
         "//tensorflow/python/eager:def_function",
+        "//tensorflow/python/framework:constant_op",
+        "//tensorflow/python/framework:dtypes",
+        "//tensorflow/python/framework:tensor_spec",
         "//tensorflow/python/module",
+        "//tensorflow/python/ops:resource_variable_ops",
+        "//tensorflow/python/ops:variables",
+        "//tensorflow/python/ops:while_loop",
         "//tensorflow/python/saved_model",
         "@absl_py//absl:app",
     ],

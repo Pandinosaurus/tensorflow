@@ -2,23 +2,23 @@ path: "tensorflow.distribute.experimental"
 tf_module {
   member {
     name: "CentralStorageStrategy"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "CollectiveCommunication"
-    mtype: "<class \'enum.EnumMeta\'>"
+    mtype: "<class \'enum.EnumType\'>"
   }
   member {
     name: "CollectiveHints"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "CommunicationImplementation"
-    mtype: "<class \'enum.EnumMeta\'>"
+    mtype: "<class \'enum.EnumType\'>"
   }
   member {
     name: "CommunicationOptions"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "MultiWorkerMirroredStrategy"
@@ -26,26 +26,42 @@ tf_module {
   }
   member {
     name: "ParameterServerStrategy"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
+  }
+  member {
+    name: "PreemptionCheckpointHandler"
+    mtype: "<class \'type\'>"
+  }
+  member {
+    name: "PreemptionWatcher"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "TPUStrategy"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
+  }
+  member {
+    name: "TerminationConfig"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "ValueContext"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'type\'>"
   }
   member {
     name: "coordinator"
-    mtype: "<type \'module\'>"
+    mtype: "<class \'module\'>"
   }
   member {
     name: "partitioners"
-    mtype: "<type \'module\'>"
+    mtype: "<class \'module\'>"
   }
   member {
     name: "rpc"
-    mtype: "<type \'module\'>"
+    mtype: "<class \'module\'>"
+  }
+  member_method {
+    name: "auto_strategy"
+    argspec: "args=[], varargs=None, keywords=None, defaults=None"
   }
 }

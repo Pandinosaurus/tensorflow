@@ -16,6 +16,8 @@ limitations under the License.
 // Benchmarks for performance (throughput and latency) of BasicBatchScheduler
 // under various rates of task injection.
 
+#include <memory>
+
 #include "tensorflow/core/kernels/batching_util/basic_batch_scheduler.h"
 #include "tensorflow/core/lib/histogram/histogram.h"
 #include "tensorflow/core/platform/init_main.h"
@@ -57,7 +59,8 @@ class UniformLoadInjector : public LoadInjector {
                   int64_t average_injection_interval_micros) const override;
 
  private:
-  TF_DISALLOW_COPY_AND_ASSIGN(UniformLoadInjector);
+  UniformLoadInjector(const UniformLoadInjector&) = delete;
+  void operator=(const UniformLoadInjector&) = delete;
 };
 
 void UniformLoadInjector::InjectLoad(
@@ -96,11 +99,11 @@ class BenchmarkBatchTask : public BatchTask {
 
   size_t size() const override { return 1; }
 
-  uint64 start_time_micros() const { return start_time_micros_; }
+  uint64_t start_time_micros() const { return start_time_micros_; }
 
  private:
   // The time at which the task was created, in microseconds.
-  const uint64 start_time_micros_;
+  const uint64_t start_time_micros_;
 };
 
 BenchmarkBatchTask::BenchmarkBatchTask()
@@ -161,7 +164,7 @@ class LatencyBenchmark {
   void InjectLoad();
 
   // Return latency and batch size stat.
-  string ReportLatencyBatchSz();
+  std::string ReportLatencyBatchSz();
 
   // Reset scheduler. This has a side-effect of waiting for all work to be
   // completed prior to reset.
@@ -225,7 +228,7 @@ void LatencyBenchmark::InjectLoad() {
   UniformLoadInjector injector;
   injector.InjectLoad(
       [this] {
-        auto task = std::unique_ptr<BenchmarkBatchTask>(new BenchmarkBatchTask);
+        auto task = std::make_unique<BenchmarkBatchTask>();
         TF_CHECK_OK(scheduler_->Schedule(&task));
       },
       kNumTasks, task_injection_interval_micros_);
@@ -252,7 +255,7 @@ void LatencyBenchmark::InjectLoad() {
 void LatencyBenchmark::ProcessBatch(
     std::unique_ptr<Batch<BenchmarkBatchTask>> batch) {
   PerformBatchCpuWork();
-  const uint64 batch_completion_time = Env::Default()->NowMicros();
+  const uint64_t batch_completion_time = Env::Default()->NowMicros();
 
   {
     mutex_lock l(mu_);
@@ -260,7 +263,7 @@ void LatencyBenchmark::ProcessBatch(
   }
 
   for (int i = 0; i < batch->num_tasks(); ++i) {
-    const uint64 task_latency_micros =
+    const uint64_t task_latency_micros =
         batch_completion_time - batch->task(i).start_time_micros();
     {
       mutex_lock l(mu_);
@@ -277,7 +280,7 @@ void LatencyBenchmark::PerformBatchCpuWork() const {
   CHECK_NE(dummy, 0);
 }
 
-string LatencyBenchmark::ReportLatencyBatchSz() {
+std::string LatencyBenchmark::ReportLatencyBatchSz() {
   mutex_lock l(mu_);
   return absl::StrCat(
       "lat_p99.9=", task_latency_millis_histogram_.Percentile(99.9),
@@ -290,14 +293,14 @@ string LatencyBenchmark::ReportLatencyBatchSz() {
 // Multi-threaded (thread > 1) version simulates N concurrent request streams.
 void ThroughputBM(::testing::benchmark::State& state) {
   static std::unique_ptr<ThroughputBenchmark> bm;
-  if (state.thread_index == 0) {
+  if (state.thread_index() == 0) {
     BasicBatchScheduler<BenchmarkBatchTask>::Options scheduler_options;
     const int kMaxBatchSize = 100;
     scheduler_options.max_batch_size = kMaxBatchSize;
     scheduler_options.batch_timeout_micros = state.range(0) * 1000;
     scheduler_options.num_batch_threads = state.range(1);
     scheduler_options.max_enqueued_batches = INT_MAX;  // Unbounded queue.
-    bm.reset(new ThroughputBenchmark(scheduler_options));
+    bm = std::make_unique<ThroughputBenchmark>(scheduler_options);
   }
 
   // Have each iteration issue a reasonably large number of tasks, to ensure our
@@ -307,12 +310,12 @@ void ThroughputBM(::testing::benchmark::State& state) {
   // Schedule 'num_iterations_*kNumTasksPerIteration' tasks.
   for (auto s : state) {
     for (int j = 0; j < kNumTasksPerIteration; ++j) {
-      auto task = std::unique_ptr<BenchmarkBatchTask>(new BenchmarkBatchTask);
+      auto task = std::make_unique<BenchmarkBatchTask>();
       TF_CHECK_OK(bm->GetScheduler()->Schedule(&task));
     }
   }
 
-  if (state.thread_index == 0) {
+  if (state.thread_index() == 0) {
     state.ResumeTiming();
     // Wait for the scheduler to process all tasks.
     bm->ResetScheduler();
@@ -336,7 +339,7 @@ BENCHMARK(ThroughputBM)
 // Multi-threaded (thread > 1) version simulates N concurrent request streams.
 void LatencyBM(::testing::benchmark::State& state) {
   static std::unique_ptr<LatencyBenchmark> bm;
-  if (state.thread_index == 0) {
+  if (state.thread_index() == 0) {
     BasicBatchScheduler<BenchmarkBatchTask>::Options scheduler_options;
     const int kMaxBatchSize = 100;
     scheduler_options.max_batch_size = kMaxBatchSize;
@@ -344,24 +347,24 @@ void LatencyBM(::testing::benchmark::State& state) {
     scheduler_options.num_batch_threads = state.range(1);
     scheduler_options.max_enqueued_batches = INT_MAX;  // Unbounded queue.
     const int kBatchCpuCost = 10 * 1000 * 1000;
-    const int64 kQps = state.range(2);
-    const int64 kInjectionIntervalMicros = 1000000 / (kQps / state.threads);
-    const int64 kNumTasks = latency_benchmark_duration_secs * kQps;
+    const int64_t kQps = state.range(2);
+    const int64_t kInjectionIntervalMicros = 1000000 / (kQps / state.threads());
+    const int64_t kNumTasks = latency_benchmark_duration_secs * kQps;
     if (kNumTasks <= 10000) {
       LOG(WARNING) << "Not enough tasks (" << kNumTasks << ")"
                    << " to report meaningful 99.9% latency!"
                    << " duration: " << latency_benchmark_duration_secs
                    << " interval: " << kInjectionIntervalMicros;
     }
-    bm.reset(new LatencyBenchmark(scheduler_options, kInjectionIntervalMicros,
-                                  kBatchCpuCost));
+    bm = std::make_unique<LatencyBenchmark>(
+        scheduler_options, kInjectionIntervalMicros, kBatchCpuCost);
   }
 
   for (auto s : state) {
     bm->InjectLoad();
   }
 
-  if (state.thread_index == 0) {
+  if (state.thread_index() == 0) {
     state.ResumeTiming();
     // Wait for the scheduler to process all tasks.
     bm->ResetScheduler();

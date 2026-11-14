@@ -37,8 +37,8 @@ namespace tensorflow {
 
 // Given a graph and the node_name of a ParseExample op,
 // extract the FixedLenFeature/VarLenFeature configurations.
-Status ExtractExampleParserConfiguration(
-    const tensorflow::GraphDef& graph, const string& node_name,
+absl::Status ExtractExampleParserConfiguration(
+    const tensorflow::GraphDef& graph, const std::string& node_name,
     tensorflow::Session* session,
     std::vector<FixedLenFeature>* fixed_len_features,
     std::vector<VarLenFeature>* var_len_features);
@@ -46,7 +46,7 @@ Status ExtractExampleParserConfiguration(
 // Given a config proto, ostensibly extracted via python,
 // fill a vector of C++ structs suitable for calling
 // the tensorflow.Example -> Tensor conversion code.
-Status ExampleParserConfigurationProtoToFeatureVectors(
+absl::Status ExampleParserConfigurationProtoToFeatureVectors(
     const ExampleParserConfiguration& config_proto,
     std::vector<FixedLenFeature>* fixed_len_features,
     std::vector<VarLenFeature>* var_len_features);

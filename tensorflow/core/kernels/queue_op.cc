@@ -14,13 +14,20 @@ limitations under the License.
 ==============================================================================*/
 
 #include "tensorflow/core/kernels/queue_op.h"
+
+#include "absl/strings/str_cat.h"
 #include "tensorflow/core/framework/op_kernel.h"
+#include "tensorflow/core/framework/op_requires.h"
 #include "tensorflow/core/framework/queue_interface.h"
+#include "tensorflow/core/framework/resource_handle.h"
+#include "tensorflow/core/framework/resource_mgr.h"
 #include "tensorflow/core/framework/tensor.h"
 #include "tensorflow/core/framework/tensor_shape.h"
 #include "tensorflow/core/framework/types.h"
 #include "tensorflow/core/lib/core/errors.h"
+#include "tensorflow/core/lib/gtl/cleanup.h"
 #include "tensorflow/core/platform/macros.h"
+#include "tensorflow/core/platform/refcount.h"
 #include "tensorflow/core/platform/types.h"
 
 namespace tensorflow {
@@ -36,16 +43,15 @@ QueueOp::QueueOp(OpKernelConstruction* context) : ResourceOpKernel(context) {
 
 void QueueOp::Compute(OpKernelContext* context) {
   ResourceOpKernel<QueueInterface>::Compute(context);
-  mutex_lock l(mu_);
-  if (resource_ && context->track_allocations()) {
-    context->record_persistent_memory_allocation(resource_->MemoryUsed());
+  core::RefCountPtr<QueueInterface> resource = get_resource();
+  if (resource != nullptr && context->track_allocations()) {
+    context->record_persistent_memory_allocation(resource->MemoryUsed());
   }
 }
 
-Status QueueOp::VerifyResource(QueueInterface* queue) {
+absl::Status QueueOp::VerifyResource(QueueInterface* queue) {
   return queue->MatchesNodeDef(def());
 }
-
 
 QueueOpKernel::QueueOpKernel(OpKernelConstruction* context)
     : AsyncOpKernel(context) {}
@@ -53,8 +59,9 @@ QueueOpKernel::QueueOpKernel(OpKernelConstruction* context)
 void QueueOpKernel::ComputeAsync(OpKernelContext* ctx, DoneCallback callback) {
   QueueInterface* queue;
   if (ctx->input_dtype(0) == DT_RESOURCE) {
-    OP_REQUIRES_OK_ASYNC(
-        ctx, LookupResource(ctx, HandleFromInput(ctx, 0), &queue), callback);
+    ResourceHandle handle;
+    OP_REQUIRES_OK_ASYNC(ctx, HandleFromInput(ctx, 0, &handle), callback);
+    OP_REQUIRES_OK_ASYNC(ctx, LookupResource(ctx, handle, &queue), callback);
   } else {
     OP_REQUIRES_OK_ASYNC(ctx, GetResourceFromContext(ctx, "handle", &queue),
                          callback);
@@ -70,7 +77,7 @@ QueueAccessOpKernel::QueueAccessOpKernel(OpKernelConstruction* context)
   OP_REQUIRES_OK(context, context->GetAttr("timeout_ms", &timeout_));
   // TODO(keveman): Enable timeout.
   OP_REQUIRES(context, timeout_ == -1,
-              errors::InvalidArgument("Timeout not supported yet."));
+              absl::InvalidArgumentError("Timeout not supported yet."));
 }
 
 // Defines an EnqueueOp, the execution of which enqueues a tuple of
@@ -209,12 +216,18 @@ DequeueManyOp::DequeueManyOp(OpKernelConstruction* context)
 void DequeueManyOp::ComputeAsync(OpKernelContext* ctx, QueueInterface* queue,
                                  DoneCallback callback) {
   const Tensor& Tnum_elements = ctx->input(1);
-  int32_t num_elements = Tnum_elements.flat<int32>()(0);
-
-  OP_REQUIRES_ASYNC(ctx, num_elements >= 0,
-                    errors::InvalidArgument("DequeueManyOp requested ",
-                                            num_elements, " < 0 elements"),
+  OP_REQUIRES_ASYNC(ctx, TensorShapeUtils::IsScalar(Tnum_elements.shape()),
+                    absl::InvalidArgumentError(
+                        absl::StrCat("num_elements must be a scalar, got ",
+                                     Tnum_elements.shape().DebugString())),
                     callback);
+  int32_t num_elements = Tnum_elements.flat<int32_t>()(0);
+
+  OP_REQUIRES_ASYNC(
+      ctx, num_elements >= 0,
+      absl::InvalidArgumentError(absl::StrCat("DequeueManyOp requested ",
+                                              num_elements, " < 0 elements")),
+      callback);
 
   if (ctx->input_dtype(0) == DT_RESOURCE) {
     OP_REQUIRES_OK_ASYNC(
@@ -282,12 +295,18 @@ DequeueUpToOp::DequeueUpToOp(OpKernelConstruction* context)
 void DequeueUpToOp::ComputeAsync(OpKernelContext* ctx, QueueInterface* queue,
                                  DoneCallback callback) {
   const Tensor& Tnum_elements = ctx->input(1);
-  int32_t num_elements = Tnum_elements.flat<int32>()(0);
-
-  OP_REQUIRES_ASYNC(ctx, num_elements >= 0,
-                    errors::InvalidArgument("DequeueUpToOp requested ",
-                                            num_elements, " < 0 elements"),
+  OP_REQUIRES_ASYNC(ctx, TensorShapeUtils::IsScalar(Tnum_elements.shape()),
+                    absl::InvalidArgumentError(
+                        absl::StrCat("num_elements must be a scalar, got ",
+                                     Tnum_elements.shape().DebugString())),
                     callback);
+  int32_t num_elements = Tnum_elements.flat<int32_t>()(0);
+
+  OP_REQUIRES_ASYNC(
+      ctx, num_elements >= 0,
+      absl::InvalidArgumentError(absl::StrCat("DequeueUpToOp requested ",
+                                              num_elements, " < 0 elements")),
+      callback);
 
   if (ctx->input_dtype(0) == DT_RESOURCE) {
     OP_REQUIRES_OK_ASYNC(
@@ -346,10 +365,11 @@ QueueSizeOp::QueueSizeOp(OpKernelConstruction* context)
 
 void QueueSizeOp::ComputeAsync(OpKernelContext* ctx, QueueInterface* queue,
                                DoneCallback callback) {
+  auto cleanup = gtl::MakeCleanup([&callback]() { callback(); });
   Tensor* Tqueue_size = nullptr;
-  OP_REQUIRES_OK(ctx, ctx->allocate_output(0, TensorShape({}), &Tqueue_size));
-  Tqueue_size->flat<int32>().setConstant(queue->size());
-  callback();
+  OP_REQUIRES_OK_ASYNC(
+      ctx, ctx->allocate_output(0, TensorShape({}), &Tqueue_size), []() {});
+  Tqueue_size->flat<int32_t>().setConstant(queue->size());
 }
 
 QueueIsClosedOp::QueueIsClosedOp(OpKernelConstruction* context)
@@ -357,11 +377,12 @@ QueueIsClosedOp::QueueIsClosedOp(OpKernelConstruction* context)
 
 void QueueIsClosedOp::ComputeAsync(OpKernelContext* ctx, QueueInterface* queue,
                                    DoneCallback callback) {
+  auto cleanup = gtl::MakeCleanup([&callback]() { callback(); });
   Tensor* Tqueue_is_closed = nullptr;
-  OP_REQUIRES_OK(ctx,
-                 ctx->allocate_output(0, TensorShape({}), &Tqueue_is_closed));
+  OP_REQUIRES_OK_ASYNC(
+      ctx, ctx->allocate_output(0, TensorShape({}), &Tqueue_is_closed),
+      []() {});
   Tqueue_is_closed->flat<bool>().setConstant(queue->is_closed());
-  callback();
 }
 
 }  // namespace tensorflow

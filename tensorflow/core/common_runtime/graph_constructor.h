@@ -17,6 +17,7 @@ limitations under the License.
 #define TENSORFLOW_CORE_COMMON_RUNTIME_GRAPH_CONSTRUCTOR_H_
 
 #include "tensorflow/core/framework/graph.pb.h"
+#include "tensorflow/core/framework/op.h"
 #include "tensorflow/core/graph/graph.h"
 #include "tensorflow/core/graph/tensor_id.h"
 #include "tensorflow/core/lib/core/status.h"
@@ -31,7 +32,7 @@ class ShapeRefiner;
 // nodes) when provided to ConvertGraphDefToGraph. To enhance an existing Graph,
 // see ImportGraphDef.
 struct GraphConstructorOptions {
-  GraphConstructorOptions() {}
+  GraphConstructorOptions() = default;
 
   // If true, allows internal ops in the GraphDef.
   bool allow_internal_ops = false;
@@ -52,17 +53,28 @@ struct GraphConstructorOptions {
   // If true, GraphConstructor will add attributes with their default
   // value to the Node when they are missing from the NodeDef.
   bool add_default_attributes = true;
+
+  // If true, upgrade legacy features of the graph (for instance, functionalize
+  // control-flow).
+  bool upgrade_legacy = false;
 };
-extern Status ConvertGraphDefToGraph(const GraphConstructorOptions& opts,
-                                     const GraphDef& gdef, Graph* g);
-extern Status ConvertGraphDefToGraph(const GraphConstructorOptions& opts,
-                                     GraphDef&& gdef, Graph* g);
+extern absl::Status ConvertGraphDefToGraph(const GraphConstructorOptions& opts,
+                                           const GraphDef& gdef, Graph* g);
+extern absl::Status ConvertGraphDefToGraph(const GraphConstructorOptions& opts,
+                                           GraphDef&& gdef, Graph* g);
+
+// Generate the shared_name for resource handle ops in the graph and functions
+// if their shared_names are empty. Resource handle ops with empty shared_name
+// may have undesired semantics.
+absl::Status GenerateResourceSharedNameIfEmpty(
+    GraphDef& gdef, const OpRegistryInterface* default_registry);
 
 // Same as ConvertGraphDefToGraph, but takes just nodes.  Used by function
 // instantiation.
 // TODO(irving): This will turn into std::vector<NodeInfoPtr> soon.
-extern Status ConvertNodeDefsToGraph(const GraphConstructorOptions& opts,
-                                     gtl::ArraySlice<NodeDef> nodes, Graph* g);
+extern absl::Status ConvertNodeDefsToGraph(
+    const GraphConstructorOptions& opts, absl::Span<const NodeDef> nodes,
+    Graph* g, const GraphDebugInfo* debug_info = nullptr);
 
 // Options for calling ImportGraphDef().
 struct ImportGraphDefOptions {
@@ -70,13 +82,14 @@ struct ImportGraphDefOptions {
       : uniquify_names(false),
         uniquify_prefix(false),
         skip_mapped_nodes(false),
-        validate_shape(true) {}
+        validate_shape(true),
+        propagate_device_spec(false) {}
 
   // Name prefix to use for nodes imported from the GraphDef.  For example, if
   // prefix="animals" and GraphDef contains a node "bunny" then the node will be
   // named "animals/bunny" in *g. Must not be already used as a node name or
   // prefix in the graph.
-  string prefix;
+  std::string prefix;
 
   // If true, imported node names will be modified if their name already exists
   // in the graph. If false, conflicting names will be treated as an error. Note
@@ -112,7 +125,7 @@ struct ImportGraphDefOptions {
   // Note that to avoid creating many redundant control edges, ImportGraphDef()
   // won't add control edges to nodes that will inherit the dependencies from
   // other nodes in `gdef`.
-  std::vector<string> control_dependencies;
+  std::vector<std::string> control_dependencies;
 
   // Tensors in `gdef` that will be returned via the ImportGraphDefResults
   // output parameter of `ImportGraphDef()`. If this list is non-empty, the
@@ -138,7 +151,7 @@ struct ImportGraphDefOptions {
   // Unlike `return_tensors`, `input_map` has no effect on the nodes
   // returned. `return_nodes` must be empty if `skip_mapped_nodes` is true.
   // TODO(skyewm): make this work with `skip_mapped_nodes` if there's a need.
-  std::vector<string> return_nodes;
+  std::vector<std::string> return_nodes;
 
   // If true, checks that all colocation constraints are nodes in the GraphDef.
   bool validate_colocation_constraints = true;
@@ -152,7 +165,11 @@ struct ImportGraphDefOptions {
   // python API.
 
   // Try to set default execution device for this grapth.
-  string default_device;
+  std::string default_device;
+
+  // If true, propagates a node's assigned device. By default the runtime
+  // will recompute the assigned device every time.
+  bool propagate_device_spec;
 };
 
 // Optional results that may be returned by ImportGraphDef.
@@ -188,10 +205,10 @@ struct ImportGraphDefResults {
 //
 // TODO(ashankar): Push this mechanism and get rid of Session::Extend()
 // as a means of enhancing an existing Graph.
-extern Status ImportGraphDef(const ImportGraphDefOptions& opts,
-                             const GraphDef& gdef, Graph* g,
-                             ShapeRefiner* refiner,
-                             ImportGraphDefResults* results = nullptr);
+extern absl::Status ImportGraphDef(const ImportGraphDefOptions& opts,
+                                   const GraphDef& gdef, Graph* g,
+                                   ShapeRefiner* refiner,
+                                   ImportGraphDefResults* results = nullptr);
 
 // Make a copy of "src" into "*dest".
 //

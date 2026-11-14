@@ -1,3 +1,18 @@
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# =============================================================================
+
 """Generates C++ grpc stubs from proto_library rules.
 
 This is an internal rule used by cc_grpc_library, and shouldn't be used
@@ -5,12 +20,13 @@ directly.
 """
 
 load(
-    "@com_github_grpc_grpc//bazel:protobuf.bzl",
+    "@grpc//bazel:protobuf.bzl",
     "get_include_directory",
     "get_plugin_args",
     "get_proto_root",
     "proto_path_to_generated_filename",
 )
+load("@rules_proto//proto:defs.bzl", "ProtoInfo")
 
 _GRPC_PROTO_HEADER_FMT = "{}.grpc.pb.h"
 _GRPC_PROTO_SRC_FMT = "{}.grpc.pb.cc"
@@ -45,7 +61,7 @@ def generate_cc_impl(ctx):
     includes = [
         f
         for src in ctx.attr.srcs
-        for f in src[ProtoInfo].transitive_imports.to_list()
+        for f in src[ProtoInfo].transitive_sources.to_list()
     ]
     outs = []
     proto_root = get_proto_root(
@@ -135,6 +151,7 @@ def generate_cc_impl(ctx):
             ]
 
     ctx.actions.run(
+        mnemonic = "GenerateCc",
         inputs = protos + includes + well_known_proto_files,
         tools = tools,
         outputs = out_files,
@@ -155,7 +172,7 @@ _generate_cc = rule(
         "plugin": attr.label(
             executable = True,
             providers = ["files_to_run"],
-            cfg = "host",
+            cfg = "exec",
         ),
         "flags": attr.string_list(
             mandatory = False,
@@ -169,11 +186,9 @@ _generate_cc = rule(
         "_protoc": attr.label(
             default = Label("@com_google_protobuf//:protoc"),
             executable = True,
-            cfg = "host",
+            cfg = "exec",
         ),
     },
-    # We generate .h files, so we need to output to genfiles.
-    output_to_genfiles = True,
     implementation = generate_cc_impl,
 )
 

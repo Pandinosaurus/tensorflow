@@ -1,0 +1,19 @@
+# Other build-related tools
+apt-transport-https
+autoconf
+automake
+build-essential
+ca-certificates
+curl
+git
+google-perftools
+parallel
+sudo
+swig
+unzip
+zip
+openjdk-25-jdk
+vim
+wget
+jq
+file

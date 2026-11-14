@@ -14,6 +14,8 @@ limitations under the License.
 ==============================================================================*/
 #include "tensorflow/core/common_runtime/collective_test_util.h"
 
+#include <vector>
+
 #include "absl/synchronization/notification.h"
 #include "tensorflow/core/common_runtime/base_collective_executor.h"
 #include "tensorflow/core/common_runtime/device_resolver_local.h"
@@ -23,6 +25,7 @@ limitations under the License.
 #include "tensorflow/core/framework/device_attributes.pb.h"
 #include "tensorflow/core/framework/device_base.h"
 #include "tensorflow/core/framework/op_kernel.h"
+#include "tensorflow/core/nccl/collective_communicator.h"
 #include "tensorflow/core/platform/refcount.h"
 #include "tensorflow/core/public/session_options.h"
 
@@ -42,7 +45,7 @@ bool FailTestRMA::MaybeFail(const StatusCallback& done) {
     }
   }
   if (fail_now) {
-    auto error = errors::Internal("Deliberate failure");
+    auto error = absl::InternalError("Deliberate failure");
     LOG(INFO) << "triggering failure " << error;
     buf_rendezvous()->StartAbort(error);
     // The current call hasn't reached BufRendezvous yet, so we need to call
@@ -54,11 +57,12 @@ bool FailTestRMA::MaybeFail(const StatusCallback& done) {
 }
 
 void FailTestRMA::RecvFromPeer(
-    const string& peer_device, const string& peer_task, bool peer_is_local,
-    const string& key, Device* to_device, DeviceContext* to_device_ctx,
-    const AllocatorAttributes& to_alloc_attr, Tensor* to_tensor,
-    const DeviceLocality& client_locality, int dev_to_dev_stream_index,
-    CancellationManager* cancellation_manager, const StatusCallback& done) {
+    const std::string& peer_device, const std::string& peer_task,
+    bool peer_is_local, const std::string& key, Device* to_device,
+    DeviceContext* to_device_ctx, const AllocatorAttributes& to_alloc_attr,
+    Tensor* to_tensor, const DeviceLocality& client_locality,
+    int dev_to_dev_stream_index, CancellationManager* cancellation_manager,
+    const StatusCallback& done) {
   if (MaybeFail(done)) return;
   CollectiveRemoteAccessLocal::RecvFromPeer(
       peer_device, peer_task, peer_is_local, key, to_device, to_device_ctx,
@@ -66,14 +70,12 @@ void FailTestRMA::RecvFromPeer(
       cancellation_manager, done);
 }
 
-void FailTestRMA::PostToPeer(const string& peer_device, const string& peer_task,
-                             const string& key, Device* from_device,
-                             DeviceContext* from_device_ctx,
-                             const AllocatorAttributes& from_alloc_attr,
-                             const Tensor* from_tensor,
-                             const DeviceLocality& client_locality,
-                             CancellationManager* cancellation_manager,
-                             const StatusCallback& done) {
+void FailTestRMA::PostToPeer(
+    const std::string& peer_device, const std::string& peer_task,
+    const std::string& key, Device* from_device, DeviceContext* from_device_ctx,
+    const AllocatorAttributes& from_alloc_attr, const Tensor* from_tensor,
+    const DeviceLocality& client_locality,
+    CancellationManager* cancellation_manager, const StatusCallback& done) {
   if (MaybeFail(done)) return;
   CollectiveRemoteAccessLocal::PostToPeer(
       peer_device, peer_task, key, from_device, from_device_ctx,
@@ -94,9 +96,9 @@ std::vector<std::unique_ptr<Device>> CreateCPUDevices(
   std::vector<std::unique_ptr<Device>> devices;
   for (int wi = 0; wi < num_workers; ++wi) {
     for (int di = 0; di < num_devices_per_worker; ++di) {
-      string dev_name = strings::StrCat("/job:worker/replica:0/task:", wi,
-                                        "/device:CPU:", di);
-      devices.push_back(absl::make_unique<ThreadPoolDevice>(
+      std::string dev_name =
+          absl::StrCat("/job:worker/replica:0/task:", wi, "/device:CPU:", di);
+      devices.push_back(std::make_unique<ThreadPoolDevice>(
           sess_opts, dev_name, mem_limit, dev_locality, cpu_allocator()));
     }
   }
@@ -112,7 +114,7 @@ std::vector<std::unique_ptr<Device>> CreateGPUDevices() {
   auto device_factory = DeviceFactory::GetFactory("GPU");
   CHECK(device_factory);
   SessionOptions options;
-  std::vector<string> physical_devices;
+  std::vector<std::string> physical_devices;
   TF_CHECK_OK(device_factory->ListPhysicalDevices(&physical_devices));
   if (physical_devices.size() < kNumVirtualDevices) {
     int num_virtual_per_phsyical = static_cast<int>(std::ceil(
@@ -129,7 +131,7 @@ std::vector<std::unique_ptr<Device>> CreateGPUDevices() {
     }
   }
   std::vector<std::unique_ptr<Device>> devices;
-  Status s = device_factory->CreateDevices(
+  absl::Status s = device_factory->CreateDevices(
       options, "/job:worker/replica:0/task:0", &devices);
   CHECK(s.ok());
   return devices;
@@ -138,12 +140,13 @@ std::vector<std::unique_ptr<Device>> CreateGPUDevices() {
 }  // namespace
 
 std::unique_ptr<CollectiveTestEnv> CreateCollectiveTestEnv(
-    int num_workers, int num_devices_per_worker, DeviceType device_type) {
-  auto test_env = absl::make_unique<CollectiveTestEnv>();
-  test_env->param_resolver = absl::make_unique<TestParamResolver>();
+    int num_workers, int num_devices_per_worker, DeviceType device_type,
+    bool use_nccl) {
+  auto test_env = std::make_unique<CollectiveTestEnv>();
+  test_env->param_resolver = std::make_unique<TestParamResolver>();
   // We don't create CollecticeExecutor from the CollecticeExecutorMgr so we
   // don't need to pass rma.
-  test_env->col_exec_mgr = absl::make_unique<TestCollectiveExecutorMgr>(
+  test_env->col_exec_mgr = std::make_unique<TestCollectiveExecutorMgr>(
       test_env->param_resolver.get(), /*rma=*/nullptr);
   test_env->num_workers = num_workers;
   test_env->num_devices_per_worker = num_devices_per_worker;
@@ -163,10 +166,10 @@ std::unique_ptr<CollectiveTestEnv> CreateCollectiveTestEnv(
   } else {
     LOG(FATAL) << "Unsupported device_type " << device_type;
   }
-  test_env->device_mgr = absl::make_unique<StaticDeviceMgr>(std::move(devices));
+  test_env->device_mgr = std::make_unique<StaticDeviceMgr>(std::move(devices));
 
   test_env->device_resolver =
-      absl::make_unique<DeviceResolverLocal>(test_env->device_mgr.get());
+      std::make_unique<DeviceResolverLocal>(test_env->device_mgr.get());
   test_env->work_queue =
       std::make_shared<UnboundedWorkQueue>(Env::Default(), "test");
   // BaseCollectiveExecutor takes the ownership of remote_access.
@@ -175,13 +178,19 @@ std::unique_ptr<CollectiveTestEnv> CreateCollectiveTestEnv(
   test_env->col_exec.reset(new BaseCollectiveExecutor(
       test_env->col_exec_mgr.get(), test_env->remote_access, kStepId,
       test_env->device_mgr.get(), test_env->work_queue));
+  if (use_nccl) {
+    ConfigProto config_proto;
+    test_env->nccl_communicator = MaybeCreateNcclCommunicator(config_proto);
+  }
 
   return test_env;
 }
 
 core::RefCountPtr<CollectiveParams> CreateCollectiveParams(
-    const CollectiveTestEnv& test_env, int rank, const string& collective_name,
-    CollectiveType collective_type, DataType dtype, const TensorShape& shape) {
+    const CollectiveTestEnv& test_env, int rank,
+    const std::string& collective_name, CollectiveType collective_type,
+    DataType dtype, const TensorShape& shape,
+    const std::vector<std::vector<int>> user_specified_rank) {
   static constexpr int kGroupKey = 5;
   static constexpr int kInstanceKey = 17;
   core::RefCountPtr<CollectiveParams> col_params(new CollectiveParams());
@@ -201,8 +210,8 @@ core::RefCountPtr<CollectiveParams> CreateCollectiveParams(
     std::iter_swap(local_ring_order.begin() + di,
                    local_ring_order.begin() + other);
   }
-  string lro_buf;
-  for (auto d : local_ring_order) strings::StrAppend(&lro_buf, d, ", ");
+  std::string lro_buf;
+  for (auto d : local_ring_order) absl::StrAppend(&lro_buf, d, ", ");
   VLOG(1) << "local_ring_order " << lro_buf;
 
   // Set up group parameters.
@@ -212,7 +221,7 @@ core::RefCountPtr<CollectiveParams> CreateCollectiveParams(
   col_params->group.num_tasks = test_env.num_workers;
   col_params->group.device_type = test_env.device_type;
   for (int wi = 0; wi < test_env.num_workers; ++wi) {
-    string task_name = strings::StrCat("/job:worker/replica:0/task:", wi);
+    std::string task_name = absl::StrCat("/job:worker/replica:0/task:", wi);
     col_params->group.num_devices_per_task[task_name] =
         test_env.num_devices_per_worker;
     for (int di = 0; di < test_env.num_devices_per_worker; ++di) {
@@ -223,6 +232,13 @@ core::RefCountPtr<CollectiveParams> CreateCollectiveParams(
       // Normally each device would set is_local to its own perspective but
       // this test runs in a single process so is_local is always true.
       member.is_local = true;
+      if (user_specified_rank.size() == test_env.num_workers &&
+          user_specified_rank[wi].size() == test_env.num_devices_per_worker) {
+        member.rank = user_specified_rank[wi][di];
+      } else {
+        member.rank = wi * test_env.num_workers + di;
+      }
+
       col_params->group.members.push_back(member);
     }
   }
@@ -255,7 +271,7 @@ Tensor CopyTensorToDevice(Device* device, const Tensor& tensor) {
   } else if (device->device_type() == DEVICE_GPU) {
     Tensor copied(device->GetAllocator(AllocatorAttributes()), tensor.dtype(),
                   tensor.shape());
-    auto* dev_info = device->tensorflow_gpu_device_info();
+    auto* dev_info = device->tensorflow_accelerator_device_info();
     CHECK(dev_info);
     TF_CHECK_OK(dev_info->default_context->CopyCPUTensorToDeviceSync(
         &tensor, device, &copied));
@@ -269,7 +285,7 @@ Tensor CopyTensorToHost(Device* device, const Tensor& tensor) {
     return tensor;
   } else if (device->device_type() == DEVICE_GPU) {
     Tensor copied(tensor.dtype(), tensor.shape());
-    auto* dev_info = device->tensorflow_gpu_device_info();
+    auto* dev_info = device->tensorflow_accelerator_device_info();
     CHECK(dev_info);
     TF_CHECK_OK(dev_info->default_context->CopyDeviceTensorToCPUSync(
         &tensor, "" /*tensor_name*/, device, &copied));
@@ -278,8 +294,9 @@ Tensor CopyTensorToHost(Device* device, const Tensor& tensor) {
   LOG(FATAL) << "Unsupported device_type " << device->device_type();
 }
 
-Status RunCollective(CollectiveTestEnv* test_env, CollectiveParams* col_params,
-                     Device* device, Tensor* input, Tensor* output) {
+absl::Status RunCollective(CollectiveTestEnv* test_env,
+                           CollectiveParams* col_params, Device* device,
+                           Tensor* input, Tensor* output) {
   // Copy input and allocate output if on GPU.
   Tensor input_buffer;
   Tensor output_buffer;
@@ -309,13 +326,14 @@ Status RunCollective(CollectiveTestEnv* test_env, CollectiveParams* col_params,
   op_params.step_id = kStepId;
   op_params.device = device;
   op_params.cancellation_manager = &cancellation_manager;
-  gtl::InlinedVector<TensorValue, 4> inputs;
+  absl::InlinedVector<TensorValue, 4UL> inputs;
   inputs.push_back(TensorValue(&input_buffer));
-  op_params.inputs = &inputs;
-  gtl::InlinedVector<AllocatorAttributes, 4> input_aa({AllocatorAttributes()});
-  op_params.input_alloc_attrs = &input_aa;
+  op_params.inputs = inputs;
+  absl::InlinedVector<AllocatorAttributes, 4UL> input_aa(
+      {AllocatorAttributes()});
+  op_params.input_alloc_attrs = input_aa;
   DeviceContext* dev_ctx = nullptr;
-  auto* dev_info = device->tensorflow_gpu_device_info();
+  auto* dev_info = device->tensorflow_accelerator_device_info();
   if (dev_info) {
     dev_ctx = dev_info->default_context;
     dev_ctx->Ref();
@@ -325,7 +343,7 @@ Status RunCollective(CollectiveTestEnv* test_env, CollectiveParams* col_params,
   core::ScopedUnref unref_dev_ctx(dev_ctx);
   op_params.op_device_context = dev_ctx;
   int forward_from = 0;
-  op_params.forward_from_array = &forward_from;
+  op_params.forward_from_array = input == output ? &forward_from : nullptr;
   AllocatorAttributes generic_alloc_attr;
   op_params.output_attr_array = &generic_alloc_attr;
   op_params.resource_manager = device->resource_manager();
@@ -338,17 +356,18 @@ Status RunCollective(CollectiveTestEnv* test_env, CollectiveParams* col_params,
   core::ScopedUnref unref_collective_impl(collective_impl);
   TF_RETURN_IF_ERROR(collective_impl->InitializeCollectiveParams(col_params));
 
-  string exec_key = strings::StrCat(col_params->instance.instance_key, ":0:0");
+  std::string exec_key =
+      absl::StrCat(col_params->instance.instance_key, ":0:0");
   auto col_ctx = std::make_shared<CollectiveContext>(
-      test_env->col_exec.get(), /*nccl_communicator*/ nullptr,
+      test_env->col_exec.get(), test_env->nccl_communicator.get(),
       test_env->device_mgr.get(), &ctx, &op_params, col_params, exec_key,
       kStepId, &input_buffer, &output_buffer);
   TF_RETURN_IF_ERROR(collective_impl->InitializeCollectiveContext(col_ctx));
 
   // Run the collective.
-  Status status;
-  Notification n;
-  collective_impl->Run([&status, &n](Status s) {
+  absl::Status status;
+  absl::Notification n;
+  collective_impl->Run([&status, &n](absl::Status s) {
     status = s;
     n.Notify();
   });

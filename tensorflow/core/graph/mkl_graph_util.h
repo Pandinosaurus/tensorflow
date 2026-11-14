@@ -22,8 +22,8 @@ limitations under the License.
 #include "tensorflow/core/framework/types.pb.h"
 #include "tensorflow/core/graph/graph.h"
 #include "tensorflow/core/lib/core/status.h"
-#include "tensorflow/core/platform/cpu_info.h"
 #include "tensorflow/core/util/env_var.h"
+#include "tensorflow/core/util/util.h"
 
 namespace tensorflow {
 // Since our ops are going to produce and also consume N addition tensors
@@ -88,23 +88,11 @@ bool inline DoesControlEdgeExist(const Node* src, const Node* dst) {
   return false;
 }
 
-// Check if graph should run in layout-dependent mode or native format mode
-// based on environment variable setting. Native format mode is default. User
-// can set TF_ENABLE_MKL_NATIVE_FORMAT=0 to disable the native format mode.
-bool inline NativeFormatEnabled() {
-#ifndef ENABLE_MKL
-  return true;
-#else
-  static bool native_fmt_enabled = true;
-  static absl::once_flag once;
-  absl::call_once(once, [&] {
-    TF_CHECK_OK(ReadBoolFromEnvVar("TF_ENABLE_MKL_NATIVE_FORMAT",
-                                   /*default_value*/ true,
-                                   &native_fmt_enabled));
-  });
-  return native_fmt_enabled;
-#endif
-}
+// In TF 2.8, oneDNN blocked format will not be supported.
+// TODO(intel_tf): Cleanup shall be done in future:
+//                 (1) Remove this method;
+//                 (2) Update related code wherever it is called.
+bool inline NativeFormatEnabled() { return true; }
 
 // Check if the data_format attribute in the node def represents 5D tensor
 bool inline Check5DFormat(const NodeDef& ndef) {
@@ -155,10 +143,12 @@ inline string GetMklNativeOpName(const string& name) {
   // prefixed with _Mkl instead of _MklNative.
   bool result =
       (0 == name.compare("ConjugateTranspose") ||
+       0 == name.compare("SparseTensorDenseMatMul") ||
        0 == name.compare("BatchMatMul") || 0 == name.compare("BatchMatMulV2") ||
        0 == name.compare("Einsum") || 0 == name.compare("MatMul") ||
        0 == name.compare("Transpose") || 0 == name.compare("QuantizeV2") ||
-       0 == name.compare("Dequantize") || 0 == name.rfind("Quantized", 0));
+       0 == name.compare("Dequantize") || 0 == name.compare("Softmax") ||
+       0 == name.rfind("Quantized", 0));
 
   if (result) {
     return string(kMklOpPrefix) + name;
@@ -183,18 +173,6 @@ inline string GetMklEagerOpName(const string& name) {
   return string(kMklEagerOpPrefix) + name;
 }
 
-static inline bool IsBF16SupportedByOneDNNOnThisCPU() {
-  return port::TestCPUFeature(port::CPUFeature::AVX512F);
-}
-
-static inline void BF16UnsupportedWarning() {
-  static absl::once_flag cpu_bfloat16_warn_once_flag;
-  absl::call_once(cpu_bfloat16_warn_once_flag, [] {
-    LOG(ERROR) << "oneDNN BFloat16 support are only on platforms with AVX512. "
-                  "Falling back to default implementation if present.";
-  });
-}
-
 // Check whether opname with type T is registered as MKL operator
 // that will go through name change or layout change pass.
 //
@@ -207,8 +185,8 @@ static inline bool IsMklOp(const string& op_name, DataType T,
   string label = is_native_op ? kMklNameChangeOpLabelPattern
                               : kMklLayoutDependentOpLabelPattern;
   string registered_kernels_key = op_name + label + std::to_string(T);
-  thread_local static auto* registered_kernels_map =
-      new absl::flat_hash_map<string, bool>();
+  thread_local static auto registered_kernels_map =
+      std::make_unique<absl::flat_hash_map<string, bool>>();
   auto kernel_element = registered_kernels_map->find(registered_kernels_key);
   bool kernel_registered = false;
 
@@ -238,15 +216,11 @@ static inline bool IsMklOp(const string& op_name, DataType T,
                                  T == DT_DOUBLE || T == DT_FLOAT)
                               : T == DT_FLOAT;
       if (!kernel_registered) {
-        if (T == DT_BFLOAT16) {
-          if (IsBF16SupportedByOneDNNOnThisCPU()) {
-            kernel_registered = true;
-          } else {
-            // Restrict bfloat16 ops to platforms with at least AVX512 support,
-            // fall back to Eigen implementation otherwise.
-            BF16UnsupportedWarning();
-            kernel_registered = false;
-          }
+        if ((T == DT_BFLOAT16 || T == DT_HALF) &&
+            IsDataTypeSupportedByOneDNNOnThisCPU(T)) {
+          kernel_registered = true;
+        } else {
+          DataTypeUnsupportedWarning(T);
         }
       }
     }
@@ -259,8 +233,8 @@ static inline bool IsMklOp(const string& op_name, DataType T,
   return kernel_registered;
 }
 
-// TODO(mdfaijul): QuantizedConv2D is registered with input: QUINT8
-// filter:QINT8 for mkldnn integration. First a dummy kernel is created
+// TODO(intel-tf): QuantizedConv2D is registered with input: QUINT8
+// filter:QINT8 for oneDNN integration. First a dummy kernel is created
 // and then it is replaced by an actual kernel.
 static inline bool IsMklQuantizedOp(const string& op_name, DataType Tinput,
                                     DataType Tfilter) {
@@ -299,6 +273,7 @@ static inline bool IsMklElementWiseOp(const string& op_name, DataType T) {
                  0 == op_name.compare(GetMklOpName("Sub")) ||
                  0 == op_name.compare(GetMklOpName("Mul")) ||
                  0 == op_name.compare(GetMklOpName("Maximum")) ||
+                 0 == op_name.compare(GetMklOpName("Sigmoid")) ||
                  0 == op_name.compare(GetMklOpName("SquaredDifference")));
 
   return result;

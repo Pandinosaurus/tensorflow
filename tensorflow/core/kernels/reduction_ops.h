@@ -18,7 +18,7 @@ limitations under the License.
 
 // Functor definitions for Reduction ops, must be compilable by nvcc.
 
-#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
+#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/tensor_types.h"
 
@@ -87,7 +87,7 @@ struct ReduceEigenImpl<Device, OUT_T, IN_T, ReductionAxes,
   void operator()(const Device& d, OUT_T out, IN_T in,
                   const ReductionAxes& reduction_axes,
                   const functor::MeanReducer<Scalar>& reducer) {
-    static_assert(std::is_same<Scalar, typename OUT_T::Scalar>::value, "");
+    static_assert(std::is_same_v<Scalar, typename OUT_T::Scalar>, "");
     Eigen::internal::SumReducer<Scalar> sum_reducer;
     out.device(d) = in.reduce(reduction_axes, sum_reducer) /
                     static_cast<Scalar>(in.size() / out.size());
@@ -95,7 +95,7 @@ struct ReduceEigenImpl<Device, OUT_T, IN_T, ReductionAxes,
 };
 
 // Specialization for which we do the reduction in IntermediateType to
-// avoid integer overflow.
+// avoid integer overflow and fix bfloat16 accuracy in some models.
 #define CASTING_SPECIALIZATION(ScalarType, IntermediateType)                  \
   template <typename Device, typename OUT_T, typename IN_T,                   \
             typename ReductionAxes>                                           \
@@ -114,12 +114,13 @@ struct ReduceEigenImpl<Device, OUT_T, IN_T, ReductionAxes,
     }                                                                         \
   }
 
-CASTING_SPECIALIZATION(uint8, uint64);
-CASTING_SPECIALIZATION(uint16, uint64);
-CASTING_SPECIALIZATION(uint32, uint64);
-CASTING_SPECIALIZATION(int8, int64_t);
-CASTING_SPECIALIZATION(int16, int64_t);
-CASTING_SPECIALIZATION(int32, int64_t);
+CASTING_SPECIALIZATION(uint8_t, uint64_t);
+CASTING_SPECIALIZATION(uint16_t, uint64_t);
+CASTING_SPECIALIZATION(uint32_t, uint64_t);
+CASTING_SPECIALIZATION(int8_t, int64_t);
+CASTING_SPECIALIZATION(int16_t, int64_t);
+CASTING_SPECIALIZATION(int32_t, int64_t);
+CASTING_SPECIALIZATION(bfloat16, float);
 #undef CASTING_SPECIALIZATION
 
 // TODO(rmlarsen): Refactor this such that taking the sqrt can be optional
@@ -131,7 +132,7 @@ struct ReduceEigenImpl<Device, OUT_T, IN_T, ReductionAxes,
   void operator()(const Device& d, OUT_T out, IN_T in,
                   const ReductionAxes& reduction_axes,
                   const functor::EuclideanNormReducer<Scalar>& reducer) {
-    static_assert(std::is_same<Scalar, typename OUT_T::Scalar>::value, "");
+    static_assert(std::is_same_v<Scalar, typename OUT_T::Scalar>, "");
     Eigen::internal::SumReducer<Scalar> sum_reducer;
     out.device(d) =
         (in * in.conjugate()).reduce(reduction_axes, sum_reducer).sqrt();
@@ -145,7 +146,7 @@ struct ReduceEigenImpl<Device, OUT_T, IN_T, ReductionAxes,
   void operator()(const Device& d, OUT_T out, IN_T in,
                   const ReductionAxes& reduction_axes,
                   const functor::EuclideanNormReducer<bfloat16>& reducer) {
-    static_assert(std::is_same<bfloat16, typename OUT_T::Scalar>::value, "");
+    static_assert(std::is_same_v<bfloat16, typename OUT_T::Scalar>, "");
     Eigen::internal::SumReducer<float> sum_reducer;
     auto in_as_float = in.template cast<float>();
     out.device(d) = (in_as_float * in_as_float.conjugate())
@@ -175,6 +176,7 @@ struct Identity {
     }                                                   \
   };
 FIX_MEAN_IDENTITY(Eigen::half)
+FIX_MEAN_IDENTITY(Eigen::bfloat16)
 FIX_MEAN_IDENTITY(float)
 FIX_MEAN_IDENTITY(double)
 #undef FIX_MEAN_IDENTITY

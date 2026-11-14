@@ -19,6 +19,7 @@ limitations under the License.
 #include <string>
 
 #include "absl/algorithm/container.h"
+#include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
 #include "absl/types/optional.h"
 #include "tensorflow/compiler/jit/defs.h"
@@ -28,10 +29,9 @@ limitations under the License.
 #include "tensorflow/compiler/tf2xla/const_analysis.h"
 #include "tensorflow/compiler/tf2xla/resource_operation_table.h"
 #include "tensorflow/compiler/tf2xla/xla_op_registry.h"
-#include "tensorflow/compiler/xla/service/graphcycles/graphcycles.h"
-#include "tensorflow/compiler/xla/statusor.h"
-#include "tensorflow/compiler/xla/union_find.h"
-#include "tensorflow/compiler/xla/util.h"
+#include "xla/service/graphcycles/graphcycles.h"
+#include "xla/union_find.h"
+#include "xla/util.h"
 #include "tensorflow/core/common_runtime/function.h"
 #include "tensorflow/core/common_runtime/graph_constructor.h"
 #include "tensorflow/core/framework/attr_value.pb.h"
@@ -135,6 +135,16 @@ class RecursiveCompilabilityChecker {
 
     // Whether to allow the compilation of CollectiveReduceV2Op.
     bool allow_collective_reduce_v2 = true;
+
+    // Whether to allow the compilation of WhereOp.
+    bool allow_where_op = true;
+
+    // Whether to allow the compilation of UniqueOp. Compilation of the UniqueOp
+    // generates output with bounded dynamic shape that may cause failures with
+    // auto clustering.
+    // TODO(b/209813421): Enable tf.unique during
+    // autoclustering once all failures are rfixed.
+    bool allow_unique_op = true;
 
     // Whether ops that are marked as outside compiled are always considered
     // compilable.
@@ -252,7 +262,7 @@ class RecursiveCompilabilityChecker {
   }
 
   bool HasXLAKernel(const Node& node,
-                    string* uncompilable_reason = nullptr) const;
+                    std::string* uncompilable_reason = nullptr) const;
 
   static void MaybeMarkUncompilableNode(
       const absl::string_view reason,
@@ -275,11 +285,10 @@ RecursiveCompilabilityChecker::OperationFilter CreateOperationFilter(
 // `fbody` is owned by `flr`.
 // `constant_arg_indices` and `resource_arg_indices` should be empty vector.
 // They are sorted in ascending order on this function's return.
-Status GetBodyAndConstantsAndResources(FunctionLibraryRuntime* flr,
-                                       const NameAttrList& function,
-                                       const FunctionBody** fbody,
-                                       std::vector<int>* constant_arg_indices,
-                                       std::vector<int>* resource_arg_indices);
+absl::Status GetBodyAndConstantsAndResources(
+    FunctionLibraryRuntime* flr, const NameAttrList& function,
+    const FunctionBody** fbody, std::vector<int>* constant_arg_indices,
+    std::vector<int>* resource_arg_indices);
 
 // Given a NodeDef `node_def` returns true iff `node_def` has kXlaCompileAttr
 // set.
@@ -322,6 +331,9 @@ tensorflow::MemoryTypeVector GetOutputMemoryTypes(
 
 // Check whether graph can trigger XLA compilation.
 bool CanTriggerXlaCompilation(const GraphDef& graph);
+
+// Returns true iff the node can trigger XLA compilation.
+bool NodeCanTriggerXlaCompilation(const NodeDef& node);
 
 }  // namespace tensorflow
 

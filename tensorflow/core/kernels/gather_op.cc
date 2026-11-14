@@ -15,11 +15,17 @@ limitations under the License.
 
 // See docs in ../ops/array_ops.cc.
 
+#include <limits>
+
+#include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
 #include "tensorflow/core/framework/bounds_check.h"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/register_types.h"
 #include "tensorflow/core/framework/tensor.h"
 #include "tensorflow/core/framework/tensor_types.h"
+#include "tensorflow/core/framework/types.h"
+#include "tensorflow/core/framework/types.pb.h"
 #include "tensorflow/core/framework/variant.h"
 #include "tensorflow/core/framework/variant_encode_decode.h"
 #include "tensorflow/core/kernels/gather_functor.h"
@@ -56,7 +62,7 @@ class GatherOp : public OpKernel {
     const Tensor& indices = c->input(1);
     OP_REQUIRES(
         c, TensorShapeUtils::IsVectorOrHigher(params.shape()),
-        errors::InvalidArgument("params must be at least 1 dimensional"));
+        absl::InvalidArgumentError("params must be at least 1 dimensional"));
 
     // GatherV2 added an axis argument. For backwards compatibility with Gather,
     // fall back to axis 0 if the op does not have an axis input.
@@ -66,23 +72,29 @@ class GatherOp : public OpKernel {
       axis_is_set = true;
       const Tensor& axis_tensor = c->input(2);
       OP_REQUIRES(c, TensorShapeUtils::IsScalar(axis_tensor.shape()),
-                  errors::InvalidArgument("axis must be scalar"));
+                  absl::InvalidArgumentError("axis must be scalar"));
 
       if (axis_tensor.dtype() == DT_INT32) {
-        axis = axis_tensor.scalar<int32>()();
+        axis = axis_tensor.scalar<int32_t>()();
       } else if (axis_tensor.dtype() == DT_INT64) {
         axis = axis_tensor.scalar<int64_t>()();
       } else {
         OP_REQUIRES(c, false,
-                    errors::InvalidArgument("axis must be int32 or int64."));
+                    absl::InvalidArgumentError("axis must be int32 or int64."));
       }
     }
+    // special case to avoid checkfail when axis =
+    // std::numeric_limits<int64_t>::max().
+    OP_REQUIRES(
+        c, axis < std::numeric_limits<int64_t>::max(),
+        absl::InvalidArgumentError(
+            "axis must be less than std::numeric_limits<int64_t>::max()"));
 
     int64_t min_params_dim = axis < 0 ? -axis : axis + 1;
-    OP_REQUIRES(
-        c, params.dims() >= min_params_dim,
-        errors::InvalidArgument("Shape must be at least rank ", min_params_dim,
-                                " but is rank ", params.dims()));
+    OP_REQUIRES(c, params.dims() >= min_params_dim,
+                absl::InvalidArgumentError(
+                    absl::StrCat("Shape must be at least rank ", min_params_dim,
+                                 " but is rank ", params.dims())));
 
     if (axis < 0) {
       axis = params.dims() + axis;
@@ -93,9 +105,9 @@ class GatherOp : public OpKernel {
     if (batch_dims != 0) {
       OP_REQUIRES(c,
                   batch_dims >= -indices.dims() && batch_dims <= indices.dims(),
-                  errors::InvalidArgument("Expected batch_dims in the range [",
-                                          -indices.dims(), ", ", indices.dims(),
-                                          "], but got ", batch_dims));
+                  absl::InvalidArgumentError(absl::StrCat(
+                      "Expected batch_dims in the range [", -indices.dims(),
+                      ", ", indices.dims(), "], but got ", batch_dims)));
 
       if (batch_dims < 0) {
         batch_dims = indices.dims() + batch_dims;
@@ -103,33 +115,35 @@ class GatherOp : public OpKernel {
 
       if (!axis_is_set) axis = batch_dims;
 
-      OP_REQUIRES(c, batch_dims < params.dims(),
-                  errors::InvalidArgument("batch_dims (", batch_dims,
-                                          ") must be less than rank(params) (",
-                                          params.dims(), ")."));
+      OP_REQUIRES(
+          c, batch_dims < params.dims(),
+          absl::InvalidArgumentError(absl::StrCat(
+              "batch_dims (", batch_dims, ") must be less than rank(params) (",
+              params.dims(), ").")));
 
-      OP_REQUIRES(c, axis >= batch_dims,
-                  errors::InvalidArgument("batch_dims (", batch_dims,
-                                          ") must be less than or equal to ",
-                                          "axis (", axis, ")."));
+      OP_REQUIRES(
+          c, axis >= batch_dims,
+          absl::InvalidArgumentError(absl::StrCat(
+              "batch_dims (", batch_dims, ") must be less than or equal to ",
+              "axis (", axis, ").")));
       for (int i = 0; i < batch_dims; ++i) {
         OP_REQUIRES(c, params.dim_size(i) == indices.dim_size(i),
-                    errors::InvalidArgument(
+                    absl::InvalidArgumentError(absl::StrCat(
                         "params.shape[", i, "]: ", params.dim_size(i),
                         " should be equal to indices.shape[", i,
-                        "]: ", indices.dim_size(i)));
+                        "]: ", indices.dim_size(i))));
       }
     }
 
     // Check that we have enough index space
     int64_t gather_dim_size = params.dim_size(axis);
     const int64_t N = indices.NumElements();
-    OP_REQUIRES(
-        c, gather_dim_size <= std::numeric_limits<Index>::max(),
-        errors::InvalidArgument("params.shape[", axis, "] too large for ",
-                                DataTypeString(DataTypeToEnum<Index>::v()),
-                                " indexing: ", gather_dim_size, " > ",
-                                std::numeric_limits<Index>::max()));
+    OP_REQUIRES(c, gather_dim_size <= std::numeric_limits<Index>::max(),
+                absl::InvalidArgumentError(
+                    absl::StrCat("params.shape[", axis, "] too large for ",
+                                 DataTypeString(DataTypeToEnum<Index>::v()),
+                                 " indexing: ", gather_dim_size, " > ",
+                                 std::numeric_limits<Index>::max())));
 
     // The result shape is params.shape[:axis] + indices.shape[batch_dims:] +
     // params.shape[axis + 1:].
@@ -139,18 +153,18 @@ class GatherOp : public OpKernel {
     int64_t inner_size = 1;
 
     for (int i = 0; i < batch_dims; ++i) {
-      result_shape.AddDim(params.dim_size(i));
+      OP_REQUIRES_OK(c, result_shape.AddDimWithStatus(params.dim_size(i)));
       batch_size *= params.dim_size(i);
     }
     for (int i = batch_dims; i < axis; ++i) {
-      result_shape.AddDim(params.dim_size(i));
+      OP_REQUIRES_OK(c, result_shape.AddDimWithStatus(params.dim_size(i)));
       outer_size *= params.dim_size(i);
     }
     for (int i = batch_dims; i < indices.dims(); ++i) {
-      result_shape.AddDim(indices.dim_size(i));
+      OP_REQUIRES_OK(c, result_shape.AddDimWithStatus(indices.dim_size(i)));
     }
     for (int i = axis + 1; i < params.dims(); ++i) {
-      result_shape.AddDim(params.dim_size(i));
+      OP_REQUIRES_OK(c, result_shape.AddDimWithStatus(params.dim_size(i)));
       inner_size *= params.dim_size(i);
     }
 
@@ -179,15 +193,15 @@ class GatherOp : public OpKernel {
     }
     OP_REQUIRES(
         c, bad_i < 0,
-        errors::InvalidArgument(
+        absl::InvalidArgumentError(absl::StrCat(
             "indices", SliceDebugString(indices.shape(), bad_i), " = ",
-            indices_flat(bad_i), " is not in [0, ", gather_dim_size, ")"));
+            indices_flat(bad_i), " is not in [0, ", gather_dim_size, ")")));
   }
 
  private:
   // The number of batch dimensions, as passed in the batch_dims attribute.
   // It must be less than or equal to rank(indices).
-  int32 batch_dims_ = 0;
+  int32_t batch_dims_ = 0;
 };
 
 #define REGISTER_GATHER_FULL(dev, type, index_type)                    \
@@ -203,34 +217,38 @@ class GatherOp : public OpKernel {
                               .HostMemory("axis"),                     \
                           GatherOp<dev##Device, type, index_type>)
 
-#define REGISTER_GATHER_ALL_INDICES(dev, type) \
-  REGISTER_GATHER_FULL(dev, type, int32);      \
-  REGISTER_GATHER_FULL(dev, type, int64_t)
-
-#define REGISTER_GATHER_CPU(type) REGISTER_GATHER_ALL_INDICES(CPU, type)
+#define REGISTER_GATHER_CPU(type)         \
+  REGISTER_GATHER_FULL(CPU, type, int16); \
+  REGISTER_GATHER_FULL(CPU, type, int32); \
+  REGISTER_GATHER_FULL(CPU, type, int64_t)
 
 // Registration of the CPU implementations.
 TF_CALL_ALL_TYPES(REGISTER_GATHER_CPU);
 TF_CALL_QUANTIZED_TYPES(REGISTER_GATHER_CPU);
 TF_CALL_quint16(REGISTER_GATHER_CPU);
 TF_CALL_qint16(REGISTER_GATHER_CPU);
+TF_CALL_float8_e5m2(REGISTER_GATHER_CPU);
+TF_CALL_float8_e4m3fn(REGISTER_GATHER_CPU);
 
 #undef REGISTER_GATHER_CPU
 
 #if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 
 // Registration of the GPU implementations.
-#define REGISTER_GATHER_GPU(type) REGISTER_GATHER_ALL_INDICES(GPU, type)
+#define REGISTER_GATHER_GPU(type)         \
+  REGISTER_GATHER_FULL(GPU, type, int32); \
+  REGISTER_GATHER_FULL(GPU, type, int64_t)
 
 TF_CALL_int32(REGISTER_GATHER_GPU);
 TF_CALL_int64(REGISTER_GATHER_GPU);
 TF_CALL_GPU_ALL_TYPES(REGISTER_GATHER_GPU);
+TF_CALL_float8_e5m2(REGISTER_GATHER_GPU);
+TF_CALL_float8_e4m3fn(REGISTER_GATHER_GPU);
 
 #undef REGISTER_GATHER_GPU
 
 #endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 
-#undef REGISTER_GATHER_ALL_INDICES
 #undef REGISTER_GATHER_FULL
 
 }  // namespace tensorflow

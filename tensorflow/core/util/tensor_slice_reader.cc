@@ -15,6 +15,8 @@ limitations under the License.
 
 #include "tensorflow/core/util/tensor_slice_reader.h"
 
+#include <climits>
+#include <memory>
 #include <utility>
 #include <vector>
 
@@ -36,7 +38,7 @@ namespace tensorflow {
 
 namespace checkpoint {
 
-TensorSliceReader::Table::~Table() {}
+TensorSliceReader::Table::~Table() = default;
 
 namespace {
 class TensorSliceReaderTable : public TensorSliceReader::Table {
@@ -50,11 +52,11 @@ class TensorSliceReaderTable : public TensorSliceReader::Table {
     delete file_;
   }
 
-  bool Get(const string& key, string* value) override {
+  bool Get(const std::string& key, std::string* value) override {
     std::unique_ptr<table::Iterator> iter(table_->NewIterator());
     iter->Seek(key);
     if (iter->Valid() && iter->key() == key) {
-      StringPiece v = iter->value();
+      absl::string_view v = iter->value();
       value->assign(v.data(), v.size());
       return true;
     } else {
@@ -68,14 +70,14 @@ class TensorSliceReaderTable : public TensorSliceReader::Table {
 };
 }  // namespace
 
-Status OpenTableTensorSliceReader(const string& fname,
-                                  TensorSliceReader::Table** result) {
+absl::Status OpenTableTensorSliceReader(const std::string& fname,
+                                        TensorSliceReader::Table** result) {
   *result = nullptr;
   Env* env = Env::Default();
   std::unique_ptr<RandomAccessFile> f;
-  Status s = env->NewRandomAccessFile(fname, &f);
+  absl::Status s = env->NewRandomAccessFile(fname, &f);
   if (s.ok()) {
-    uint64 file_size;
+    uint64_t file_size;
     s = env->GetFileSize(fname, &file_size);
     if (s.ok()) {
       table::Options options;
@@ -83,13 +85,13 @@ Status OpenTableTensorSliceReader(const string& fname,
       s = table::Table::Open(options, f.get(), file_size, &table);
       if (s.ok()) {
         *result = new TensorSliceReaderTable(f.release(), table);
-        return Status::OK();
+        return absl::OkStatus();
       } else {
         s = errors::CreateWithUpdatedMessage(
-            s, strings::StrCat(s.error_message(),
-                               ": perhaps your file is in a different "
-                               "file format and you need to use a "
-                               "different restore operator?"));
+            s, absl::StrCat(s.message(),
+                            ": perhaps your file is in a different "
+                            "file format and you need to use a "
+                            "different restore operator?"));
       }
     }
   }
@@ -97,33 +99,33 @@ Status OpenTableTensorSliceReader(const string& fname,
   return s;
 }
 
-TensorSliceReader::TensorSliceReader(const string& filepattern)
+TensorSliceReader::TensorSliceReader(const std::string& filepattern)
     : TensorSliceReader(filepattern, OpenTableTensorSliceReader,
                         kLoadAllShards) {}
 
-TensorSliceReader::TensorSliceReader(const string& filepattern,
+TensorSliceReader::TensorSliceReader(const std::string& filepattern,
                                      OpenTableFunction open_function)
     : TensorSliceReader(filepattern, std::move(open_function), kLoadAllShards) {
 }
 
-TensorSliceReader::TensorSliceReader(const string& filepattern,
+TensorSliceReader::TensorSliceReader(const std::string& filepattern,
                                      OpenTableFunction open_function,
                                      int preferred_shard)
     : filepattern_(filepattern), open_function_(std::move(open_function)) {
   VLOG(1) << "TensorSliceReader for " << filepattern;
-  Status s = Env::Default()->GetMatchingPaths(filepattern, &fnames_);
+  absl::Status s = Env::Default()->GetMatchingPaths(filepattern, &fnames_);
   if (!s.ok()) {
-    status_ = errors::InvalidArgument(
-        "Unsuccessful TensorSliceReader constructor: "
-        "Failed to get matching files on ",
-        filepattern, ": ", s.ToString());
+    status_ = absl::InvalidArgumentError(
+        absl::StrCat("Unsuccessful TensorSliceReader constructor: "
+                     "Failed to get matching files on ",
+                     filepattern, ": ", s.ToString()));
     return;
   }
   if (fnames_.empty()) {
-    status_ = errors::NotFound(
-        "Unsuccessful TensorSliceReader constructor: "
-        "Failed to find any matching files for ",
-        filepattern);
+    status_ = absl::NotFoundError(
+        absl::StrCat("Unsuccessful TensorSliceReader constructor: "
+                     "Failed to find any matching files for ",
+                     filepattern));
     return;
   }
   sss_.resize(fnames_.size());
@@ -144,24 +146,24 @@ void TensorSliceReader::LoadShard(int shard) const {
   if (sss_[shard] || !status_.ok()) {
     return;  // Already loaded, or invalid.
   }
-  string value;
+  std::string value;
   SavedTensorSlices sts;
-  const string fname = fnames_[shard];
+  const std::string fname = fnames_[shard];
   VLOG(1) << "Reading meta data from file " << fname << "...";
   Table* table;
-  Status s = open_function_(fname, &table);
+  absl::Status s = open_function_(fname, &table);
   if (!s.ok()) {
-    status_ = errors::DataLoss("Unable to open table file ", fname, ": ",
-                               s.ToString());
+    status_ = absl::DataLossError(
+        absl::StrCat("Unable to open table file ", fname, ": ", s.ToString()));
     return;
   }
   sss_[shard].reset(table);
   if (!(table->Get(kSavedTensorSlicesKey, &value) &&
         ParseProtoUnlimited(&sts, value))) {
-    status_ = errors::Internal(
+    status_ = absl::InternalError(absl::StrCat(
         "Failed to find the saved tensor slices at the beginning of the "
         "checkpoint file: ",
-        fname);
+        fname));
     return;
   }
   status_ = CheckVersions(sts.meta().versions(), TF_CHECKPOINT_VERSION,
@@ -192,8 +194,8 @@ void TensorSliceReader::LoadAllShards() const {
 }
 
 const TensorSliceSet* TensorSliceReader::FindTensorSlice(
-    const string& name, const TensorSlice& slice,
-    std::vector<std::pair<TensorSlice, string>>* details) const {
+    const std::string& name, const TensorSlice& slice,
+    std::vector<std::pair<TensorSlice, std::string>>* details) const {
   const TensorSliceSet* tss = gtl::FindPtrOrNull(tensors_, name);
   if (tss && !tss->QueryMeta(slice, details)) {
     return nullptr;
@@ -208,7 +210,7 @@ TensorSliceReader::~TensorSliceReader() {
   tensors_.clear();
 }
 
-bool TensorSliceReader::HasTensor(const string& name, TensorShape* shape,
+bool TensorSliceReader::HasTensor(const std::string& name, TensorShape* shape,
                                   DataType* type) const {
   mutex_lock l(mu_);
   const TensorSliceSet* tss = gtl::FindPtrOrNull(tensors_, name);
@@ -231,8 +233,9 @@ bool TensorSliceReader::HasTensor(const string& name, TensorShape* shape,
   }
 }
 
-Status TensorSliceReader::GetTensor(
-    const string& name, std::unique_ptr<tensorflow::Tensor>* out_tensor) const {
+absl::Status TensorSliceReader::GetTensor(
+    const std::string& name,
+    std::unique_ptr<tensorflow::Tensor>* out_tensor) const {
   DataType type;
   TensorShape shape;
   TensorSlice slice;
@@ -240,12 +243,13 @@ Status TensorSliceReader::GetTensor(
     mutex_lock l(mu_);
     const TensorSliceSet* tss = gtl::FindPtrOrNull(tensors_, name);
     if (tss == nullptr) {
-      return errors::NotFound(name, " not found in checkpoint file");
+      return absl::NotFoundError(
+          absl::StrCat(name, " not found in checkpoint file"));
     }
 
     if (tss->Slices().size() > 1) {
       // TODO(sherrym): Support multi-slice checkpoints.
-      return errors::Unimplemented("Sliced checkpoints are not supported");
+      return absl::UnimplementedError("Sliced checkpoints are not supported");
     }
 
     type = tss->type();
@@ -253,9 +257,24 @@ Status TensorSliceReader::GetTensor(
     slice = tss->Slices().begin()->second.slice;
   }
 
+  // A single stored slice must cover the full tensor.
+  TensorShape slice_shape;
+  TF_RETURN_IF_ERROR(slice.SliceTensorShape(shape, &slice_shape));
+  if (!slice_shape.IsSameSize(shape)) {
+    return absl::UnimplementedError("Sliced checkpoints are not supported");
+  }
+
   std::unique_ptr<tensorflow::Tensor> t(new tensorflow::Tensor);
-  Status s = tensorflow::Tensor::BuildTensor(type, shape, t.get());
-  if (!s.ok()) return s;
+  TF_RETURN_IF_ERROR(tensorflow::Tensor::BuildTensor(type, shape, t.get()));
+
+  for (const auto d : shape.dim_sizes()) {
+    if (d == LLONG_MAX) {
+      return absl::InvalidArgumentError(
+          absl::StrCat("Unable to read dimensions of size ", LLONG_MAX,
+                       ". Got shape: ", shape.DebugString()));
+    }
+  }
+
   bool success = false;
 
 #define READER_COPY(dt)                                                  \
@@ -273,17 +292,19 @@ Status TensorSliceReader::GetTensor(
     READER_COPY(DT_INT8);
     READER_COPY(DT_INT64);
     READER_COPY(DT_STRING);
+    READER_COPY(DT_BOOL);
     default:
-      return errors::Unimplemented("Data type not supported");
+      return absl::UnimplementedError("Data type not supported");
   }
 #undef READER_COPY
 
   if (!success) {
-    return errors::NotFound(name, " not found in checkpoint file");
+    return absl::NotFoundError(
+        absl::StrCat(name, " not found in checkpoint file"));
   }
   std::swap(*out_tensor, t);
 
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 TensorSliceReader::VarToShapeMap TensorSliceReader::GetVariableToShapeMap()
@@ -308,8 +329,8 @@ TensorSliceReader::GetVariableToDataTypeMap() const {
   return name_to_dtype;
 }
 
-const string TensorSliceReader::DebugString() const {
-  string shape_str;
+const std::string TensorSliceReader::DebugString() const {
+  std::string shape_str;
   if (status().ok()) {
     for (const auto& e : Tensors()) {
       strings::StrAppend(&shape_str, e.first, " (",
@@ -318,9 +339,9 @@ const string TensorSliceReader::DebugString() const {
       // Indicates if a tensor has more than 1 slice (i.e., it's partitioned).
       const int num_slices = e.second->Slices().size();
       if (num_slices > 1) {
-        strings::StrAppend(&shape_str, ", ", num_slices, " slices");
+        absl::StrAppend(&shape_str, ", ", num_slices, " slices");
       }
-      strings::StrAppend(&shape_str, "\n");
+      absl::StrAppend(&shape_str, "\n");
     }
   }
   return shape_str;

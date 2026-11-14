@@ -14,10 +14,6 @@
 # ==============================================================================
 """Handles control flow statements: while, for, if."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import gast
 
 from tensorflow.python.autograph.core import converter
@@ -41,7 +37,7 @@ class _Function(object):
 
 
 class ControlFlowTransformer(converter.Base):
-  """Transforms control flow structures like loops an conditionals."""
+  """Transforms control flow structures like loops and conditionals."""
 
   def visit_Lambda(self, node):
     with self.state[_Function] as fn:

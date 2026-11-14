@@ -29,10 +29,6 @@ def _initializer(shape, dtype=dtypes.float32, partition_info=None):
   Returns:
     A `Tensor` of type `dtype` and `shape`.
 """
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import math
 
 import numpy as np
@@ -41,6 +37,7 @@ from tensorflow.python.framework import constant_op
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import tensor_shape
 from tensorflow.python.ops import array_ops
+from tensorflow.python.ops import array_ops_stack
 from tensorflow.python.ops import gen_linalg_ops
 from tensorflow.python.ops import linalg_ops_impl
 from tensorflow.python.ops import math_ops
@@ -52,7 +49,7 @@ from tensorflow.python.util.deprecation import deprecated_args
 from tensorflow.python.util.tf_export import tf_export
 
 
-class Initializer(object):
+class Initializer:
   """Initializer base class: all initializers inherit from this class."""
 
   def __call__(self, shape, dtype=None, partition_info=None):
@@ -111,7 +108,7 @@ class Zeros(Initializer):
   `tf.zeros_initializer.__init__()`. However, you can specify the `dtype` in
   `__call__()` in both cases.
 
-  #### Structural Mapping to Native TF2
+  #### Structural Mapping to TF2
 
   Before:
 
@@ -306,7 +303,7 @@ class Constant(Initializer):
   The `verify_shape` argument is not supported in TF2. Using
   `tf.constant_initializer` is equivalent to setting `verify_shape` to `False`.
 
-  #### Structural Mapping to Native TF2
+  #### Structural Mapping to TF2
 
   Before:
 
@@ -416,13 +413,13 @@ class RandomUniform(Initializer):
   Although it is a legacy compat.v1 API, this symbol is compatible with eager
   execution and `tf.function`.
 
-  To switch to native TF2, switch to using either
+  To switch to TF2, switch to using either
   `tf.initializers.RandomUniform` or `tf.keras.initializers.RandomUniform`
   (neither from `compat.v1`) and
   pass the dtype when calling the initializer. Keep in mind that
   the default minval, maxval and the behavior of fixed seeds have changed.
 
-  #### Structural Mapping to Native TF2
+  #### Structural Mapping to TF2
 
   Before:
 
@@ -506,13 +503,13 @@ class RandomNormal(Initializer):
   Although it is a legacy `compat.v1` API, this symbol is compatible with eager
   execution and `tf.function`.
 
-  To switch to native TF2, switch to using either
+  To switch to TF2, switch to using either
   `tf.initializers.RandomNormal` or `tf.keras.initializers.RandomNormal`
   (neither from `compat.v1`) and
   pass the dtype when calling the initializer. Keep in mind that
   the default stddev and the behavior of fixed seeds have changed.
 
-  #### Structural Mapping to Native TF2
+  #### Structural Mapping to TF2
 
   Before:
 
@@ -599,16 +596,16 @@ class TruncatedNormal(Initializer):
       calling the initializer. Only floating point types are supported.
 
   @compatibility(TF2)
-  Although it is a legacy compat.v1 API, this symbol is compatible with eager
+  Although it is a legacy `compat.v1` API, this symbol is compatible with eager
   execution and `tf.function`.
 
-  To switch to native TF2, switch to using either
+  To switch to TF2, switch to using either
   `tf.initializers.truncated_normal` or `tf.keras.initializers.TruncatedNormal`
   (neither from `compat.v1`) and
   pass the dtype when calling the initializer. Keep in mind that
   the default stddev and the behavior of fixed seeds have changed.
 
-  #### Structural Mapping to Native TF2
+  #### Structural Mapping to TF2
 
   Before:
 
@@ -747,6 +744,59 @@ class UniformUnitScaling(Initializer):
 class VarianceScaling(Initializer):
   """Initializer capable of adapting its scale to the shape of weights tensors.
 
+  @compatibility(TF2)
+  Although it is a legacy `compat.v1` API, this symbol is compatible with eager
+  execution and `tf.function`.
+
+  To switch to TF2 APIs, move to using either
+  `tf.initializers.variance_scaling` or `tf.keras.initializers.VarianceScaling`
+  (neither from `compat.v1`) and
+  pass the dtype when calling the initializer.
+
+  #### Structural Mapping to TF2
+
+  Before:
+
+  ```python
+  initializer = tf.compat.v1.variance_scaling_initializer(
+    scale=scale,
+    mode=mode,
+    distribution=distribution
+    seed=seed,
+    dtype=dtype)
+
+  weight_one = tf.Variable(initializer(shape_one))
+  weight_two = tf.Variable(initializer(shape_two))
+  ```
+
+  After:
+
+  ```python
+  initializer = tf.keras.initializers.VarianceScaling(
+    scale=scale,
+    mode=mode,
+    distribution=distribution
+    seed=seed)
+
+  weight_one = tf.Variable(initializer(shape_one, dtype=dtype))
+  weight_two = tf.Variable(initializer(shape_two, dtype=dtype))
+  ```
+
+  #### How to Map Arguments
+
+  | TF1 Arg Name       | TF2 Arg Name    | Note                       |
+  | :----------------- | :-------------- | :------------------------- |
+  | `scale`            | `scale`        | No change to defaults       |
+  | `mode`             | `mode`         | No change to defaults       |
+  | `distribution`     | `distribution` | No change to defaults.      |
+  :                    :                : 'normal' maps to 'truncated_normal' :
+  | `seed`             | `seed`         | |
+  | `dtype`        |  `dtype` | The TF2 api only takes it  |
+  :                :          : as a `__call__` arg, not a constructor arg. :
+  | `partition_info`     | - |  (`__call__` arg in TF1) Not supported       |
+
+  @end_compatibility
+
   With `distribution="truncated_normal" or "untruncated_normal"`,
   samples are drawn from a truncated/untruncated normal
   distribution with a mean of zero and a standard deviation (after truncation,
@@ -792,6 +842,11 @@ class VarianceScaling(Initializer):
     if mode not in {"fan_in", "fan_out", "fan_avg"}:
       raise ValueError("Argument `mode` should be one of ('fan_in', 'fan_out', "
                        f"'fan_avg'). Received: {mode}")
+    if not isinstance(distribution, str):
+      raise ValueError(
+          "Argument `distribution` must be a string. Received: "
+          f"{distribution} (of type {type(distribution).__name__})"
+      )
     distribution = distribution.lower()
     if distribution not in {
         "normal", "uniform", "truncated_normal", "untruncated_normal"
@@ -1104,8 +1159,8 @@ class ConvolutionOrthogonal2D(ConvolutionOrthogonal):
       A k1 * k2 tensor.
     """
 
-    return array_ops.stack([array_ops.stack([x[i, j] for j in range(k2)])
-                            for i in range(k1)])
+    return array_ops_stack.stack([
+        array_ops_stack.stack([x[i, j] for j in range(k2)]) for i in range(k1)])
 
   def _block_orth(self, p1, p2):
     """Construct a 2 x 2 kernel.
@@ -1250,7 +1305,7 @@ class ConvolutionOrthogonal1D(ConvolutionOrthogonal):
       A tensor with the same dimension.
     """
 
-    return array_ops.stack([x[i] for i in range(k)])
+    return array_ops_stack.stack([x[i] for i in range(k)])
 
   def _block_orth(self, projection_matrix):
     """Construct a kernel.
@@ -1386,8 +1441,8 @@ class ConvolutionOrthogonal3D(ConvolutionOrthogonal):
       A k1 * k2 * k3 tensor.
     """
 
-    return array_ops.stack([array_ops.stack(
-        [array_ops.stack([x[i, j, k] for k in range(k3)])
+    return array_ops_stack.stack([array_ops_stack.stack(
+        [array_ops_stack.stack([x[i, j, k] for k in range(k3)])
          for j in range(k2)]) for i in range(k1)])
 
   def _block_orth(self, p1, p2, p3):

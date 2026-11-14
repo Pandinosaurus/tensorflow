@@ -1,3 +1,18 @@
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
 # Description:
 # Java Native Interface (JNI) library for testing the TensorFlow Lite Java API.
 
@@ -8,8 +23,19 @@ load(
 )
 
 package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:LICENSE"],
     default_visibility = ["//visibility:public"],
     licenses = ["notice"],
+)
+
+filegroup(
+    name = "native_srcs",
+    srcs = [
+        "interpreter_test_jni.cc",
+        "nnapi_delegate_test_jni.cc",
+        "supported_features_jni.cc",
+        "test_init_jni.cc",
+    ],
 )
 
 cc_library_with_tflite(
@@ -19,21 +45,38 @@ cc_library_with_tflite(
         "interpreter_test_jni.cc",
         "nnapi_delegate_test_jni.cc",
         "supported_features_jni.cc",
-        "test_init_jni.cc",
     ],
     tflite_deps = [
-        "//tensorflow/lite/core/shims:c_shims_test_util",
+        ":test_init_jni",
+        "//tensorflow/lite/delegates/nnapi/java/src/main/native",
         "//tensorflow/lite/java/src/main/native",
+        "//tensorflow/lite/java/src/main/native:jni_utils",
         "//tensorflow/lite/java/src/main/native:native_framework_only",
     ],
     deps = [
-        "//tensorflow/lite/c:common",
-        "//tensorflow/lite/delegates/nnapi/java/src/main/native",
+        "//tensorflow/lite/core/c:common",
+        "//tensorflow/lite/delegates/nnapi:nnapi_delegate",
         "//tensorflow/lite/delegates/xnnpack:xnnpack_delegate",
         "//tensorflow/lite/java/jni",
         "//tensorflow/lite/kernels:kernel_util",
         "//tensorflow/lite/nnapi:nnapi_lib",
         "//tensorflow/lite/nnapi/sl:nnapi_support_library_headers",
+    ],
+    alwayslink = 1,
+)
+
+cc_library_with_tflite(
+    name = "test_init_jni",
+    testonly = 1,
+    srcs = [
+        "test_init_jni.cc",
+    ],
+    tflite_deps = [
+        "//tensorflow/lite/java/src/main/native:jni_utils",
+        "//tensorflow/lite/c:test_util",
+    ],
+    deps = [
+        "//tensorflow/lite/java/jni",
     ],
     alwayslink = 1,
 )
@@ -47,13 +90,14 @@ cc_library_with_tflite(
         "test_init_jni.cc",
     ],
     tflite_deps = [
-        "//tensorflow/lite/core/shims:c_shims_test_util",
+        "//tensorflow/lite/c:test_util",
+        "//tensorflow/lite/delegates/nnapi/java/src/main/native",
+        "//tensorflow/lite/java/src/main/native:jni_utils",
         "//tensorflow/lite/java/src/main/native:native_stable",
         "//tensorflow/lite/java/src/main/native:native_stable_framework_only",
     ],
     deps = [
-        "//tensorflow/lite/c:common",
-        "//tensorflow/lite/delegates/nnapi/java/src/main/native",
+        "//tensorflow/lite/core/c:common",
         "//tensorflow/lite/delegates/xnnpack:xnnpack_delegate",
         "//tensorflow/lite/java/jni",
         "//tensorflow/lite/kernels:kernel_util",

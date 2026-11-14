@@ -14,18 +14,14 @@
 # ==============================================================================
 """Tests for SavedModel utils."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 from tensorflow.core.framework import types_pb2
 from tensorflow.core.protobuf import struct_pb2
 from tensorflow.python.eager import context
-from tensorflow.python.eager import function
 from tensorflow.python.framework import constant_op
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import ops
 from tensorflow.python.framework import sparse_tensor
+from tensorflow.python.framework import tensor
 from tensorflow.python.framework import test_util
 from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import control_flow_ops
@@ -48,21 +44,6 @@ class UtilsTest(test.TestCase):
     self.assertEqual("op_z", z_op_info.name)
     self.assertEqual(types_pb2.DT_INVALID, z_op_info.dtype)
     self.assertEqual(0, len(z_op_info.tensor_shape.dim))
-
-  @test_util.run_v1_only(
-      "b/120545219: `build_tensor_info` is only available in graph mode.")
-  def testBuildTensorInfoDefunOp(self):
-    @function.defun
-    def my_init_fn(x, y):
-      self.x_var = x
-      self.y_var = y
-
-    x = constant_op.constant(1, name="x")
-    y = constant_op.constant(2, name="y")
-    init_op_info = utils.build_tensor_info_from_op(my_init_fn(x, y))
-    self.assertEqual("PartitionedCall", init_op_info.name)
-    self.assertEqual(types_pb2.DT_INVALID, init_op_info.dtype)
-    self.assertEqual(0, len(init_op_info.tensor_shape.dim))
 
   @test_util.run_v1_only(
       "b/120545219: `build_tensor_info` is only available in graph mode.")
@@ -105,10 +86,9 @@ class UtilsTest(test.TestCase):
     self.assertEqual(types_pb2.DT_INT64,
                      x_tensor_info.composite_tensor.components[1].dtype)
     # Check type_spec.
-    struct_coder = nested_structure_coder.StructureCoder()
     spec_proto = struct_pb2.StructuredValue(
         type_spec_value=x_tensor_info.composite_tensor.type_spec)
-    spec = struct_coder.decode_proto(spec_proto)
+    spec = nested_structure_coder.decode_proto(spec_proto)
     self.assertEqual(spec, x._type_spec)
 
   def testBuildTensorInfoEager(self):
@@ -123,7 +103,7 @@ class UtilsTest(test.TestCase):
     expected = array_ops.placeholder(dtypes.float32, 1, name="x")
     tensor_info = utils.build_tensor_info(expected)
     actual = utils.get_tensor_from_tensor_info(tensor_info)
-    self.assertIsInstance(actual, ops.Tensor)
+    self.assertIsInstance(actual, tensor.Tensor)
     self.assertEqual(expected.name, actual.name)
 
   @test_util.run_v1_only(
@@ -155,7 +135,7 @@ class UtilsTest(test.TestCase):
       array_ops.placeholder(dtypes.float32, 1, name="other")
     actual = utils.get_tensor_from_tensor_info(tensor_info,
                                                graph=expected_graph)
-    self.assertIsInstance(actual, ops.Tensor)
+    self.assertIsInstance(actual, tensor.Tensor)
     self.assertIs(actual.graph, expected_graph)
     self.assertEqual(expected.name, actual.name)
 

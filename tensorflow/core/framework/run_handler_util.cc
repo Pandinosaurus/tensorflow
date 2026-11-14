@@ -26,7 +26,7 @@ namespace tensorflow {
 double ParamFromEnvWithDefault(const char* var_name, double default_value) {
   const char* val = std::getenv(var_name);
   double num;
-  return (val && strings::safe_strtod(val, &num)) ? num : default_value;
+  return (val && absl::SimpleAtod(val, &num)) ? num : default_value;
 }
 
 std::vector<double> ParamFromEnvWithDefault(const char* var_name,
@@ -35,12 +35,12 @@ std::vector<double> ParamFromEnvWithDefault(const char* var_name,
   if (!val) {
     return default_value;
   }
-  std::vector<string> splits = str_util::Split(val, ",");
+  std::vector<std::string> splits = str_util::Split(val, ",");
   std::vector<double> result;
   result.reserve(splits.size());
   for (auto& split : splits) {
     double num;
-    if (strings::safe_strtod(split, &num)) {
+    if (absl::SimpleAtod(split, &num)) {
       result.push_back(num);
     } else {
       LOG(ERROR) << "Wrong format for " << var_name << ". Use default value.";
@@ -56,12 +56,12 @@ std::vector<int> ParamFromEnvWithDefault(const char* var_name,
   if (!val) {
     return default_value;
   }
-  std::vector<string> splits = str_util::Split(val, ",");
+  std::vector<std::string> splits = str_util::Split(val, ",");
   std::vector<int> result;
   result.reserve(splits.size());
   for (auto& split : splits) {
     int num;
-    if (strings::safe_strto32(split, &num)) {
+    if (absl::SimpleAtoi(split, &num)) {
       result.push_back(num);
     } else {
       LOG(ERROR) << "Wrong format for " << var_name << ". Use default value.";
@@ -73,7 +73,7 @@ std::vector<int> ParamFromEnvWithDefault(const char* var_name,
 
 bool ParamFromEnvBoolWithDefault(const char* var_name, bool default_value) {
   const char* val = std::getenv(var_name);
-  return (val) ? str_util::Lowercase(val) == "true" : default_value;
+  return (val) ? absl::AsciiStrToLower(val) == "true" : default_value;
 }
 
 void ComputeInterOpSchedulingRanges(int num_active_requests, int num_threads,

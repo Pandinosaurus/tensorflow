@@ -24,11 +24,14 @@ limitations under the License.
 #include "tensorflow/core/framework/tensor_shape.h"
 #include "tensorflow/core/framework/tensor_shape.pb.h"
 #include "tensorflow/core/framework/types.h"
+#include "tensorflow/core/platform/status_matchers.h"
 #include "tensorflow/core/platform/test.h"
 #include "tensorflow/core/protobuf/device_properties.pb.h"
 
 namespace tensorflow {
 namespace grappler {
+
+using ::testing::ElementsAreArray;
 
 namespace {
 
@@ -136,7 +139,7 @@ OpContext DescribeSparseTensorDenseMatMul(const int nnz_a,
 // Returns an OpInfo for an XlaEinsum
 OpContext DescribeXlaEinsum(const std::vector<int>& dims_a,
                             const std::vector<int>& dims_b,
-                            const string& equation) {
+                            const std::string& equation) {
   OpContext op_context;
   SetCpuDevice(&op_context.op_info);
   op_context.op_info.set_op("XlaEinsum");
@@ -153,7 +156,7 @@ OpContext DescribeXlaEinsum(const std::vector<int>& dims_a,
 // Returns an OpInfo for an Einsum
 OpContext DescribeEinsum(const std::vector<int>& dims_a,
                          const std::vector<int>& dims_b,
-                         const string& equation) {
+                         const std::string& equation) {
   OpContext op_context = DescribeXlaEinsum(dims_a, dims_b, equation);
   op_context.op_info.set_op("Einsum");
   return op_context;
@@ -242,8 +245,8 @@ OpContext DescribeDepthwiseConv2dNative(int batch, int ix, int iy, int iz1,
 OpContext DescribeFusedConv2DBiasActivation(int batch, int ix, int iy, int iz1,
                                             int iz2, int kx, int ky, int ox,
                                             int oy, int oz, bool has_side_input,
-                                            const string& data_format,
-                                            const string& filter_format) {
+                                            const std::string& data_format,
+                                            const std::string& filter_format) {
   const int kVecWidth = 4;
   OpContext op_context;
   SetCpuDevice(&op_context.op_info);
@@ -300,7 +303,7 @@ OpContext DescribeFusedConv2DBiasActivation(int batch, int ix, int iy, int iz1,
 
 // DescribeUnaryOp constructs an OpContext for the given operation applied to
 // a 4-tensor with shape (size1, 1, 1, 1).
-OpContext DescribeUnaryOp(const string& op, int size1) {
+OpContext DescribeUnaryOp(const std::string& op, int size1) {
   OpContext op_context;
   SetCpuDevice(&op_context.op_info);
   op_context.op_info.set_op(op);
@@ -318,7 +321,7 @@ OpContext DescribeUnaryOp(const string& op, int size1) {
 // The choice of dimension here is arbitrary, and is used strictly to test the
 // cost model for applying elementwise operations to tensors with unequal
 // dimension values.
-OpContext DescribeBinaryOp(const string& op, int size1, int size2) {
+OpContext DescribeBinaryOp(const std::string& op, int size1, int size2) {
   OpContext op_context;
   SetCpuDevice(&op_context.op_info);
   op_context.op_info.set_op(op);
@@ -347,7 +350,7 @@ OpContext DescribeBiasAdd(int size1, int size2) {
 }
 
 int GetOutputSize(const int x, const int k, const int s,
-                  const string& padding) {
+                  const std::string& padding) {
   if (padding == "SAME") {
     return (x + s - 1) / s;
   } else {
@@ -358,8 +361,8 @@ int GetOutputSize(const int x, const int k, const int s,
 std::vector<int> GetPoolingOutputSize(const std::vector<int>& input,
                                       const std::vector<int>& ksize,
                                       const std::vector<int>& strides,
-                                      const string& data_format,
-                                      const string& padding) {
+                                      const std::string& data_format,
+                                      const std::string& padding) {
   // h, w, and c indices: default with NHWC.
   int h_index = 1;
   int w_index = 2;
@@ -425,10 +428,12 @@ void GetTensorProto(const DataType dtype, const std::vector<int64_t>& shape,
   }
 }
 
-OpContext DescribePoolingOp(const string& op_name, const std::vector<int>& x,
+OpContext DescribePoolingOp(const std::string& op_name,
+                            const std::vector<int>& x,
                             const std::vector<int>& ksize,
                             const std::vector<int>& strides,
-                            const string& data_format, const string& padding) {
+                            const std::string& data_format,
+                            const std::string& padding) {
   OpContext op_context;
   auto& op_info = op_context.op_info;
   SetCpuDevice(&op_info);
@@ -465,7 +470,7 @@ OpContext DescribePoolingOp(const string& op_name, const std::vector<int>& x,
 
 OpContext DescribeFusedBatchNorm(const bool is_training, const bool is_grad,
                                  const std::vector<int>& x,
-                                 const string& data_format) {
+                                 const std::string& data_format) {
   // First, get MaxPool op info with unit stride and unit window.
   OpContext op_context = DescribePoolingOp("MaxPool", x, {1, 1, 1, 1},
                                            {1, 1, 1, 1}, data_format, "SAME");
@@ -540,8 +545,8 @@ class OpLevelCostEstimatorTest : public ::testing::Test {
   void ValidateOpDimensionsFromInputs(const int n, const int h, const int w,
                                       const int c, const int kx, const int ky,
                                       const int sx, const int sy,
-                                      const string& data_format,
-                                      const string& padding) {
+                                      const std::string& data_format,
+                                      const std::string& padding) {
     OpContext op_context;
     int ho;
     int wo;
@@ -558,9 +563,10 @@ class OpLevelCostEstimatorTest : public ::testing::Test {
     }
 
     bool found_unknown_shapes;
-    auto dims = OpLevelCostEstimator::OpDimensionsFromInputs(
-        op_context.op_info.inputs(0).shape(), op_context.op_info,
-        &found_unknown_shapes);
+    TF_ASSERT_OK_AND_ASSIGN(
+        auto dims, OpLevelCostEstimator::OpDimensionsFromInputs(
+                       op_context.op_info.inputs(0).shape(), op_context.op_info,
+                       &found_unknown_shapes));
     Padding padding_enum;
     if (padding == "VALID") {
       padding_enum = Padding::VALID;
@@ -579,6 +585,38 @@ class OpLevelCostEstimatorTest : public ::testing::Test {
     EXPECT_EQ(wo, dims.oy);
     EXPECT_EQ(c, dims.oz);
     EXPECT_EQ(padding_enum, dims.padding);
+  }
+
+  absl::StatusOr<OpLevelCostEstimator::ConvolutionDimensions>
+  CallOpDimensionsFromInputs(const int n, const int h, const int w, const int c,
+                             const int kx, const int ky, const int sx,
+                             const int sy, const std::string& data_format,
+                             const std::string& padding) {
+    OpContext op_context;
+
+    const std::vector<int> x = {n, h, w, c};
+    const std::vector<int> ksize = {1, kx, ky, 1};
+    std::vector<int> strides;
+    if (data_format == "NHWC") {
+      strides = {1, sy, sx, 1};
+    } else {
+      strides = {1, 1, sy, sx};
+    }
+
+    auto& op_info = op_context.op_info;
+    SetCpuDevice(&op_info);
+    op_info.set_op("MaxPool");
+
+    DescribeTensor4D(x[0], x[1], x[2], x[3], op_info.add_inputs());
+    auto* attr = op_info.mutable_attr();
+    SetAttrValue(data_format, &(*attr)["data_format"]);
+    SetAttrValue(padding, &(*attr)["padding"]);
+    SetAttrValue(strides, &(*attr)["strides"]);
+    SetAttrValue(ksize, &(*attr)["ksize"]);
+    bool found_unknown_shapes;
+    return OpLevelCostEstimator::OpDimensionsFromInputs(
+        op_context.op_info.inputs(0).shape(), op_context.op_info,
+        &found_unknown_shapes);
   }
 
   OpLevelCostEstimator estimator_;
@@ -630,7 +668,7 @@ class OpLevelBatchMatMulCostEstimatorTest
 TEST_F(OpLevelCostEstimatorTest, TestPersistentOpCosts) {
   OpContext op_context;
   SetCpuDevice(&op_context.op_info);
-  std::unordered_set<string> persistent_ops = {
+  std::unordered_set<std::string> persistent_ops = {
       "Const",       "Variable",       "VariableV2", "AutoReloadVariable",
       "VarHandleOp", "ReadVariableOp",
   };
@@ -740,9 +778,9 @@ TEST_F(OpLevelCostEstimatorTest, TestStridedSliceCosts) {
 }
 
 TEST_F(OpLevelCostEstimatorTest, TestScatterOps) {
-  std::vector<string> scatter_ops = {"ScatterAdd",   "ScatterDiv", "ScatterMax",
-                                     "ScatterMin",   "ScatterMul", "ScatterSub",
-                                     "ScatterUpdate"};
+  std::vector<std::string> scatter_ops = {
+      "ScatterAdd", "ScatterDiv", "ScatterMax",   "ScatterMin",
+      "ScatterMul", "ScatterSub", "ScatterUpdate"};
   for (const auto& op : scatter_ops) {
     // Test updates.shape = indices.shape + ref.shape[1:]
     {
@@ -1054,7 +1092,7 @@ TEST_F(OpLevelCostEstimatorTest, UnaryOpExecutionTime) {
   std::vector<std::pair<std::string, int>> unary_ops = {
       {"All", 1},      {"ArgMax", 1}, {"Cast", 1},  {"Max", 1},
       {"Min", 1},      {"Prod", 1},   {"Relu", 1},  {"Relu6", 1},
-      {"Softmax", 43}, {"Sum", 1},    {"TopKV2", 1}};
+      {"Softmax", 40}, {"Sum", 1},    {"TopKV2", 1}};
 
   const int kTensorSize = 1000;
   for (auto unary_op : unary_ops) {
@@ -1370,8 +1408,8 @@ TEST_F(OpLevelCostEstimatorTest, GetTensorShapeProtoFromTensorProto) {
 }
 
 TEST_F(OpLevelCostEstimatorTest, OpDimensionsFromInputs) {
-  std::vector<string> paddings = {"VALID", "SAME"};
-  std::vector<string> formats = {"NHWC", "NCHW"};
+  std::vector<std::string> paddings = {"VALID", "SAME"};
+  std::vector<std::string> formats = {"NHWC", "NCHW"};
   for (const auto& p : paddings) {
     for (const auto& f : formats) {
       // n, h, w, c, kx, ky, sx, sy, data_format, padding.
@@ -1383,10 +1421,30 @@ TEST_F(OpLevelCostEstimatorTest, OpDimensionsFromInputs) {
   }
 }
 
+TEST_F(OpLevelCostEstimatorTest, OpDimensionsFromInputsError) {
+  std::vector<std::string> paddings = {"VALID", "SAME"};
+  std::vector<std::string> formats = {"NHWC", "NCHW"};
+  for (const auto& p : paddings) {
+    for (const auto& f : formats) {
+      // n, h, w, c, kx, ky, sx, sy, data_format, padding.
+      ASSERT_THAT(
+          CallOpDimensionsFromInputs(10, 14, 14, 3840, 3, 3, 0, 2, f, p),
+          absl_testing::StatusIs(
+              error::INVALID_ARGUMENT,
+              "Stride must be > 0 for Height and Width, but got (2, 0)"));
+      ASSERT_THAT(
+          CallOpDimensionsFromInputs(10, 14, 14, 3840, 3, 3, 2, 0, f, p),
+          absl_testing::StatusIs(
+              error::INVALID_ARGUMENT,
+              "Stride must be > 0 for Height and Width, but got (0, 2)"));
+    }
+  }
+}
+
 TEST_F(OpLevelCostEstimatorTest, PredictMaxPool) {
   auto predict_max_pool = [this](const int n, const int in, const int c,
                                  const int k, const int s,
-                                 const string& padding) -> Costs {
+                                 const std::string& padding) -> Costs {
     OpContext op_context = DescribePoolingOp(
         "MaxPool", {n, in, in, c}, {1, k, k, 1}, {1, s, s, 1}, "NHWC", padding);
     return estimator_.PredictCosts(op_context);
@@ -1429,7 +1487,7 @@ TEST_F(OpLevelCostEstimatorTest, PredictMaxPool) {
 TEST_F(OpLevelCostEstimatorTest, PredictMaxPoolGrad) {
   auto predict_max_pool_grad = [this](const int n, const int in, const int c,
                                       const int k, const int s,
-                                      const string& padding) -> Costs {
+                                      const std::string& padding) -> Costs {
     OpContext op_context =
         DescribePoolingOp("MaxPoolGrad", {n, in, in, c}, {1, k, k, 1},
                           {1, s, s, 1}, "NHWC", padding);
@@ -1473,7 +1531,7 @@ TEST_F(OpLevelCostEstimatorTest, PredictMaxPoolGrad) {
 TEST_F(OpLevelCostEstimatorTest, PredictAvgPool) {
   auto predict_avg_pool = [this](const int n, const int in, const int c,
                                  const int k, const int s,
-                                 const string& padding) -> Costs {
+                                 const std::string& padding) -> Costs {
     OpContext op_context = DescribePoolingOp(
         "AvgPool", {n, in, in, c}, {1, k, k, 1}, {1, s, s, 1}, "NHWC", padding);
     return estimator_.PredictCosts(op_context);
@@ -1516,7 +1574,7 @@ TEST_F(OpLevelCostEstimatorTest, PredictAvgPool) {
 TEST_F(OpLevelCostEstimatorTest, PredictAvgPoolGrad) {
   auto predict_avg_pool_grad = [this](const int n, const int in, const int c,
                                       const int k, const int s,
-                                      const string& padding) -> Costs {
+                                      const std::string& padding) -> Costs {
     OpContext op_context =
         DescribePoolingOp("AvgPoolGrad", {n, in, in, c}, {1, k, k, 1},
                           {1, s, s, 1}, "NHWC", padding);
@@ -1639,32 +1697,32 @@ TEST_F(OpLevelCostEstimatorTest, PredictFusedBatchNormGrad) {
   }
 }
 
-TEST_F(OpLevelCostEstimatorTest, MaybeGetMinimumShape) {
+TEST_F(OpLevelCostEstimatorTest, MaybeGetMinimumShapeTest) {
   {
     TensorShapeProto x;
     x.set_unknown_rank(true);
     bool unknown_shapes = false;
-    TensorShapeProto y = MaybeGetMinimumShape(x, 4, &unknown_shapes);
+    std::vector<int64_t> y = MaybeGetMinimumShape(x, 4, &unknown_shapes);
     EXPECT_TRUE(unknown_shapes);
-    ExpectTensorShape({1, 1, 1, 1}, y);
+    EXPECT_THAT(y, ElementsAreArray({1, 1, 1, 1}));
   }
 
   {
     TensorShapeProto x;
     x.set_unknown_rank(false);
     bool unknown_shapes = false;
-    TensorShapeProto y = MaybeGetMinimumShape(x, 1, &unknown_shapes);
+    std::vector<int64_t> y = MaybeGetMinimumShape(x, 1, &unknown_shapes);
     EXPECT_FALSE(unknown_shapes);
-    ExpectTensorShape({1}, y);
+    EXPECT_THAT(y, ElementsAreArray({1}));
   }
 
   {
     TensorShapeProto x;
     x.set_unknown_rank(false);
     bool unknown_shapes = false;
-    TensorShapeProto y = MaybeGetMinimumShape(x, 2, &unknown_shapes);
+    std::vector<int64_t> y = MaybeGetMinimumShape(x, 2, &unknown_shapes);
     EXPECT_FALSE(unknown_shapes);
-    ExpectTensorShape({1, 1}, y);
+    EXPECT_THAT(y, ElementsAreArray({1, 1}));
   }
 
   {
@@ -1673,15 +1731,14 @@ TEST_F(OpLevelCostEstimatorTest, MaybeGetMinimumShape) {
     x.add_dim()->set_size(10);
     x.add_dim()->set_size(20);
     bool unknown_shapes = false;
-    TensorShapeProto y = MaybeGetMinimumShape(x, 2, &unknown_shapes);
+    std::vector<int64_t> y = MaybeGetMinimumShape(x, 2, &unknown_shapes);
     EXPECT_FALSE(unknown_shapes);
-    ExpectTensorShape({10, 20}, y);
+    EXPECT_THAT(y, ElementsAreArray({10, 20}));
 
     unknown_shapes = false;
-    TensorShapeProto z = MaybeGetMinimumShape(x, 4, &unknown_shapes);
+    std::vector<int64_t> z = MaybeGetMinimumShape(x, 4, &unknown_shapes);
     EXPECT_TRUE(unknown_shapes);
-    EXPECT_EQ(4, z.dim_size());
-    ExpectTensorShape({10, 20, 1, 1}, z);
+    EXPECT_THAT(z, ElementsAreArray({10, 20, 1, 1}));
   }
 
   {
@@ -1692,9 +1749,9 @@ TEST_F(OpLevelCostEstimatorTest, MaybeGetMinimumShape) {
     x.add_dim()->set_size(-1);
     x.add_dim()->set_size(20);
     bool unknown_shapes = false;
-    TensorShapeProto y = MaybeGetMinimumShape(x, 4, &unknown_shapes);
+    std::vector<int64_t> y = MaybeGetMinimumShape(x, 4, &unknown_shapes);
     EXPECT_TRUE(unknown_shapes);
-    ExpectTensorShape({10, 20, 1, 20}, y);
+    EXPECT_THAT(y, ElementsAreArray({10, 20, 1, 20}));
   }
 
   {
@@ -1705,9 +1762,9 @@ TEST_F(OpLevelCostEstimatorTest, MaybeGetMinimumShape) {
     x.add_dim()->set_size(30);
     x.add_dim()->set_size(20);
     bool unknown_shapes = false;
-    TensorShapeProto y = MaybeGetMinimumShape(x, 2, &unknown_shapes);
+    std::vector<int64_t> y = MaybeGetMinimumShape(x, 2, &unknown_shapes);
     EXPECT_TRUE(unknown_shapes);
-    ExpectTensorShape({10, 20}, y);
+    EXPECT_THAT(y, ElementsAreArray({10, 20}));
   }
 }
 
@@ -2308,6 +2365,43 @@ TEST_F(OpLevelCostEstimatorTest, CropAndResizeExecutionTime) {
     EXPECT_FALSE(cost.inaccurate);
     EXPECT_EQ(cost.num_ops_with_unknown_shapes, 0);
   }
+}
+
+TEST_F(OpLevelCostEstimatorTest, GetDeviceInfo_EmptyCpu) {
+  OpLevelCostEstimator estimator;
+  DeviceProperties device_properties;
+  device_properties.set_type("CPU");
+  const auto device_info = estimator.GetDeviceInfo(device_properties);
+  EXPECT_GT(device_info.gigaops, 0);
+  EXPECT_GT(device_info.gb_per_sec, 0);
+}
+
+TEST_F(OpLevelCostEstimatorTest, InvalidStridesOrKernelSize) {
+  // Test with invalid strides (e.g. size 3 instead of 4).
+  // PredictCosts() should log a warning but handle it gracefully using the
+  // fallback {1, 1, 1, 1}.
+  auto op_context = DescribePoolingOp("MaxPool", {16, 19, 19, 48}, {1, 1, 1, 1},
+                                      {1, 1, 1, 1}, "NHWC", "SAME");
+  auto* attr = op_context.op_info.mutable_attr();
+  std::vector<int> invalid_strides = {1, 1, 1};
+  SetAttrValue(invalid_strides, &(*attr)["strides"]);
+
+  auto cost = PredictCosts(op_context);
+  EXPECT_GT(cost.execution_time.count(), 0);
+  EXPECT_FALSE(cost.inaccurate);
+
+  // Test with invalid ksize (e.g. size 3 instead of 4).
+  // PredictCosts() should log a warning but handle it gracefully using the
+  // fallback {1, 1, 1, 1}.
+  auto op_context_invalid_ksize = DescribePoolingOp(
+      "MaxPool", {16, 19, 19, 48}, {1, 1, 1, 1}, {1, 1, 1, 1}, "NHWC", "SAME");
+  auto* attr_invalid_ksize = op_context_invalid_ksize.op_info.mutable_attr();
+  std::vector<int> invalid_ksize = {1, 1, 1};
+  SetAttrValue(invalid_ksize, &(*attr_invalid_ksize)["ksize"]);
+
+  auto cost_invalid_ksize = PredictCosts(op_context_invalid_ksize);
+  EXPECT_GT(cost_invalid_ksize.execution_time.count(), 0);
+  EXPECT_FALSE(cost_invalid_ksize.inaccurate);
 }
 
 }  // end namespace grappler

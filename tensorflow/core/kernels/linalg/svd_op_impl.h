@@ -22,8 +22,9 @@ limitations under the License.
 // individual kernels. A separate file is used for each instantiated kernel to
 // improve compilation times.
 #include <algorithm>
+#include <limits>
 
-#include "third_party/eigen3/Eigen/SVD"
+#include "Eigen/SVD"  // from @eigen_archive
 #include "tensorflow/core/framework/kernel_def_builder.h"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/tensor_shape.h"
@@ -72,14 +73,16 @@ class SvdOp : public LinearAlgebraOp<Scalar> {
     double m = static_cast<double>(input_matrix_shapes[0].dim_size(0));
     double n = static_cast<double>(input_matrix_shapes[0].dim_size(1));
     double cost = 12 * std::max(m, n) * std::min(m, n) * std::min(m, n);
-    return cost >= static_cast<double>(kint64max) ? kint64max
-                                                  : static_cast<int64_t>(cost);
+    return cost >= static_cast<double>(std::numeric_limits<int64_t>::max())
+               ? std::numeric_limits<int64_t>::max()
+               : static_cast<int64_t>(cost);
   }
 
   using Matrix = typename Base::Matrix;
   using MatrixMaps = typename Base::MatrixMaps;
   using ConstMatrixMap = typename Base::ConstMatrixMap;
   using ConstMatrixMaps = typename Base::ConstMatrixMaps;
+  using RealScalar = typename Base::RealScalar;
 
   void ComputeMatrix(OpKernelContext* context, const ConstMatrixMaps& inputs,
                      MatrixMaps* outputs) final {
@@ -108,10 +111,15 @@ class SvdOp : public LinearAlgebraOp<Scalar> {
     Eigen::BDCSVD<Matrix> svd(inputs[0], options);
     if (svd.info() != Eigen::Success) {
       LOG(ERROR) << "Eigen::BDCSVD failed with error code " << svd.info();
-      outputs->at(0).fill(std::numeric_limits<Scalar>::quiet_NaN());
+      const RealScalar real_nan = std::numeric_limits<RealScalar>::quiet_NaN();
+      Scalar nan_val(real_nan);
+      if constexpr (Eigen::NumTraits<Scalar>::IsComplex) {
+        nan_val = Scalar(real_nan, real_nan);
+      }
+      outputs->at(0).fill(nan_val);
       if (compute_uv_) {
-        outputs->at(1).fill(std::numeric_limits<Scalar>::quiet_NaN());
-        outputs->at(2).fill(std::numeric_limits<Scalar>::quiet_NaN());
+        outputs->at(1).fill(nan_val);
+        outputs->at(2).fill(nan_val);
       }
     } else {
       outputs->at(0) = svd.singularValues().template cast<Scalar>();
@@ -126,7 +134,8 @@ class SvdOp : public LinearAlgebraOp<Scalar> {
   bool compute_uv_;
   bool full_matrices_;
 
-  TF_DISALLOW_COPY_AND_ASSIGN(SvdOp);
+  SvdOp(const SvdOp&) = delete;
+  void operator=(const SvdOp&) = delete;
 };
 
 }  // namespace tensorflow

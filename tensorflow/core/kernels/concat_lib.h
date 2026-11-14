@@ -16,13 +16,34 @@ limitations under the License.
 #ifndef TENSORFLOW_CORE_KERNELS_CONCAT_LIB_H_
 #define TENSORFLOW_CORE_KERNELS_CONCAT_LIB_H_
 
+#include <cstddef>
 #include <vector>
 
-#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
+#include "absl/types/span.h"
+#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
 #include "tensorflow/core/framework/device_base.h"
 #include "tensorflow/core/framework/register_types.h"
 
 namespace tensorflow {
+
+// Lightweight descriptor for a flattened [dim0, dim1] input slice in CPU
+// concatenation and packing kernels, avoiding per-input heap-allocated
+// `Eigen::TensorMap` (`ConstMatrix`) wrappers. `data` points to `dim0 * dim1`
+// contiguous elements (or may be null when `dim1 == 0`).
+template <typename T>
+struct ConcatSlice {
+  const T* data;
+  ptrdiff_t dim1;
+};
+
+// Concatenates `slices` along dimension 1 into `output_data`.
+// Each slice in `slices` has outer dimension `dim0` and inner width
+// `slice.dim1`, where the sum of `slice.dim1` across `slices` equals
+// `row_size`. `output_data` must point to at least `dim0 * row_size` elements.
+template <typename T>
+void ConcatCPUSlices(DeviceBase* device,
+                     absl::Span<const ConcatSlice<T>> slices, int64_t dim0,
+                     int64_t row_size, T* output_data);
 
 // Functors to concatenate tensors. These always take a rank-2 tensor (i.e a
 // matrix) and concatenate it along the axis 1 ("putting them next to each
@@ -40,7 +61,8 @@ namespace tensorflow {
 // {1, Numelements} and reshape the result matrix to have shape
 // {1, N * NumElements} before passing it to this functor.
 
-// Assumes all inputs are nonempty
+// Assumes all elements of inputs are nonempty.
+// Assumes output is nonempty.
 template <typename T>
 void ConcatCPU(
     DeviceBase* d,
@@ -65,7 +87,6 @@ void ConcatGPU(
       Tensor* output, typename TTypes<T, 2>::Tensor* output_flat);
 
 TF_CALL_INTEGRAL_TYPES(REGISTER);  // int32 Needed for TensorLists.
-TF_CALL_bfloat16(REGISTER);
 TF_CALL_GPU_ALL_TYPES(REGISTER);
 #undef REGISTER
 #endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM

@@ -12,18 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-
 """Operations for clipping (gradient, weight) tensors to min/max values."""
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
 
-import six
+import numpy as np
 
 from tensorflow.python.framework import constant_op
 from tensorflow.python.framework import dtypes
+from tensorflow.python.framework import indexed_slices
 from tensorflow.python.framework import ops
 from tensorflow.python.ops import array_ops
+from tensorflow.python.ops import array_ops_stack
 from tensorflow.python.ops import gen_array_ops
 from tensorflow.python.ops import gen_nn_ops
 from tensorflow.python.ops import math_ops
@@ -106,7 +104,8 @@ def clip_by_value(t, clip_value_min, clip_value_max,
   with ops.name_scope(name, "clip_by_value",
                       [t, clip_value_min, clip_value_max]) as name:
     values = ops.convert_to_tensor(
-        t.values if isinstance(t, ops.IndexedSlices) else t, name="t")
+        t.values if isinstance(t, indexed_slices.IndexedSlices) else t,
+        name="t")
 
     # Go through list of tensors, for each value in each tensor clip
     t_min = math_ops.minimum(values, clip_value_max)
@@ -117,17 +116,13 @@ def clip_by_value(t, clip_value_min, clip_value_max,
     t_max = math_ops.maximum(t_min, clip_value_min, name=name)
     values.shape.assert_is_compatible_with(t_max.shape)
 
-    if isinstance(t, ops.IndexedSlices):
-      t_max = ops.IndexedSlices(t_max, t.indices, t.dense_shape)
+    if isinstance(t, indexed_slices.IndexedSlices):
+      t_max = indexed_slices.IndexedSlices(t_max, t.indices, t.dense_shape)
 
   return t_max
-  # TODO(scottzhu): switch to use new implementation in 2 weeks.
-  # return gen_math_ops.clip_by_value(
-  #     t, clip_value_min, clip_value_max, name=name)
 
 
-# TODO(scottzhu): switch to use new implementation in 2 weeks.
-# @ops.RegisterGradient("ClipByValue")
+@ops.RegisterGradient("ClipByValue")
 def _clip_by_value_grad(op, grad):
   """Returns grad of clip_by_value."""
   x = op.inputs[0]
@@ -141,15 +136,14 @@ def _clip_by_value_grad(op, grad):
   zeros = array_ops.zeros(gradshape, gdtype)
   xymask = math_ops.less(x, y)
   xzmask = math_ops.greater(x, z)
-  rx, ry = gen_array_ops.broadcast_gradient_args(sx, sy)
-  rx, rz = gen_array_ops.broadcast_gradient_args(sx, sz)
+  _, ry = gen_array_ops.broadcast_gradient_args(sx, sy)
+  _, rz = gen_array_ops.broadcast_gradient_args(sx, sz)
   xgrad = array_ops.where(math_ops.logical_or(xymask, xzmask), zeros, grad)
   ygrad = array_ops.where(xymask, grad, zeros)
   zgrad = array_ops.where(xzmask, grad, zeros)
-  gx = array_ops.reshape(math_ops.reduce_sum(xgrad, rx), sx)
   gy = array_ops.reshape(math_ops.reduce_sum(ygrad, ry), sy)
   gz = array_ops.reshape(math_ops.reduce_sum(zgrad, rz), sz)
-  return (gx, gy, gz)
+  return xgrad, gy, gz
 
 
 @tf_export("clip_by_norm")
@@ -199,10 +193,10 @@ def clip_by_norm(t, clip_norm, axes=None, name=None):
   Args:
     t: A `Tensor` or `IndexedSlices`.  This must be a floating point type.
     clip_norm: A 0-D (scalar) `Tensor` > 0. A maximum clipping value, also
-      floating point
-    axes: A 1-D (vector) `Tensor` of type int32 containing the dimensions
-      to use for computing the L2-norm. If `None` (the default), uses all
-      dimensions.
+      floating point.
+      Note: If a negative clip_norm is provided, it will be treated as zero.
+    axes: A 1-D (vector) `Tensor` of type int32 containing the dimensions to use
+      for computing the L2-norm. If `None` (the default), uses all dimensions.
     name: A name for the operation (optional).
 
   Returns:
@@ -210,12 +204,35 @@ def clip_by_norm(t, clip_norm, axes=None, name=None):
 
   Raises:
     ValueError: If the clip_norm tensor is not a 0-D scalar tensor.
-    TypeError: If dtype of the input is not a floating point or
-      complex type.
+    TypeError: If the input is not a floating point type, in graph mode.
+    InvalidArgumentError: If the input is not a floating point type, in eager
+      mode.
   """
   with ops.name_scope(name, "clip_by_norm", [t, clip_norm]) as name:
     values = ops.convert_to_tensor(
-        t.values if isinstance(t, ops.IndexedSlices) else t, name="t")
+        t.values if isinstance(t, indexed_slices.IndexedSlices) else t,
+        name="t")
+
+    is_clip_norm_inf = None
+    if np.isscalar(clip_norm):
+      if np.isposinf(clip_norm) or clip_norm > values.dtype.real_dtype.max:
+        if isinstance(t, indexed_slices.IndexedSlices):
+          return indexed_slices.IndexedSlices(
+              array_ops.identity(values, name=name), t.indices, t.dense_shape
+          )
+        return array_ops.identity(values, name=name)
+      if clip_norm < 0:
+        clip_norm = 0
+      clip_norm_safe = clip_norm
+    else:
+      clip_norm = math_ops.maximum(clip_norm, 0)
+      is_clip_norm_inf = math_ops.is_inf(
+          math_ops.cast(clip_norm, values.dtype.real_dtype)
+      )
+      clip_norm = math_ops.cast(clip_norm, dtype=values.dtype)
+      clip_norm_safe = array_ops.where(
+          is_clip_norm_inf, array_ops.ones_like(clip_norm), clip_norm
+      )
 
     # Calculate L2-norm, clip elements by ratio of clip_norm to L2-norm
     l2sum = math_ops.reduce_sum(values * values, axes, keepdims=True)
@@ -223,15 +240,17 @@ def clip_by_norm(t, clip_norm, axes=None, name=None):
     # Two-tap tf.where trick to bypass NaN gradients
     l2sum_safe = array_ops.where(pred, l2sum, array_ops.ones_like(l2sum))
     l2norm = array_ops.where(pred, math_ops.sqrt(l2sum_safe), l2sum)
-    intermediate = values * clip_norm
+    intermediate = values * clip_norm_safe
     # Assert that the shape is compatible with the initial shape,
     # to prevent unintentional broadcasting.
     values.shape.assert_is_compatible_with(intermediate.shape)
-    values_clip = array_ops.identity(
-        intermediate / math_ops.maximum(l2norm, clip_norm), name=name)
+    values_clip = intermediate / math_ops.maximum(l2norm, clip_norm_safe)
+    if is_clip_norm_inf is not None:
+      values_clip = array_ops.where(is_clip_norm_inf, values, values_clip)
+    values_clip = array_ops.identity(values_clip, name=name)
 
-    if isinstance(t, ops.IndexedSlices):
-      return ops.IndexedSlices(values_clip, t.indices, t.dense_shape)
+    if isinstance(t, indexed_slices.IndexedSlices):
+      return indexed_slices.IndexedSlices(values_clip, t.indices, t.dense_shape)
 
     return values_clip
 
@@ -261,24 +280,25 @@ def global_norm(t_list, name=None):
     TypeError: If `t_list` is not a sequence.
   """
   if (not isinstance(t_list, collections_abc.Sequence) or
-      isinstance(t_list, six.string_types)):
+      isinstance(t_list, str)):
     raise TypeError("`t_list` should be a sequence of tensors. Received "
                     f"{type(t_list)}.")
   t_list = list(t_list)
   with ops.name_scope(name, "global_norm", t_list) as name:
     values = [
         ops.convert_to_tensor(
-            t.values if isinstance(t, ops.IndexedSlices) else t,
-            name="t_%d" % i)
-        if t is not None else t
-        for i, t in enumerate(t_list)]
+            t.values if isinstance(t, indexed_slices.IndexedSlices) else t,
+            name="t_%d" % i) if t is not None else t
+        for i, t in enumerate(t_list)
+    ]
     half_squared_norms = []
     for v in values:
       if v is not None:
         with ops.colocate_with(v):
           half_squared_norms.append(gen_nn_ops.l2_loss(v))
 
-    half_squared_norm = math_ops.reduce_sum(array_ops.stack(half_squared_norms))
+    half_squared_norm = math_ops.reduce_sum(
+        array_ops_stack.stack(half_squared_norms))
 
     norm = math_ops.sqrt(
         half_squared_norm *
@@ -340,29 +360,53 @@ def clip_by_global_norm(t_list, clip_norm, use_norm=None, name=None):
       ([pdf](http://proceedings.mlr.press/v28/pascanu13.pdf))
   """
   if (not isinstance(t_list, collections_abc.Sequence) or
-      isinstance(t_list, six.string_types)):
+      isinstance(t_list, str)):
     raise TypeError("`t_list` should be a sequence of tensors. Received "
                     f"{type(t_list)}.")
   t_list = list(t_list)
   if use_norm is None:
     use_norm = global_norm(t_list, name)
+  else:
+    use_norm = ops.convert_to_tensor(use_norm, name="use_norm")
 
   with ops.name_scope(name, "clip_by_global_norm",
                       t_list + [clip_norm]) as name:
     # Calculate L2-norm, clip elements by ratio of clip_norm to L2-norm
-    scale_for_finite = clip_norm * math_ops.minimum(
-        1.0 / use_norm,
-        constant_op.constant(1.0, dtype=use_norm.dtype) / clip_norm)
-    # If use_norm is any finite number, this is a no-op. For inf/-inf/NaN,
-    # this will make scale NaN.
-    scale = scale_for_finite + (use_norm - use_norm)
+    if np.isscalar(clip_norm):
+      if np.isposinf(clip_norm) or clip_norm > use_norm.dtype.real_dtype.max:
+        scale = constant_op.constant(1.0, dtype=use_norm.dtype)
+      else:
+        scale = clip_norm * math_ops.minimum(
+            1.0 / use_norm,
+            constant_op.constant(1.0, dtype=use_norm.dtype) / clip_norm,
+        )
+      # If use_norm is any finite number, this is a no-op. For inf/-inf/NaN,
+      # this will make scale NaN.
+      scale = scale + (use_norm - use_norm)
+    else:
+      clip_norm = math_ops.cast(clip_norm, dtype=use_norm.dtype)
+      is_clip_norm_inf = math_ops.is_inf(clip_norm)
+      clip_norm_safe = array_ops.where(
+          is_clip_norm_inf, array_ops.ones_like(clip_norm), clip_norm
+      )
+      scale_for_finite = clip_norm_safe * math_ops.minimum(
+          1.0 / use_norm,
+          constant_op.constant(1.0, dtype=use_norm.dtype) / clip_norm_safe,
+      )
+      # If use_norm is any finite number, this is a no-op. For inf/-inf/NaN,
+      # this will make scale NaN.
+      scale = scale_for_finite + (use_norm - use_norm)
+      scale_if_inf = constant_op.constant(1.0, dtype=use_norm.dtype) + (
+          use_norm - use_norm
+      )
+      scale = array_ops.where(is_clip_norm_inf, scale_if_inf, scale)
 
     values = [
         ops.convert_to_tensor(
-            t.values if isinstance(t, ops.IndexedSlices) else t,
-            name="t_%d" % i)
-        if t is not None else t
-        for i, t in enumerate(t_list)]
+            t.values if isinstance(t, indexed_slices.IndexedSlices) else t,
+            name="t_%d" % i) if t is not None else t
+        for i, t in enumerate(t_list)
+    ]
 
     values_clipped = []
     for i, v in enumerate(values):
@@ -371,13 +415,16 @@ def clip_by_global_norm(t_list, clip_norm, use_norm=None, name=None):
       else:
         with ops.colocate_with(v):
           values_clipped.append(
-              array_ops.identity(v * scale, name="%s_%d" % (name, i)))
+              array_ops.identity(
+                  v * math_ops.cast(scale, v.dtype), name="%s_%d" % (name, i)
+              )
+          )
 
     list_clipped = [
-        ops.IndexedSlices(c_v, t.indices, t.dense_shape)
-        if isinstance(t, ops.IndexedSlices)
-        else c_v
-        for (c_v, t) in zip(values_clipped, t_list)]
+        indexed_slices.IndexedSlices(c_v, t.indices, t.dense_shape)
+        if isinstance(t, indexed_slices.IndexedSlices) else c_v
+        for (c_v, t) in zip(values_clipped, t_list)
+    ]
 
   return list_clipped, use_norm
 

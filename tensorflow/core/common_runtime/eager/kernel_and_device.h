@@ -18,8 +18,13 @@ limitations under the License.
 
 // Support for eager execution of TensorFlow kernels.
 
+#include <functional>
 #include <memory>
+#include <optional>
 #include <unordered_map>
+#include <utility>
+#include <variant>
+#include <vector>
 
 // clang-format off
 // Required for IS_MOBILE_PLATFORM
@@ -53,39 +58,51 @@ static constexpr const char* const kOutputsOnOpDevice = "_OutputsOnOpDevice";
 class ProcessFunctionLibraryRuntime;
 class FunctionLibraryRuntime;
 
-struct EagerRemoteFunctionParams {
-  int64_t op_id;
-  // Set when this function is a component function.
-  absl::optional<int64_t> step_id = absl::nullopt;
+const int64_t kInvalidOpId = -1;
+
+// This struct is used for:
+// 1. Setting `op_id` and `step_id`, `is_component_function` for single-client
+// remote function scenario,
+// 2. Setting `step_id` for multi-client parallel_device scenario.
+// 3. Supplying an overriding, private `FunctionLibraryDefinition` for component
+// functions.
+struct EagerFunctionParams {
+  int64_t op_id = kInvalidOpId;
+  bool is_component_function;
+  std::optional<int64_t> step_id = std::nullopt;
+  FunctionLibraryDefinition* func_lib_def_override =
+      nullptr;  // Not owned (owned by `EagerContext`). If not null, functions
+                // called by the function will be looked up in this library.
 };
 
 class EagerKernelArgs : public FunctionArgsInterface {
  public:
-  EagerKernelArgs() {}
+  EagerKernelArgs() = default;
 
   explicit EagerKernelArgs(int count) : tensor_args_(count) {}
 
-  explicit EagerKernelArgs(gtl::InlinedVector<TensorValue, 4>&& tensor_args)
+  explicit EagerKernelArgs(absl::InlinedVector<TensorValue, 4UL>&& tensor_args)
       : tensor_args_(std::move(tensor_args)) {}
 
-  ~EagerKernelArgs() override{};
+  ~EagerKernelArgs() override = default;
 
   bool HasRemoteOrPackedInputs() const override { return false; };
   TensorValue* MutableInput(int i) { return &tensor_args_[i]; }
 
-  Status GetLocalArg(const FunctionArgIndex& index, Tensor* val) const override;
+  absl::Status GetLocalArg(const FunctionArgIndex& index,
+                           Tensor* val) const override;
 
   std::vector<Tensor> GetLocalTensors() const override;
 
-  const gtl::InlinedVector<TensorValue, 4>* GetTensorValues() const {
+  const absl::InlinedVector<TensorValue, 4UL>* GetTensorValues() const {
     return &tensor_args_;
   }
 
  protected:
-  gtl::InlinedVector<TensorValue, 4> tensor_args_;
+  absl::InlinedVector<TensorValue, 4UL> tensor_args_;
 };
 
-typedef absl::variant<Tensor, TensorShape> EagerKernelRet;
+typedef std::variant<Tensor, TensorShape> EagerKernelRet;
 
 // KernelAndDevice encapsulates the logic needed to run a computation eagerly.
 // The computation can be a single instantiated kernel (implemented by
@@ -102,8 +119,10 @@ class KernelAndDevice : public core::RefCounted {
   //
   // The provided FunctionLibraryRuntime MUST outlive all calls to
   // Run() on the returned KernelAndDevice.
-  virtual Status Init(const bool log_device_placement, const NodeDef& ndef,
-                      GraphCollector* graph_collector) = 0;
+  virtual absl::Status Init(
+      bool log_device_placement, const NodeDef& ndef,
+      GraphCollector* graph_collector,
+      const absl::optional<EagerFunctionParams>& eager_func_params) = 0;
 
   // Non-multi-device functions are run using regular CallOp and look like
   // primitive operations from KernelAndDevice perspective.
@@ -121,20 +140,20 @@ class KernelAndDevice : public core::RefCounted {
         runner_(runner) {}
 
   // Not thread safe.
-  ~KernelAndDevice() override {}
+  ~KernelAndDevice() override = default;
 
   virtual bool IsFunction() { return false; }
 
   virtual bool IsCrossProcess() { return false; }
 
   // TODO(ashankar): Handle list-valued inputs.
-  virtual Status Run(
+  virtual absl::Status Run(
       ScopedStepContainer* step_container, const EagerKernelArgs& inputs,
       std::vector<EagerKernelRet>* outputs,
       CancellationManager* cancellation_manager,
-      const absl::optional<EagerRemoteFunctionParams>& remote_func_params,
+      const absl::optional<EagerFunctionParams>& eager_func_params,
       const absl::optional<ManagedStackTrace>& stack_trace,
-      CoordinationServiceAgent* coordination_service_agent) = 0;
+      tsl::CoordinationServiceAgent* coordination_service_agent) = 0;
 
   // Execute kernel asynchronously when applicable. Different from `Run` which
   // blocks the caller thread and waits for the execution of the op/function,
@@ -148,8 +167,8 @@ class KernelAndDevice : public core::RefCounted {
       ScopedStepContainer* step_container, const EagerKernelArgs& inputs,
       std::vector<EagerKernelRet>* outputs,
       CancellationManager* cancellation_manager,
-      const absl::optional<EagerRemoteFunctionParams>& remote_func_params,
-      CoordinationServiceAgent* coordination_service_agent,
+      const absl::optional<EagerFunctionParams>& eager_func_params,
+      tsl::CoordinationServiceAgent* coordination_service_agent,
       StatusCallback done) = 0;
 
   virtual Device* InputDevice(int i) const = 0;
@@ -174,7 +193,7 @@ class KernelAndDevice : public core::RefCounted {
 
   virtual int num_inputs() const = 0;
   virtual int num_outputs() const = 0;
-  virtual const string& name() const = 0;
+  virtual const std::string& name() const = 0;
 
  protected:
   std::function<void(std::function<void()>)>* get_runner() const;
@@ -202,29 +221,31 @@ class KernelAndDeviceOp final : public KernelAndDevice {
         rendezvous_(rendezvous),
         log_memory_(log_memory) {}
 
-  ~KernelAndDeviceOp() override {}
+  ~KernelAndDeviceOp() override = default;
 
-  Status Init(const bool log_device_placement, const NodeDef& ndef,
-              GraphCollector* graph_collector) override;
+  absl::Status Init(
+      bool log_device_placement, const NodeDef& ndef,
+      GraphCollector* graph_collector,
+      const absl::optional<EagerFunctionParams>& eager_func_params) override;
 
-  Status Run(
+  absl::Status Run(
       ScopedStepContainer* step_container, const EagerKernelArgs& inputs,
       std::vector<EagerKernelRet>* outputs,
       CancellationManager* cancellation_manager,
-      const absl::optional<EagerRemoteFunctionParams>& remote_func_params,
+      const absl::optional<EagerFunctionParams>& eager_func_params,
       const absl::optional<ManagedStackTrace>& stack_trace,
-      CoordinationServiceAgent* coordination_service_agent) override;
+      tsl::CoordinationServiceAgent* coordination_service_agent) override;
 
-  void RunAsync(
-      ScopedStepContainer* step_container, const EagerKernelArgs& inputs,
-      std::vector<EagerKernelRet>* outputs,
-      CancellationManager* cancellation_manager,
-      const absl::optional<EagerRemoteFunctionParams>& remote_func_params,
-      CoordinationServiceAgent* coordination_service_agent,
-      StatusCallback done) override {
+  void RunAsync(ScopedStepContainer* step_container,
+                const EagerKernelArgs& inputs,
+                std::vector<EagerKernelRet>* outputs,
+                CancellationManager* cancellation_manager,
+                const absl::optional<EagerFunctionParams>& eager_func_params,
+                tsl::CoordinationServiceAgent* coordination_service_agent,
+                StatusCallback done) override {
     // Trivial async implementation on top of the sync version
     done(Run(step_container, inputs, outputs, cancellation_manager,
-             remote_func_params, {}, coordination_service_agent));
+             eager_func_params, {}, coordination_service_agent));
   }
 
   const OpKernel* kernel() const override { return kernel_.get(); }
@@ -241,14 +262,14 @@ class KernelAndDeviceOp final : public KernelAndDevice {
   }
   int num_inputs() const override { return kernel_->num_inputs(); }
   int num_outputs() const override { return kernel_->num_outputs(); }
-  const string& name() const override { return kernel_->name(); }
+  const std::string& name() const override { return kernel_->name(); }
 
  private:
   std::unique_ptr<OpKernel> kernel_;
   bool is_distributed_communication_op_;
-  gtl::InlinedVector<AllocatorAttributes, 4> input_alloc_attrs_;
+  absl::InlinedVector<AllocatorAttributes, 4UL> input_alloc_attrs_;
   std::vector<Device*> input_devices_;
-  gtl::InlinedVector<AllocatorAttributes, 1> output_alloc_attrs_;
+  absl::InlinedVector<AllocatorAttributes, 1UL> output_alloc_attrs_;
   Rendezvous* const rendezvous_;
   checkpoint::TensorSliceReaderCacheWrapper slice_reader_cache_;
   const bool log_memory_;
@@ -265,26 +286,41 @@ class KernelAndDeviceFunc : public KernelAndDevice {
   KernelAndDeviceFunc(
       FunctionLibraryRuntime* flr, ProcessFunctionLibraryRuntime* pflr,
       std::vector<Device*> input_devices,
-      absl::flat_hash_map<string, const std::vector<string>*> composite_devices,
+      absl::flat_hash_map<std::string, const std::vector<std::string>*>
+          composite_devices,
       std::unordered_map<int, DtypeAndPartialTensorShape>
           input_resource_dtypes_and_shapes,
       std::function<void(std::function<void()>)>* runner,
       std::unique_ptr<CollectiveExecutor::Handle> collective_executor,
-      Device* host_cpu_device, const string& name,
+      Device* host_cpu_device, const std::string& name,
       const bool outputs_on_op_device,
-      std::function<Rendezvous*(const int64_t)> rendezvous_creator,
+      const bool allow_small_function_optimizations,
+      const bool allow_control_flow_sync_execution,
+      const bool shape_inference_on_tfe_dialect_import,
+      const bool int_args_and_retvals_on_device,
+      const bool function_runs_at_most_once,
+      std::optional<std::string> xla_compile_device_type,
+      const bool allow_soft_placement, Rendezvous::Factory rendezvous_factory,
       std::function<int64_t()> get_op_id)
       : KernelAndDevice(flr, runner, std::move(collective_executor),
                         host_cpu_device),
         pflr_(pflr),
         handle_(kInvalidHandle),
         outputs_on_op_device_(outputs_on_op_device),
+        allow_small_function_optimizations_(allow_small_function_optimizations),
+        allow_control_flow_sync_execution_(allow_control_flow_sync_execution),
+        shape_inference_on_tfe_dialect_import_(
+            shape_inference_on_tfe_dialect_import),
+        int_args_and_retvals_on_device_(int_args_and_retvals_on_device),
+        function_runs_at_most_once_(function_runs_at_most_once),
+        xla_compile_device_type_(xla_compile_device_type),
+        allow_soft_placement_(allow_soft_placement),
         input_devices_(std::move(input_devices)),
         composite_devices_(std::move(composite_devices)),
         input_resource_dtypes_and_shapes_(
             std::move(input_resource_dtypes_and_shapes)),
         name_(name),
-        rendezvous_creator_(std::move(rendezvous_creator)),
+        rendezvous_factory_(std::move(rendezvous_factory)),
         get_op_id_(std::move(get_op_id)) {}
 
   ~KernelAndDeviceFunc() override;
@@ -293,27 +329,31 @@ class KernelAndDeviceFunc : public KernelAndDevice {
 
   bool IsCrossProcess() override { return is_cross_process_; }
 
-  Status InstantiateFunc(const bool log_device_placement, const NodeDef& ndef,
-                         GraphCollector* graph_collector);
+  absl::Status InstantiateFunc(
+      bool log_device_placement, const NodeDef& ndef,
+      GraphCollector* graph_collector,
+      const absl::optional<EagerFunctionParams>& eager_func_params);
 
-  Status Init(const bool log_device_placement, const NodeDef& ndef,
-              GraphCollector* graph_collector) override;
+  absl::Status Init(
+      bool log_device_placement, const NodeDef& ndef,
+      GraphCollector* graph_collector,
+      const absl::optional<EagerFunctionParams>& eager_func_params) override;
 
-  Status Run(
+  absl::Status Run(
       ScopedStepContainer* step_container, const EagerKernelArgs& inputs,
       std::vector<EagerKernelRet>* outputs,
       CancellationManager* cancellation_manager,
-      const absl::optional<EagerRemoteFunctionParams>& remote_func_params,
+      const absl::optional<EagerFunctionParams>& eager_func_params,
       const absl::optional<ManagedStackTrace>& stack_trace,
-      CoordinationServiceAgent* coordination_service_agent) override;
+      tsl::CoordinationServiceAgent* coordination_service_agent) override;
 
-  void RunAsync(
-      ScopedStepContainer* step_container, const EagerKernelArgs& inputs,
-      std::vector<EagerKernelRet>* outputs,
-      CancellationManager* cancellation_manager,
-      const absl::optional<EagerRemoteFunctionParams>& remote_func_params,
-      CoordinationServiceAgent* coordination_service_agent,
-      StatusCallback done) override;
+  void RunAsync(ScopedStepContainer* step_container,
+                const EagerKernelArgs& inputs,
+                std::vector<EagerKernelRet>* outputs,
+                CancellationManager* cancellation_manager,
+                const absl::optional<EagerFunctionParams>& eager_func_params,
+                tsl::CoordinationServiceAgent* coordination_service_agent,
+                StatusCallback done) override;
 
   const OpKernel* kernel() const override { return nullptr; }
 
@@ -327,15 +367,16 @@ class KernelAndDeviceFunc : public KernelAndDevice {
   }
   int num_inputs() const override { return input_dtypes_.size(); }
   int num_outputs() const override { return output_dtypes_.size(); }
-  const string& name() const override { return name_; };
+  const std::string& name() const override { return name_; };
 
  private:
   std::shared_ptr<FunctionLibraryRuntime::Options> PrepareForRun(
       ScopedStepContainer* step_container, std::vector<EagerKernelRet>* outputs,
       CancellationManager* cancellation_manager,
-      const absl::optional<EagerRemoteFunctionParams>& remote_func_params,
+      const absl::optional<EagerFunctionParams>& eager_func_params,
       const absl::optional<ManagedStackTrace>& stack_trace,
-      CoordinationServiceAgent* coordination_service_agent);
+      tsl::CoordinationServiceAgent* coordination_service_agent,
+      tsl::core::RefCountPtr<Rendezvous>* rendezvous);
 
   ProcessFunctionLibraryRuntime* const pflr_;  // non-null
   FunctionLibraryRuntime::Handle handle_;
@@ -346,6 +387,26 @@ class KernelAndDeviceFunc : public KernelAndDevice {
   // if false, the output devices are inferred by pflr_.
   bool outputs_on_op_device_;
 
+  // If True, allow optimizations which should be targeted at a limited
+  // set of small functions.  (For example, running kernels synchronously can
+  // be faster under some conditions.)
+  const bool allow_small_function_optimizations_;
+
+  // If True, allows control nodes to run on the single threaded executor.
+  const bool allow_control_flow_sync_execution_;
+
+  // TODO(b/176491312): Remove this if shape inference on import flag is
+  // removed. If True, allows mlir roundtrip to run shape inference on import.
+  const bool shape_inference_on_tfe_dialect_import_;
+
+  const bool int_args_and_retvals_on_device_;
+
+  const bool function_runs_at_most_once_;
+
+  const absl::optional<std::string> xla_compile_device_type_;
+
+  const bool allow_soft_placement_;
+
   // CPU devices are null. Resource handles' devices are actual backing
   // devices.
   std::vector<Device*> output_devices_;
@@ -353,15 +414,16 @@ class KernelAndDeviceFunc : public KernelAndDevice {
   // devices.
   std::vector<Device*> input_devices_;
   // Maps from a CompositeDevice name to a list of physical device names.
-  absl::flat_hash_map<string, const std::vector<string>*> composite_devices_;
+  absl::flat_hash_map<std::string, const std::vector<std::string>*>
+      composite_devices_;
   std::unordered_map<int, DtypeAndPartialTensorShape>
       input_resource_dtypes_and_shapes_;
 
   DataTypeVector input_dtypes_;
   DataTypeVector output_dtypes_;
-  string name_;
+  std::string name_;
 
-  std::function<Rendezvous*(const int64_t)> rendezvous_creator_;
+  Rendezvous::Factory rendezvous_factory_;
   std::function<int64_t()> get_op_id_;
 };
 

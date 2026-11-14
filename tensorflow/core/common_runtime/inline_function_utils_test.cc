@@ -19,6 +19,7 @@ limitations under the License.
 #include "tensorflow/core/common_runtime/graph_constructor.h"
 #include "tensorflow/core/framework/function.h"
 #include "tensorflow/core/framework/function_testlib.h"
+#include "tensorflow/core/framework/op.h"
 #include "tensorflow/core/framework/tensor_testutil.h"
 #include "tensorflow/core/lib/core/status_test_util.h"
 #include "tensorflow/core/platform/test.h"
@@ -35,7 +36,8 @@ TEST(InlineFunctionBody, ColocationConstraintPropagation) {
   // inputs of the function to be inlined, the constraint is propagated with the
   // new name.
 
-  FunctionLibraryDefinition flib_def(OpRegistry::Global(), {});
+  FunctionLibraryDefinition flib_def(OpRegistry::Global(),
+                                     FunctionDefLibrary());
   // Add a simple function that takes 2 inputs and the op is colocated with
   // one of the inputs.
   FunctionDef fdef = FunctionDefHelper::Define(
@@ -48,11 +50,11 @@ TEST(InlineFunctionBody, ColocationConstraintPropagation) {
           {{"z"},
            "AddV2",
            {"x", "y"},
-           {{"T", DT_FLOAT}, {"_class", std::vector<string>({"loc:@x"})}}},
+           {{"T", DT_FLOAT}, {"_class", std::vector<std::string>({"loc:@x"})}}},
       });
   TF_ASSERT_OK(flib_def.AddFunctionDef(fdef));
 
-  auto g = absl::make_unique<Graph>(OpRegistry::Global());
+  auto g = std::make_unique<Graph>(OpRegistry::Global());
   GraphConstructorOptions opts;
   const Tensor kZero = test::AsScalar<int64_t>(0);
   const Tensor kOne = test::AsScalar<int64_t>(1);
@@ -96,7 +98,8 @@ TEST(InlineFunctionBody, ColocationConstraintPropagation) {
           // Func/call/input/_0.
           NDef("call/z", "AddV2", {"Func/call/input/_0", "Func/call/input/_1"},
                {{"T", DT_FLOAT},
-                {"_class", std::vector<string>({"loc:@Func/call/input/_0"})}}),
+                {"_class",
+                 std::vector<std::string>({"loc:@Func/call/input/_0"})}}),
           NDef("Func/call/output/_2", "Identity", {"call/z"},
                {{"T", DT_FLOAT}}),
       },

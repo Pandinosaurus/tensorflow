@@ -13,19 +13,24 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "tensorflow/c/eager/parallel_device/parallel_device.h"
-
 #include <array>
+#include <memory>
+#include <string>
+#include <vector>
 
+#include <gmock/gmock.h>
 #include "tensorflow/c/c_api.h"
 #include "tensorflow/c/c_api_experimental.h"
 #include "tensorflow/c/eager/c_api.h"
-#include "tensorflow/c/eager/c_api_experimental.h"
 #include "tensorflow/c/eager/immediate_execution_tensor_handle.h"
+#include "tensorflow/c/eager/parallel_device/parallel_device_lib.h"
 #include "tensorflow/c/eager/parallel_device/parallel_device_testlib.h"
 #include "tensorflow/c/eager/tfe_tensorhandle_internal.h"
+#include "tensorflow/c/tf_buffer.h"
+#include "tensorflow/c/tf_datatype.h"
+#include "tensorflow/c/tf_status.h"
 #include "tensorflow/c/tf_status_internal.h"
-#include "tensorflow/core/lib/core/status_test_util.h"
+#include "xla/tsl/lib/core/status_test_util.h"
 #include "tensorflow/core/platform/test.h"
 
 // NOTE(allenl): These tests currently go through TFE_Execute and so are
@@ -362,6 +367,23 @@ TEST(PARALLEL_DEVICE, TestInvalidPacking) {
     TFE_OpSetAttrInt(op.get(), "num_replicas", 1);
     TFE_OpAddInput(op.get(), value_one.get(), status.get());
     if (TF_GetCode(status.get()) != TF_OK) return;
+    TFE_OpSetDevice(op.get(), device_name, status.get());
+    if (TF_GetCode(status.get()) != TF_OK) return;
+
+    TFE_TensorHandle* result_handles;
+    int num_retvals = 1;
+    TFE_Execute(op.get(), &result_handles, &num_retvals, status.get());
+    ASSERT_TRUE(TF_GetCode(status.get()) == TF_INVALID_ARGUMENT)
+        << TF_Message(status.get());
+  }
+
+  {
+    // Try to pass 0 inputs to TPUReplicatedOutput
+    std::unique_ptr<TFE_Op, decltype(&TFE_DeleteOp)> op(
+        TFE_NewOp(context.get(), "TPUReplicatedOutput", status.get()),
+        TFE_DeleteOp);
+    if (TF_GetCode(status.get()) != TF_OK) return;
+    TFE_OpSetAttrInt(op.get(), "num_replicas", 1);
     TFE_OpSetDevice(op.get(), device_name, status.get());
     if (TF_GetCode(status.get()) != TF_OK) return;
 

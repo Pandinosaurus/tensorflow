@@ -68,13 +68,23 @@ class TargetAnnotationPass : public TacFunctionPass<TargetAnnotationPass> {
       *this, "device-specs",
       llvm::cl::desc(
           "comma separated list of device specs, like CPU, GPU, Hexagon."),
-      llvm::cl::ZeroOrMore, llvm::cl::MiscFlags::CommaSeparated};
+      llvm::cl::ZeroOrMore};
+
+  void getDependentDialects(mlir::DialectRegistry& registry) const override {
+    if (!module_) {
+      for (const auto& device : device_specs_flag_) {
+        auto* hardware = this->GetTargetHardware(device);
+        if (hardware == nullptr) continue;
+        hardware->GetDependentDialects(registry);
+      }
+    }
+  }
 };
 
 void SetAnnotation(Operation* op, std::string attribute, std::string annotation,
                    OpBuilder* builder) {
   // TODO(karimnosseir): Maybe set device capabilities to allow us to have
-  // more flexbility when raise the subgraphs.
+  // more flexibility when raise the subgraphs.
   auto default_target = builder->getStringAttr(annotation);
   op->setAttr(attribute, default_target);
 }
@@ -82,6 +92,9 @@ void SetAnnotation(Operation* op, std::string attribute, std::string annotation,
 void TargetAnnotationPass::SetTargetAnnotation(
     Operation* op, llvm::ArrayRef<std::string> device_specs,
     OpBuilder* builder) {
+  if (op->hasAttr(kSkipTargetAnnotation)) {
+    return;
+  }
   const InferenceType inference_type = GetInferenceType(op);
   const std::string inference_type_str = GetInferenceString(inference_type);
   SetAnnotation(op, kInferenceType, inference_type_str, builder);
@@ -110,7 +123,8 @@ void TargetAnnotationPass::SetTargetAnnotation(
   }
   // default to CPU
   if (!device_is_set) {
-    if (IsTFLDialectNonConstOp(op)) {
+    if (IsNonConstOp(op) && !IsTerminatorOp(op) &&
+        !llvm::isa<func::ReturnOp, func::FuncOp, CallableOpInterface>(op)) {
       SetAnnotation(op, kDevice, "CPU", builder);
       device_is_set = true;
     }
@@ -126,7 +140,8 @@ void TargetAnnotationPass::runOnFunction() {
 
   func.walk([&](Operation* op) {
     // We only care about TFL dialect.
-    if (IsTFLDialectNonConstOp(op) && IsTFLNonQuantDequantizeOp(op)) {
+    if (IsNonConstOp(op) && !IsTerminatorOp(op) &&
+        !llvm::isa<func::ReturnOp, func::FuncOp, CallOpInterface>(op)) {
       SetTargetAnnotation(op, device_specs_flag_, &builder);
     }
   });
@@ -134,12 +149,12 @@ void TargetAnnotationPass::runOnFunction() {
 
 }  // namespace
 
-std::unique_ptr<OperationPass<FuncOp>> CreateTargetAnnotationPass(
+std::unique_ptr<OperationPass<func::FuncOp>> CreateTargetAnnotationPass(
     llvm::ArrayRef<std::string> device_specs) {
   return std::make_unique<TargetAnnotationPass>(device_specs);
 }
 
-std::unique_ptr<OperationPass<FuncOp>> CreateTargetAnnotationPass(
+std::unique_ptr<OperationPass<func::FuncOp>> CreateTargetAnnotationPass(
     const TacModule* module) {
   return std::make_unique<TargetAnnotationPass>(module);
 }

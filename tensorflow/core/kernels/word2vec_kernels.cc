@@ -13,8 +13,24 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include <algorithm>
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <string>
+#include <unordered_map>
+#include <utility>
+#include <vector>
+
+#include "absl/log/check.h"
+#include "absl/log/log.h"
+#include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
+#include "absl/strings/string_view.h"
+#include "tensorflow/core/framework/bounds_check.h"
 #include "tensorflow/core/framework/op.h"
 #include "tensorflow/core/framework/op_kernel.h"
+#include "tensorflow/core/framework/types.pb.h"
 #include "tensorflow/core/lib/core/stringpiece.h"
 #include "tensorflow/core/lib/gtl/map_util.h"
 #include "tensorflow/core/lib/random/distribution_sampler.h"
@@ -33,9 +49,9 @@ const int kSentenceSize = 1000;
 
 namespace {
 
-bool ScanWord(StringPiece* input, string* word) {
+bool ScanWord(absl::string_view* input, std::string* word) {
   str_util::RemoveLeadingWhitespace(input);
-  StringPiece tmp;
+  absl::string_view tmp;
   if (str_util::ConsumeNonWhitespace(input, &tmp)) {
     word->assign(tmp.data(), tmp.size());
     return true;
@@ -50,7 +66,7 @@ class SkipgramOp : public OpKernel {
  public:
   explicit SkipgramOp(OpKernelConstruction* ctx)
       : OpKernel(ctx), rng_(&philox_) {
-    string filename;
+    std::string filename;
     OP_REQUIRES_OK(ctx, ctx->GetAttr("filename", &filename));
     OP_REQUIRES_OK(ctx, ctx->GetAttr("batch_size", &batch_size_));
     OP_REQUIRES_OK(ctx, ctx->GetAttr("window_size", &window_size_));
@@ -73,9 +89,9 @@ class SkipgramOp : public OpKernel {
     Tensor current_epoch(DT_INT32, TensorShape({}));
     Tensor total_words_processed(DT_INT64, TensorShape({}));
     Tensor examples(DT_INT32, TensorShape({batch_size_}));
-    auto Texamples = examples.flat<int32>();
+    auto Texamples = examples.flat<int32_t>();
     Tensor labels(DT_INT32, TensorShape({batch_size_}));
-    auto Tlabels = labels.flat<int32>();
+    auto Tlabels = labels.flat<int32_t>();
     {
       mutex_lock l(mu_);
       for (int i = 0; i < batch_size_; ++i) {
@@ -91,7 +107,7 @@ class SkipgramOp : public OpKernel {
         }
       }
       words_per_epoch.scalar<int64_t>()() = corpus_size_;
-      current_epoch.scalar<int32>()() = current_epoch_;
+      current_epoch.scalar<int32_t>()() = current_epoch_;
       total_words_processed.scalar<int64_t>()() = total_words_processed_;
     }
     ctx->set_output(0, word_);
@@ -105,38 +121,38 @@ class SkipgramOp : public OpKernel {
 
  private:
   struct Example {
-    int32 input;
-    int32 label;
+    int32_t input;
+    int32_t label;
   };
 
-  int32 batch_size_ = 0;
-  int32 window_size_ = 5;
+  int32_t batch_size_ = 0;
+  int32_t window_size_ = 5;
   float subsample_ = 1e-3;
   int min_count_ = 5;
-  int32 vocab_size_ = 0;
+  int32_t vocab_size_ = 0;
   Tensor word_;
   Tensor freq_;
   int64_t corpus_size_ = 0;
-  std::vector<int32> corpus_;
+  std::vector<int32_t> corpus_;
   std::vector<Example> precalc_examples_;
   int precalc_index_ = 0;
-  std::vector<int32> sentence_;
+  std::vector<int32_t> sentence_;
   int sentence_index_ = 0;
 
   mutex mu_;
   random::PhiloxRandom philox_ TF_GUARDED_BY(mu_);
   random::SimplePhilox rng_ TF_GUARDED_BY(mu_);
-  int32 current_epoch_ TF_GUARDED_BY(mu_) = -1;
+  int32_t current_epoch_ TF_GUARDED_BY(mu_) = -1;
   int64_t total_words_processed_ TF_GUARDED_BY(mu_) = 0;
-  int32 example_pos_ TF_GUARDED_BY(mu_);
-  int32 label_pos_ TF_GUARDED_BY(mu_);
-  int32 label_limit_ TF_GUARDED_BY(mu_);
+  int32_t example_pos_ TF_GUARDED_BY(mu_);
+  int32_t label_pos_ TF_GUARDED_BY(mu_);
+  int32_t label_limit_ TF_GUARDED_BY(mu_);
 
   // {example_pos_, label_pos_} is the cursor for the next example.
   // example_pos_ wraps around at the end of corpus_. For each
   // example, we randomly generate [label_pos_, label_limit) for
   // labels.
-  void NextExample(int32* example, int32* label)
+  void NextExample(int32_t* example, int32_t* label)
       TF_EXCLUSIVE_LOCKS_REQUIRED(mu_) {
     while (true) {
       if (label_pos_ >= label_limit_) {
@@ -150,7 +166,7 @@ class SkipgramOp : public OpKernel {
               example_pos_ = 0;
             }
             if (subsample_ > 0) {
-              int32_t word_freq = freq_.flat<int32>()(corpus_[example_pos_]);
+              int32_t word_freq = freq_.flat<int32_t>()(corpus_[example_pos_]);
               // See Eq. 5 in http://arxiv.org/abs/1310.4546
               float keep_prob =
                   (std::sqrt(word_freq / (subsample_ * corpus_size_)) + 1) *
@@ -164,9 +180,9 @@ class SkipgramOp : public OpKernel {
           }
         }
         const int32_t skip = 1 + rng_.Uniform(window_size_);
-        label_pos_ = std::max<int32>(0, sentence_index_ - skip);
+        label_pos_ = std::max<int32_t>(0, sentence_index_ - skip);
         label_limit_ =
-            std::min<int32>(kSentenceSize, sentence_index_ + skip + 1);
+            std::min<int32_t>(kSentenceSize, sentence_index_ + skip + 1);
       }
       if (sentence_index_ != label_pos_) {
         break;
@@ -177,23 +193,23 @@ class SkipgramOp : public OpKernel {
     *label = sentence_[label_pos_++];
   }
 
-  Status Init(Env* env, const string& filename) {
-    string data;
+  absl::Status Init(Env* env, const std::string& filename) {
+    std::string data;
     TF_RETURN_IF_ERROR(ReadFileToString(env, filename, &data));
-    StringPiece input = data;
-    string w;
+    absl::string_view input = data;
+    std::string w;
     corpus_size_ = 0;
-    std::unordered_map<string, int32> word_freq;
+    std::unordered_map<std::string, int32_t> word_freq;
     while (ScanWord(&input, &w)) {
       ++(word_freq[w]);
       ++corpus_size_;
     }
     if (corpus_size_ < window_size_ * 10) {
-      return errors::InvalidArgument(
-          "The text file ", filename,
-          " contains too little data: ", corpus_size_, " words");
+      return absl::InvalidArgumentError(
+          absl::StrCat("The text file ", filename,
+                       " contains too little data: ", corpus_size_, " words"));
     }
-    typedef std::pair<string, int32> WordFreq;
+    typedef std::pair<std::string, int32_t> WordFreq;
     std::vector<WordFreq> ordered;
     for (const auto& p : word_freq) {
       if (p.second >= min_count_) ordered.push_back(p);
@@ -207,23 +223,23 @@ class SkipgramOp : public OpKernel {
               [](const WordFreq& x, const WordFreq& y) {
                 return x.second > y.second;
               });
-    vocab_size_ = static_cast<int32>(1 + ordered.size());
+    vocab_size_ = static_cast<int32_t>(1 + ordered.size());
     Tensor word(DT_STRING, TensorShape({vocab_size_}));
     Tensor freq(DT_INT32, TensorShape({vocab_size_}));
     word.flat<tstring>()(0) = "UNK";
     static const int32_t kUnkId = 0;
-    std::unordered_map<string, int32> word_id;
+    std::unordered_map<std::string, int32_t> word_id;
     int64_t total_counted = 0;
     for (std::size_t i = 0; i < ordered.size(); ++i) {
       const auto& w = ordered[i].first;
       auto id = i + 1;
       word.flat<tstring>()(id) = w;
       auto word_count = ordered[i].second;
-      freq.flat<int32>()(id) = word_count;
+      freq.flat<int32_t>()(id) = word_count;
       total_counted += word_count;
       word_id[w] = id;
     }
-    freq.flat<int32>()(kUnkId) = corpus_size_ - total_counted;
+    freq.flat<int32_t>()(kUnkId) = corpus_size_ - total_counted;
     word_ = word;
     freq_ = freq;
     corpus_.reserve(corpus_size_);
@@ -233,7 +249,7 @@ class SkipgramOp : public OpKernel {
     }
     precalc_examples_.resize(kPrecalc);
     sentence_.resize(kSentenceSize);
-    return Status::OK();
+    return absl::OkStatus();
   }
 };
 
@@ -246,7 +262,7 @@ class NegTrainOp : public OpKernel {
 
     OP_REQUIRES_OK(ctx, ctx->GetAttr("num_negative_samples", &num_samples_));
 
-    std::vector<int32> vocab_count;
+    std::vector<int32_t> vocab_count;
     OP_REQUIRES_OK(ctx, ctx->GetAttr("vocab_count", &vocab_count));
 
     std::vector<float> vocab_weights;
@@ -263,31 +279,32 @@ class NegTrainOp : public OpKernel {
   void Compute(OpKernelContext* ctx) override {
     Tensor w_in = ctx->mutable_input(0, false);
     OP_REQUIRES(ctx, TensorShapeUtils::IsMatrix(w_in.shape()),
-                errors::InvalidArgument("Must be a matrix"));
+                absl::InvalidArgumentError("Must be a matrix"));
     Tensor w_out = ctx->mutable_input(1, false);
     OP_REQUIRES(ctx, w_in.shape() == w_out.shape(),
-                errors::InvalidArgument("w_in.shape == w_out.shape"));
+                absl::InvalidArgumentError("w_in.shape == w_out.shape"));
     const Tensor& examples = ctx->input(2);
     OP_REQUIRES(ctx, TensorShapeUtils::IsVector(examples.shape()),
-                errors::InvalidArgument("Must be a vector"));
+                absl::InvalidArgumentError("Must be a vector"));
     const Tensor& labels = ctx->input(3);
     OP_REQUIRES(ctx, examples.shape() == labels.shape(),
-                errors::InvalidArgument("examples.shape == labels.shape"));
+                absl::InvalidArgumentError("examples.shape == labels.shape"));
     const Tensor& learning_rate = ctx->input(4);
     OP_REQUIRES(ctx, TensorShapeUtils::IsScalar(learning_rate.shape()),
-                errors::InvalidArgument("Must be a scalar"));
+                absl::InvalidArgumentError("Must be a scalar"));
 
     auto Tw_in = w_in.matrix<float>();
     auto Tw_out = w_out.matrix<float>();
-    auto Texamples = examples.flat<int32>();
-    auto Tlabels = labels.flat<int32>();
+    auto Texamples = examples.flat<int32_t>();
+    auto Tlabels = labels.flat<int32_t>();
     auto lr = learning_rate.scalar<float>()();
     const int64_t vocab_size = w_in.dim_size(0);
     const int64_t dims = w_in.dim_size(1);
     const int64_t batch_size = examples.dim_size(0);
-    OP_REQUIRES(ctx, vocab_size == sampler_->num(),
-                errors::InvalidArgument("vocab_size mismatches: ", vocab_size,
-                                        " vs. ", sampler_->num()));
+    OP_REQUIRES(
+        ctx, vocab_size == sampler_->num(),
+        absl::InvalidArgumentError(absl::StrCat(
+            "vocab_size mismatches: ", vocab_size, " vs. ", sampler_->num())));
 
     // Gradient accumulator for v_in.
     Tensor buf(DT_FLOAT, TensorShape({dims}));
@@ -304,10 +321,17 @@ class NegTrainOp : public OpKernel {
     random::SimplePhilox srnd(&rnd);
 
     for (int64_t i = 0; i < batch_size; ++i) {
-      const int32_t example = Texamples(i);
-      DCHECK(0 <= example && example < vocab_size) << example;
-      const int32_t label = Tlabels(i);
-      DCHECK(0 <= label && label < vocab_size) << label;
+      const int32_t example =
+          ::tensorflow::internal::SubtleMustCopy(Texamples(i));
+      OP_REQUIRES(ctx, FastBoundsCheck(example, vocab_size),
+                  absl::InvalidArgumentError(
+                      absl::StrCat("examples value ", example,
+                                   " out of range [0, ", vocab_size, ")")));
+      const int32_t label = ::tensorflow::internal::SubtleMustCopy(Tlabels(i));
+      OP_REQUIRES(
+          ctx, FastBoundsCheck(label, vocab_size),
+          absl::InvalidArgumentError(absl::StrCat(
+              "labels value ", label, " out of range [0, ", vocab_size, ")")));
       auto v_in = Tw_in.chip<0>(example);
 
       // Positive: example predicts label.
@@ -320,8 +344,9 @@ class NegTrainOp : public OpKernel {
         auto v_out = Tw_out.chip<0>(label);
         auto dot = (v_in * v_out).sum();
         g = (dot.exp() + 1.f).inverse();
-        Tbuf = v_out * (g() * lr);
-        v_out += v_in * (g() * lr);
+        const float g_lr = g() * lr;
+        Tbuf = v_out * g_lr;
+        v_out += v_in * g_lr;
       }
 
       // Negative samples:
@@ -336,8 +361,9 @@ class NegTrainOp : public OpKernel {
         auto v_sample = Tw_out.chip<0>(sample);
         auto dot = (v_in * v_sample).sum();
         g = -((-dot).exp() + 1.f).inverse();
-        Tbuf += v_sample * (g() * lr);
-        v_sample += v_in * (g() * lr);
+        const float g_lr = g() * lr;
+        Tbuf += v_sample * g_lr;
+        v_sample += v_in * g_lr;
       }
 
       // Applies the gradient on v_in.
@@ -346,7 +372,7 @@ class NegTrainOp : public OpKernel {
   }
 
  private:
-  int32 num_samples_ = 0;
+  int32_t num_samples_ = 0;
   random::DistributionSampler* sampler_ = nullptr;
   GuardedPhiloxRandom base_;
 };

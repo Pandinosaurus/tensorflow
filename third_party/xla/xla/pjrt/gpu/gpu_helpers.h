@@ -1,0 +1,127 @@
+/* Copyright 2020 The OpenXLA Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+==============================================================================*/
+
+#ifndef XLA_PJRT_GPU_GPU_HELPERS_H_
+#define XLA_PJRT_GPU_GPU_HELPERS_H_
+
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <optional>
+#include <set>
+#include <string>
+#include <vector>
+
+#include "absl/status/statusor.h"
+#include "absl/strings/string_view.h"
+#include "absl/types/span.h"
+#include "xla/client/local_client.h"
+#include "xla/pjrt/gpu/allocator_config.h"
+#include "xla/stream_executor/device_description.h"
+#include "xla/stream_executor/stream_executor.h"
+#include "xla/tsl/framework/allocator.h"
+#include "xla/tsl/framework/bfc_allocator.h"
+#include "xla/types.h"
+
+namespace xla {
+
+// Formats the runtime software version for both GPU clients and topologies.
+// The description may come from a live device or a serialized target config;
+// this function does not initialize a GPU runtime.
+std::string GetGpuPlatformVersion(
+    const stream_executor::DeviceDescription& device_description);
+
+// Builds an xla::LocalClient for the GPU platform.
+absl::StatusOr<LocalClient*> GetGpuXlaClient(
+    const std::optional<std::string>& platform_name,
+    const std::optional<std::set<int>>& allowed_devices);
+
+// Enables peer access between all pairs of GPUs where possible.
+void EnablePeerAccess(absl::Span<se::StreamExecutor* const> executors);
+
+// Returns a GPU pinned host memory allocator to use when staging host->GPU
+// transfers. We use a fixed pool of pinned memory.
+//
+// The pool size is controlled by XLA_PJRT_GPU_HOST_MEMORY_LIMIT_GB environment
+// variable, which defaults to 64GB.
+//
+// If `preallocate` is set to true, the pool will be preallocated, and the
+// preallocated size is controlled by XLA_PJRT_GPU_HOST_MEMORY_LIMIT_GB
+// environment variable, which defaults to 16GB in this case.
+absl::StatusOr<std::unique_ptr<tsl::BFCAllocator>> GetGpuHostAllocator(
+    se::StreamExecutor* executor, bool preallocate);
+
+// Builds a BFCAllocator for all local GPUs. When enable_spatial_partitioning
+// is set, the allocator serves collective (lower-end) and default (upper-end)
+// requests from one shared address range; this requires preallocate=true.
+// Collective allocations split exactly; default allocations use the BFC split
+// heuristic, for both owned-hole reuse and central-gap carves.
+// Equal-size holes prefer lower addresses for collective memory and higher
+// addresses for default memory.
+//
+// memory_fraction decides how the pool may use device memory (see
+// MemFraction). A FlexMemFraction only takes effect for spatial device-memory
+// pools: the initial allocation given by its start (or gpu_system_memory_size)
+// is mapped up front and default-only backing is added on demand, up to
+// cap * total device memory rounded down to the mapping granularity. CUDA
+// reserves the cap in VA and extends the mapped prefix without moving it. The
+// initial allocation must fit under the cap, otherwise InvalidArgument is
+// returned. Non-spatial and unified-memory pools use only the start fraction.
+//
+// The allocator is named `<name_prefix>_<device ordinal>_bfc`.
+absl::StatusOr<std::shared_ptr<tsl::BFCAllocator>> CreateBFCAllocator(
+    se::StreamExecutor* executor, const MemFraction& memory_fraction,
+    bool preallocate, std::optional<int64_t> gpu_system_memory_size,
+    const std::vector<tsl::SubAllocator::Visitor>& sub_allocator_alloc_visitors,
+    const std::vector<tsl::SubAllocator::Visitor>& sub_allocator_free_visitors,
+    bool enable_spatial_partitioning = false,
+    absl::string_view name_prefix = "GPU");
+
+// Builds a BFCAllocator for all local GPUs that uses collective memory.
+absl::StatusOr<std::unique_ptr<tsl::BFCAllocator>> CreateCollectiveBFCAllocator(
+    se::StreamExecutor* executor, double memory_fraction,
+    size_t collective_memory_size);
+
+// Builds a growing BFCAllocator for temp buffers on a device whose default pool
+// was created with `memory_fraction`, `preallocate` and
+// `gpu_system_memory_size`. Next to a preallocated default pool, the temp pool
+// may use the device memory that the start fraction leaves (MemFractionLeft;
+// like the collective pool, it does not consider `gpu_system_memory_size`), and
+// a default pool that grows can still take from it. Otherwise the temp pool has
+// the default pool's limit. Returns InvalidArgument if the limit is zero.
+absl::StatusOr<std::shared_ptr<tsl::BFCAllocator>> CreateTempBufferBFCAllocator(
+    se::StreamExecutor* executor, const MemFraction& memory_fraction,
+    bool preallocate, std::optional<int64_t> gpu_system_memory_size,
+    const std::vector<tsl::SubAllocator::Visitor>& sub_allocator_alloc_visitors,
+    const std::vector<tsl::SubAllocator::Visitor>& sub_allocator_free_visitors);
+
+// Represents topology of devices.
+struct TopologySizes {
+  int num_partitions = 0;
+  int num_hosts_per_partition = 0;
+  int num_devices_per_host = 0;
+
+  // Returns number of devices in the topology.
+  int GetDeviceCount();
+  // Parses the topology description of the form
+  // "<num_partitions> x <num_hosts_per_partition> x <num_devices_per_host>"
+  // and returns the parsed components on success.
+  static absl::StatusOr<TopologySizes> FromString(
+      absl::string_view topology_string);
+};
+
+}  // namespace xla
+
+#endif  // XLA_PJRT_GPU_GPU_HELPERS_H_

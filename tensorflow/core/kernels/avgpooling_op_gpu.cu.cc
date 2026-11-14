@@ -20,11 +20,13 @@ limitations under the License.
 #include <stdio.h>
 
 #include <iostream>
+#include <limits>
 
 #include "tensorflow/core/framework/register_types.h"
 #include "tensorflow/core/framework/tensor_types.h"
 #include "tensorflow/core/kernels/avgpooling_op.h"
 #include "tensorflow/core/util/gpu_kernel_helper.h"
+#include "tensorflow/core/util/overflow.h"
 
 namespace tensorflow {
 
@@ -34,6 +36,7 @@ typedef Eigen::GpuDevice GPUDevice;
   template struct functor::SpatialAvgPooling<GPUDevice, T>;
 
 DEFINE_GPU_KERNELS(Eigen::half)
+DEFINE_GPU_KERNELS(Eigen::bfloat16)
 DEFINE_GPU_KERNELS(float)
 DEFINE_GPU_KERNELS(double)
 
@@ -79,15 +82,23 @@ __global__ void AvePoolBackwardNHWC(
 }
 
 template <typename T>
-bool RunAvePoolBackwardNHWC(const T* const top_diff, const int num,
-                            const int height, const int width,
-                            const int channels, const int pooled_height,
-                            const int pooled_width, const int kernel_h,
-                            const int kernel_w, const int stride_h,
-                            const int stride_w, const int pad_t,
-                            const int pad_l, T* const bottom_diff,
-                            const GPUDevice& d) {
-  int x_size = num * height * width * channels;
+absl::Status RunAvePoolBackwardNHWC(const T* const top_diff, const int num,
+                                    const int height, const int width,
+                                    const int channels, const int pooled_height,
+                                    const int pooled_width, const int kernel_h,
+                                    const int kernel_w, const int stride_h,
+                                    const int stride_w, const int pad_t,
+                                    const int pad_l, T* const bottom_diff,
+                                    const GPUDevice& d) {
+  int64_t size_1 = MultiplyWithoutOverflow(num, height);
+  int64_t size_2 = MultiplyWithoutOverflow(size_1, width);
+  int64_t x_size = MultiplyWithoutOverflow(size_2, channels);
+  if (x_size < 0 || x_size > std::numeric_limits<int32_t>::max()) {
+    return absl::InternalError(
+        "RunAvePoolBackwardNHWC: num * height * width * channels exceeds "
+        "int32 bounds");
+  }
+
   GpuLaunchConfig config = GetGpuLaunchConfig(x_size, d);
   TF_CHECK_OK(GpuLaunchKernel(
       AvePoolBackwardNHWC<T>, config.block_count, config.thread_per_block, 0,
@@ -95,27 +106,23 @@ bool RunAvePoolBackwardNHWC(const T* const top_diff, const int num,
       channels, pooled_height, pooled_width, kernel_h, kernel_w, stride_h,
       stride_w, pad_t, pad_t, bottom_diff));
 
-  return d.ok();
+  return d.ok() ? absl::OkStatus()
+                : absl::InternalError("GPU execution failed");
 }
 
-template bool RunAvePoolBackwardNHWC(
-    const double* const top_diff, const int num, const int height,
-    const int width, const int channels, const int pooled_height,
-    const int pooled_width, const int kernel_h, const int kernel_w,
-    const int stride_h, const int stride_w, const int pad_t, const int pad_l,
-    double* const bottom_diff, const GPUDevice& d);
-template bool RunAvePoolBackwardNHWC(
-    const float* const top_diff, const int num, const int height,
-    const int width, const int channels, const int pooled_height,
-    const int pooled_width, const int kernel_h, const int kernel_w,
-    const int stride_h, const int stride_w, const int pad_t, const int pad_l,
-    float* const bottom_diff, const GPUDevice& d);
-template bool RunAvePoolBackwardNHWC(
-    const Eigen::half* const top_diff, const int num, const int height,
-    const int width, const int channels, const int pooled_height,
-    const int pooled_width, const int kernel_h, const int kernel_w,
-    const int stride_h, const int stride_w, const int pad_t, const int pad_l,
-    Eigen::half* const bottom_diff, const GPUDevice& d);
+#define DECLARE_GPU_SPEC(T)                                           \
+  template absl::Status RunAvePoolBackwardNHWC(                       \
+      const T* const top_diff, const int num, const int height,       \
+      const int width, const int channels, const int pooled_height,   \
+      const int pooled_width, const int kernel_h, const int kernel_w, \
+      const int stride_h, const int stride_w, const int pad_t,        \
+      const int pad_l, T* const bottom_diff, const GPUDevice& d);
+
+DECLARE_GPU_SPEC(Eigen::half);
+DECLARE_GPU_SPEC(Eigen::bfloat16);
+DECLARE_GPU_SPEC(float);
+DECLARE_GPU_SPEC(double);
+#undef DECLARE_GPU_SPEC
 
 }  // end namespace tensorflow
 

@@ -20,11 +20,14 @@ limitations under the License.
 #define GEMMLOWP_ALLOW_SLOW_SCALAR_FALLBACK
 #include "public/gemmlowp.h"
 #include "tensorflow/core/framework/op_kernel.h"
+#include "tensorflow/core/framework/op_requires.h"
 #include "tensorflow/core/framework/tensor.h"
+#include "tensorflow/core/framework/tensor_shape.h"
 #include "tensorflow/core/kernels/meta_support.h"
 #include "tensorflow/core/kernels/quantization_utils.h"
 #include "tensorflow/core/kernels/reference_gemm.h"
 #include "tensorflow/core/lib/core/errors.h"
+#include "tensorflow/core/platform/errors.h"
 
 namespace tensorflow {
 
@@ -35,9 +38,9 @@ template <bool TransposeA, bool TransposeB, bool TransposeC>
 void GemmlowpMultiply(OpKernelContext* op_context, const quint8* a_data,
                       const quint8* b_data, qint32* c_data, int m, int n, int k,
                       int offset_a, int offset_b, int lda, int ldb, int ldc) {
-  const uint8* a_data_as_uint8 = &(a_data->value);
-  const uint8* b_data_as_uint8 = &(b_data->value);
-  int32* c_data_as_int32 = &(c_data->value);
+  const uint8_t* a_data_as_uint8 = &(a_data->value);
+  const uint8_t* b_data_as_uint8 = &(b_data->value);
+  int32_t* c_data_as_int32 = &(c_data->value);
   static const gemmlowp::MapOrder ResultOrder =
       !TransposeC ? gemmlowp::MapOrder::RowMajor : gemmlowp::MapOrder::ColMajor;
   static const gemmlowp::MapOrder LhsOrder =
@@ -75,18 +78,30 @@ class QuantizedMatMulOp : public OpKernel {
   void Compute(OpKernelContext* context) override {
     const Tensor& a = context->input(0);
     const Tensor& b = context->input(1);
+    OP_REQUIRES(context, TensorShapeUtils::IsScalar(context->input(2).shape()),
+                errors::InvalidArgument("min_a must be a scalar, but got shape",
+                                        context->input(2).shape()));
     const float min_a = context->input(2).flat<float>()(0);
+    OP_REQUIRES(context, context->input(3).NumElements() == 1,
+                errors::InvalidArgument("max_a must be a scalar, but got shape",
+                                        context->input(3).shape()));
     const float max_a = context->input(3).flat<float>()(0);
+    OP_REQUIRES(context, context->input(4).NumElements() == 1,
+                errors::InvalidArgument("min_b must be a scalar, but got shape",
+                                        context->input(4).shape()));
     const float min_b = context->input(4).flat<float>()(0);
+    OP_REQUIRES(context, context->input(5).NumElements() == 1,
+                errors::InvalidArgument("max_b must be a scalar, but got shape",
+                                        context->input(5).shape()));
     const float max_b = context->input(5).flat<float>()(0);
 
     // Make sure that we have valid quantization ranges for the input buffers.
     // If the difference between the min and max is negative or zero, it makes
     // it hard to do meaningful intermediate operations on the values.
     OP_REQUIRES(context, (max_a > min_a),
-                errors::InvalidArgument("max_a must be larger than min_a."));
+                absl::InvalidArgumentError("max_a must be larger than min_a."));
     OP_REQUIRES(context, (max_b > min_b),
-                errors::InvalidArgument("max_b must be larger than min_b."));
+                absl::InvalidArgumentError("max_b must be larger than min_b."));
     const int32_t offset_a = FloatToQuantizedUnclamped<T1>(0.0f, min_a, max_a);
     const int32_t offset_b = FloatToQuantizedUnclamped<T2>(0.0f, min_b, max_b);
     const int32_t offset_c = 0;
@@ -95,22 +110,23 @@ class QuantizedMatMulOp : public OpKernel {
 
     // Check that the dimensions of the two matrices are valid.
     OP_REQUIRES(context, TensorShapeUtils::IsMatrix(a.shape()),
-                errors::InvalidArgument("In[0] is not a matrix"));
+                absl::InvalidArgumentError("In[0] is not a matrix"));
     OP_REQUIRES(context, TensorShapeUtils::IsMatrix(b.shape()),
-                errors::InvalidArgument("In[1] is not a matrix"));
+                absl::InvalidArgumentError("In[1] is not a matrix"));
     Eigen::array<Eigen::IndexPair<Eigen::DenseIndex>, 1> dim_pair;
     dim_pair[0].first = transpose_a_ ? 0 : 1;
     dim_pair[0].second = transpose_b_ ? 1 : 0;
 
-    OP_REQUIRES(context,
-                a.dim_size(dim_pair[0].first) == b.dim_size(dim_pair[0].second),
-                errors::InvalidArgument("Matrix size-incompatible: In[0]: ",
-                                        a.shape().DebugString(),
-                                        ", In[1]: ", b.shape().DebugString()));
+    OP_REQUIRES(
+        context,
+        a.dim_size(dim_pair[0].first) == b.dim_size(dim_pair[0].second),
+        absl::InvalidArgumentError(absl::StrCat(
+            "Matrix size-incompatible: In[0]: ", a.shape().DebugString(),
+            ", In[1]: ", b.shape().DebugString())));
 
     OP_REQUIRES(context, ((shift_c >= 0) && (shift_c <= 31)),
-                errors::InvalidArgument("shift_c must be between 0 and 31, "
-                                        "inclusive."));
+                absl::InvalidArgumentError("shift_c must be between 0 and 31, "
+                                           "inclusive."));
 
     int a_dim_remaining = 1 - dim_pair[0].first;
     int b_dim_remaining = 1 - dim_pair[0].second;

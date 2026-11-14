@@ -15,6 +15,9 @@ limitations under the License.
 
 #include "tensorflow/core/framework/node_def_util.h"
 
+#include <limits>
+
+#include "absl/status/status.h"
 #include "tensorflow/core/framework/attr_value.pb.h"  // NOLINT
 #include "tensorflow/core/framework/fake_input.h"
 #include "tensorflow/core/framework/node_def_builder.h"
@@ -37,7 +40,7 @@ OpDef ToOpDef(const OpDefBuilder& builder) {
   return op_reg_data.op_def;
 }
 
-NodeDef ToNodeDef(const string& text) {
+NodeDef ToNodeDef(const std::string& text) {
   NodeDef node_def;
   EXPECT_TRUE(protobuf::TextFormat::MergeFromString(text, &node_def));
   return node_def;
@@ -50,24 +53,24 @@ NodeDef ToNodeDef(NodeDefBuilder&& builder) {
 }
 
 void ExpectSuccess(const NodeDef& good, const OpDef& op_def) {
-  EXPECT_EQ(Status::OK(), ValidateNodeDef(good, op_def))
+  EXPECT_EQ(absl::OkStatus(), ValidateNodeDef(good, op_def))
       << "NodeDef: " << SummarizeNodeDef(good)
       << "; OpDef: " << SummarizeOpDef(op_def);
 }
 
 void ExpectFailure(const NodeDef& bad, const OpDef& op_def,
-                   const string& message) {
-  Status status = ValidateNodeDef(bad, op_def);
+                   const std::string& message) {
+  absl::Status status = ValidateNodeDef(bad, op_def);
 
   EXPECT_FALSE(status.ok()) << "NodeDef: " << SummarizeNodeDef(bad)
                             << "; OpDef: " << SummarizeOpDef(op_def);
   if (status.ok()) return;
 
-  EXPECT_TRUE(errors::IsInvalidArgument(status))
+  EXPECT_TRUE(absl::IsInvalidArgument(status))
       << status << "; NodeDef: " << SummarizeNodeDef(bad)
       << "; OpDef: " << SummarizeOpDef(op_def);
 
-  LOG(INFO) << "Message: " << status.error_message();
+  LOG(INFO) << "Message: " << status.message();
   EXPECT_TRUE(absl::StrContains(status.ToString(), message))
       << "NodeDef: " << SummarizeNodeDef(bad)
       << "; OpDef: " << SummarizeOpDef(op_def) << "\nActual error: " << status
@@ -161,7 +164,8 @@ TEST(NodeDefUtilTest, Out) {
   ExpectFailure(bad, op,
                 "Value for attr 'T' of string is not in the list of allowed "
                 "values: float, double, int32, uint8, int16, int8, complex64, "
-                "int64, qint8, quint8, qint32, bfloat16, uint16, complex128, "
+                "int64, qint8, quint8, qint32, bfloat16, qint16, quint16, "
+                "uint16, complex128, "
                 "half, uint32, uint64");
 }
 
@@ -317,19 +321,19 @@ TEST(NodeDefUtilTest, Device) {
 }
 
 void ExpectValidSyntax(const NodeDef& good) {
-  EXPECT_EQ(Status::OK(), ValidateExternalNodeDefSyntax(good))
+  EXPECT_EQ(absl::OkStatus(), ValidateExternalNodeDefSyntax(good))
       << "NodeDef: " << SummarizeNodeDef(good);
 }
 
-void ExpectInvalidSyntax(const NodeDef& bad, const string& message) {
-  Status status = ValidateExternalNodeDefSyntax(bad);
+void ExpectInvalidSyntax(const NodeDef& bad, const std::string& message) {
+  absl::Status status = ValidateExternalNodeDefSyntax(bad);
 
   ASSERT_FALSE(status.ok()) << "NodeDef: " << SummarizeNodeDef(bad);
 
-  EXPECT_TRUE(errors::IsInvalidArgument(status))
+  EXPECT_TRUE(absl::IsInvalidArgument(status))
       << status << "; NodeDef: " << SummarizeNodeDef(bad);
 
-  EXPECT_TRUE(absl::StrContains(StringPiece(status.ToString()), message))
+  EXPECT_TRUE(absl::StrContains(absl::string_view(status.ToString()), message))
       << "NodeDef: " << SummarizeNodeDef(bad) << ", " << status << ", "
       << message;
 }
@@ -760,11 +764,11 @@ TEST(AddPrefixAndSuffixToNode, Enter) {
   node_def.set_name("enter");
   node_def.set_op("Enter");
   AddNodeAttr("frame_name", "test_frame", &node_def);
-  const string prefix = "prefix/";
-  const string suffix = "/suffix";
+  const std::string prefix = "prefix/";
+  const std::string suffix = "/suffix";
   TF_ASSERT_OK(AddPrefixAndSuffixToNode(prefix, suffix, &node_def));
   EXPECT_EQ("prefix/enter/suffix", node_def.name());
-  string frame_name;
+  std::string frame_name;
   TF_ASSERT_OK(GetNodeAttr(node_def, "frame_name", &frame_name));
   EXPECT_EQ("prefix/test_frame/suffix", frame_name);
 }
@@ -774,20 +778,20 @@ TEST(MaybeAddPrefixToColocationConstraints, Basic) {
   node_def.set_name("Identity");
   node_def.set_op("Identity");
   AddNodeAttr(kColocationAttrName,
-              {strings::StrCat(kColocationGroupPrefix, "Node1"),
-               strings::StrCat(kColocationGroupPrefix, "Node2"),
-               strings::StrCat(kColocationGroupPrefix, "Node3")},
+              {absl::StrCat(kColocationGroupPrefix, "Node1"),
+               absl::StrCat(kColocationGroupPrefix, "Node2"),
+               absl::StrCat(kColocationGroupPrefix, "Node3")},
               &node_def);
 
-  std::unordered_set<string> match;
+  std::unordered_set<std::string> match;
   match.insert("Node1");
   match.insert("Node3");
   TF_ASSERT_OK(MaybeAddPrefixToColocationConstraints(match, "fn/", &node_def));
-  std::vector<string> coloc_constraints;
+  std::vector<std::string> coloc_constraints;
   TF_ASSERT_OK(GetNodeAttr(node_def, kColocationAttrName, &coloc_constraints));
-  EXPECT_EQ(
-      coloc_constraints,
-      std::vector<string>({"loc:@fn/Node1", "loc:@Node2", "loc:@fn/Node3"}));
+  EXPECT_EQ(coloc_constraints,
+            std::vector<std::string>(
+                {"loc:@fn/Node1", "loc:@Node2", "loc:@fn/Node3"}));
 }
 
 TEST(MaybeAddPrefixToColocationConstraints, NoConstraints) {
@@ -795,7 +799,7 @@ TEST(MaybeAddPrefixToColocationConstraints, NoConstraints) {
   node_def.set_name("Identity");
   node_def.set_op("Identity");
 
-  std::unordered_set<string> match;
+  std::unordered_set<std::string> match;
   match.insert("Node1");
   match.insert("Node3");
   TF_ASSERT_OK(MaybeAddPrefixToColocationConstraints(match, "fn/", &node_def));
@@ -807,19 +811,19 @@ TEST(MaybeUpdateColocationConstraintsWithMap, Basic) {
   node_def.set_name("Identity");
   node_def.set_op("Identity");
   AddNodeAttr(kColocationAttrName,
-              {strings::StrCat(kColocationGroupPrefix, "Node1"),
-               strings::StrCat(kColocationGroupPrefix, "Node2"),
-               strings::StrCat(kColocationGroupPrefix, "Node3")},
+              {absl::StrCat(kColocationGroupPrefix, "Node1"),
+               absl::StrCat(kColocationGroupPrefix, "Node2"),
+               absl::StrCat(kColocationGroupPrefix, "Node3")},
               &node_def);
 
   std::map<absl::string_view, absl::string_view> node_map;
   node_map["Node1"] = "Node4";
   node_map["Invalid"] = "Node5";
   TF_ASSERT_OK(MaybeUpdateColocationConstraintsWithMap(node_map, &node_def));
-  std::vector<string> coloc_constraints;
+  std::vector<std::string> coloc_constraints;
   TF_ASSERT_OK(GetNodeAttr(node_def, kColocationAttrName, &coloc_constraints));
-  EXPECT_EQ(coloc_constraints,
-            std::vector<string>({"loc:@Node4", "loc:@Node2", "loc:@Node3"}));
+  EXPECT_EQ(coloc_constraints, std::vector<std::string>(
+                                   {"loc:@Node4", "loc:@Node2", "loc:@Node3"}));
 }
 
 TEST(MaybeUpdateColocationConstraintsWithMap, NoConstraints) {
@@ -875,11 +879,11 @@ TEST(AttachDef, AllowMultipleFormattedNode) {
   a.set_name("a");
   NodeDef b;
   b.set_name("b");
-  Status s = Status(error::CANCELLED, "Error");
-  Status s2 = AttachDef(s, a, true);
-  EXPECT_EQ("Error\n\t [[{{node a}}]]", s2.error_message());
-  Status s3 = AttachDef(s2, b, true);
-  EXPECT_EQ("Error\n\t [[{{node a}}]]\n\t [[{{node b}}]]", s3.error_message());
+  absl::Status s = absl::Status(absl::StatusCode::kCancelled, "Error");
+  absl::Status s2 = AttachDef(s, a, true);
+  EXPECT_EQ("Error\n\t [[{{node a}}]]", s2.message());
+  absl::Status s3 = AttachDef(s2, b, true);
+  EXPECT_EQ("Error\n\t [[{{node a}}]]\n\t [[{{node b}}]]", s3.message());
 }
 
 TEST(AttachDef, DisallowMultipleFormattedNode) {
@@ -887,11 +891,91 @@ TEST(AttachDef, DisallowMultipleFormattedNode) {
   a.set_name("a");
   NodeDef b;
   b.set_name("b");
-  Status s = Status(error::CANCELLED, "Error");
-  Status s2 = AttachDef(s, a, false);
-  EXPECT_EQ("Error\n\t [[{{node a}}]]", s2.error_message());
-  Status s3 = AttachDef(s2, b, false);
-  EXPECT_EQ("Error\n\t [[{{node a}}]]\n\t [[b]]", s3.error_message());
+  absl::Status s = absl::Status(absl::StatusCode::kCancelled, "Error");
+  absl::Status s2 = AttachDef(s, a, false);
+  EXPECT_EQ("Error\n\t [[{{node a}}]]", s2.message());
+  absl::Status s3 = AttachDef(s2, b, false);
+  EXPECT_EQ("Error\n\t [[{{node a}}]]\n\t [[b]]", s3.message());
+}
+
+TEST(NodeDefUtilTest, ValidInputOutputPortAndNameRangeControl) {
+  const OpDef op_def = ToOpDef(OpDefBuilder("SimplePortAndRange")
+                                   .Input("a: N * float")
+                                   .Output("b: M * int32")
+                                   .Attr("N: int")
+                                   .Attr("M: int"));
+  const NodeDef node_def = ToNodeDef(R"pb(
+    name: 'valid_node'
+    op: 'SimplePortAndRange'
+    input: 'x0'
+    input: 'x1'
+    attr {
+      key: 'N'
+      value { i: 2 }
+    }
+    attr {
+      key: 'M'
+      value { i: 1 }
+    }
+  )pb");
+
+  DataType dtype = DT_INVALID;
+  TF_EXPECT_OK(InputTypeForNode(node_def, op_def, 0, &dtype));
+  EXPECT_EQ(dtype, DT_FLOAT);
+  TF_EXPECT_OK(InputTypeForNode(node_def, op_def, 1, &dtype));
+  EXPECT_EQ(dtype, DT_FLOAT);
+  TF_EXPECT_OK(OutputTypeForNode(node_def, op_def, 0, &dtype));
+  EXPECT_EQ(dtype, DT_INT32);
+
+  NameRangeMap inputs, outputs;
+  TF_EXPECT_OK(NameRangesForNode(node_def, op_def, &inputs, &outputs));
+  EXPECT_EQ(NameRangeMap({{"a", {0, 2}}}), inputs);
+  EXPECT_EQ(NameRangeMap({{"b", {0, 1}}}), outputs);
+}
+
+TEST(NodeDefUtilTest, RejectsNegativePortAndInvalidNameRange) {
+  const OpDef op_def = ToOpDef(OpDefBuilder("PortAndRangeBounds")
+                                   .Input("a: N * float")
+                                   .Input("b: M * float")
+                                   .Output("c: N * int32")
+                                   .Attr("N: int")
+                                   .Attr("M: int"));
+  const NodeDef valid_node_def = ToNodeDef(R"pb(
+    name: 'port_bounds_node'
+    op: 'PortAndRangeBounds'
+    input: 'x0'
+    input: 'x1'
+    attr {
+      key: 'N'
+      value { i: 1 }
+    }
+    attr {
+      key: 'M'
+      value { i: 1 }
+    }
+  )pb");
+
+  DataType dtype = DT_INVALID;
+  EXPECT_EQ(InputTypeForNode(valid_node_def, op_def, -1, &dtype).code(),
+            absl::StatusCode::kInvalidArgument);
+  EXPECT_EQ(OutputTypeForNode(valid_node_def, op_def, -1, &dtype).code(),
+            absl::StatusCode::kInvalidArgument);
+
+  NodeDef neg_range_node_def = valid_node_def;
+  (*neg_range_node_def.mutable_attr())["N"].set_i(-2);
+  NameRangeMap inputs, outputs;
+  EXPECT_EQ(
+      NameRangesForNode(neg_range_node_def, op_def, &inputs, &outputs).code(),
+      absl::StatusCode::kInvalidArgument);
+
+  NodeDef overflow_range_node_def = valid_node_def;
+  (*overflow_range_node_def.mutable_attr())["N"].set_i(
+      std::numeric_limits<int>::max());
+  (*overflow_range_node_def.mutable_attr())["M"].set_i(1);
+  EXPECT_EQ(
+      NameRangesForNode(overflow_range_node_def, op_def, &inputs, &outputs)
+          .code(),
+      absl::StatusCode::kInvalidArgument);
 }
 
 }  // namespace

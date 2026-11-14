@@ -13,16 +13,19 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include <functional>
+#include <cstddef>
+#include <limits>
 #include <unordered_map>
-#include <utility>
+#include <vector>
 
 #include "absl/container/flat_hash_map.h"
+#include "absl/strings/string_view.h"
 #include "tensorflow/core/framework/bounds_check.h"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/register_types.h"
 #include "tensorflow/core/framework/tensor.h"
 #include "tensorflow/core/framework/tensor_shape.h"
+#include "tensorflow/core/framework/types.pb.h"
 #include "tensorflow/core/lib/core/status.h"
 #include "tensorflow/core/lib/hash/hash.h"
 #include "tensorflow/core/platform/bfloat16.h"
@@ -83,46 +86,46 @@ class UniqueOp : public OpKernel {
     // TODO(dga):  Make unique polymorphic for returning int32 and int64
     // vectors to support large tensors.
     OP_REQUIRES(context,
-                input.NumElements() <= std::numeric_limits<int32>::max(),
-                errors::InvalidArgument(
+                input.NumElements() <= std::numeric_limits<int32_t>::max(),
+                absl::InvalidArgumentError(absl::StrCat(
                     "unique does not support input tensors larger than ",
-                    std::numeric_limits<int32>::max(), " elements"));
+                    std::numeric_limits<int32_t>::max(), " elements")));
 
     int64_t axis = 0;
     std::vector<int64_t> new_sizes{1, input.NumElements(), 1};
     if (context->num_inputs() == 1) {
       OP_REQUIRES(context, TensorShapeUtils::IsVector(input.shape()),
-                  errors::InvalidArgument("unique expects a 1D vector."));
+                  absl::InvalidArgumentError("unique expects a 1D vector."));
     } else {
       // In case of UniqueV2, the axis is a 1D vector. The purpose is
       // to allow specifying either "no axis" or "axis". The `[]` means
       // "no axis", while `[x]` means `axis = x`.
       const Tensor& axis_tensor = context->input(1);
       OP_REQUIRES(context, TensorShapeUtils::IsVector(axis_tensor.shape()),
-                  errors::InvalidArgument("axis expects a 1D vector."));
+                  absl::InvalidArgumentError("axis expects a 1D vector."));
       OP_REQUIRES(
           context, axis_tensor.NumElements() <= 1,
-          errors::InvalidArgument(
+          absl::InvalidArgumentError(
               "axis does not support input tensors larger than 1 elements"));
       if (axis_tensor.NumElements() == 0) {
         OP_REQUIRES(context, TensorShapeUtils::IsVector(input.shape()),
-                    errors::InvalidArgument("unique expects a 1D vector."));
+                    absl::InvalidArgumentError("unique expects a 1D vector."));
       } else {
         OP_REQUIRES(context,
                     (axis_tensor.dtype() == DT_INT32 ||
                      axis_tensor.dtype() == DT_INT64),
-                    errors::InvalidArgument(
+                    absl::InvalidArgumentError(absl::StrCat(
                         "axis tensor should be int32 or int64, but got ",
-                        DataTypeString(axis_tensor.dtype())));
+                        DataTypeString(axis_tensor.dtype()))));
         if (axis_tensor.dtype() == DT_INT32) {
-          axis = internal::SubtleMustCopy(axis_tensor.scalar<int32>()());
+          axis = internal::SubtleMustCopy(axis_tensor.scalar<int32_t>()());
         } else {
           axis = internal::SubtleMustCopy(axis_tensor.scalar<int64_t>()());
         }
         axis = axis < 0 ? axis + input.dims() : axis;
         OP_REQUIRES(context, 0 <= axis && axis < input.dims(),
-                    errors::InvalidArgument("axis has to be between [0, ",
-                                            input.dims(), ")"));
+                    absl::InvalidArgumentError(absl::StrCat(
+                        "axis has to be between [0, ", input.dims(), ")")));
         if (axis > 0) {
           for (int64_t i = 0; i < axis; i++) {
             new_sizes[0] *= input.dim_size(i);
@@ -289,22 +292,22 @@ REGISTER_UNIQUE(bool)
 // de-duplicate sparse gradient indices) does not conflict with gradients being
 // located on a GPU. These kernels run on the CPU, their inputs and outputs
 // residing in host (not GPU) memory.
-#define REGISTER_UNIQUE_DEVICE(type)                            \
-  REGISTER_KERNEL_BUILDER(Name("Unique")                        \
-                              .Device(DEVICE_DEFAULT)           \
-                              .TypeConstraint<type>("T")        \
-                              .TypeConstraint<int32>("out_idx") \
-                              .HostMemory("x")                  \
-                              .HostMemory("y")                  \
-                              .HostMemory("idx"),               \
-                          UniqueOp<type, int32>);               \
-  REGISTER_KERNEL_BUILDER(Name("Unique")                        \
-                              .Device(DEVICE_DEFAULT)           \
-                              .TypeConstraint<type>("T")        \
-                              .TypeConstraint<int64>("out_idx") \
-                              .HostMemory("x")                  \
-                              .HostMemory("y")                  \
-                              .HostMemory("idx"),               \
+#define REGISTER_UNIQUE_DEVICE(type)                              \
+  REGISTER_KERNEL_BUILDER(Name("Unique")                          \
+                              .Device(DEVICE_DEFAULT)             \
+                              .TypeConstraint<type>("T")          \
+                              .TypeConstraint<int32>("out_idx")   \
+                              .HostMemory("x")                    \
+                              .HostMemory("y")                    \
+                              .HostMemory("idx"),                 \
+                          UniqueOp<type, int32>);                 \
+  REGISTER_KERNEL_BUILDER(Name("Unique")                          \
+                              .Device(DEVICE_DEFAULT)             \
+                              .TypeConstraint<type>("T")          \
+                              .TypeConstraint<int64_t>("out_idx") \
+                              .HostMemory("x")                    \
+                              .HostMemory("y")                    \
+                              .HostMemory("idx"),                 \
                           UniqueOp<type, int64>);
 
 TF_CALL_REAL_NUMBER_TYPES(REGISTER_UNIQUE_DEVICE);

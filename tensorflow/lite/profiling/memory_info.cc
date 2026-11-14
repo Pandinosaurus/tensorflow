@@ -14,10 +14,28 @@ limitations under the License.
 ==============================================================================*/
 #include "tensorflow/lite/profiling/memory_info.h"
 
+#include <stddef.h>
+
+#include <cinttypes>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <ostream>
+#include <string>
+
 #ifdef __linux__
 #include <malloc.h>
 #include <sys/resource.h>
 #include <sys/time.h>
+#include <time.h>
+#include <unistd.h>
+#elif defined(__APPLE__)
+#include <mach/mach.h>
+#include <malloc/malloc.h>
+#elif defined(_WIN32)
+#include <windows.h>
+// psapi must be included after windows.h.
+#include <psapi.h>
 #endif
 
 namespace tflite {
@@ -26,8 +44,86 @@ namespace memory {
 
 const size_t MemoryUsage::kValueNotSet = 0;
 
+namespace {
+
+#if defined(__linux__)
+// Returns the current VM swap in kilobytes on Linux.
+int64_t GetCurrentVmSwapKb() {
+  FILE* status_file = fopen("/proc/self/status", "r");
+  if (!status_file) {
+    return -1;
+  }
+  char line[256];
+  while (fgets(line, sizeof(line), status_file)) {
+    if (strncmp(line, "VmSwap:", 7) == 0) {
+      int64_t value_kb = 0;
+      if (sscanf(line + 7, "%" SCNd64, &value_kb) == 1) {
+        fclose(status_file);
+        return value_kb;
+      } else {
+        fclose(status_file);
+        return -1;  // Indicate parsing error
+      }
+    }
+  }
+  fclose(status_file);
+  // If the VmSwap line is not found, it means 0 swap is being used.
+  return 0;
+}
+
+// Returns the current CPU VMA-backed resident set size in kilobytes on Linux,
+// or -1 if unavailable. Reading Rss from /proc/self/smaps_rollup walks only
+// userspace CPU virtual memory areas and excludes unmapped GPU driver pages
+// injected into mm->rss_stat[MM_FILEPAGES] on Mali (mali_kbase). Because
+// walking /proc/self/smaps_rollup takes 10-30 ms on a large process, it is only
+// read on Mali devices and refreshed at most every 500 ms per thread.
+int64_t GetCurrentCpuRssKb() {
+  static const bool has_mali_device = (access("/dev/mali0", F_OK) == 0);
+  if (!has_mali_device) {
+    return -1;
+  }
+
+  thread_local int64_t last_refresh_ms = 0;
+  thread_local int64_t cached_rss_kb = -1;
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  const int64_t now_ms =
+      static_cast<int64_t>(ts.tv_sec) * 1000 + ts.tv_nsec / 1000000;
+  if (last_refresh_ms != 0 && now_ms - last_refresh_ms < 500) {
+    return cached_rss_kb;
+  }
+  last_refresh_ms = now_ms;
+
+  FILE* smaps_file = fopen("/proc/self/smaps_rollup", "r");
+  if (!smaps_file) {
+    cached_rss_kb = -1;
+    return -1;
+  }
+  char line[256];
+  while (fgets(line, sizeof(line), smaps_file)) {
+    if (strncmp(line, "Rss:", 4) == 0) {
+      int64_t value_kb = 0;
+      if (sscanf(line + 4, "%" SCNd64, &value_kb) == 1) {
+        fclose(smaps_file);
+        cached_rss_kb = value_kb;
+        return value_kb;
+      } else {
+        fclose(smaps_file);
+        cached_rss_kb = -1;
+        return -1;
+      }
+    }
+  }
+  fclose(smaps_file);
+  cached_rss_kb = -1;
+  return -1;
+}
+#endif
+
+}  // namespace
+
 bool MemoryUsage::IsSupported() {
-#ifdef __linux__
+#if defined(__linux__) || defined(__APPLE__) || defined(_WIN32)
   return true;
 #endif
   return false;
@@ -36,27 +132,89 @@ bool MemoryUsage::IsSupported() {
 MemoryUsage GetMemoryUsage() {
   MemoryUsage result;
 #ifdef __linux__
-  rusage res;
-  if (getrusage(RUSAGE_SELF, &res) == 0) {
-    result.max_rss_kb = res.ru_maxrss;
+  int64_t rss_kb = GetCurrentCpuRssKb();
+  if (rss_kb < 0) {
+    rusage res;
+    if (getrusage(RUSAGE_SELF, &res) == 0) {
+      rss_kb = res.ru_maxrss;
+    }
   }
-#if defined(__GLIBC__) && __GLIBC_MINOR__ >= 33
+  if (rss_kb >= 0) {
+    result.mem_footprint_kb = rss_kb;
+    int64_t vm_swap_kb = GetCurrentVmSwapKb();
+    if (vm_swap_kb >= 0) {
+      result.private_footprint_bytes = (vm_swap_kb + rss_kb) * 1024;
+    }
+  }
+#if defined(__NO_MALLINFO__) || !defined(__GLIBC__) ||         \
+    defined(ADDRESS_SANITIZER) || defined(MEMORY_SANITIZER) || \
+    defined(THREAD_SANITIZER)
+  result.total_allocated_bytes = -1;
+  result.in_use_allocated_bytes = -1;
+#elif __GLIBC_MINOR__ >= 33
   const auto mem = mallinfo2();
-#else
-  const auto mem = mallinfo();
-#endif
   result.total_allocated_bytes = mem.arena;
   result.in_use_allocated_bytes = mem.uordblks;
-#endif
+#else
+  const auto mem = mallinfo();
+  result.total_allocated_bytes = mem.arena;
+  result.in_use_allocated_bytes = mem.uordblks;
+#endif  // defined(__NO_MALLINFO__) || !defined(__GLIBC__) || \
+        // defined(ADDRESS_SANITIZER) || defined(MEMORY_SANITIZER) ||
+        // defined(THREAD_SANITIZER)
+#elif defined(__APPLE__)
+  struct task_vm_info vm_info;
+  mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+  auto status = task_info(mach_task_self(), TASK_VM_INFO,
+                          reinterpret_cast<task_info_t>(&vm_info), &count);
+  if (status == KERN_SUCCESS) {
+    result.mem_footprint_kb =
+        static_cast<int64_t>(vm_info.phys_footprint / 1024.0);
+    // TODO: b/421171145 - Consider subtracting shared_resident_kb.
+    result.private_footprint_bytes = vm_info.phys_footprint;
+  }
+  struct mstats stats = mstats();
+  result.total_allocated_bytes = stats.bytes_total;
+  result.in_use_allocated_bytes = stats.bytes_used;
+#elif defined(_WIN32)
+  PROCESS_MEMORY_COUNTERS_EX process_memory_counters;
+  HANDLE process_handle = GetCurrentProcess();
+  if (process_handle != nullptr &&
+      GetProcessMemoryInfo(process_handle,
+                           (PROCESS_MEMORY_COUNTERS*)&process_memory_counters,
+                           sizeof(process_memory_counters))) {
+    result.mem_footprint_kb = process_memory_counters.WorkingSetSize / 1024;
+    result.private_footprint_bytes = process_memory_counters.PrivateUsage;
+  } else {
+    result.mem_footprint_kb = -1;
+    result.private_footprint_bytes = -1;
+  }
+  CloseHandle(process_handle);
+  result.total_allocated_bytes = -1;
+  result.in_use_allocated_bytes = -1;
+#ifdef USE_WIN32_HEAP_SUMMARY
+  HANDLE process_heap = GetProcessHeap();
+  if (process_heap != nullptr) {
+    HEAP_SUMMARY heap_summary;
+    heap_summary.cb = sizeof(heap_summary);
+    if (HeapSummary(process_heap, 0, &heap_summary)) {
+      result.total_allocated_bytes = heap_summary.cbCommitted;
+      result.in_use_allocated_bytes = heap_summary.cbAllocated;
+    }
+  }
+#endif  // USE_WIN32_HEAP_SUMMARY
+#endif  // __linux__
   return result;
 }
 
 void MemoryUsage::AllStatsToStream(std::ostream* stream) const {
-  *stream << "max resident set size = " << max_rss_kb / 1024.0
-          << " MB, total malloc-ed size = "
-          << total_allocated_bytes / 1024.0 / 1024.0
-          << " MB, in-use allocated/mmapped size = "
-          << in_use_allocated_bytes / 1024.0 / 1024.0 << " MB";
+  *stream << "max resident set size/physical footprint = "
+          << mem_footprint_kb / 1000.0 << " MB, total non-mmapped heap size = "
+          << total_allocated_bytes / 1000.0 / 1000.0
+          << " MB, in-use heap size = "
+          << in_use_allocated_bytes / 1000.0 / 1000.0
+          << " MB, private footprint = "
+          << private_footprint_bytes / 1000.0 / 1000.0 << " MB";
 }
 
 }  // namespace memory

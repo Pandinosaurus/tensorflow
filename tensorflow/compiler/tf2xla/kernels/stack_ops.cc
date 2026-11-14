@@ -15,35 +15,40 @@ limitations under the License.
 
 // XLA Stack operators.
 
-#include <limits>
+#include <cstdint>
+#include <string>
 #include <vector>
 
+#include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
 #include "tensorflow/compiler/tf2xla/shape_util.h"
-#include "tensorflow/compiler/tf2xla/type_util.h"
-#include "tensorflow/compiler/tf2xla/xla_helpers.h"
 #include "tensorflow/compiler/tf2xla/xla_op_kernel.h"
 #include "tensorflow/compiler/tf2xla/xla_op_registry.h"
-#include "tensorflow/compiler/xla/literal.h"
-#include "tensorflow/core/framework/bounds_check.h"
+#include "tensorflow/compiler/tf2xla/xla_resource.h"
+#include "xla/hlo/builder/xla_builder.h"
+#include "xla/shape.h"
+#include "xla/shape_util.h"
+#include "xla/status_macros.h"
+#include "xla/tsl/platform/errors.h"
 #include "tensorflow/core/framework/op_kernel.h"
-#include "tensorflow/core/framework/partial_tensor_shape.h"
-#include "tensorflow/core/framework/register_types.h"
-#include "tensorflow/core/framework/tensor.h"
-#include "tensorflow/core/framework/tensor_types.h"
+#include "tensorflow/core/framework/op_requires.h"
+#include "tensorflow/core/framework/tensor_shape.h"
 #include "tensorflow/core/framework/types.h"
+#include "tensorflow/core/framework/types.pb.h"
 #include "tensorflow/core/lib/core/status.h"
+#include "tensorflow/core/platform/errors.h"
 #include "tensorflow/core/platform/types.h"
 
 namespace tensorflow {
 namespace {
 
-Status GetStackShape(xla::XlaBuilder* builder, XlaResource* resource,
-                     TensorShape* stack_shape) {
+absl::Status GetStackShape(xla::XlaBuilder* builder, XlaResource* resource,
+                           TensorShape* stack_shape) {
   auto shape_or_status = builder->GetShape(resource->value());
   if (!shape_or_status.ok()) {
     return shape_or_status.status();
   }
-  xla::Shape shape = shape_or_status.ValueOrDie();
+  xla::Shape shape = shape_or_status.value();
   TF_RET_CHECK(shape.IsTuple());
   return XLAShapeToTensorShape(xla::ShapeUtil::GetTupleElementShape(shape, 0),
                                stack_shape);
@@ -59,8 +64,9 @@ Status GetStackShape(xla::XlaBuilder* builder, XlaResource* resource,
 //
 // TODO(phawkins): consider changing the API of the stack operators to
 // allow an optional element shape at stack construction time.
-Status MaybeInitializeStack(xla::XlaBuilder* builder, XlaResource* resource,
-                            DataType dtype, const TensorShape& elem_shape) {
+absl::Status MaybeInitializeStack(xla::XlaBuilder* builder,
+                                  XlaResource* resource, DataType dtype,
+                                  const TensorShape& elem_shape) {
   if (resource->type() != dtype) {
     return errors::InvalidArgument(
         "Stack dtype is ", DataTypeString(resource->type()),
@@ -68,7 +74,7 @@ Status MaybeInitializeStack(xla::XlaBuilder* builder, XlaResource* resource,
   }
 
   TensorShape stack_shape;
-  stack_shape.AddDim(resource->max_array_size());
+  TF_RETURN_IF_ERROR(stack_shape.AddDimWithStatus(resource->max_array_size()));
   stack_shape.AppendShape(elem_shape);
 
   if (!resource->initialized()) {
@@ -85,7 +91,7 @@ Status MaybeInitializeStack(xla::XlaBuilder* builder, XlaResource* resource,
           actual_shape.DebugString());
     }
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 class StackOp : public XlaOpKernel {
@@ -115,9 +121,10 @@ class StackOp : public XlaOpKernel {
 
  private:
   DataType dtype_;
-  string stack_name_;
+  std::string stack_name_;
 
-  TF_DISALLOW_COPY_AND_ASSIGN(StackOp);
+  StackOp(const StackOp&) = delete;
+  void operator=(const StackOp&) = delete;
 };
 
 REGISTER_XLA_OP(
@@ -146,7 +153,7 @@ class StackPushOp : public XlaOpKernel {
 
     // start_indices of the DynamicUpdateSlice are [index, 0, 0, ..., 0].
     std::vector<xla::XlaOp> start_indices(elem_shape.dims() + 1,
-                                          xla::ConstantR0<int32>(b, 0));
+                                          xla::ConstantR0<int32_t>(b, 0));
     start_indices[0] = index;
 
     TensorShape slice_shape = elem_shape;
@@ -158,7 +165,7 @@ class StackPushOp : public XlaOpKernel {
     OP_REQUIRES_OK(ctx,
                    resource->SetValue(xla::Tuple(
                        b, {xla::DynamicUpdateSlice(ta, update, start_indices),
-                           xla::Add(index, xla::ConstantR0<int32>(b, 1))})));
+                           xla::Add(index, xla::ConstantR0<int32_t>(b, 1))})));
 
     ctx->SetOutput(0, value);
   }
@@ -166,7 +173,8 @@ class StackPushOp : public XlaOpKernel {
  private:
   DataType dtype_;
 
-  TF_DISALLOW_COPY_AND_ASSIGN(StackPushOp);
+  StackPushOp(const StackPushOp&) = delete;
+  void operator=(const StackPushOp&) = delete;
 };
 
 REGISTER_XLA_OP(Name("StackPushV2").CompilationOnly(), StackPushOp);
@@ -197,12 +205,12 @@ class StackPopOp : public XlaOpKernel {
     xla::XlaOp ta = xla::GetTupleElement(state, 0);
     xla::XlaOp index = xla::GetTupleElement(state, 1);
 
-    index = Sub(index, xla::ConstantR0<int32>(b, 1));
+    index = Sub(index, xla::ConstantR0<int32_t>(b, 1));
     OP_REQUIRES_OK(ctx, resource->SetValue(xla::Tuple(b, {ta, index})));
 
     // start_indices of the DynamicSlice are [index, 0, 0, ..., 0].
     std::vector<xla::XlaOp> start_indices(stack_shape.dims(),
-                                          xla::ConstantR0<int32>(b, 0));
+                                          xla::ConstantR0<int32_t>(b, 0));
     start_indices[0] = index;
 
     auto slice_shape = stack_shape.dim_sizes();
@@ -221,7 +229,8 @@ class StackPopOp : public XlaOpKernel {
  private:
   DataType dtype_;
 
-  TF_DISALLOW_COPY_AND_ASSIGN(StackPopOp);
+  StackPopOp(const StackPopOp&) = delete;
+  void operator=(const StackPopOp&) = delete;
 };
 
 REGISTER_XLA_OP(Name("StackPopV2").CompilationOnly(), StackPopOp);
@@ -235,7 +244,8 @@ class StackCloseOp : public XlaOpKernel {
   }
 
  private:
-  TF_DISALLOW_COPY_AND_ASSIGN(StackCloseOp);
+  StackCloseOp(const StackCloseOp&) = delete;
+  void operator=(const StackCloseOp&) = delete;
 };
 
 REGISTER_XLA_OP(Name("StackCloseV2").CompilationOnly(), StackCloseOp);

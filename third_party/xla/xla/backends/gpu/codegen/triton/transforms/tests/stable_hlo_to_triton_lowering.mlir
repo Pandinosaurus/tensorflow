@@ -1,0 +1,823 @@
+// Copyright 2026 The OpenXLA Authors. All Rights Reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+// ==============================================================================
+// RUN: xla-opt %s -split-input-file \
+// RUN: -stablehlo-lower-to-triton="warp_specialization_allowed=false" \
+// RUN: -triton-xla-fold-reshape-around-for-loop \
+// RUN: | FileCheck %s
+// RUN: xla-opt %s -split-input-file \
+// RUN: -stablehlo-lower-to-triton="warp_specialization_allowed=true" \
+// RUN: -triton-xla-fold-reshape-around-for-loop \
+// RUN: | FileCheck %s --check-prefix=WARP
+
+// CHECK: func @lower_transpose(%[[ARG:.*]]: tensor<2x4x8xf32>) -> tensor<8x2x4xf32>
+func.func @lower_transpose(%arg0: tensor<2x4x8xf32>) -> tensor<8x2x4xf32> {
+  // CHECK: %[[RES:.*]] = tt.trans %[[ARG]] {order = array<i32: 2, 0, 1>} : tensor<2x4x8xf32> -> tensor<8x2x4xf32>
+  %0 = stablehlo.transpose %arg0, dims = [2, 0, 1] : (tensor<2x4x8xf32>) -> tensor<8x2x4xf32>
+  // CHECK: return %[[RES]] : tensor<8x2x4xf32>
+  return %0 : tensor<8x2x4xf32>
+}
+
+// CHECK: func @lower_iota_to_make_range() -> tensor<16xi32>
+func.func @lower_iota_to_make_range() -> tensor<16xi32> {
+  // CHECK: %[[RES:.*]] = tt.make_range {end = 16 : i32, start = 0 : i32} : tensor<16xi32>
+  %0 = stablehlo.iota dim = 0 : tensor<16xi32>
+  // CHECK: return %[[RES]] : tensor<16xi32>
+  return %0 : tensor<16xi32>
+}
+
+// CHECK: func @lower_iota_on_multidimensional_tensor_falls_back_to_stablehlo() -> tensor<16x32xi32>
+func.func @lower_iota_on_multidimensional_tensor_falls_back_to_stablehlo() -> tensor<16x32xi32> {
+  // CHECK: %[[RES:.*]] = stablehlo.iota dim = 0 : tensor<16x32xi32>
+  %0 = stablehlo.iota dim = 0 : tensor<16x32xi32>
+  // CHECK: return %[[RES]] : tensor<16x32xi32>
+  return %0 : tensor<16x32xi32>
+}
+
+// CHECK: func @lower_iota_on_non_signed_32_bit_tensor_falls_back_to_stablehlo() -> tensor<8xui32>
+func.func @lower_iota_on_non_signed_32_bit_tensor_falls_back_to_stablehlo() -> tensor<8xui32> {
+  // CHECK: %[[RES:.*]] = stablehlo.iota dim = 0 : tensor<8xui32>
+  %0 = stablehlo.iota dim = 0 : tensor<8xui32>
+  // CHECK: return %[[RES]] : tensor<8xui32>
+  return %0 : tensor<8xui32>
+}
+
+// CHECK: func @lower_broadcast_in_dim(%[[ARG0:.*]]: tensor<2x4xf32>) -> tensor<8x2x4x16xf32>
+func.func @lower_broadcast_in_dim(%arg0: tensor<2x4xf32>) -> tensor<8x2x4x16xf32> {
+  // CHECK: %[[RES_EXPAND_DIMS_0:.*]] = tt.expand_dims %[[ARG0]] {axis = 0 : i32} : tensor<2x4xf32> -> tensor<1x2x4xf32>
+  // CHECK: %[[RES_EXPAND_DIMS_1:.*]] = tt.expand_dims %[[RES_EXPAND_DIMS_0]] {axis = 3 : i32} : tensor<1x2x4xf32> -> tensor<1x2x4x1xf32>
+  // CHECK: %[[RES:.*]] = tt.broadcast %[[RES_EXPAND_DIMS_1]] : tensor<1x2x4x1xf32> -> tensor<8x2x4x16xf32>
+  %0 = stablehlo.broadcast_in_dim %arg0, dims = [1, 2] : (tensor<2x4xf32>) -> tensor<8x2x4x16xf32>
+  // CHECK: return %[[RES]] : tensor<8x2x4x16xf32>
+  return %0 : tensor<8x2x4x16xf32>
+}
+
+// CHECK: func @lower_broadcast_in_dim_on_0d_tensor_produced_by_to_tensor_to_splat(%[[ARG0:.*]]: f32) -> tensor<4x2xf32>
+func.func @lower_broadcast_in_dim_on_0d_tensor_produced_by_to_tensor_to_splat(%arg0: f32) -> tensor<4x2xf32> {
+  // CHECK-NOT: tensor.from_elements
+  // CHECK: %[[RES:.*]] = tt.splat %[[ARG0]] : f32 -> tensor<4x2xf32>
+  %to_tensor = tensor.from_elements %arg0 : tensor<f32>
+  %0 = stablehlo.broadcast_in_dim %to_tensor, dims = [] : (tensor<f32>) -> tensor<4x2xf32>
+  // CHECK: return %[[RES]] : tensor<4x2xf32>
+  return %0 : tensor<4x2xf32>
+}
+
+// CHECK: func @lower_broadcast_in_dim_to_scalar_to_from_elements(%[[ARG0:.*]]: f32) -> tensor<f32>
+func.func @lower_broadcast_in_dim_to_scalar_to_from_elements(%arg0: f32) -> tensor<f32> {
+  // CHECK: %[[FROM_ELEMENTS:.*]] = tensor.from_elements %arg0 : tensor<f32>
+  %to_tensor = tensor.from_elements %arg0 : tensor<f32>
+  %2 = stablehlo.broadcast_in_dim %to_tensor, dims = [] : (tensor<f32>) -> tensor<f32>
+  // CHECK: return %[[FROM_ELEMENTS]] : tensor<f32>
+  return %2 : tensor<f32>
+}
+
+// CHECK: func @reduce(%[[ARG0:.*]]: tensor<16x8xf32>) -> tensor<8xf32>
+func.func @reduce(%arg0: tensor<16x8xf32>) -> tensor<8xf32> {
+  %0 = stablehlo.constant dense<0.000000e+00> : tensor<f32>
+  // CHECK: %[[RES:.*]] = "tt.reduce"(%[[ARG0]]) <{axis = 0 : i32}> ({
+  %1 = "stablehlo.reduce"(%arg0, %0) ({
+  //CHECK: ^bb0(%[[ARG1:.*]]: f32, %[[ARG2:.*]]: f32):
+  ^bb0(%arg1: tensor<f32>, %arg2: tensor<f32>):
+    // CHECK: %[[ARG1_CAST:.*]] = tensor.from_elements %[[ARG1]] : tensor<f32>
+    // CHECK: %[[ARG2_CAST:.*]] = tensor.from_elements %[[ARG2]] : tensor<f32>
+    // CHECK: %[[RES:.*]] = arith.addf %[[ARG1_CAST]], %[[ARG2_CAST]] : tensor<f32>
+    // CHECK: %[[RES_CAST:.*]] = tensor.extract %[[RES]][] : tensor<f32>
+    // CHECK: tt.reduce.return %[[RES_CAST]] : f32
+    %add = arith.addf %arg1, %arg2 : tensor<f32>
+    stablehlo.return %add : tensor<f32>
+  }) {dimensions = array<i64: 0>} : (tensor<16x8xf32>, tensor<f32>) -> tensor<8xf32>
+  return %1 : tensor<8xf32>
+}
+
+// CHECK: func @reduce_to_scalar_followed_by_extract(%[[ARG0:.*]]: tensor<16xf32>) -> f32
+func.func @reduce_to_scalar_followed_by_extract(%arg0: tensor<16xf32>) -> f32 {
+  %0 = stablehlo.constant dense<0.000000e+00> : tensor<f32>
+  // CHECK: %[[REDUCE_RESULT:.*]] = "tt.reduce"(%[[ARG0]]) <{axis = 0 : i32}> ({
+  %1 = "stablehlo.reduce"(%arg0, %0) ({
+  //CHECK: ^bb0(%[[ARG1:.*]]: f32, %[[ARG2:.*]]: f32):
+  ^bb0(%arg1: tensor<f32>, %arg2: tensor<f32>):
+    // CHECK: %[[RES:.*]] = arith.addf {{.*}} : tensor<f32>
+    // CHECK: tt.reduce.return {{.*}} : f32
+    %add = arith.addf %arg1, %arg2 : tensor<f32>
+    stablehlo.return %add : tensor<f32>
+  }) {dimensions = array<i64: 0>} : (tensor<16xf32>, tensor<f32>) -> tensor<f32>
+  // CHECK-NOT: tensor.from_elements
+  // CHECK-NOT: tensor.extract
+  %extract = tensor.extract %1[] : tensor<f32>
+  // CHECK: return %[[REDUCE_RESULT:.*]] : f32
+  return %extract : f32
+}
+
+// CHECK: func @reduce_over_multiple_dimensions(%[[ARG0:.*]]: tensor<16x8x4xf32>) -> tensor<4xf32>
+func.func @reduce_over_multiple_dimensions(%arg0: tensor<16x8x4xf32>) -> tensor<4xf32> {
+  %0 = stablehlo.constant dense<0.000000e+00> : tensor<f32>
+  // CHECK: %[[REDUCE1:.*]] = "tt.reduce"(%[[ARG0]]) <{axis = 1 : i32}>
+  // CHECK: %[[REDUCE0:.*]] = "tt.reduce"(%[[REDUCE1]]) <{axis = 0 : i32}>
+  %1 = "stablehlo.reduce"(%arg0, %0) ({
+  ^bb0(%arg1: tensor<f32>, %arg2: tensor<f32>):
+    %add = arith.addf %arg1, %arg2 : tensor<f32>
+    stablehlo.return %add : tensor<f32>
+  }) {dimensions = array<i64: 0, 1>} : (tensor<16x8x4xf32>, tensor<f32>) -> tensor<4xf32>
+  // CHECK: return %[[REDUCE0]] : tensor<4xf32>
+  return %1 : tensor<4xf32>
+}
+
+// CHECK: func @reduce_with_multiple_inputs(%[[ARG0:.*]]: tensor<16x8xf32>, %[[ARG1:.*]]: tensor<16x8xf32>) -> tensor<8xf32>
+func.func @reduce_with_multiple_inputs(%arg0: tensor<16x8xf32>, %arg1: tensor<16x8xf32>) -> tensor<8xf32> {
+  %0 = stablehlo.constant dense<0.000000e+00> : tensor<f32>
+  // CHECK: %[[REDUCE_RESULT:.*]] = "tt.reduce"(%[[ARG0]], %[[ARG1]]) <{axis = 0 : i32}> ({
+  %1, %2 = "stablehlo.reduce"(%arg0, %arg1, %0, %0) ({
+  ^bb0(%arg0_reducer: tensor<f32>, %arg1_reducer: tensor<f32>, %arg2_reducer: tensor<f32>, %arg3_reducer: tensor<f32>):
+    // Reducer arguments are (accumulator_0, accumulator_1, element_0,
+    // element_1), so pair each accumulator with its own element.
+    %add0 = arith.addf %arg0_reducer, %arg2_reducer : tensor<f32>
+    %add1 = arith.addf %arg1_reducer, %arg3_reducer : tensor<f32>
+    stablehlo.return %add0, %add1 : tensor<f32>, tensor<f32>
+  }) {dimensions = array<i64: 0>} : (tensor<16x8xf32>, tensor<16x8xf32>, tensor<f32>, tensor<f32>) -> (tensor<8xf32>, tensor<8xf32>)
+  return %1 : tensor<8xf32>
+}
+
+func.func @lower_reshape(%arg0: tensor<2x4x8xf32>) -> tensor<8x2x4xf32> {
+  // CHECK: %[[RES:.*]] = tt.reshape %[[ARG]] : tensor<2x4x8xf32> -> tensor<8x2x4xf32>
+  %0 = stablehlo.reshape %arg0 : (tensor<2x4x8xf32>) -> tensor<8x2x4xf32>
+  return %0 : tensor<8x2x4xf32>
+}
+
+// CHECK-LABEL: @reshape_0d_to_0d_folds(%arg0: tensor<f32>)
+func.func @reshape_0d_to_0d_folds(%arg0: tensor<f32>) -> tensor<f32> {
+  %0 = stablehlo.reshape %arg0 : (tensor<f32>) -> tensor<f32>
+  // CHECK: return %arg0 : tensor<f32>
+  return %0 : tensor<f32>
+}
+
+// CHECK-LABEL: @reshape_0d_to_2d_splats(%arg0: tensor<f32>)
+func.func @reshape_0d_to_2d_splats(%arg0: tensor<f32>) -> tensor<1x1xf32> {
+  // CHECK: %[[SCALAR:.*]] = tensor.extract %arg0[] : tensor<f32>
+  // CHECK: %[[SPLAT:.*]] = tt.splat %[[SCALAR]] : f32 -> tensor<1x1xf32>
+  %0 = stablehlo.reshape %arg0 : (tensor<f32>) -> tensor<1x1xf32>
+  // CHECK: return %[[SPLAT]]
+  return %0 : tensor<1x1xf32>
+}
+
+// CHECK-LABEL: @reshape_2d_to_0d_reduces(%arg0: tensor<1x1xf32>)
+func.func @reshape_2d_to_0d_reduces(%arg0: tensor<1x1xf32>) -> tensor<f32> {
+  // CHECK: %[[UNSPLAT:.*]] = tt.unsplat %arg0 : tensor<1x1xf32>
+  // CHECK: %[[RES:.*]] = tensor.from_elements %[[UNSPLAT]] : tensor<f32>
+  %0 = stablehlo.reshape %arg0 : (tensor<1x1xf32>) -> tensor<f32>
+  // CHECK: return %[[RES]]
+  return %0 : tensor<f32>
+}
+
+// CHECK: func @lower_dot_add_to_triton(%[[ARG0:.*]]: tensor<2x4xf32>, %[[ARG1:.*]]: tensor<4x8xf32>, %[[ARG2:.*]]: tensor<2x8xf32>) -> tensor<2x8xf32>
+func.func @lower_dot_add_to_triton(%arg0: tensor<2x4xf32>, %arg1: tensor<4x8xf32>, %arg2: tensor<2x8xf32>) -> tensor<2x8xf32> {
+  // CHECK: %[[RES:.*]] = tt.dot %[[ARG0]], %[[ARG1]], %[[ARG2]], inputPrecision = tf32 : tensor<2x4xf32> * tensor<4x8xf32> -> tensor<2x8xf32>
+  // CHECK-NOT: arith.addf
+  %0 = stablehlo.dot_general %arg0, %arg1, contracting_dims = [1] x [0], precision = [DEFAULT, DEFAULT] : (tensor<2x4xf32>, tensor<4x8xf32>) -> tensor<2x8xf32>
+  %1 = arith.addf %0, %arg2 : tensor<2x8xf32>
+  // CHECK: return %[[RES]] : tensor<2x8xf32>
+  return %1 : tensor<2x8xf32>
+}
+
+// CHECK: func @lower_integer_dot_add_to_triton(%[[ARG0:.*]]: tensor<2x4xi32>, %[[ARG1:.*]]: tensor<4x8xi32>, %[[ARG2:.*]]: tensor<2x8xi32>) -> tensor<2x8xi32>
+func.func @lower_integer_dot_add_to_triton(%arg0: tensor<2x4xi32>, %arg1: tensor<4x8xi32>, %arg2: tensor<2x8xi32>) -> tensor<2x8xi32> {
+  // CHECK: %[[RES:.*]] = tt.dot %[[ARG0]], %[[ARG1]], %[[ARG2]] : tensor<2x4xi32> * tensor<4x8xi32> -> tensor<2x8xi32>
+  // CHECK-NOT: inputPrecision = tf32
+  // CHECK-NOT: arith.addi
+  %0 = stablehlo.dot_general %arg0, %arg1, contracting_dims = [1] x [0], precision = [DEFAULT, DEFAULT] : (tensor<2x4xi32>, tensor<4x8xi32>) -> tensor<2x8xi32>
+  %1 = arith.addi %0, %arg2 : tensor<2x8xi32>
+  // CHECK: return %[[RES]] : tensor<2x8xi32>
+  return %1 : tensor<2x8xi32>
+}
+
+// CHECK: func @lower_dot_without_add_falls_back_to_stablehlo(%[[ARG0:.*]]: tensor<2x4xf32>, %[[ARG1:.*]]: tensor<4x8xf32>, %[[ARG2:.*]]: tensor<2x8xf32>) -> tensor<2x8xf32>
+func.func @lower_dot_without_add_falls_back_to_stablehlo(%arg0: tensor<2x4xf32>, %arg1: tensor<4x8xf32>, %arg2: tensor<2x8xf32>) -> tensor<2x8xf32> {
+  // CHECK: %[[RES:.*]] = stablehlo.dot_general %[[ARG0]], %[[ARG1]], contracting_dims = [1] x [0], precision = [DEFAULT, DEFAULT] : (tensor<2x4xf32>, tensor<4x8xf32>) -> tensor<2x8xf32>
+  %0 = stablehlo.dot_general %arg0, %arg1, contracting_dims = [1] x [0], precision = [DEFAULT, DEFAULT] : (tensor<2x4xf32>, tensor<4x8xf32>) -> tensor<2x8xf32>
+  // CHECK: return %[[RES]] : tensor<2x8xf32>
+  return %0 : tensor<2x8xf32>
+}
+
+// CHECK: func @lower_dot_f8_no_ieee_has_max_num_imprecise_acc_set_to_max(%[[ARG0:.*]]: tensor<2x4xf8E4M3FN>, %[[ARG1:.*]]: tensor<4x8xf8E4M3FN>, %[[ARG2:.*]]: tensor<2x8xf8E4M3FN>) -> tensor<2x8xf8E4M3FN>
+func.func @lower_dot_f8_no_ieee_has_max_num_imprecise_acc_set_to_max(%arg0: tensor<2x4xf8E4M3FN>, %arg1: tensor<4x8xf8E4M3FN>, %arg2: tensor<2x8xf8E4M3FN>) -> tensor<2x8xf8E4M3FN> {
+  // CHECK: %[[RES:.*]] = tt.dot %[[ARG0]], %[[ARG1]], %[[ARG2]], inputPrecision = tf32 {maxNumImpreciseAcc = 2147483647 : i32} : tensor<2x4xf8E4M3FN> * tensor<4x8xf8E4M3FN> -> tensor<2x8xf8E4M3FN>
+  // CHECK-NOT: arith.addf
+  %0 = stablehlo.dot_general %arg0, %arg1, contracting_dims = [1] x [0], precision = [DEFAULT, DEFAULT] : (tensor<2x4xf8E4M3FN>, tensor<4x8xf8E4M3FN>) -> tensor<2x8xf8E4M3FN>
+  %1 = arith.addf %0, %arg2 : tensor<2x8xf8E4M3FN>
+  // CHECK: return %[[RES]] : tensor<2x8xf8E4M3FN>
+  return %1 : tensor<2x8xf8E4M3FN>
+}
+
+// CHECK: func @lower_dot_f8_highest_precision_keeps_max_num_imprecise_acc_zero(%[[ARG0:.*]]: tensor<2x4xf8E4M3FN>, %[[ARG1:.*]]: tensor<4x8xf8E4M3FN>, %[[ARG2:.*]]: tensor<2x8xf32>) -> tensor<2x8xf32>
+func.func @lower_dot_f8_highest_precision_keeps_max_num_imprecise_acc_zero(%arg0: tensor<2x4xf8E4M3FN>, %arg1: tensor<4x8xf8E4M3FN>, %arg2: tensor<2x8xf32>) -> tensor<2x8xf32> {
+  // CHECK: %[[RES:.*]] = tt.dot %[[ARG0]], %[[ARG1]], %[[ARG2]] : tensor<2x4xf8E4M3FN> * tensor<4x8xf8E4M3FN> -> tensor<2x8xf32>
+  // CHECK-NOT: maxNumImpreciseAcc
+  // CHECK-NOT: arith.addf
+  %0 = stablehlo.dot_general %arg0, %arg1, contracting_dims = [1] x [0], precision = [HIGHEST, HIGHEST] : (tensor<2x4xf8E4M3FN>, tensor<4x8xf8E4M3FN>) -> tensor<2x8xf32>
+  %1 = arith.addf %0, %arg2 : tensor<2x8xf32>
+  // CHECK: return %[[RES]] : tensor<2x8xf32>
+  return %1 : tensor<2x8xf32>
+}
+
+// CHECK-LABEL: func @lower_dot_bf16_bf16_f32_x3_to_triton
+// CHECK-SAME: (%[[LHS:.*]]: tensor<2x4xf32>, %[[RHS:.*]]: tensor<4x8xf32>, %[[ACC:.*]]: tensor<2x8xf32>) -> tensor<2x8xf32>
+func.func @lower_dot_bf16_bf16_f32_x3_to_triton(%arg0: tensor<2x4xf32>, %arg1: tensor<4x8xf32>, %arg2: tensor<2x8xf32>) -> tensor<2x8xf32> {
+  // CHECK-NOT: stablehlo.convert
+  // CHECK-DAG: %[[LHS_BF16_HIGH:.*]] = arith.truncf %[[LHS]] : tensor<2x4xf32> to tensor<2x4xbf16>
+  // CHECK-DAG: %[[LHS_F32_HIGH:.*]] = arith.extf %[[LHS_BF16_HIGH]] : tensor<2x4xbf16> to tensor<2x4xf32>
+  // CHECK-DAG: %[[LHS_DIFF:.*]] = arith.subf %[[LHS]], %[[LHS_F32_HIGH]] : tensor<2x4xf32>
+  // CHECK-DAG: %[[LHS_BF16_LOW:.*]] = arith.truncf %[[LHS_DIFF]] : tensor<2x4xf32> to tensor<2x4xbf16>
+  // CHECK-DAG: %[[RHS_BF16_HIGH:.*]] = arith.truncf %[[RHS]] : tensor<4x8xf32> to tensor<4x8xbf16>
+  // CHECK-DAG: %[[RHS_F32_HIGH:.*]] = arith.extf %[[RHS_BF16_HIGH]] : tensor<4x8xbf16> to tensor<4x8xf32>
+  // CHECK-DAG: %[[RHS_DIFF:.*]] = arith.subf %[[RHS]], %[[RHS_F32_HIGH]] : tensor<4x8xf32>
+  // CHECK-DAG: %[[RHS_BF16_LOW:.*]] = arith.truncf %[[RHS_DIFF]] : tensor<4x8xf32> to tensor<4x8xbf16>
+  // CHECK: %[[DOT0:.*]] = tt.dot %[[LHS_BF16_LOW]], %[[RHS_BF16_HIGH]], %{{.*}} : tensor<2x4xbf16> * tensor<4x8xbf16> -> tensor<2x8xf32>
+  // CHECK: %[[DOT1:.*]] = tt.dot %[[LHS_BF16_HIGH]], %[[RHS_BF16_LOW]], %[[DOT0]] : tensor<2x4xbf16> * tensor<4x8xbf16> -> tensor<2x8xf32>
+  // CHECK: %[[DOT2:.*]] = tt.dot %[[LHS_BF16_HIGH]], %[[RHS_BF16_HIGH]], %{{.*}} : tensor<2x4xbf16> * tensor<4x8xbf16> -> tensor<2x8xf32>
+  // CHECK: %[[RES:.*]] = arith.addf %[[ACC]], %[[DOT2]] : tensor<2x8xf32>
+  // CHECK: return %[[RES]] : tensor<2x8xf32>
+  %0 = "stablehlo.dot_general"(%arg0, %arg1) {
+    dot_dimension_numbers = #stablehlo.dot<lhs_contracting_dimensions = [1], rhs_contracting_dimensions = [0]>,
+    precision_config = [#stablehlo<precision DEFAULT>, #stablehlo<precision DEFAULT>],
+    algorithm = #stablehlo.dot_algorithm<lhs_precision_type = bf16, rhs_precision_type = bf16, accumulation_type = f32, lhs_component_count = 1, rhs_component_count = 1, num_primitive_operations = 3, allow_imprecise_accumulation = false>
+  } : (tensor<2x4xf32>, tensor<4x8xf32>) -> tensor<2x8xf32>
+  %1 = arith.addf %0, %arg2 : tensor<2x8xf32>
+  return %1 : tensor<2x8xf32>
+}
+
+func.func @all_reduce_without_xtile_entry_func_doesnt_lower(%input: tensor<10xf32>, %output: tensor<10xf32>) -> tensor<10xf32> {
+  // CHECK: stablehlo.all_reduce
+  %all_reduce = "stablehlo.all_reduce"(%input) <{replica_groups = dense<[[0, 1]]> : tensor<1x2xi64>}> ({
+    ^bb0(%arg7: tensor<f32>, %arg8: tensor<f32>):
+      %4 = arith.addf %arg7, %arg8 : tensor<f32>
+      stablehlo.return %4 : tensor<f32>
+    }) : (tensor<10xf32>) -> tensor<10xf32>
+  return %all_reduce : tensor<10xf32>
+}
+
+xtile.entry_func @all_reduce_with_multiple_inputs_doesnt_lower(%input: memref<1024xf32>, %output: memref<1024xf32>, %remote_input_buffer: memref<2xi64>, %signal_buffer: memref<2xi64>, %device_rank: index, %tile_id: index) attributes {has_rank, has_signal_buffer, num_scratch_buffers = 1 : i32} {
+  %tile = xtile.extract %input[%tile_id][10][1] : memref<1024xf32> -> tensor<10xf32>
+  %c_1 = arith.constant 1 : index
+  %tile_id_2 = arith.addi %tile_id, %c_1 : index
+  %tile2 = xtile.extract %input[%tile_id_2][10][1] : memref<1024xf32> -> tensor<10xf32>
+  // CHECK: stablehlo.all_reduce
+  %all_reduce:2 = "stablehlo.all_reduce"(%tile, %tile2) <{replica_groups = dense<[[0, 1]]> : tensor<1x2xi64>}> ({
+    ^bb0(%arg7: tensor<f32>, %arg8: tensor<f32>):
+      %4 = arith.addf %arg7, %arg8 : tensor<f32>
+      stablehlo.return %4: tensor<f32>
+    }) : (tensor<10xf32>, tensor<10xf32>) -> (tensor<10xf32>, tensor<10xf32>)
+  xtile.return
+}
+
+xtile.entry_func @all_reduce_with_multiple_operations_in_reducer_doesnt_lower(%input: memref<1024xf32>, %output: memref<1024xf32>, %remote_input_buffer: memref<2xi64>, %signal_buffer: memref<2xi64>, %device_rank: index, %tile_id: index) attributes {has_rank, has_signal_buffer, num_scratch_buffers = 1 : i32} {
+  %tile = xtile.extract %input[%tile_id][10][1] : memref<1024xf32> -> tensor<10xf32>
+  // CHECK: stablehlo.all_reduce
+  %all_reduce = "stablehlo.all_reduce"(%tile) <{replica_groups = dense<[[0, 1]]> : tensor<1x2xi64>}> ({
+    ^bb0(%arg7: tensor<f32>, %arg8: tensor<f32>):
+      %4 = arith.addf %arg7, %arg8 : tensor<f32>
+      %5 = arith.addf %4, %arg8 : tensor<f32>
+      stablehlo.return %5 : tensor<f32>
+    }) {xtile.collective_strategy = #xtile.collective_strategy<one_shot>} : (tensor<10xf32>) -> tensor<10xf32>
+  xtile.return
+}
+
+xtile.entry_func @all_reduce_input_not_from_extract_doesnt_lower(%input: memref<1024xf32>, %output: memref<1024xf32>, %remote_input_buffer: memref<2xi64>, %signal_buffer: memref<2xi64>, %device_rank: index, %tile_id: index) attributes {has_rank, has_signal_buffer, num_scratch_buffers = 1 : i32} {
+  %tile = stablehlo.constant dense<1.000000e+00> : tensor<10xf32>
+  // CHECK: stablehlo.all_reduce
+  %all_reduce = "stablehlo.all_reduce"(%tile) <{replica_groups = dense<[[0, 1]]> : tensor<1x2xi64>}> ({
+    ^bb0(%arg7: tensor<f32>, %arg8: tensor<f32>):
+      %4 = arith.addf %arg7, %arg8 : tensor<f32>
+      stablehlo.return %4 : tensor<f32>
+    }) : (tensor<10xf32>) -> tensor<10xf32>
+  xtile.return
+}
+
+xtile.entry_func @all_reduce_with_incorrect_num_args_doesnt_lower(%input: memref<1024xf32>, %output: memref<1024xf32>, %remote_input_buffer0: memref<2xi64>, %remote_input_buffer1: memref<2xi64>, %signal_buffer: memref<2xi64>, %device_rank: index, %tile_id: index) attributes {has_rank, has_signal_buffer, num_scratch_buffers = 2 : i32} {
+  %tile = xtile.extract %input[%tile_id][10][1] : memref<1024xf32> -> tensor<10xf32>
+  // CHECK: stablehlo.all_reduce
+  %all_reduce = "stablehlo.all_reduce"(%tile) <{replica_groups = dense<[[0, 1]]> : tensor<1x2xi64>}> ({
+    ^bb0(%arg7: tensor<f32>, %arg8: tensor<f32>):
+      %4 = arith.addf %arg7, %arg8 : tensor<f32>
+      stablehlo.return %4 : tensor<f32>
+    }) : (tensor<10xf32>) -> tensor<10xf32>
+  xtile.return
+}
+
+// CHECK-LABEL: xtile.entry_func @all_reduce_one_shot(
+xtile.entry_func @all_reduce_one_shot(%input: memref<65536xf32>, %output: memref<65536xf32>, %remote_input_buffer: memref<2xi64>, %signal_buffer: memref<2xi64>, %device_rank: index, %tile_id: index) attributes {has_rank, has_signal_buffer, num_scratch_buffers = 1 : i32} {
+  %tile = xtile.extract %input[%tile_id][65536][1] : memref<65536xf32> -> tensor<65536xf32>
+  // CHECK: xtile.extract
+  // CHECK: xtile.insert {{.*}} : tensor<65536xf32> -> memref<65536xf32>
+  // CHECK: triton_xla.block_barrier
+  // CHECK: xtile.extract {{.*}} : memref<65536xf32> -> tensor<65536xf32>
+  // CHECK: xtile.extract {{.*}} : memref<65536xf32> -> tensor<65536xf32>
+  // CHECK-NOT: triton_xla.block_barrier
+  %all_reduce = "stablehlo.all_reduce"(%tile) <{replica_groups = dense<[[0, 1]]> : tensor<1x2xi64>}> ({
+    ^bb0(%arg7: tensor<f32>, %arg8: tensor<f32>):
+      %4 = arith.addf %arg7, %arg8 : tensor<f32>
+      stablehlo.return %4 : tensor<f32>
+    }) {xtile.collective_strategy = #xtile.collective_strategy<one_shot>} : (tensor<65536xf32>) -> tensor<65536xf32>
+  xtile.insert %all_reduce into %output[%tile_id][65536][1] : tensor<65536xf32> -> memref<65536xf32>
+  xtile.return
+}
+
+// CHECK-LABEL: xtile.entry_func @all_reduce_one_shot_scalar_i1(
+xtile.entry_func @all_reduce_one_shot_scalar_i1(%input: memref<i8>, %output: memref<i8>, %remote_input_buffer: memref<2xi64>, %signal_buffer: memref<2xi64>, %device_rank: index, %tile_id: index) attributes {has_rank, has_signal_buffer, num_scratch_buffers = 1 : i32} {
+  %raw = xtile.extract %input[] [] [] : memref<i8> -> tensor<i8>
+  %c0 = arith.constant dense<0> : tensor<i8>
+  %tile = arith.cmpi ne, %raw, %c0 : tensor<i8>
+  // CHECK: %[[IN_RAW:.*]] = xtile.extract %{{.*}}[] [] [] : memref<i8> -> tensor<i8>
+  // CHECK: %[[IN_TILE:.*]] = arith.cmpi ne, %[[IN_RAW]]
+  // CHECK: %[[REMOTE_COPY:.*]] = triton_xla.ptr_to_memref %{{.*}} from <i8> to memref<i8>
+  // CHECK: %[[IN_EXT:.*]] = arith.extui %[[IN_TILE]] : tensor<i1> to tensor<i8>
+  // CHECK: xtile.insert %[[IN_EXT]] into %[[REMOTE_COPY]][] [] [] : tensor<i8> -> memref<i8>
+  // CHECK: triton_xla.block_barrier
+  // CHECK: %[[R0_I8:.*]] = xtile.extract %{{.*}}[] [] [] : memref<i8> -> tensor<i8>
+  // CHECK: %[[R0:.*]] = arith.trunci %[[R0_I8]] : tensor<i8> to tensor<i1>
+  // CHECK: %[[R1_I8:.*]] = xtile.extract %{{.*}}[] [] [] : memref<i8> -> tensor<i8>
+  // CHECK: %[[R1:.*]] = arith.trunci %[[R1_I8]] : tensor<i8> to tensor<i1>
+  // CHECK: %[[OR:.*]] = arith.ori %[[R0]], %[[R1]] : tensor<i1>
+  // CHECK: %[[OUT_EXT:.*]] = arith.extui %[[OR]] : tensor<i1> to tensor<i8>
+  // CHECK: xtile.insert %[[OUT_EXT]] into %{{.*}}[] [] [] : tensor<i8> -> memref<i8>
+  %all_reduce = "stablehlo.all_reduce"(%tile) <{replica_groups = dense<[[0, 1]]> : tensor<1x2xi64>}> ({
+    ^bb0(%arg7: tensor<i1>, %arg8: tensor<i1>):
+      %4 = arith.ori %arg7, %arg8 : tensor<i1>
+      stablehlo.return %4 : tensor<i1>
+    }) {xtile.collective_strategy = #xtile.collective_strategy<one_shot>} : (tensor<i1>) -> tensor<i1>
+  %out_i8 = arith.extui %all_reduce : tensor<i1> to tensor<i8>
+  xtile.insert %out_i8 into %output[] [] [] : tensor<i8> -> memref<i8>
+  xtile.return
+}
+
+// CHECK-LABEL: xtile.entry_func @all_reduce_two_shot(
+xtile.entry_func @all_reduce_two_shot(%input: memref<524288xf32>, %output: memref<524288xf32>, %remote_input_buffer: memref<2xi64>, %signal_buffer: memref<2xi64>, %device_rank: index, %tile_id: index) attributes {has_rank, has_signal_buffer, num_scratch_buffers = 1 : i32} {
+  %tile = xtile.extract %input[%tile_id][131072][1] : memref<524288xf32> -> tensor<131072xf32>
+  // CHECK: xtile.extract
+  // CHECK: xtile.insert {{.*}} : tensor<131072xf32> -> memref<524288xf32>
+  // CHECK: triton_xla.block_barrier
+  // CHECK: xtile.extract {{.*}} : memref<524288xf32> -> tensor<65536xf32>
+  // CHECK: xtile.extract {{.*}} : memref<524288xf32> -> tensor<65536xf32>
+  // CHECK: xtile.insert {{.*}} : tensor<65536xf32> -> memref<524288xf32>
+  // CHECK: triton_xla.block_barrier
+  // CHECK-NOT: triton_xla.block_barrier
+  %all_reduce = "stablehlo.all_reduce"(%tile) <{replica_groups = dense<[[0, 1]]> : tensor<1x2xi64>}> ({
+    ^bb0(%arg7: tensor<f32>, %arg8: tensor<f32>):
+      %4 = arith.addf %arg7, %arg8 : tensor<f32>
+      stablehlo.return %4 : tensor<f32>
+    }) {xtile.collective_strategy = #xtile.collective_strategy<two_shot>} : (tensor<131072xf32>) -> tensor<131072xf32>
+  xtile.insert %all_reduce into %output[%tile_id][131072][1] : tensor<131072xf32> -> memref<524288xf32>
+  xtile.return
+}
+
+// CHECK-LABEL: xtile.entry_func @all_reduce_one_shot_2d
+xtile.entry_func @all_reduce_one_shot_2d(%input: memref<1024x2xf32>, %output: memref<1024x2xf32>, %remote_input_buffer: memref<4xi64>, %signal_buffer: memref<4xi64>, %device_rank: index, %tile_id: index) attributes {has_rank, has_signal_buffer, num_scratch_buffers = 1 : i32} {
+  %cst_0 = arith.constant 0 : index
+  %tile = xtile.extract %input[%cst_0, %tile_id][1024, 2][1, 1] : memref<1024x2xf32> -> tensor<1024x2xf32>
+  // CHECK: triton_xla.block_barrier
+  %all_reduce = "stablehlo.all_reduce"(%tile) <{replica_groups = dense<[[0, 1, 2, 3]]> : tensor<1x4xi64>}> ({
+    ^bb0(%arg7: tensor<f32>, %arg8: tensor<f32>):
+      %4 = arith.addf %arg7, %arg8 : tensor<f32>
+      stablehlo.return %4 : tensor<f32>
+    }) {xtile.collective_strategy = #xtile.collective_strategy<one_shot>} : (tensor<1024x2xf32>) -> tensor<1024x2xf32>
+  xtile.insert %all_reduce into %output[%cst_0, %tile_id][1024, 2][1, 1] : tensor<1024x2xf32> -> memref<1024x2xf32>
+  xtile.return
+}
+
+// CHECK-LABEL: xtile.entry_func @all_reduce_two_shot_3d
+xtile.entry_func @all_reduce_two_shot_3d(%input: memref<1024x512x2xf32>, %output: memref<1024x512x2xf32>, %remote_input_buffer: memref<4xi64>, %signal_buffer: memref<4xi64>, %device_rank: index, %tile_id: index) attributes {has_rank, has_signal_buffer, num_scratch_buffers = 1 : i32} {
+  %cst_0 = arith.constant 0 : index
+  %tile = xtile.extract %input[%cst_0, %cst_0, %tile_id][1024, 512, 2][1, 1, 1] : memref<1024x512x2xf32> -> tensor<1024x512x2xf32>
+  // CHECK: triton_xla.block_barrier
+  // CHECK: triton_xla.block_barrier
+  %all_reduce = "stablehlo.all_reduce"(%tile) <{replica_groups = dense<[[0, 1, 2, 3]]> : tensor<1x4xi64>}> ({
+    ^bb0(%arg7: tensor<f32>, %arg8: tensor<f32>):
+      %4 = arith.addf %arg7, %arg8 : tensor<f32>
+      stablehlo.return %4 : tensor<f32>
+    }) {xtile.collective_strategy = #xtile.collective_strategy<two_shot>} : (tensor<1024x512x2xf32>) -> tensor<1024x512x2xf32>
+  xtile.insert %all_reduce into %output[%cst_0, %cst_0, %tile_id][1024, 512, 2][1, 1, 1] : tensor<1024x512x2xf32> -> memref<1024x512x2xf32>
+  xtile.return
+}
+
+// CHECK-LABEL: xtile.entry_func @all_gather_one_shot(
+xtile.entry_func @all_gather_one_shot(%input: memref<128x128xf32>, %output: memref<256x128xf32>, %remote_input_buffer: memref<2xi64>, %signal_buffer: memref<2xi64>, %device_rank: index, %tile_id: index) attributes {has_rank, has_signal_buffer, num_scratch_buffers = 1 : i32} {
+  %c0 = arith.constant 0 : index
+  %tile = xtile.extract %input[%c0, %c0][16, 16][1, 1] : memref<128x128xf32> -> tensor<16x16xf32>
+  // CHECK: arith.divui
+  // CHECK: arith.remui
+  // CHECK: triton_xla.ptr_to_memref
+  // CHECK: triton_xla.block_barrier {{.*}} <world_size = 2, signal_stride = 64, barrier_mode = pairwise_symmetric>
+  // CHECK: triton_xla.ptr_to_memref
+  // CHECK-NOT: stablehlo.all_gather
+  %all_gather = "stablehlo.all_gather"(%tile) <{all_gather_dim = 0 : i64, replica_groups = dense<[[0, 1]]> : tensor<1x2xi64>}> : (tensor<16x16xf32>) -> tensor<16x16xf32>
+  xtile.insert %all_gather into %output[%c0, %c0][16, 16][1, 1] : tensor<16x16xf32> -> memref<256x128xf32>
+  xtile.return
+}
+
+// Every program pushes its full tile into the peer's scratch buffer and reads
+// from its own scratch buffer after a pairwise barrier.
+// CHECK-LABEL: xtile.entry_func @all_gather_tile_not_divisible_by_world_size(
+// CHECK-SAME:    %[[INPUT:[a-zA-Z0-9_]+]]: memref<4x4xf32>
+// CHECK:         arith.index_cast {{.*}} : index to i32
+// CHECK-NOT:     arith.index_cast
+// CHECK:         xtile.extract %[[INPUT]]{{.*}} [1, 1] [1, 1]
+// CHECK:         triton_xla.block_barrier {{.*}} <world_size = 2, signal_stride = 16, barrier_mode = pairwise_symmetric>
+xtile.entry_func @all_gather_tile_not_divisible_by_world_size(%input: memref<4x4xf32>, %output: memref<8x4xf32>, %remote_input_buffer: memref<2xi64>, %signal_buffer: memref<2xi64>, %device_rank: index, %tile_id: index) attributes {has_rank, has_signal_buffer, num_scratch_buffers = 1 : i32} {
+  %c0 = arith.constant 0 : index
+  %tile = xtile.extract %input[%c0, %c0][1, 1][1, 1] : memref<4x4xf32> -> tensor<1x1xf32>
+  %all_gather = "stablehlo.all_gather"(%tile) <{all_gather_dim = 0 : i64, replica_groups = dense<[[0, 1]]> : tensor<1x2xi64>}> : (tensor<1x1xf32>) -> tensor<1x1xf32>
+  xtile.insert %all_gather into %output[%c0, %c0][1, 1][1, 1] : tensor<1x1xf32> -> memref<8x4xf32>
+  xtile.return
+}
+
+// CHECK-LABEL: xtile.entry_func @all_gather_unit_gather_dim_tile(
+// CHECK-SAME:    %[[INPUT:[a-zA-Z0-9_]+]]: memref<4x16xf32>
+// CHECK:         arith.index_cast {{.*}} : index to i32
+// CHECK-NOT:     arith.index_cast
+// CHECK:         xtile.extract %[[INPUT]]{{.*}} [1, 16] [1, 1]
+// CHECK:         triton_xla.block_barrier {{.*}} <world_size = 2, signal_stride = 4, barrier_mode = pairwise_symmetric>
+xtile.entry_func @all_gather_unit_gather_dim_tile(%input: memref<4x16xf32>, %output: memref<8x16xf32>, %remote_input_buffer: memref<2xi64>, %signal_buffer: memref<2xi64>, %device_rank: index, %tile_id: index) attributes {has_rank, has_signal_buffer, num_scratch_buffers = 1 : i32} {
+  %c0 = arith.constant 0 : index
+  %tile = xtile.extract %input[%c0, %c0][1, 16][1, 1] : memref<4x16xf32> -> tensor<1x16xf32>
+  %all_gather = "stablehlo.all_gather"(%tile) <{all_gather_dim = 0 : i64, replica_groups = dense<[[0, 1]]> : tensor<1x2xi64>}> : (tensor<1x16xf32>) -> tensor<1x16xf32>
+  xtile.insert %all_gather into %output[%c0, %c0][1, 16][1, 1] : tensor<1x16xf32> -> memref<8x16xf32>
+  xtile.return
+}
+
+// CHECK-LABEL: xtile.entry_func @all_gather_second_parameter(
+// CHECK-SAME: %[[INPUT1:[a-zA-Z0-9_]+]]: memref<128x128xf32>, %{{[a-zA-Z0-9_]+}}: memref<256x128xf32>
+// CHECK-SAME: %{{[a-zA-Z0-9_]+}}: memref<2xi64>, %[[REMOTE1:[a-zA-Z0-9_]+]]: memref<2xi64>
+xtile.entry_func @all_gather_second_parameter(%input0: memref<128x128xf32>, %input1: memref<128x128xf32>, %output: memref<256x128xf32>, %remote_input_buffer0: memref<2xi64>, %remote_input_buffer1: memref<2xi64>, %signal_buffer: memref<2xi64>, %device_rank: index, %tile_id: index) attributes {has_rank, has_signal_buffer, num_scratch_buffers = 2 : i32} {
+  %c0 = arith.constant 0 : index
+  // CHECK: xtile.extract %[[INPUT1]][
+  // CHECK: %[[REMOTE1_PTR0:.*]] = triton_xla.memref_to_ptr %[[REMOTE1]]
+  // CHECK: tt.addptr %[[REMOTE1_PTR0]], %{{.*}} : !tt.ptr<i64>, i32
+  // CHECK: triton_xla.block_barrier
+  // CHECK: %[[REMOTE1_PTR1:.*]] = triton_xla.memref_to_ptr %[[REMOTE1]]
+  // CHECK: tt.addptr %[[REMOTE1_PTR1]], %{{.*}} : !tt.ptr<i64>, i32
+  %tile = xtile.extract %input1[%c0, %c0][16, 16][1, 1] : memref<128x128xf32> -> tensor<16x16xf32>
+  %all_gather = "stablehlo.all_gather"(%tile) <{all_gather_dim = 0 : i64, replica_groups = dense<[[0, 1]]> : tensor<1x2xi64>}> : (tensor<16x16xf32>) -> tensor<16x16xf32>
+  xtile.insert %all_gather into %output[%c0, %c0][16, 16][1, 1] : tensor<16x16xf32> -> memref<256x128xf32>
+  xtile.return
+}
+
+// CHECK-LABEL: xtile.entry_func @all_gather_in_loop_doesnt_lower(
+xtile.entry_func @all_gather_in_loop_doesnt_lower(%input: memref<128x128xf32>, %output: memref<256x128xf32>, %remote_input_buffer: memref<2xi64>, %signal_buffer: memref<2xi64>, %device_rank: index, %tile_id: index) attributes {has_rank, has_signal_buffer, num_scratch_buffers = 1 : i32} {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c2 = arith.constant 2 : index
+  scf.for %i = %c0 to %c2 step %c1 {
+    %tile = xtile.extract %input[%c0, %c0][16, 16][1, 1] : memref<128x128xf32> -> tensor<16x16xf32>
+    // CHECK: stablehlo.all_gather
+    %all_gather = "stablehlo.all_gather"(%tile) <{all_gather_dim = 0 : i64, replica_groups = dense<[[0, 1]]> : tensor<1x2xi64>}> : (tensor<16x16xf32>) -> tensor<16x16xf32>
+    xtile.insert %all_gather into %output[%c0, %c0][16, 16][1, 1] : tensor<16x16xf32> -> memref<256x128xf32>
+  }
+  xtile.return
+}
+
+// CHECK-LABEL: xtile.entry_func @all_gather_tile_not_dividing_per_rank_size_doesnt_lower(
+xtile.entry_func @all_gather_tile_not_dividing_per_rank_size_doesnt_lower(%input: memref<96x128xf32>, %output: memref<192x128xf32>, %remote_input_buffer: memref<2xi64>, %signal_buffer: memref<2xi64>, %device_rank: index, %tile_id: index) attributes {has_rank, has_signal_buffer, num_scratch_buffers = 1 : i32} {
+  %c0 = arith.constant 0 : index
+  %tile = xtile.extract %input[%c0, %c0][64, 16][1, 1] : memref<96x128xf32> -> tensor<64x16xf32>
+  // CHECK: stablehlo.all_gather
+  %all_gather = "stablehlo.all_gather"(%tile) <{all_gather_dim = 0 : i64, replica_groups = dense<[[0, 1]]> : tensor<1x2xi64>}> : (tensor<64x16xf32>) -> tensor<64x16xf32>
+  xtile.insert %all_gather into %output[%c0, %c0][64, 16][1, 1] : tensor<64x16xf32> -> memref<192x128xf32>
+  xtile.return
+}
+
+// CHECK-LABEL: xtile.entry_func @all_gather_input_tile_with_other_users_doesnt_lower(
+xtile.entry_func @all_gather_input_tile_with_other_users_doesnt_lower(%input: memref<128x128xf32>, %output: memref<256x128xf32>, %remote_input_buffer: memref<2xi64>, %signal_buffer: memref<2xi64>, %device_rank: index, %tile_id: index) attributes {has_rank, has_signal_buffer, num_scratch_buffers = 1 : i32} {
+  %c0 = arith.constant 0 : index
+  %tile = xtile.extract %input[%c0, %c0][16, 16][1, 1] : memref<128x128xf32> -> tensor<16x16xf32>
+  // CHECK: stablehlo.all_gather
+  %all_gather = "stablehlo.all_gather"(%tile) <{all_gather_dim = 0 : i64, replica_groups = dense<[[0, 1]]> : tensor<1x2xi64>}> : (tensor<16x16xf32>) -> tensor<16x16xf32>
+  %sum = arith.addf %all_gather, %tile : tensor<16x16xf32>
+  xtile.insert %sum into %output[%c0, %c0][16, 16][1, 1] : tensor<16x16xf32> -> memref<256x128xf32>
+  xtile.return
+}
+
+// CHECK-LABEL: xtile.entry_func @all_gather_without_remote_buffers_arg_doesnt_lower(
+xtile.entry_func @all_gather_without_remote_buffers_arg_doesnt_lower(%input: memref<128x128xf32>, %output: memref<256x128xf32>, %signal_buffer: memref<2xi64>, %device_rank: index, %tile_id: index) attributes {has_rank, has_signal_buffer} {
+  %c0 = arith.constant 0 : index
+  %tile = xtile.extract %input[%c0, %c0][16, 16][1, 1] : memref<128x128xf32> -> tensor<16x16xf32>
+  // CHECK: stablehlo.all_gather
+  %all_gather = "stablehlo.all_gather"(%tile) <{all_gather_dim = 0 : i64, replica_groups = dense<[[0, 1]]> : tensor<1x2xi64>}> : (tensor<16x16xf32>) -> tensor<16x16xf32>
+  xtile.insert %all_gather into %output[%c0, %c0][16, 16][1, 1] : tensor<16x16xf32> -> memref<256x128xf32>
+  xtile.return
+}
+
+// CHECK-LABEL: xtile.entry_func @reduce_scatter_one_shot(
+xtile.entry_func @reduce_scatter_one_shot(%input: memref<4x1024xf32>, %output: memref<2x1024xf32>, %remote_input_buffer: memref<2xi64>, %signal_buffer: memref<2xi64>, %device_rank: index, %tile_id: index) attributes {has_rank, has_signal_buffer, num_scratch_buffers = 1 : i32} {
+  %c0 = arith.constant 0 : index
+  %tile = xtile.extract %input[%c0, %tile_id][2, 64][1, 1] : memref<4x1024xf32> -> tensor<2x64xf32>
+  // CHECK: xtile.extract
+  // CHECK: xtile.insert {{.*}} : tensor<2x64xf32> -> memref<4x1024xf32>
+  // CHECK: triton_xla.block_barrier {{.*}} <world_size = 2, signal_stride = 16, barrier_mode = producer_symmetric>
+  // CHECK: xtile.extract {{.*}} : memref<4x1024xf32> -> tensor<1x64xf32>
+  // CHECK: xtile.extract {{.*}} : memref<4x1024xf32> -> tensor<1x64xf32>
+  // CHECK-NOT: xtile.reduce_scatter
+  %reduce_scatter = xtile.reduce_scatter(%tile) scatter_dimension = 0 <replica_groups = dense<[[0, 1]]> : tensor<1x2xi64>> : (tensor<2x64xf32>) -> (tensor<1x64xf32>) {
+  ^bb0(%arg7: tensor<f32>, %arg8: tensor<f32>):
+    %4 = arith.addf %arg7, %arg8 : tensor<f32>
+    stablehlo.return %4 : tensor<f32>
+  }
+  xtile.insert %reduce_scatter into %output[%c0, %tile_id][1, 64][1, 1] : tensor<1x64xf32> -> memref<2x1024xf32>
+  xtile.return
+}
+
+// CHECK-LABEL: xtile.entry_func @reduce_scatter_invalid_tile_size_doesnt_lower(
+xtile.entry_func @reduce_scatter_invalid_tile_size_doesnt_lower(%input: memref<4x1024xf32>, %output: memref<2x1024xf32>, %remote_input_buffer: memref<2xi64>, %signal_buffer: memref<2xi64>, %device_rank: index, %tile_id: index) attributes {has_rank, has_signal_buffer, num_scratch_buffers = 1 : i32} {
+  %c0 = arith.constant 0 : index
+  %tile = xtile.extract %input[%c0, %tile_id][4, 64][1, 1] : memref<4x1024xf32> -> tensor<4x64xf32>
+  // CHECK: xtile.reduce_scatter
+  %reduce_scatter = xtile.reduce_scatter(%tile) scatter_dimension = 0 <replica_groups = dense<[[0, 1]]> : tensor<1x2xi64>> : (tensor<4x64xf32>) -> (tensor<2x64xf32>) {
+  ^bb0(%arg7: tensor<f32>, %arg8: tensor<f32>):
+    %4 = arith.addf %arg7, %arg8 : tensor<f32>
+    stablehlo.return %4 : tensor<f32>
+  }
+  xtile.insert %reduce_scatter into %output[%c0, %tile_id][2, 64][1, 1] : tensor<2x64xf32> -> memref<2x1024xf32>
+  xtile.return
+}
+
+// CHECK-LABEL: xtile.entry_func @all_to_all_one_shot(
+xtile.entry_func @all_to_all_one_shot(%input: memref<128x128xf32>, %output: memref<128x128xf32>, %remote_input_buffer: memref<2xi64>, %signal_buffer: memref<2xi64>, %device_rank: index, %tile_id: index) attributes {has_rank, has_signal_buffer, num_scratch_buffers = 1 : i32} {
+  %c0 = arith.constant 0 : index
+  %tile = xtile.extract %input[%c0, %c0][16, 16][1, 1] : memref<128x128xf32> -> tensor<16x16xf32>
+  // CHECK: triton_xla.ptr_to_memref
+  // CHECK: triton_xla.block_barrier {{.*}} <world_size = 2, signal_stride = 32, barrier_mode = pairwise_symmetric>
+  // CHECK: triton_xla.ptr_to_memref
+  // CHECK-NOT: stablehlo.all_to_all
+  %all_to_all = "stablehlo.all_to_all"(%tile) <{split_dimension = 0 : i64, concat_dimension = 0 : i64, split_count = 2 : i64, replica_groups = dense<[[0, 1]]> : tensor<1x2xi64>}> {xtile.collective_strategy = #xtile.collective_strategy<one_shot>} : (tensor<16x16xf32>) -> tensor<16x16xf32>
+  xtile.insert %all_to_all into %output[%c0, %c0][16, 16][1, 1] : tensor<16x16xf32> -> memref<128x128xf32>
+  xtile.return
+}
+
+// CHECK-LABEL: xtile.entry_func @all_to_all_two_shot(
+xtile.entry_func @all_to_all_two_shot(%input: memref<8192x4096xf32>, %output: memref<8192x4096xf32>, %remote_input_buffer: memref<2xi64>, %signal_buffer: memref<2xi64>, %device_rank: index, %tile_id: index) attributes {has_rank, has_signal_buffer, num_scratch_buffers = 1 : i32} {
+  %c0 = arith.constant 0 : index
+  %tile = xtile.extract %input[%c0, %c0][64, 64][1, 1] : memref<8192x4096xf32> -> tensor<64x64xf32>
+  // CHECK-NOT: ttg.barrier
+  // CHECK: triton_xla.block_barrier {{.*}} <world_size = 2, signal_stride = 4096, barrier_mode = pairwise_symmetric>
+  // CHECK: triton_xla.ptr_to_memref
+  // CHECK: ttg.barrier local
+  // CHECK: triton_xla.block_barrier {{.*}} <world_size = 2, signal_stride = 4096, barrier_mode = pairwise_symmetric>
+  // CHECK-NOT: stablehlo.all_to_all
+  %all_to_all = "stablehlo.all_to_all"(%tile) <{split_dimension = 0 : i64, concat_dimension = 0 : i64, split_count = 2 : i64, replica_groups = dense<[[0, 1]]> : tensor<1x2xi64>}> {xtile.collective_strategy = #xtile.collective_strategy<two_shot>} : (tensor<64x64xf32>) -> tensor<64x64xf32>
+  xtile.insert %all_to_all into %output[%c0, %c0][64, 64][1, 1] : tensor<64x64xf32> -> memref<8192x4096xf32>
+  xtile.return
+}
+
+// CHECK-LABEL: xtile.entry_func @all_to_all_with_unrealized_conversion_cast(
+xtile.entry_func @all_to_all_with_unrealized_conversion_cast(%input: memref<4x128xf32>, %output: memref<4x128xf32>, %remote_input_buffer: memref<2xi64>, %signal_buffer: memref<2xi64>, %device_rank: index, %tile_id: index) attributes {has_rank, has_signal_buffer, num_scratch_buffers = 1 : i32} {
+  %c0 = arith.constant 0 : index
+  %tile = xtile.extract %input[%c0, %c0][1, 16][1, 1] : memref<4x128xf32> -> tensor<1x16xf32>
+  %cast_in = builtin.unrealized_conversion_cast %tile : tensor<1x16xf32> to tensor<2x16xf32>
+  // CHECK: triton_xla.ptr_to_memref
+  // CHECK: triton_xla.block_barrier {{.*}} <world_size = 2, signal_stride = 16, barrier_mode = pairwise_symmetric>
+  // CHECK: triton_xla.ptr_to_memref
+  // CHECK-NOT: builtin.unrealized_conversion_cast
+  // CHECK-NOT: stablehlo.all_to_all
+  %all_to_all = "stablehlo.all_to_all"(%cast_in) <{split_dimension = 0 : i64, concat_dimension = 0 : i64, split_count = 2 : i64, replica_groups = dense<[[0, 1]]> : tensor<1x2xi64>}> {xtile.collective_strategy = #xtile.collective_strategy<one_shot>} : (tensor<2x16xf32>) -> tensor<2x16xf32>
+  %cast_out = builtin.unrealized_conversion_cast %all_to_all : tensor<2x16xf32> to tensor<1x16xf32>
+  xtile.insert %cast_out into %output[%c0, %c0][1, 16][1, 1] : tensor<1x16xf32> -> memref<4x128xf32>
+  xtile.return
+}
+
+// CHECK-LABEL: xtile.entry_func @all_to_all_tile_not_dividing_shard_size_doesnt_lower(
+xtile.entry_func @all_to_all_tile_not_dividing_shard_size_doesnt_lower(%input: memref<96x128xf32>, %output: memref<96x128xf32>, %remote_input_buffer: memref<2xi64>, %signal_buffer: memref<2xi64>, %device_rank: index, %tile_id: index) attributes {has_rank, has_signal_buffer, num_scratch_buffers = 1 : i32} {
+  %c0 = arith.constant 0 : index
+  %tile = xtile.extract %input[%c0, %c0][32, 16][1, 1] : memref<96x128xf32> -> tensor<32x16xf32>
+  // CHECK: stablehlo.all_to_all
+  %all_to_all = "stablehlo.all_to_all"(%tile) <{split_dimension = 0 : i64, concat_dimension = 0 : i64, split_count = 2 : i64, replica_groups = dense<[[0, 1]]> : tensor<1x2xi64>}> {xtile.collective_strategy = #xtile.collective_strategy<one_shot>} : (tensor<32x16xf32>) -> tensor<32x16xf32>
+  xtile.insert %all_to_all into %output[%c0, %c0][32, 16][1, 1] : tensor<32x16xf32> -> memref<96x128xf32>
+  xtile.return
+}
+
+// CHECK-LABEL: xtile.entry_func @variadic_reduce_scatter_one_shot(
+// CHECK-SAME: %[[REMOTE0:[a-zA-Z0-9_]+]]: memref<2xi64>, %[[REMOTE1:[a-zA-Z0-9_]+]]: memref<2xi64>
+xtile.entry_func @variadic_reduce_scatter_one_shot(%input0: memref<4x1024xf32>, %input1: memref<4x16xf32>, %output0: memref<2x1024xf32>, %output1: memref<2x16xf32>, %remote_input_buffer0: memref<2xi64>, %remote_input_buffer1: memref<2xi64>, %signal_buffer: memref<2xi64>, %device_rank: index, %tile_id: index) attributes {has_rank, has_signal_buffer, num_scratch_buffers = 2 : i32} {
+  %c0 = arith.constant 0 : index
+  %tile0 = xtile.extract %input0[%c0, %tile_id][2, 64][1, 1] : memref<4x1024xf32> -> tensor<2x64xf32>
+  %tile1 = xtile.extract %input1[%c0, %tile_id][2, 1][1, 1] : memref<4x16xf32> -> tensor<2x1xf32>
+  // CHECK-DAG: %[[REMOTE0_PTR:.*]] = triton_xla.memref_to_ptr %[[REMOTE0]]
+  // CHECK-DAG: %[[REMOTE1_PTR:.*]] = triton_xla.memref_to_ptr %[[REMOTE1]]
+  // Copy phase: one store per operand into its own symmetric buffer.
+  // CHECK: tt.addptr %[[REMOTE0_PTR]], %{{.*}} : !tt.ptr<i64>, i32
+  // CHECK: tt.addptr %[[REMOTE1_PTR]], %{{.*}} : !tt.ptr<i64>, i32
+  // A single barrier covers both operands.
+  // CHECK: triton_xla.block_barrier {{.*}} <world_size = 2, signal_stride = 16, barrier_mode = producer_symmetric>
+  // CHECK-NOT: triton_xla.block_barrier
+  // CHECK-NOT: xtile.reduce_scatter
+  // Reduce phase: pull from both ranks and reduce, per operand.
+  // CHECK: tt.load %[[REMOTE0_PTR]] : !tt.ptr<i64>
+  // CHECK: tt.addptr %[[REMOTE0_PTR]], %{{.*}} : !tt.ptr<i64>, i64
+  // CHECK: arith.addf {{.*}} : tensor<1x64xf32>
+  // CHECK: tt.load %[[REMOTE1_PTR]] : !tt.ptr<i64>
+  // CHECK: tt.addptr %[[REMOTE1_PTR]], %{{.*}} : !tt.ptr<i64>, i64
+  // CHECK: arith.addf {{.*}} : tensor<1x1xf32>
+  %out0, %out1 = xtile.reduce_scatter(%tile0, %tile1) scatter_dimension = 0 <replica_groups = dense<[[0, 1]]> : tensor<1x2xi64>> : (tensor<2x64xf32>, tensor<2x1xf32>) -> (tensor<1x64xf32>, tensor<1x1xf32>) {
+  ^bb0(%arg0: tensor<f32>, %arg1: tensor<f32>):
+    %add = arith.addf %arg0, %arg1 : tensor<f32>
+    stablehlo.return %add : tensor<f32>
+  }
+  xtile.insert %out0 into %output0[%c0, %tile_id][1, 64][1, 1] : tensor<1x64xf32> -> memref<2x1024xf32>
+  xtile.insert %out1 into %output1[%c0, %tile_id][1, 1][1, 1] : tensor<1x1xf32> -> memref<2x16xf32>
+  xtile.return
+}
+
+// Operand 1 is covered by 8 programs per rank, operand 0 by 16: the signal
+// stride is the maximum and the excess programs of operand 1 are masked.
+// CHECK-LABEL: xtile.entry_func @variadic_reduce_scatter_mismatched_programs_per_rank(
+xtile.entry_func @variadic_reduce_scatter_mismatched_programs_per_rank(%input0: memref<4x1024xf32>, %input1: memref<4x16xf32>, %output0: memref<2x1024xf32>, %output1: memref<2x16xf32>, %remote_input_buffer0: memref<2xi64>, %remote_input_buffer1: memref<2xi64>, %signal_buffer: memref<2xi64>, %device_rank: index, %tile_id: index) attributes {has_rank, has_signal_buffer, num_scratch_buffers = 2 : i32} {
+  %c0 = arith.constant 0 : index
+  %tile0 = xtile.extract %input0[%c0, %tile_id][2, 64][1, 1] : memref<4x1024xf32> -> tensor<2x64xf32>
+  %tile1 = xtile.extract %input1[%c0, %tile_id][2, 2][1, 1] : memref<4x16xf32> -> tensor<2x2xf32>
+  // CHECK: triton_xla.block_barrier {{.*}} <world_size = 2, signal_stride = 16, barrier_mode = producer_symmetric>
+  // CHECK-NOT: xtile.reduce_scatter
+  %out0, %out1 = xtile.reduce_scatter(%tile0, %tile1) scatter_dimension = 0 <replica_groups = dense<[[0, 1]]> : tensor<1x2xi64>> : (tensor<2x64xf32>, tensor<2x2xf32>) -> (tensor<1x64xf32>, tensor<1x2xf32>) {
+  ^bb0(%arg0: tensor<f32>, %arg1: tensor<f32>):
+    %add = arith.addf %arg0, %arg1 : tensor<f32>
+    stablehlo.return %add : tensor<f32>
+  }
+  xtile.insert %out0 into %output0[%c0, %tile_id][1, 64][1, 1] : tensor<1x64xf32> -> memref<2x1024xf32>
+  xtile.insert %out1 into %output1[%c0, %tile_id][1, 2][1, 1] : tensor<1x2xf32> -> memref<2x16xf32>
+  xtile.return
+}
+// CHECK: func @lower_dot_with_warp_specialization_to_triton
+func.func @lower_dot_with_warp_specialization_to_triton(
+    %arg0: tensor<2x4xf32>,
+    %arg1: tensor<4x8xf32>,
+    %arg2: tensor<2x8xf32>) -> tensor<2x8xf32> {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c4 = arith.constant 4 : index
+  %res = scf.for %iv = %c0 to %c4 step %c1 iter_args(%accum = %arg2) -> tensor<2x8xf32> {
+    %dot = stablehlo.dot_general %arg0, %arg1, contracting_dims = [1] x [0], precision = [DEFAULT, DEFAULT] : (tensor<2x4xf32>, tensor<4x8xf32>) -> tensor<2x8xf32>
+    %add = arith.addf %dot, %accum : tensor<2x8xf32>
+    // CHECK-NOT: tt.warp_specialize
+    // WARP: scf.yield
+    // WARP-NEXT: tt.warp_specialize = true
+    scf.yield %add : tensor<2x8xf32>
+  }
+  return %res : tensor<2x8xf32>
+}
+
+// CHECK-LABEL: func @lower_dot_with_non_canonical_operands
+func.func @lower_dot_with_non_canonical_operands(
+    %arg0: tensor<1x4x2xf32>,
+    %arg1: tensor<1x4x8xf32>,
+    %arg2: tensor<1x2x8xf32>) -> tensor<1x2x8xf32> {
+  // CHECK-DAG: %[[LHS_RESHAPE:.*]] = tt.reshape %arg0 : tensor<1x4x2xf32> -> tensor<4x2xf32>
+  // CHECK-DAG: %[[LHS_TRANSPOSE:.*]] = tt.trans %[[LHS_RESHAPE]] {order = array<i32: 1, 0>} : tensor<4x2xf32> -> tensor<2x4xf32>
+  // CHECK-DAG: %[[RHS_RESHAPE:.*]] = tt.reshape %arg1 : tensor<1x4x8xf32> -> tensor<4x8xf32>
+  // CHECK-DAG: %[[ACC_RESHAPE:.*]] = tt.reshape %arg2 : tensor<1x2x8xf32> -> tensor<2x8xf32>
+  // CHECK: %[[DOT:.*]] = tt.dot %[[LHS_TRANSPOSE]], %[[RHS_RESHAPE]], %[[ACC_RESHAPE]], inputPrecision = tf32 : tensor<2x4xf32> * tensor<4x8xf32> -> tensor<2x8xf32>
+  // CHECK: %[[FINAL_R:.*]] = tt.reshape %[[DOT]] : tensor<2x8xf32> -> tensor<1x2x8xf32>
+  %0 = stablehlo.dot_general %arg0, %arg1, batching_dims = [0] x [0], contracting_dims = [1] x [1], precision = [DEFAULT, DEFAULT] : (tensor<1x4x2xf32>, tensor<1x4x8xf32>) -> tensor<1x2x8xf32>
+  %1 = arith.addf %0, %arg2 : tensor<1x2x8xf32>
+  // CHECK: return %[[FINAL_R]] : tensor<1x2x8xf32>
+  return %1 : tensor<1x2x8xf32>
+}
+
+// CHECK-LABEL: func @lower_vector_matrix_dot
+func.func @lower_vector_matrix_dot(
+    %arg0: tensor<4xf32>,
+    %arg1: tensor<8x4xf32>,
+    %arg2: tensor<8xf32>) -> tensor<8xf32> {
+  // CHECK-DAG: %[[LHS_RESHAPE:.*]] = tt.reshape %arg0 : tensor<4xf32> -> tensor<1x4xf32>
+  // CHECK-DAG: %[[RHS_TRANSPOSE:.*]] = tt.trans %arg1 {order = array<i32: 1, 0>} : tensor<8x4xf32> -> tensor<4x8xf32>
+  // CHECK-DAG: %[[ACC_RESHAPE:.*]] = tt.reshape %arg2 : tensor<8xf32> -> tensor<1x8xf32>
+  // CHECK: %[[DOT:.*]] = tt.dot %[[LHS_RESHAPE]], %[[RHS_TRANSPOSE]], %[[ACC_RESHAPE]], inputPrecision = tf32 : tensor<1x4xf32> * tensor<4x8xf32> -> tensor<1x8xf32>
+  // CHECK: %[[FINAL_R:.*]] = tt.reshape %[[DOT]] : tensor<1x8xf32> -> tensor<8xf32>
+  %0 = stablehlo.dot_general %arg0, %arg1, contracting_dims = [0] x [1], precision = [DEFAULT, DEFAULT] : (tensor<4xf32>, tensor<8x4xf32>) -> tensor<8xf32>
+  %1 = arith.addf %0, %arg2 : tensor<8xf32>
+  // CHECK: return %[[FINAL_R]] : tensor<8xf32>
+  return %1 : tensor<8xf32>
+}
+
+// CHECK-LABEL: func @lower_matrix_vector_dot
+func.func @lower_matrix_vector_dot(
+    %arg0: tensor<2x4xf32>,
+    %arg1: tensor<4xf32>,
+    %arg2: tensor<2xf32>) -> tensor<2xf32> {
+  // CHECK-DAG: %[[RHS_RESHAPE:.*]] = tt.reshape %arg1 : tensor<4xf32> -> tensor<4x1xf32>
+  // CHECK-DAG: %[[ACC_RESHAPE:.*]] = tt.reshape %arg2 : tensor<2xf32> -> tensor<2x1xf32>
+  // CHECK: %[[DOT:.*]] = tt.dot %arg0, %[[RHS_RESHAPE]], %[[ACC_RESHAPE]], inputPrecision = tf32 : tensor<2x4xf32> * tensor<4x1xf32> -> tensor<2x1xf32>
+  // CHECK: %[[FINAL_R:.*]] = tt.reshape %[[DOT]] : tensor<2x1xf32> -> tensor<2xf32>
+  %0 = stablehlo.dot_general %arg0, %arg1, contracting_dims = [1] x [0], precision = [DEFAULT, DEFAULT] : (tensor<2x4xf32>, tensor<4xf32>) -> tensor<2xf32>
+  %1 = arith.addf %0, %arg2 : tensor<2xf32>
+  // CHECK: return %[[FINAL_R]] : tensor<2xf32>
+  return %1 : tensor<2xf32>
+}
+
+// CHECK-LABEL: func @lower_dot_with_unit_non_contracting_dim
+func.func @lower_dot_with_unit_non_contracting_dim(
+    %arg0: tensor<8x4xf32>,
+    %arg1: tensor<1x4xf32>,
+    %arg2: tensor<8x1xf32>) -> tensor<8x1xf32> {
+  // CHECK: %[[RHS_RESHAPE:.*]] = tt.reshape %arg1 : tensor<1x4xf32> -> tensor<4x1xf32>
+  // CHECK: tt.dot %arg0, %[[RHS_RESHAPE]], %arg2, inputPrecision = tf32 : tensor<8x4xf32> * tensor<4x1xf32> -> tensor<8x1xf32>
+  %0 = stablehlo.dot_general %arg0, %arg1, contracting_dims = [1] x [1], precision = [DEFAULT, DEFAULT] : (tensor<8x4xf32>, tensor<1x4xf32>) -> tensor<8x1xf32>
+  %1 = arith.addf %0, %arg2 : tensor<8x1xf32>
+  return %1 : tensor<8x1xf32>
+}
+
+// CHECK-LABEL: func @lower_fused_dot_in_loop_non_canonical
+func.func @lower_fused_dot_in_loop_non_canonical(
+    %arg0: tensor<1x4x2xf32>,
+    %arg1: tensor<4x8xf32>,
+    %arg2: tensor<1x2x8xf32>) -> tensor<1x2x8xf32> {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c4 = arith.constant 4 : index
+  // CHECK: %[[INIT_R:.*]] = tt.reshape %arg2 : tensor<1x2x8xf32> -> tensor<2x8xf32>
+  // CHECK: %[[LOOP:.*]] = scf.for %{{.*}} = %{{.*}} to %{{.*}} step %{{.*}} iter_args(%[[ACC_2D:.*]] = %[[INIT_R]]) -> (tensor<2x8xf32>) {
+  %res = scf.for %iv = %c0 to %c4 step %c1 iter_args(%accum = %arg2) -> tensor<1x2x8xf32> {
+    // CHECK-DAG: %[[RESTORED:.*]] = tt.reshape %[[ACC_2D]] : tensor<2x8xf32> -> tensor<1x2x8xf32>
+    // CHECK-DAG: %[[LHS_R:.*]] = tt.reshape %arg0 : tensor<1x4x2xf32> -> tensor<4x2xf32>
+    // CHECK-DAG: %[[LHS_T:.*]] = tt.trans %[[LHS_R]] {order = array<i32: 1, 0>} : tensor<4x2xf32> -> tensor<2x4xf32>
+    // CHECK: %[[DOT_ACC:.*]] = tt.reshape %[[RESTORED]] : tensor<1x2x8xf32> -> tensor<2x8xf32>
+    // CHECK: %[[DOT:.*]] = tt.dot %[[LHS_T]], %arg1, %[[DOT_ACC]], inputPrecision = tf32 : tensor<2x4xf32> * tensor<4x8xf32> -> tensor<2x8xf32>
+    %dot = stablehlo.dot_general %arg0, %arg1, contracting_dims = [1] x [0], precision = [DEFAULT, DEFAULT] : (tensor<1x4x2xf32>, tensor<4x8xf32>) -> tensor<1x2x8xf32>
+    %add = arith.addf %dot, %accum : tensor<1x2x8xf32>
+    // CHECK: scf.yield %[[DOT]] : tensor<2x8xf32>
+    scf.yield %add : tensor<1x2x8xf32>
+  }
+  // CHECK: %[[FINAL_R:.*]] = tt.reshape %[[LOOP]] : tensor<2x8xf32> -> tensor<1x2x8xf32>
+  // CHECK: return %[[FINAL_R]]
+  return %res : tensor<1x2x8xf32>
+}
+
+// CHECK-LABEL: func @reduce_with_non_neutral_init
+// CHECK-SAME: (%[[ARG0:.*]]: tensor<16x8xf32>) -> tensor<8xf32>
+func.func @reduce_with_non_neutral_init(%arg0: tensor<16x8xf32>) -> tensor<8xf32> {
+  %cst = stablehlo.constant dense<5.000000e+00> : tensor<f32>
+  // CHECK: %[[REDUCE:.*]] = "tt.reduce"(%[[ARG0]]) <{axis = 0 : i32}>
+  // CHECK: %[[COMBINED:.*]] = arith.maximumf %[[REDUCE]], %{{.*}} : tensor<8xf32>
+  // CHECK: return %[[COMBINED]] : tensor<8xf32>
+  %1 = "stablehlo.reduce"(%arg0, %cst) ({
+  ^bb0(%arg1: tensor<f32>, %arg2: tensor<f32>):
+    %max = arith.maximumf %arg1, %arg2 : tensor<f32>
+    stablehlo.return %max : tensor<f32>
+  }) {dimensions = array<i64: 0>} : (tensor<16x8xf32>, tensor<f32>) -> tensor<8xf32>
+  return %1 : tensor<8xf32>
+}
+
+// CHECK-LABEL: func @reduce_to_scalar_with_non_neutral_init
+// CHECK-SAME: (%[[ARG0:.*]]: tensor<16xf32>) -> tensor<f32>
+func.func @reduce_to_scalar_with_non_neutral_init(%arg0: tensor<16xf32>) -> tensor<f32> {
+  %cst = stablehlo.constant dense<5.000000e+00> : tensor<f32>
+  // CHECK: %[[REDUCE:.*]] = "tt.reduce"(%[[ARG0]]) <{axis = 0 : i32}>
+  // CHECK: %[[REDUCE_TENSOR:.*]] = tensor.from_elements %[[REDUCE]] : tensor<f32>
+  // CHECK: %[[COMBINED:.*]] = arith.minimumf %[[REDUCE_TENSOR]], %{{.*}} : tensor<f32>
+  // CHECK: return %[[COMBINED]] : tensor<f32>
+  %1 = "stablehlo.reduce"(%arg0, %cst) ({
+  ^bb0(%arg1: tensor<f32>, %arg2: tensor<f32>):
+    %min = arith.minimumf %arg1, %arg2 : tensor<f32>
+    stablehlo.return %min : tensor<f32>
+  }) {dimensions = array<i64: 0>} : (tensor<16xf32>, tensor<f32>) -> tensor<f32>
+  return %1 : tensor<f32>
+}
+
+// CHECK-LABEL: func @reduce_multi_input_with_non_neutral_init
+// CHECK-SAME: (%[[ARG0:.*]]: tensor<16x8xf32>, %[[ARG1:.*]]: tensor<16x8xf32>) -> (tensor<8xf32>, tensor<8xf32>)
+func.func @reduce_multi_input_with_non_neutral_init(%arg0: tensor<16x8xf32>, %arg1: tensor<16x8xf32>) -> (tensor<8xf32>, tensor<8xf32>) {
+  %cst0 = stablehlo.constant dense<5.000000e+00> : tensor<f32>
+  %cst1 = stablehlo.constant dense<1.000000e+01> : tensor<f32>
+  // CHECK: %[[REDUCE:.*]]:2 = "tt.reduce"(%[[ARG0]], %[[ARG1]]) <{axis = 0 : i32}>
+  // CHECK: %[[COMB0:.*]] = arith.maximumf %[[REDUCE]]#0, %{{.*}} : tensor<8xf32>
+  // CHECK: %[[COMB1:.*]] = arith.maximumf %[[REDUCE]]#1, %{{.*}} : tensor<8xf32>
+  // CHECK: return %[[COMB0]], %[[COMB1]]
+  %0:2 = "stablehlo.reduce"(%arg0, %arg1, %cst0, %cst1) ({
+  ^bb0(%arg0_lhs: tensor<f32>, %arg1_lhs: tensor<f32>, %arg0_rhs: tensor<f32>, %arg1_rhs: tensor<f32>):
+    %max0 = arith.maximumf %arg0_lhs, %arg0_rhs : tensor<f32>
+    %max1 = arith.maximumf %arg1_lhs, %arg1_rhs : tensor<f32>
+    stablehlo.return %max0, %max1 : tensor<f32>, tensor<f32>
+  }) {dimensions = array<i64: 0>} : (tensor<16x8xf32>, tensor<16x8xf32>, tensor<f32>, tensor<f32>) -> (tensor<8xf32>, tensor<8xf32>)
+  return %0#0, %0#1 : tensor<8xf32>, tensor<8xf32>
+}
+
+// CHECK-LABEL: func @reduce_with_parameter_only_reducer_and_non_neutral_init
+// CHECK-SAME: (%[[ARG0:.*]]: tensor<16x8xf32>) -> tensor<8xf32>
+func.func @reduce_with_parameter_only_reducer_and_non_neutral_init(%arg0: tensor<16x8xf32>) -> tensor<8xf32> {
+  %cst = stablehlo.constant dense<5.000000e+00> : tensor<f32>
+  // A `take_last` reducer ignores the init value, so the reduction must not be
+  // combined with it: swapping the accumulator and element arguments would make
+  // the whole reduction collapse to the init value.
+  // CHECK: %[[REDUCE:.*]] = "tt.reduce"(%[[ARG0]]) <{axis = 0 : i32}>
+  // CHECK: return %[[REDUCE]] : tensor<8xf32>
+  %1 = "stablehlo.reduce"(%arg0, %cst) ({
+  ^bb0(%arg1: tensor<f32>, %arg2: tensor<f32>):
+    stablehlo.return %arg2 : tensor<f32>
+  }) {dimensions = array<i64: 0>} : (tensor<16x8xf32>, tensor<f32>) -> tensor<8xf32>
+  return %1 : tensor<8xf32>
+}

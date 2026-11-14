@@ -14,19 +14,33 @@ limitations under the License.
 ==============================================================================*/
 #include "tensorflow/lite/tools/optimize/calibration/calibrator.h"
 
+#include <cmath>
+#include <cstdlib>
 #include <cstring>
+#include <iostream>
+#include <memory>
+#include <string>
+#include <tuple>
+#include <utility>
+#include <vector>
 
-#include <gmock/gmock.h>
 #include <gtest/gtest.h>
-#include "absl/memory/memory.h"
-#include "tensorflow/core/lib/io/path.h"
+#include "absl/container/flat_hash_map.h"
 #include "tensorflow/core/platform/init_main.h"
+#include "tensorflow/core/platform/path.h"
+#include "tensorflow/core/platform/types.h"
 #include "tensorflow/core/util/command_line_flags.h"
-#include "tensorflow/lite/kernels/register.h"
-#include "tensorflow/lite/model.h"
+#include "tensorflow/lite/c/c_api_types.h"
+#include "tensorflow/lite/c/common.h"
+#include "tensorflow/lite/core/kernels/register.h"
+#include "tensorflow/lite/interpreter.h"
+#include "tensorflow/lite/model_builder.h"
+#include "tensorflow/lite/schema/schema_generated.h"
+#include "tensorflow/lite/string_type.h"
+#include "tensorflow/lite/tools/optimize/calibration/calibration_reader.h"
 
 namespace {
-tensorflow::string* g_test_model_dir = nullptr;
+std::string* g_test_model_dir = nullptr;
 }  // namespace
 
 namespace tflite {
@@ -223,7 +237,96 @@ TEST(CalibratorTest, UpdateMinMax) {
     }
   }
   auto input_0_quant_params =
-      absl::make_unique<tflite::QuantizationParametersT>();
+      std::make_unique<tflite::QuantizationParametersT>();
+  input_0_quant_params->min.push_back(0.5);
+  input_0_quant_params->max.push_back(1.5);
+  model.subgraphs[0]->tensors[0]->quantization =
+      std::move(input_0_quant_params);
+
+  // Invoke with update == true.
+  status = interpreter->Invoke();
+  ASSERT_EQ(kTfLiteOk, status);
+  const float eps = 1e-6f;
+  // Verify that min max of tensors.
+  const float expected_min[7] = {
+      0.5f,  // input 0
+      2.0f,  // input 1
+      3.0f,  // input 2
+      4.0f,  // input 3
+      5.0f,  // Add(1, 2)
+      6.0f,  // Output 5: Add(0, Add(1,2))
+      9.0f,  // Output 6: Add(Add(1,2), 3)
+  };
+  const float expected_max[7] = {
+      1.5f,  // input 0
+      2.0f,  // input 1
+      3.0f,  // input 2
+      4.0f,  // input 3
+      5.0f,  // Add(1, 2)
+      6.0f,  // Output 5: Add(0, Add(1,2))
+      9.0f,  // Output 6: Add(Add(1,2), 3)
+  };
+  status = reader->AddCalibrationToModel(&model, /*update=*/true);
+  for (int tensor_idx = 0; tensor_idx < 7; tensor_idx++) {
+    EXPECT_NEAR(model.subgraphs[0]->tensors[tensor_idx]->quantization->min[0],
+                expected_min[tensor_idx], eps);
+    EXPECT_NEAR(model.subgraphs[0]->tensors[tensor_idx]->quantization->max[0],
+                expected_max[tensor_idx], eps);
+  }
+
+  // Invoke with update == false;
+  // Verify that min max of tensors.
+  const float expected_value[7] = {
+      1.0f,  // input 0
+      2.0f,  // input 1
+      3.0f,  // input 2
+      4.0f,  // input 3
+      5.0f,  // Add(1, 2)
+      6.0f,  // Output 5: Add(0, Add(1,2))
+      9.0f,  // Output 6: Add(Add(1,2), 3)
+  };
+  status = reader->AddCalibrationToModel(&model, /*update=*/false);
+  for (int tensor_idx = 0; tensor_idx < 7; tensor_idx++) {
+    EXPECT_NEAR(model.subgraphs[0]->tensors[tensor_idx]->quantization->min[0],
+                expected_value[tensor_idx], eps);
+    EXPECT_NEAR(model.subgraphs[0]->tensors[tensor_idx]->quantization->max[0],
+                expected_value[tensor_idx], eps);
+  }
+}
+
+TEST(CalibratorTest, HandleNanValues) {
+  auto flatbuffer_model = ReadModel("multi_add.bin");
+  ASSERT_TRUE(flatbuffer_model);
+  std::unique_ptr<Interpreter> interpreter;
+  std::unique_ptr<CalibrationReader> reader;
+  auto status = BuildLoggingInterpreter(*flatbuffer_model,
+                                        ops::builtin::BuiltinOpResolver{},
+                                        &interpreter, &reader);
+  EXPECT_EQ(kTfLiteOk, status);
+  auto readonly_model = flatbuffer_model->GetModel();
+  tflite::ModelT model;
+  readonly_model->UnPackTo(&model);
+
+  ASSERT_TRUE(interpreter);
+  ASSERT_TRUE(reader);
+  status = interpreter->AllocateTensors();
+
+  EXPECT_EQ(kTfLiteOk, status);
+  const size_t tensor_size = 1 * 8 * 8 * 3;
+  for (size_t i = 0; i < interpreter->inputs().size(); i++) {
+    int input_tensor_idx = interpreter->inputs()[i];
+    TfLiteTensor* tensor = interpreter->tensor(input_tensor_idx);
+    ASSERT_EQ(tensor->bytes, tensor_size * sizeof(float));
+    for (size_t j = 0; j < tensor_size; j++) {
+      if (j % 2 == 0) {
+        tensor->data.f[j] = NAN;
+      } else {
+        tensor->data.f[j] = i + 1;
+      }
+    }
+  }
+  auto input_0_quant_params =
+      std::make_unique<tflite::QuantizationParametersT>();
   input_0_quant_params->min.push_back(0.5);
   input_0_quant_params->max.push_back(1.5);
   model.subgraphs[0]->tensors[0]->quantization =
@@ -608,13 +711,62 @@ TEST(CalibratorTest, CalibrationWithCallOnce) {
     EXPECT_NEAR(e.second.max, expected_result.max, eps);
   }
 }
+
+TEST(CalibratorTest, NonVariableInputsNotReLoggedPostInvocation) {
+  auto model = ReadModel("multi_add.bin");
+  ASSERT_TRUE(model);
+  std::unique_ptr<Interpreter> interpreter;
+  std::unique_ptr<CalibrationReader> reader;
+  auto status = BuildLoggingInterpreter(
+      *model, ops::builtin::BuiltinOpResolver{}, &interpreter, &reader);
+  EXPECT_EQ(kTfLiteOk, status);
+
+  ASSERT_TRUE(interpreter);
+  ASSERT_TRUE(reader);
+
+  status = interpreter->AllocateTensors();
+  ASSERT_EQ(kTfLiteOk, status);
+
+  const size_t tensor_size = 1 * 8 * 8 * 3;
+  for (size_t i = 0; i < interpreter->inputs().size(); i++) {
+    int input_tensor_idx = interpreter->inputs()[i];
+    TfLiteTensor* tensor = interpreter->tensor(input_tensor_idx);
+    ASSERT_NE(tensor, nullptr);
+    ASSERT_EQ(tensor->bytes, tensor_size * sizeof(float));
+    for (size_t j = 0; j < tensor_size; j++) {
+      tensor->data.f[j] = i + 1;
+    }
+  }
+
+  // Simulate memory planner buffer reuse where an output tensor shares the
+  // buffer of an input tensor.
+  ASSERT_NE(interpreter->tensor(5), nullptr);
+  char* original_output_data = interpreter->tensor(5)->data.raw;
+  interpreter->tensor(5)->data.raw = interpreter->tensor(0)->data.raw;
+
+  status = interpreter->Invoke();
+  ASSERT_EQ(kTfLiteOk, status);
+
+  absl::flat_hash_map<std::tuple<int, int>, CalibrationReader::CalibrationStats>
+      stats;
+  status = reader->GetTensorStatsAsMap(&stats);
+  EXPECT_EQ(kTfLiteOk, status);
+  const float eps = 1e-6f;
+  for (int tensor_idx = 0; tensor_idx < 4; tensor_idx++) {
+    auto it = stats.find({0, tensor_idx});
+    ASSERT_NE(it, stats.end());
+    EXPECT_NEAR(it->second.min, tensor_idx + 1, eps);
+    EXPECT_NEAR(it->second.max, tensor_idx + 1, eps);
+  }
+  interpreter->tensor(5)->data.raw = original_output_data;
+}
 }  // namespace
 }  // namespace calibration
 }  // namespace optimize
 }  // namespace tflite
 
 int main(int argc, char** argv) {
-  tensorflow::string model_file;
+  std::string model_file;
   const std::vector<tensorflow::Flag> flag_list = {
       tensorflow::Flag("test_model_file", &model_file,
                        "Path to test tflite model file."),
@@ -625,8 +777,7 @@ int main(int argc, char** argv) {
     std::cerr << "Required test_model_file\n";
     std::abort();
   }
-  g_test_model_dir =
-      new tensorflow::string(tensorflow::io::Dirname(model_file));
+  g_test_model_dir = new std::string(tensorflow::io::Dirname(model_file));
   ::tensorflow::port::InitMain(argv[0], &argc, &argv);
   return RUN_ALL_TESTS();
 }

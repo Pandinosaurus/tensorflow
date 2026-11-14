@@ -1,15 +1,23 @@
+# Copyright 2026 Google Inc. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
+load("//tensorflow/core/kernels/fuzzing:tf_ops_fuzz_target_lib.bzl", "tf_ops_fuzz_target_lib", "tf_oss_fuzz_corpus", "tf_oss_fuzz_dict")
 load("//tensorflow/core/platform:rules_cc.bzl", "cc_library")
 
-# buildifier: disable=same-origin-load
-load("//tensorflow/core/kernels/fuzzing:tf_ops_fuzz_target_lib.bzl", "tf_ops_fuzz_target_lib")
-
-# buildifier: disable=same-origin-load
-load("//tensorflow/core/kernels/fuzzing:tf_ops_fuzz_target_lib.bzl", "tf_oss_fuzz_corpus")
-
-# buildifier: disable=same-origin-load
-load("//tensorflow/core/kernels/fuzzing:tf_ops_fuzz_target_lib.bzl", "tf_oss_fuzz_dict")
-
 package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
     default_visibility = ["//visibility:public"],
     licenses = ["notice"],
 )
@@ -18,6 +26,7 @@ cc_library(
     name = "fuzz_session",
     hdrs = ["fuzz_session.h"],
     deps = [
+        "//tensorflow/cc:cc_ops",
         "//tensorflow/cc:scope",
         "//tensorflow/core:core_cpu",
         "//tensorflow/core:tensorflow",
@@ -27,14 +36,6 @@ cc_library(
 tf_ops_fuzz_target_lib("string_to_number")
 
 tf_oss_fuzz_corpus("string_to_number")
-
-tf_ops_fuzz_target_lib("string_split")
-
-tf_oss_fuzz_corpus("string_split")
-
-tf_ops_fuzz_target_lib("string_split_v2")
-
-tf_oss_fuzz_corpus("string_split_v2")
 
 tf_ops_fuzz_target_lib("encode_base64")
 

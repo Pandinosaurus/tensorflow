@@ -19,8 +19,10 @@ limitations under the License.
 #include "mlir/IR/MLIRContext.h"  // from @llvm-project
 
 namespace mlir {
-
+namespace bufferization {
 class BufferizeTypeConverter;
+}
+class ConversionTarget;
 class LLVMTypeConverter;
 class MLIRContext;
 class RewritePatternSet;
@@ -44,23 +46,11 @@ namespace transforms {
 
 /// Collects a set of patterns that bufferize operations from the standard and
 /// other dialects.
-void populateExtraBufferizePatterns(MLIRContext *context,
-                                    BufferizeTypeConverter *converter,
+void populateExtraBufferizeDialects(DialectRegistry &registry);
+void populateExtraBufferizePatterns(ConversionTarget &target,
+                                    MLIRContext *context,
+                                    TypeConverter *converter,
                                     RewritePatternSet *patterns);
-
-/// Populate pattern to bufferize `linalg.tiled_loop`.
-void populateTiledLoopBufferizePattern(MLIRContext *context,
-                                       BufferizeTypeConverter *converter,
-                                       RewritePatternSet *patterns);
-
-/// Populate patterns to rewrite TF operations to TF framework JIT invocations.
-void PopulateTFToJITInvocationPatterns(MLIRContext *ctx,
-                                       RewritePatternSet *patterns,
-                                       llvm::ArrayRef<StringRef> architectures,
-                                       llvm::ArrayRef<int64_t> tile_sizes,
-                                       llvm::ArrayRef<int64_t> unroll_factors,
-                                       int64_t max_supported_rank,
-                                       bool enable_ftz, bool cpu_codegen);
 
 }  // namespace transforms
 }  // namespace kernel_gen

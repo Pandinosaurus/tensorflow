@@ -42,7 +42,7 @@ void ConstantOpTest::PersistentMemoryTrackingTest(bool on_gpu) {
   std::initializer_list<int64_t> dims = {2, 3, 4, 5};
   Tensor tensor(data_type, TensorShape(dims));
   for (int i = 0; i < 2 * 3 * 4 * 5; ++i) {
-    tensor.flat<int32>()(i) = i;
+    tensor.flat<int32_t>()(i) = i;
   }
 
   NodeDef const_node;
@@ -51,7 +51,7 @@ void ConstantOpTest::PersistentMemoryTrackingTest(bool on_gpu) {
                    .Attr("value", tensor)
                    .Finalize(&const_node));
 
-  string device_string = "CPU";
+  std::string device_string = "CPU";
   DeviceType device_type = DEVICE_CPU;
   if (on_gpu) {
     device_string = "GPU";
@@ -60,7 +60,7 @@ void ConstantOpTest::PersistentMemoryTrackingTest(bool on_gpu) {
   std::unique_ptr<Device> device(DeviceFactory::NewDevice(
       device_string, {}, "/job:worker/replica:0/task:0"));
 
-  Status status;
+  absl::Status status;
   std::unique_ptr<OpKernel> op(CreateOpKernel(device_type, device.get(),
                                               cpu_allocator(), const_node,
                                               TF_GRAPH_DEF_VERSION, &status));

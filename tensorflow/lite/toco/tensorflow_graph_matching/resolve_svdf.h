@@ -15,16 +15,17 @@ limitations under the License.
 #ifndef TENSORFLOW_LITE_TOCO_TENSORFLOW_GRAPH_MATCHING_RESOLVE_SVDF_H_
 #define TENSORFLOW_LITE_TOCO_TENSORFLOW_GRAPH_MATCHING_RESOLVE_SVDF_H_
 
+#include <memory>
 #include <string>
 #include <vector>
 
+#include "tensorflow/core/framework/attr_value.pb.h"
+#include "tensorflow/core/framework/graph.pb.h"
+#include "tensorflow/core/framework/node_def.pb.h"
 #include "tensorflow/lite/toco/model.h"
 #include "tensorflow/lite/toco/tensorflow_graph_matching/cluster.h"
 #include "tensorflow/lite/toco/tensorflow_graph_matching/cluster_utils.h"
 #include "tensorflow/lite/toco/tooling_util.h"
-#include "tensorflow/core/framework/attr_value.pb.h"
-#include "tensorflow/core/framework/graph.pb.h"
-#include "tensorflow/core/framework/node_def.pb.h"
 
 namespace toco {
 
@@ -40,7 +41,7 @@ class SvdfCluster : public Cluster {
     const_node_patterns_.push_back(const_pattern);
   }
 
-  virtual ~SvdfCluster() {}
+  ~SvdfCluster() override {}
 
  private:
   // The main function which is used to create Const nodes for this cluster.
@@ -53,8 +54,7 @@ class SvdfCluster : public Cluster {
   // needed.
   void MaybeMergeConstNodes(
       const std::vector<const tensorflow::NodeDef*>& const_node_parts,
-      bool transpose_tensor_value,
-      const std::unique_ptr<tensorflow::NodeDef>& merged_node);
+      bool transpose_tensor_value, tensorflow::NodeDef* merged_node);
 
   // Infer the value of Svdf filter rank, by looking up a reshape operator which
   // is used for 'output' which reshapes output from [num_filters, batch, 1]
@@ -74,7 +74,7 @@ class SvdfClusterFactory : public ClusterFactoryInterface {
   // and it creates an SVDF Op from them.
   std::unique_ptr<Cluster> CreateCluster(
       const tensorflow::NodeDef& node,
-      const tensorflow::GraphDef& graph_def) const;
+      const tensorflow::GraphDef& graph_def) const override;
 };
 
 }  // end namespace toco

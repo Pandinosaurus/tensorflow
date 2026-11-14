@@ -15,11 +15,10 @@ limitations under the License.
 
 #include "tensorflow/lite/delegates/gpu/gl/kernels/tile.h"
 
+#include <memory>
 #include <string>
 #include <utility>
 
-#include "absl/memory/memory.h"
-#include "absl/types/any.h"
 #include "tensorflow/lite/delegates/gpu/common/operations.h"
 #include "tensorflow/lite/delegates/gpu/common/status.h"
 #include "tensorflow/lite/delegates/gpu/gl/node_shader.h"
@@ -63,7 +62,7 @@ class Tile : public NodeShader {
 }  // namespace
 
 std::unique_ptr<NodeShader> NewTileNodeShader() {
-  return absl::make_unique<Tile>();
+  return std::make_unique<Tile>();
 }
 
 }  // namespace gl

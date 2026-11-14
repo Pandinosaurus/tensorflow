@@ -13,18 +13,26 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include <algorithm>
+#include <cstdint>
+#include <vector>
+
+#include "absl/algorithm/container.h"
+#include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
+#include "absl/types/span.h"
 #include "tensorflow/compiler/tf2xla/lib/util.h"
 #include "tensorflow/compiler/tf2xla/mlir_xla_op_kernel.h"
 #include "tensorflow/compiler/tf2xla/type_util.h"
 #include "tensorflow/compiler/tf2xla/xla_helpers.h"
 #include "tensorflow/compiler/tf2xla/xla_op_kernel.h"
 #include "tensorflow/compiler/tf2xla/xla_op_registry.h"
-#include "tensorflow/compiler/xla/client/lib/constants.h"
-#include "tensorflow/compiler/xla/client/lib/matrix.h"
-#include "tensorflow/compiler/xla/client/lib/pooling.h"
-#include "tensorflow/compiler/xla/client/xla_builder.h"
-#include "tensorflow/compiler/xla/util.h"
-#include "tensorflow/compiler/xla/xla_data.pb.h"
+#include "xla/hlo/builder/lib/constants.h"
+#include "xla/hlo/builder/lib/matrix.h"
+#include "xla/hlo/builder/lib/pooling.h"
+#include "xla/hlo/builder/xla_builder.h"
+#include "xla/util.h"
+#include "xla/xla_data.pb.h"
 #include "tensorflow/core/framework/op_kernel.h"
 
 namespace tensorflow {
@@ -79,13 +87,14 @@ class DiagOp : public XlaOpKernel {
 
   void Compile(XlaOpKernelContext* ctx) override {
     OP_REQUIRES(ctx, ctx->num_inputs() >= 1,
-                errors::InvalidArgument("Diag op must have at an input"));
+                absl::InvalidArgumentError("Diag op must have at an input"));
     const TensorShape input_shape = ctx->InputShape(0);
 
     auto dims = input_shape.dim_sizes();
-    OP_REQUIRES(ctx, !dims.empty(),
-                errors::InvalidArgument("Expected 1 <= dims, got shape ",
-                                        input_shape.DebugString()));
+    OP_REQUIRES(
+        ctx, !dims.empty(),
+        absl::InvalidArgumentError(absl::StrCat(
+            "Expected 1 <= dims, got shape ", input_shape.DebugString())));
 
     xla::XlaOp input = ctx->Input(0);
 

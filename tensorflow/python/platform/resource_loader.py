@@ -13,10 +13,6 @@
 # limitations under the License.
 # ==============================================================================
 """Resource management library."""
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import os as _os
 import sys as _sys
 
@@ -25,7 +21,7 @@ from tensorflow.python.util.tf_export import tf_export
 
 # pylint: disable=g-import-not-at-top
 try:
-  from rules_python.python.runfiles import runfiles
+  from python.runfiles import runfiles
 except ImportError:
   runfiles = None
 # pylint: enable=g-import-not-at-top

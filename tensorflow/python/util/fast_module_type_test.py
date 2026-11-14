@@ -31,7 +31,30 @@ class ChildFastModule(FastModuleType):
     return 3
 
 
+class ChildFastModuleWithProperty(FastModuleType):
+
+  @property
+  def read_only(self):
+    return 42
+
+
+class EarlyAttrAccessModule(FastModuleType):
+
+  def __init__(self, name):
+    self.some_attr = 1
+    super().__init__(name)  # pytype: disable=too-many-function-args
+
+
 class FastModuleTypeTest(test.TestCase):
+
+  def testAttributeAccessBeforeSuperInitDoesNotCrash(self):
+    # Tests that the attribute access before super().__init__() does not crash.
+    module = EarlyAttrAccessModule("early_attr")
+    self.assertEqual(1, module.some_attr)
+
+  def testMissingModuleNameCallDoesNotCrash(self):
+    with self.assertRaises(TypeError):
+      ChildFastModule()
 
   def testBaseGetattribute(self):
     # Tests that the default attribute lookup works.
@@ -46,12 +69,32 @@ class FastModuleTypeTest(test.TestCase):
                                              ChildFastModule._getattribute1)
     self.assertEqual(2, module.foo)
 
+  def testInvalidGetattributeCallbackRaisesAndKeepsExistingCallback(self):
+    module = ChildFastModule("test")
+    FastModuleType.set_getattribute_callback(
+        module, ChildFastModule._getattribute1
+    )
+
+    with self.assertRaisesRegex(TypeError, "input args must be callable"):
+      FastModuleType.set_getattribute_callback(module, 1)
+
+    self.assertEqual(2, module.foo)
+
   def testGetattrCallback(self):
     # Tests that functionality of __getattr__ can be set as a callback.
     module = ChildFastModule("test")
     FastModuleType.set_getattribute_callback(module,
                                              ChildFastModule._getattribute2)
     FastModuleType.set_getattr_callback(module, ChildFastModule._getattr)
+    self.assertEqual(3, module.foo)
+
+  def testInvalidGetattrCallbackRaisesAndKeepsExistingCallback(self):
+    module = ChildFastModule("test")
+    FastModuleType.set_getattr_callback(module, ChildFastModule._getattr)
+
+    with self.assertRaisesRegex(TypeError, "input args must be callable"):
+      FastModuleType.set_getattr_callback(module, 1)
+
     self.assertEqual(3, module.foo)
 
   def testFastdictApis(self):
@@ -65,6 +108,30 @@ class FastModuleTypeTest(test.TestCase):
     # After _fastdict_insert() the attribute is added.
     self.assertTrue(module._fastdict_key_in("bar"))
     self.assertEqual(1, module.bar)
+
+  def testAttributeDeletion(self):
+    module = ChildFastModule("test")
+    module.foo = 1
+    self.assertEqual(1, module.foo)
+    self.assertTrue(module._fastdict_key_in("foo"))
+
+    del module.foo
+    self.assertFalse(module._fastdict_key_in("foo"))
+
+    with self.assertRaises(AttributeError):
+      _ = module.foo
+
+    with self.assertRaises(AttributeError):
+      del module.bar
+
+  def testCacheConsistencyOnSettingError(self):
+    module = ChildFastModuleWithProperty("test")
+
+    with self.assertRaises(AttributeError):
+      module.read_only = 1
+
+    self.assertFalse(module._fastdict_key_in("read_only"))
+    self.assertEqual(42, module.read_only)
 
 
 if __name__ == "__main__":

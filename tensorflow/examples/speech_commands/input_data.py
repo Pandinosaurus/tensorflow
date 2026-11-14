@@ -15,10 +15,6 @@
 """Model definitions for simple speech recognition.
 
 """
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import hashlib
 import math
 import os.path
@@ -28,8 +24,7 @@ import sys
 import tarfile
 
 import numpy as np
-from six.moves import urllib
-from six.moves import xrange  # pylint: disable=redefined-builtin
+import urllib
 import tensorflow as tf
 
 from tensorflow.python.ops import gen_audio_ops as audio_ops
@@ -167,7 +162,7 @@ def get_features_range(model_settings):
     Min/max float pair holding the range of features.
 
   Raises:
-    Exception: If preprocessing mode isn't recognized.
+    ValueError: If preprocessing mode isn't recognized.
   """
   # TODO(petewarden): These values have been derived from the observed ranges
   # of spectrogram and MFCC inputs. If the preprocessing pipeline changes,
@@ -182,8 +177,10 @@ def get_features_range(model_settings):
     features_min = 0.0
     features_max = 26.0
   else:
-    raise Exception('Unknown preprocess mode "%s" (should be "mfcc",'
-                    ' "average", or "micro")' % (model_settings['preprocess']))
+    raise ValueError(
+        'Unknown preprocess mode "%s" (should be "mfcc", "average", or "micro")'
+        % (model_settings['preprocess'])
+    )
   return features_min, features_max
 
 
@@ -231,7 +228,7 @@ class AudioProcessor(object):
 
       try:
         filepath, _ = urllib.request.urlretrieve(data_url, filepath, _progress)
-      except:
+      except Exception:
         tf.compat.v1.logging.error(
             'Failed to download URL: {0} to folder: {1}. Please make sure you '
             'have enough free space and an internet connection'.format(
@@ -242,7 +239,34 @@ class AudioProcessor(object):
       tf.compat.v1.logging.info(
           'Successfully downloaded {0} ({1} bytes)'.format(
               filename, statinfo.st_size))
-      tarfile.open(filepath, 'r:gz').extractall(dest_directory)
+      with tarfile.open(filepath, 'r:gz') as archive:
+        if hasattr(tarfile, 'data_filter'):
+          archive.extractall(dest_directory, filter='data')
+        else:
+          # Python versions without extraction filters (before 3.10.12 and
+          # 3.11.4). Members are not on disk yet, so resolving paths with
+          # realpath here cannot see symlinks from this archive. Instead,
+          # refuse absolute paths, drive prefixes and '..' components in
+          # member names and link targets: then every file, symlink and hard
+          # link stays inside dest_directory.
+          def _is_unsafe(path):
+            return (
+                os.path.isabs(path)
+                or bool(os.path.splitdrive(path)[0])
+                or '..' in re.split(r'[\\/]', path)
+            )
+
+          for member in archive.getmembers():
+            if _is_unsafe(member.name) or (
+                (member.issym() or member.islnk())
+                and _is_unsafe(member.linkname)
+            ):
+              raise ValueError(
+                  'Refusing to extract unsafe archive member: {0}'.format(
+                      member.name
+                  )
+              )
+          archive.extractall(dest_directory)
 
   def prepare_data_index(self, silence_percentage, unknown_percentage,
                          wanted_words, validation_percentage,
@@ -268,7 +292,7 @@ class AudioProcessor(object):
       and a lookup map for each class to determine its numeric index.
 
     Raises:
-      Exception: If expected files are not found.
+      FileNotFoundError: If expected files are not found.
     """
     # Make sure the shuffling and picking of unknowns is deterministic.
     random.seed(RANDOM_SEED)
@@ -296,12 +320,15 @@ class AudioProcessor(object):
       else:
         unknown_index[set_index].append({'label': word, 'file': wav_path})
     if not all_words:
-      raise Exception('No .wavs found at ' + search_path)
+      raise FileNotFoundError('No .wavs found at ' + search_path)
     for index, wanted_word in enumerate(wanted_words):
       if wanted_word not in all_words:
-        raise Exception('Expected to find ' + wanted_word +
-                        ' in labels but only found ' +
-                        ', '.join(all_words.keys()))
+        raise ValueError(
+            'Expected to find '
+            + wanted_word
+            + ' in labels but only found '
+            + ', '.join(all_words.keys())
+        )
     # We need an arbitrary file to load as the input for the silence samples.
     # It's multiplied by zero later, so the content doesn't matter.
     silence_wav_path = self.data_index['training'][0]['file']
@@ -346,7 +373,7 @@ class AudioProcessor(object):
       List of raw PCM-encoded audio samples of background noise.
 
     Raises:
-      Exception: If files aren't found in the folder.
+      FileNotFoundError: If files aren't found in the folder.
     """
     self.background_data = []
     background_dir = os.path.join(self.data_dir, BACKGROUND_NOISE_DIR_NAME)
@@ -364,7 +391,9 @@ class AudioProcessor(object):
             feed_dict={wav_filename_placeholder: wav_path}).audio.flatten()
         self.background_data.append(wav_data)
       if not self.background_data:
-        raise Exception('No background wav files were found in ' + search_path)
+        raise FileNotFoundError(
+            'No background wav files were found in ' + search_path
+        )
 
   def prepare_processing_graph(self, model_settings, summaries_dir):
     """Builds a TensorFlow graph to apply the input distortions.
@@ -390,7 +419,7 @@ class AudioProcessor(object):
 
     Raises:
       ValueError: If the preprocessing mode isn't recognized.
-      Exception: If the preprocessor wasn't compiled in.
+      ImportError: If the preprocessor wasn't compiled in.
     """
     with tf.compat.v1.get_default_graph().name_scope('data'):
       desired_samples = model_settings['desired_samples']
@@ -460,10 +489,11 @@ class AudioProcessor(object):
             'mfcc', tf.expand_dims(self.output_, -1), max_outputs=1)
       elif model_settings['preprocess'] == 'micro':
         if not frontend_op:
-          raise Exception(
+          raise ImportError(
               'Micro frontend op is currently not available when running'
               ' TensorFlow directly from Python, you need to build and run'
-              ' through Bazel')
+              ' through Bazel'
+          )
         sample_rate = model_settings['sample_rate']
         window_size_ms = (model_settings['window_size_samples'] *
                           1000) / sample_rate
@@ -547,7 +577,7 @@ class AudioProcessor(object):
     pick_deterministically = (mode != 'training')
     # Use the processing graph we created earlier to repeatedly to generate the
     # final output sample data we'll use in training.
-    for i in xrange(offset, offset + sample_count):
+    for i in range(offset, offset + sample_count):
       # Pick which audio sample to use.
       if how_many == -1 or pick_deterministically:
         sample_index = i

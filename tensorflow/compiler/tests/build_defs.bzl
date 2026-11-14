@@ -1,5 +1,21 @@
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
 """Build rules for Tensorflow/XLA testing."""
 
+load("@xla//third_party/rules_python/python:defs.bzl", "py_library")
 load("//tensorflow:tensorflow.bzl", "py_test")
 load("//tensorflow/compiler/tests:plugin.bzl", "plugins")
 load(
@@ -19,8 +35,12 @@ def tf_xla_py_test(
         main = None,
         enabled_backends = None,
         disabled_backends = None,
+        backend_tags = {},
+        backend_args = {},
+        backend_data = {},
         use_xla_device = True,
         enable_mlir_bridge = True,
+        test_rule = py_test,
         **kwargs):
     """Generates py_test targets, one per XLA backend.
 
@@ -47,11 +67,15 @@ def tf_xla_py_test(
         values include "cpu" and "gpu". If not specified, defaults to None.
       disabled_backends: A list of backends that should not be tested. Supported
         values include "cpu" and "gpu". If not specified, defaults to None.
+      backend_tags: A dict of backend name to tags to apply to the generated target.
+      backend_args: A dict of backend name to args to apply to the generated target.
+      backend_data: A dict of backend name to data to apply to the generated target.
       use_xla_device: If true then the --test_device argument is set to XLA_CPU
         and XLA_GPU for the CPU and GPU tests.  Otherwise it is set to CPU and
         GPU.
       enable_mlir_bridge: If true, then runs the test with and without mlir
         bridge enabled.
+      test_rule: Rule to generate test targets (defaults to py_test).
       **kwargs: keyword arguments passed onto the generated py_test() rules.
     """
     if enabled_backends == None:
@@ -71,36 +95,42 @@ def tf_xla_py_test(
         cpu_xla_device = "CPU"
         gpu_xla_device = "GPU"
 
+    py_library(
+        name = name + "_lib",
+        srcs = srcs,
+        deps = deps,
+        testonly = 1,
+    )
     for backend in backends:
         test_name = "{}_{}".format(name, backend)
-        backend_tags = ["tf_xla_{}".format(backend)]
-        backend_args = []
-        backend_deps = []
-        backend_data = []
+        this_backend_tags = ["tf_xla_{}".format(backend)] + backend_tags.get(backend, [])
+        this_backend_args = backend_args.get(backend, [])
+        this_backend_deps = []
+        this_backend_data = backend_data.get(backend, [])
         if backend == "cpu":
-            backend_args += [
+            this_backend_args += [
                 "--test_device=" + cpu_xla_device,
                 "--types=DT_HALF,DT_FLOAT,DT_DOUBLE,DT_UINT8,DT_QUINT8,DT_INT8,DT_QINT8,DT_INT32,DT_QINT32,DT_INT64,DT_BOOL,DT_COMPLEX64,DT_COMPLEX128",
             ]
-        elif backend == "gpu":
-            backend_args += [
+        elif backend in ("gpu", "gpu_a100", "gpu_h100"):
+            this_backend_args += [
                 "--test_device=" + gpu_xla_device,
                 "--types=DT_HALF,DT_FLOAT,DT_DOUBLE,DT_UINT8,DT_QUINT8,DT_INT8,DT_QINT8,DT_INT32,DT_QINT32,DT_INT64,DT_BOOL,DT_COMPLEX64,DT_COMPLEX128,DT_BFLOAT16",
             ]
-            backend_tags += tf_cuda_tests_tags()
+            this_backend_tags += tf_cuda_tests_tags()
         elif backend in plugins:
-            backend_args += [
+            this_backend_args += [
                 "--test_device=" + plugins[backend]["device"],
                 "--types=" + plugins[backend]["types"],
             ]
-            backend_tags += plugins[backend]["tags"]
-            backend_args += plugins[backend]["args"]
-            backend_deps += plugins[backend]["deps"]
-            backend_data += plugins[backend]["data"]
+            this_backend_tags += plugins[backend]["tags"]
+            this_backend_args += plugins[backend]["args"]
+            this_backend_deps += plugins[backend]["deps"]
+            this_backend_data += plugins[backend]["data"]
         else:
             fail("Unknown backend {}".format(backend))
 
-        test_tags = tags + backend_tags
+        test_tags = tags + this_backend_tags
 
         enable_mlir_bridge_options = [False]
         if enable_mlir_bridge:
@@ -108,35 +138,49 @@ def tf_xla_py_test(
 
         for mlir_option in enable_mlir_bridge_options:
             extra_dep = []
+            extra_tag = []
             updated_name = test_name
 
-            mlir_bridge_dep = "//tensorflow/python:is_mlir_bridge_test_true"
+            mlir_bridge_dep = "//tensorflow/python/framework:is_mlir_bridge_test_true"
             has_mlir_dep = (mlir_bridge_dep in deps)
             if mlir_option:
                 if updated_name.endswith("_test"):
                     updated_name = updated_name[:-5]
                 updated_name += "_mlir_bridge_test"
                 extra_dep = [] if has_mlir_dep else [mlir_bridge_dep]
+
+                # Mark gpu mlir_bridge tests as ondemand
+                #
+                # This is for testing book keeping because the bridge does not have any gpu specific
+                # logic at this time, so CPU testing is good enough and cheaper.
+                extra_tag = ["ondemand"] if backend in ("gpu", "gpu_a100", "gpu_h100") else []
             elif has_mlir_dep:
                 # Some tests run only with mlir_bridge by explicitly adding the MLIR
                 # bridge dep so if the dep is already present skip non MLIR
                 # version.
                 continue
 
-            py_test(
+            # Rules may set exec_properties, but Google has internal
+            # exec_properties values so they don't merge easily. Just strip them
+            # all for now.
+            kwargs.pop("exec_properties", {})
+            test_rule(
                 name = updated_name,
                 srcs = srcs,
                 srcs_version = "PY3",
-                args = backend_args,
+                args = this_backend_args,
                 main = "{}.py".format(name) if main == None else main,
-                data = data + backend_data,
-                deps = deps + backend_deps + extra_dep,
-                tags = test_tags,
+                data = data + this_backend_data,
+                deps = deps + this_backend_deps + extra_dep + [name + "_lib"],
+                tags = test_tags + extra_tag,
                 exec_properties = tf_exec_properties({"tags": test_tags}),
                 **kwargs
             )
             test_names.append(updated_name)
     native.test_suite(name = name, tests = test_names)
+
+def tf_xla_py_strict_test(**kwargs):
+    tf_xla_py_test(**kwargs)
 
 def generate_backend_suites(backends = []):
     """Generates per-backend test_suites that run all tests for a backend."""

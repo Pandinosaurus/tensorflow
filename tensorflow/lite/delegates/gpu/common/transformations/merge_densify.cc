@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "absl/types/any.h"
@@ -104,7 +105,7 @@ class MergeDensify : public NodeTransformation {
 }  // namespace
 
 std::unique_ptr<NodeTransformation> NewMergeDensify() {
-  return absl::make_unique<MergeDensify>();
+  return std::make_unique<MergeDensify>();
 }
 
 }  // namespace gpu

@@ -26,34 +26,43 @@ limitations under the License.
 
 namespace tensorflow {
 
-DeviceSet::DeviceSet() {}
+DeviceSet::DeviceSet() = default;
 
-DeviceSet::~DeviceSet() {}
+DeviceSet::~DeviceSet() = default;
 
 void DeviceSet::AddDevice(Device* device) {
   mutex_lock l(devices_mu_);
   devices_.push_back(device);
   prioritized_devices_.clear();
   prioritized_device_types_.clear();
-  for (const string& name :
+  for (const std::string& name :
        DeviceNameUtils::GetNamesForDeviceMappings(device->parsed_name())) {
     device_by_name_.insert({name, device});
   }
+  matching_device_cache_.clear();
 }
 
 void DeviceSet::FindMatchingDevices(const DeviceNameUtils::ParsedName& spec,
                                     std::vector<Device*>* devices) const {
-  // TODO(jeff): If we are going to repeatedly lookup the set of devices
-  // for the same spec, maybe we should have a cache of some sort
+  {
+    mutex_lock l(devices_mu_);
+    auto match = matching_device_cache_.find(spec);
+    if (match != matching_device_cache_.end()) {
+      *devices = match->second;
+    }
+  }
+
   devices->clear();
   for (Device* d : devices_) {
     if (DeviceNameUtils::IsCompleteSpecification(spec, d->parsed_name())) {
       devices->push_back(d);
     }
   }
+  mutex_lock l(devices_mu_);
+  matching_device_cache_.insert({spec, *devices});
 }
 
-Device* DeviceSet::FindDeviceByName(const string& name) const {
+Device* DeviceSet::FindDeviceByName(const std::string& name) const {
   return gtl::FindPtrOrNull(device_by_name_, name);
 }
 
@@ -71,12 +80,12 @@ static bool DeviceTypeComparator(const DeviceType& a, const DeviceType& b) {
     return a_priority > b_priority;
   }
 
-  return StringPiece(a.type()) < StringPiece(b.type());
+  return absl::string_view(a.type()) < absl::string_view(b.type());
 }
 
 std::vector<DeviceType> DeviceSet::PrioritizedDeviceTypeList() const {
   std::vector<DeviceType> result;
-  std::set<string> seen;
+  std::set<std::string> seen;
   for (Device* d : devices_) {
     const auto& t = d->device_type();
     if (seen.insert(t).second) {
@@ -105,14 +114,14 @@ void DeviceSet::SortPrioritizedDeviceTypeVector(
 }
 
 void DeviceSet::SortPrioritizedDeviceVector(PrioritizedDeviceVector* vector) {
-  auto device_sort = [](const std::pair<Device*, int32>& a,
-                        const std::pair<Device*, int32>& b) {
+  auto device_sort = [](const std::pair<Device*, int32_t>& a,
+                        const std::pair<Device*, int32_t>& b) {
     if (a.second != b.second) {
       return a.second > b.second;
     }
 
-    const string& a_type_name = a.first->device_type();
-    const string& b_type_name = b.first->device_type();
+    const std::string& a_type_name = a.first->device_type();
+    const std::string& b_type_name = b.first->device_type();
     if (a_type_name != b_type_name) {
       auto a_priority = DeviceFactory::DevicePriority(a_type_name);
       auto b_priority = DeviceFactory::DevicePriority(b_type_name);
@@ -125,7 +134,8 @@ void DeviceSet::SortPrioritizedDeviceVector(PrioritizedDeviceVector* vector) {
       return a.first->IsLocal();
     }
 
-    return StringPiece(a.first->name()) < StringPiece(b.first->name());
+    return absl::string_view(a.first->name()) <
+           absl::string_view(b.first->name());
   };
   std::sort(vector->begin(), vector->end(), device_sort);
 }
@@ -147,7 +157,7 @@ void UpdatePrioritizedVectors(
   if (prioritized_device_types != nullptr &&
       prioritized_device_types->size() != devices.size()) {
     std::set<DeviceType> seen;
-    for (const std::pair<Device*, int32>& p : *prioritized_devices) {
+    for (const std::pair<Device*, int32_t>& p : *prioritized_devices) {
       DeviceType t(p.first->device_type());
       if (seen.insert(t).second) {
         prioritized_device_types->emplace_back(t, p.second);

@@ -178,11 +178,11 @@ class IsotonicRegressionOp : public tensorflow::OpKernel {
     // Grab the input tensor.
     const tensorflow::Tensor& input_tensor = context->input(0);
     const auto input = input_tensor.flat_inner_dims<Tin, 2>();
-    int int_max = std::numeric_limits<int32>::max();
+    int int_max = std::numeric_limits<int32_t>::max();
     OP_REQUIRES(context,
                 tensorflow::FastBoundsCheck(input.dimensions()[0], int_max) &&
                     tensorflow::FastBoundsCheck(input.dimensions()[1], int_max),
-                tensorflow::errors::InvalidArgument("Tensor too large"));
+                absl::InvalidArgumentError("Tensor too large"));
 
     // Create the output tensor holding the minimizers.
     const auto shape = input_tensor.shape();

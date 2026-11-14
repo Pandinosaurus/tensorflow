@@ -23,9 +23,8 @@ limitations under the License.
 
 #define EIGEN_USE_THREADS
 
-#include "third_party/eigen3/Eigen/Core"
-#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
-
+#include "Eigen/Core"  // from @eigen_archive
+#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
 #include "tensorflow/core/framework/numeric_op.h"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/register_types.h"
@@ -60,7 +59,6 @@ struct Constants {
   }
 };
 
-#if defined(EIGEN_HAS_INDEX_LIST)
 struct ConstantsBase {
   const Eigen::IndexList<Eigen::type2index<0>> kZero;
   const Eigen::IndexList<Eigen::type2index<1>> kOne;
@@ -68,13 +66,13 @@ struct ConstantsBase {
 };
 template <>
 struct Constants<CPUDevice> : ConstantsBase {};
-#endif  // EIGEN_HAS_INDEX_LIST
 
 class ReductionHelper {
  public:
   ReductionHelper() : reduce_first_axis_(false) {}
 
-  Status Simplify(const Tensor& data, const Tensor& axis, const bool keep_dims);
+  absl::Status Simplify(const Tensor& data, const Tensor& axis,
+                        const bool keep_dims);
 
   // We need to do roughly:
   //   tmp_out = allocate(out_reshape())
@@ -116,14 +114,15 @@ class ReductionHelper {
   TensorShape shuffled_shape();
 
   // Permutation of reduced dims needed to put reduction dimensions at the end
-  gtl::InlinedVector<int32, 8> permutation();
+  absl::InlinedVector<int32_t, 8> permutation();
 
  private:
   bool reduce_first_axis_;  // True if need to reduce the 0-th dimension.
-  gtl::InlinedVector<int64_t, 4>
-      data_reshape_;                          // Reshape data before reduction.
-  gtl::InlinedVector<int64_t, 4> out_shape_;  // The final output shape.
-  gtl::InlinedVector<int64_t, 4> out_reshape_;  // Reshape output for reduction.
+  absl::InlinedVector<int64_t, 4>
+      data_reshape_;                           // Reshape data before reduction.
+  absl::InlinedVector<int64_t, 4> out_shape_;  // The final output shape.
+  absl::InlinedVector<int64_t, 4>
+      out_reshape_;  // Reshape output for reduction.
 };
 
 // For operations where the output is a reduction function along some
@@ -147,7 +146,10 @@ class ReductionOp : public OpKernel {
 
     ReductionHelper helper;
     OP_REQUIRES_OK(ctx, helper.Simplify(data, axes, keep_dims_));
-    CHECK_GE(helper.ndims(), 0);
+    OP_REQUIRES(ctx, helper.ndims() >= 0,
+                absl::InvalidArgumentError(absl::StrCat(
+                    "Reduction helper returned negative ndims. Input shape: ",
+                    data.shape().DebugString())));
 
     bool is_scalar_identity = functor::ReducerTraits<Reducer>::IsScalarIdentity;
     bool is_trivial = helper.ndims() == 0 ||
@@ -156,7 +158,7 @@ class ReductionOp : public OpKernel {
       Tensor out;
       // Special case. Reduces nothing and does not alter the input values.
       if (!out.CopyFrom(data, helper.out_shape())) {
-        ctx->SetStatus(errors::Internal("Error during reduction copy."));
+        ctx->SetStatus(absl::InternalError("Error during reduction copy."));
       }
       ctx->set_output(0, out);
       return;
@@ -221,7 +223,7 @@ class ReductionOp : public OpKernel {
         // all reduced dimensions are last and reuse the 2-D -> 1-D case.
         Tensor data_reshaped;
         OP_REQUIRES(ctx, data_reshaped.CopyFrom(data, helper.data_reshape()),
-                    errors::Internal("Error during reduction copy."));
+                    absl::InternalError("Error during reduction copy."));
         Tensor shuffled;
         OP_REQUIRES_OK(ctx, ctx->allocate_temp(DataTypeToEnum<T>::value,
                                                helper.shuffled_shape(),
@@ -242,7 +244,7 @@ class ReductionOp : public OpKernel {
     // match between the two shapes.
     Tensor out;
     OP_REQUIRES(ctx, out.CopyFrom(tmp_out, helper.out_shape()),
-                errors::Internal("Error during reduction copy."));
+                absl::InternalError("Error during reduction copy."));
     ctx->set_output(0, out);
   }
 

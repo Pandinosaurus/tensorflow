@@ -15,34 +15,38 @@ limitations under the License.
 
 #include "tensorflow/c/checkpoint_reader.h"
 
-#include <unordered_set>
 #include <utility>
 
+#include "absl/container/flat_hash_set.h"
+#include "absl/synchronization/mutex.h"
 #include "tensorflow/core/platform/env.h"
 #include "tensorflow/core/platform/status.h"
 #include "tensorflow/core/platform/stringpiece.h"
 #include "tensorflow/core/platform/types.h"
 #include "tensorflow/core/util/saved_tensor_slice_util.h"
+#include "tensorflow/core/util/tensor_bundle/naming.h"
+#include "tensorflow/core/util/tensor_bundle/tensor_bundle.h"
 
 namespace tensorflow {
 namespace checkpoint {
 
 class TensorSliceReader;
 
-CheckpointReader::CheckpointReader(const string& filename, TF_Status* status)
+CheckpointReader::CheckpointReader(const std::string& filename,
+                                   TF_Status* status)
     : reader_(nullptr),
       v2_reader_(nullptr),
       var_to_shape_map_(nullptr),
       var_to_data_type_map_(nullptr) {
   // Depending on whether this is a V2 ckpt, initializes "reader_" or
   // "v2_reader_".
-  std::vector<string> v2_path;
+  std::vector<std::string> v2_path;
   if (Env::Default()->GetMatchingPaths(MetaFilename(filename), &v2_path).ok() &&
       !v2_path.empty()) {
     v2_reader_.reset(
         new BundleReader(Env::Default(), filename /* prefix to a V2 ckpt */));
     if (!v2_reader_->status().ok()) {
-      Set_TF_Status_from_Status(status, v2_reader_->status());
+      tsl::Set_TF_Status_from_Status(status, v2_reader_->status());
       return;
     }
     auto result = BuildV2VarMaps();
@@ -51,7 +55,7 @@ CheckpointReader::CheckpointReader(const string& filename, TF_Status* status)
   } else {
     reader_.reset(new TensorSliceReader(filename));
     if (!reader_->status().ok()) {
-      Set_TF_Status_from_Status(status, reader_->status());
+      tsl::Set_TF_Status_from_Status(status, reader_->status());
       return;
     }
     var_to_shape_map_.reset(
@@ -61,7 +65,11 @@ CheckpointReader::CheckpointReader(const string& filename, TF_Status* status)
   }
 }
 
-bool CheckpointReader::HasTensor(const string& name) const {
+bool CheckpointReader::HasTensor(const std::string& name) const {
+  if (var_to_shape_map_ != nullptr) {
+    return var_to_shape_map_->find(name) != var_to_shape_map_->end();
+  }
+  absl::MutexLock lock(reader_mu_);
   if (reader_ != nullptr) {
     return reader_->HasTensor(name, nullptr, nullptr);
   }
@@ -80,15 +88,17 @@ CheckpointReader::GetVariableToDataTypeMap() const {
   return *var_to_data_type_map_;
 }
 
-const string CheckpointReader::DebugString() const {
+const std::string CheckpointReader::DebugString() const {
+  absl::MutexLock lock(reader_mu_);
   if (reader_ != nullptr) return reader_->DebugString();
   return v2_reader_->DebugString();
 }
 
 void CheckpointReader::GetTensor(
-    const string& name, std::unique_ptr<tensorflow::Tensor>* out_tensor,
+    const std::string& name, std::unique_ptr<tensorflow::Tensor>* out_tensor,
     TF_Status* out_status) const {
-  Status status;
+  absl::MutexLock lock(reader_mu_);
+  absl::Status status;
   if (reader_ != nullptr) {
     status = reader_->GetTensor(name, out_tensor);
   } else {
@@ -102,7 +112,7 @@ void CheckpointReader::GetTensor(
     }
   }
   if (!status.ok()) {
-    Set_TF_Status_from_Status(out_status, status);
+    tsl::Set_TF_Status_from_Status(out_status, status);
   }
 }
 
@@ -113,18 +123,17 @@ CheckpointReader::BuildV2VarMaps() {
   CHECK(v2_reader_->status().ok());
 
   // First pass: filters out the entries of the slices.
-  std::unordered_set<string> filtered_keys;
+  absl::flat_hash_set<std::string> filtered_keys;
   BundleEntryProto entry;
   v2_reader_->Seek(kHeaderEntryKey);
   for (v2_reader_->Next(); v2_reader_->Valid(); v2_reader_->Next()) {
-    CHECK(entry.ParseFromArray(v2_reader_->value().data(),
-                               v2_reader_->value().size()))
+    CHECK(entry.ParseFromString(v2_reader_->value()))
         << entry.InitializationErrorString();
     for (int i = 0; i < entry.slices_size(); ++i) {
       const auto& slice_proto = entry.slices(i);
       CHECK(filtered_keys
                 .insert(EncodeTensorNameSlice(
-                    string(v2_reader_->key()) /* full var's name */,
+                    std::string(v2_reader_->key()) /* full var's name */,
                     TensorSlice(slice_proto)))
                 .second);
     }
@@ -137,11 +146,10 @@ CheckpointReader::BuildV2VarMaps() {
       new TensorSliceReader::VarToDataTypeMap);
   v2_reader_->Seek(kHeaderEntryKey);
   for (v2_reader_->Next(); v2_reader_->Valid(); v2_reader_->Next()) {
-    if (filtered_keys.count(string(v2_reader_->key())) > 0) continue;
-    CHECK(entry.ParseFromArray(v2_reader_->value().data(),
-                               v2_reader_->value().size()))
+    if (filtered_keys.count(v2_reader_->key()) > 0) continue;
+    CHECK(entry.ParseFromString(v2_reader_->value()))
         << entry.InitializationErrorString();
-    string key(v2_reader_->key());
+    std::string key(v2_reader_->key());
     (*var_to_shape_map)[key] = TensorShape(entry.shape());
     (*var_to_data_type_map)[key] = DataType(entry.dtype());
   }

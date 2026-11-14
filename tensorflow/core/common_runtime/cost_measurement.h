@@ -24,7 +24,16 @@ namespace tensorflow {
 // An interface for cost measurement.
 class CostMeasurement {
  public:
-  virtual ~CostMeasurement() {}
+  // Context of the CostMeasurement.
+  struct Context {
+    // Whether this CostMeasurement is running within a per-query context (e.g.
+    // rpc handler) or not (e.g. batching).
+    bool is_per_query = false;
+  };
+
+  explicit CostMeasurement(const Context& context) {}
+
+  virtual ~CostMeasurement() = default;
 
   virtual absl::Duration GetTotalCost() = 0;
 

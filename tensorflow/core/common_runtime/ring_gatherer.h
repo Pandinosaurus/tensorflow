@@ -20,6 +20,7 @@ limitations under the License.
 #include <string>
 #include <vector>
 
+#include "absl/status/status.h"
 #include "tensorflow/core/common_runtime/base_collective_executor.h"
 #include "tensorflow/core/common_runtime/ring_alg.h"
 #include "tensorflow/core/framework/collective.h"
@@ -31,9 +32,10 @@ class Device;
 class RingGatherer : public RingAlg {
  public:
   RingGatherer() : RingAlg(GATHER_COLLECTIVE, "Gather") {}
-  ~RingGatherer() override {}
+  ~RingGatherer() override = default;
 
-  Status InitializeCollectiveParams(CollectiveParams* col_params) override;
+  absl::Status InitializeCollectiveParams(
+      CollectiveParams* col_params) override;
 
   // Begins async execution of the ring gather algorithm.
   // Must be called in a blockable thread.

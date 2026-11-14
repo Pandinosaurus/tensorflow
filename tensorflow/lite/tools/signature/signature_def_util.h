@@ -12,19 +12,22 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
-#ifndef TENSORFLOW_LITE_TOOLS_SIGNATURE_DEF_UTIL_H_
-#define TENSORFLOW_LITE_TOOLS_SIGNATURE_DEF_UTIL_H_
+#ifndef TENSORFLOW_LITE_TOOLS_SIGNATURE_SIGNATURE_DEF_UTIL_H_
+#define TENSORFLOW_LITE_TOOLS_SIGNATURE_SIGNATURE_DEF_UTIL_H_
 
-#include "tensorflow/core/lib/core/status.h"
-#include "tensorflow/core/platform/status.h"
+#include <map>
+#include <string>
+
+#include "absl/status/status.h"
+#include "absl/strings/string_view.h"
 #include "tensorflow/core/protobuf/meta_graph.pb.h"
-#include "tensorflow/lite/c/common.h"
 #include "tensorflow/lite/schema/schema_generated.h"
 
 namespace tflite {
 
 // Constant for name of the Metadata entry associated with SignatureDefs.
-constexpr char kSignatureDefsMetadataName[] = "signature_defs_metadata";
+inline constexpr absl::string_view kSignatureDefsMetadataName =
+    "signature_defs_metadata";
 
 // The function `SetSignatureDefMap()` results in
 // `model_data_with_signature_defs` containing a serialized TFLite model
@@ -38,9 +41,9 @@ constexpr char kSignatureDefsMetadataName[] = "signature_defs_metadata";
 // Returns error if `model_data_with_signature_defs` is null or
 //   `signature_def_map` is empty.
 //
-// On success, returns tensorflow::Status::OK() or error otherwise.
+// On success, returns absl::OkStatus() or error otherwise.
 // On error, `model_data_with_signature_defs` is unchanged.
-tensorflow::Status SetSignatureDefMap(
+absl::Status SetSignatureDefMap(
     const Model* model,
     const std::map<std::string, tensorflow::SignatureDef>& signature_def_map,
     std::string* model_data_with_signature_defs);
@@ -48,24 +51,28 @@ tensorflow::Status SetSignatureDefMap(
 // The function `HasSignatureDef()` returns true if `model` contains a Metadata
 // table pointing to a buffer containing a FlexBuffer::Map and the map has
 // `signature_key` as a key, or false otherwise.
-bool HasSignatureDef(const Model* model, const std::string& signature_key);
+bool HasSignatureDef(const Model* model, absl::string_view signature_key);
 
 // The function `GetSignatureDefMap()` results in `signature_def_map`
 // pointing to a map<std::string, tensorflow::SignatureDef>
 // parsed from `model`'s metadata buffer.
 //
 // If the Metadata entry does not exist, `signature_def_map` is unchanged.
+//
+// Returns error if `model` or `signature_def_map` is null.
 // If the Metadata entry exists but cannot be parsed, returns an error.
-tensorflow::Status GetSignatureDefMap(
+absl::Status GetSignatureDefMap(
     const Model* model,
     std::map<std::string, tensorflow::SignatureDef>* signature_def_map);
 
-// The function `ClearSignatureDefs` results in `model_data`
+// The function `ClearSignatureDefMap` results in `model_data`
 // containing a serialized Model identical to `model` omitting any
 // SignatureDef-related metadata or buffers.
-tensorflow::Status ClearSignatureDefMap(const Model* model,
-                                        std::string* model_data);
+//
+// Returns error if `model` or `model_data` is null.
+// On success, returns absl::OkStatus() or error otherwise.
+absl::Status ClearSignatureDefMap(const Model* model, std::string* model_data);
 
 }  // namespace tflite
 
-#endif  // TENSORFLOW_LITE_TOOLS_SIGNATURE_DEF_UTIL_H_
+#endif  // TENSORFLOW_LITE_TOOLS_SIGNATURE_SIGNATURE_DEF_UTIL_H_

@@ -13,9 +13,11 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
 #include "tensorflow/compiler/tf2xla/xla_op_kernel.h"
 #include "tensorflow/compiler/tf2xla/xla_op_registry.h"
-#include "tensorflow/compiler/xla/client/xla_builder.h"
+#include "xla/hlo/builder/xla_builder.h"
 #include "tensorflow/core/framework/tensor_shape.h"
 
 namespace tensorflow {
@@ -34,13 +36,13 @@ class ClipByValueOp : public XlaOpKernel {
     auto min = ctx->Input(1);
     auto max = ctx->Input(2);
 
-    auto shape_error = [&]() -> tensorflow::Status {
-      return errors::InvalidArgument(
-          "clip_value_min and clip_value_max must be either of "
-          "the same shape as input, or a scalar. ",
-          "Input shape: ", shape.DebugString(),
-          " clip_value_min shape: ", min_shape.DebugString(),
-          " clip_value_max shape: ", max_shape.DebugString());
+    auto shape_error = [&]() -> absl::Status {
+      return absl::InvalidArgumentError(
+          absl::StrCat("clip_value_min and clip_value_max must be either of "
+                       "the same shape as input, or a scalar. ",
+                       "Input shape: ", shape.DebugString(),
+                       " clip_value_min shape: ", min_shape.DebugString(),
+                       " clip_value_max shape: ", max_shape.DebugString()));
     };
 
     if (shape != min_shape) {

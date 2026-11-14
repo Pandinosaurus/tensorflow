@@ -38,8 +38,8 @@ namespace {
 
 void PickOutputMultiplier(
     const ConvParams& params, const RuntimeShape& input_shape,
-    const int16* input_data, const RuntimeShape& filter_shape,
-    const int8* filter_data, const RuntimeShape& bias_shape,
+    const int16_t* input_data, const RuntimeShape& filter_shape,
+    const int8_t* filter_data, const RuntimeShape& bias_shape,
     const std::int64_t* bias_data, const RuntimeShape& output_shape,
     float* output_multiplier) {
   const int stride_width = params.stride_width;
@@ -81,9 +81,9 @@ void PickOutputMultiplier(
                     (in_x >= 0) && (in_x < input_width) && (in_y >= 0) &&
                     (in_y < input_height);
                 if (is_point_inside_image) {
-                  int32 input_val = input_data[Offset(input_shape, batch, in_y,
-                                                      in_x, in_channel)];
-                  int32 filter_val =
+                  int32_t input_val = input_data[Offset(
+                      input_shape, batch, in_y, in_x, in_channel)];
+                  int32_t filter_val =
                       filter_data[Offset(filter_shape, output_channel, filter_y,
                                          filter_x, in_channel)];
                   acc += static_cast<std::int64_t>(filter_val) *
@@ -170,13 +170,13 @@ bool GenerateValidShapeConfigurations(
 
 void IntToFloat(std::vector<float>* d, std::vector<std::int8_t>* s) {
   for (unsigned int i = 0; i < s->size(); i++) {
-    d->data()[i] = (float)s->data()[i];
+    (*d)[i] = (float)(*s)[i];
   }
 }
 
 void IntToFloat(std::vector<float>* d, std::vector<std::int64_t>* s) {
   for (unsigned int i = 0; i < s->size(); i++) {
-    d->data()[i] = (float)s->data()[i];
+    (*d)[i] = (float)(*s)[i];
   }
 }
 
@@ -228,7 +228,7 @@ void TryTestOneConvFilter(int test_num) {
     FillRandom(&filter_data);
   }
   for (int i = 0; i < output_depth; i++) {
-    bias_data.data()[i] = 0;
+    bias_data[i] = 0;
   }
 
   ConvParams params;
@@ -277,7 +277,7 @@ void TryTestOneConvFilter(int test_num) {
   std::vector<float> output_data_float(output_buffer_size);
 
   for (int i = 0; i < input_buffer_size; i++) {
-    input_data_float.data()[i] = (float)(input_data.data()[i]);
+    input_data_float[i] = (float)(input_data[i]);
   }
   IntToFloat(&filter_data_float, &filter_data);
   IntToFloat(&bias_data_float, &bias_data);
@@ -295,10 +295,10 @@ void TryTestOneConvFilter(int test_num) {
       for (int w = 0; w < output_shape_inference.Dims(2); w++) {
         for (int c = 0; c < output_shape_inference.Dims(3); c++) {
           int offset = Offset(output_shape_inference, n, h, w, c);
-          float float_res = output_data_float.data()[offset];
-          int16 int16_res = reference_output_data.data()[offset];
-          int32 output_mul = output_multiplier.data()[c];
-          int shift = output_shift.data()[c];
+          float float_res = output_data_float[offset];
+          int16_t int16_res = reference_output_data[offset];
+          int32_t output_mul = output_multiplier[c];
+          int shift = output_shift[c];
           float scale = (float)output_mul / (float)(1ULL << 31);
           if (shift > 0) scale = scale * (float)(1 << shift);
           if (shift < 0) scale = scale / (float)(1 << -shift);

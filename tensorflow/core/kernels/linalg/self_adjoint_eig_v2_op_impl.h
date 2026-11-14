@@ -18,8 +18,8 @@ limitations under the License.
 
 // See docs in ../ops/linalg_ops.cc.
 
-#include "third_party/eigen3/Eigen/Core"
-#include "third_party/eigen3/Eigen/Eigenvalues"
+#include "Eigen/Core"  // from @eigen_archive
+#include "Eigen/Eigenvalues"  // from @eigen_archive
 #include "tensorflow/core/framework/kernel_def_builder.h"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/tensor_shape.h"
@@ -72,10 +72,10 @@ class SelfAdjointEigV2Op : public LinearAlgebraOp<Scalar> {
         inputs[0],
         compute_v_ ? Eigen::ComputeEigenvectors : Eigen::EigenvaluesOnly);
     // TODO(rmlarsen): Output more detailed error info on failure.
-    OP_REQUIRES(
-        context, eig.info() == Eigen::Success,
-        errors::InvalidArgument("Self-adjoint eigen decomposition was not "
-                                "successful. The input might not be valid."));
+    OP_REQUIRES(context, eig.info() == Eigen::Success,
+                absl::InvalidArgumentError(
+                    "Self-adjoint eigen decomposition was not "
+                    "successful. The input might not be valid."));
 
     outputs->at(0) = eig.eigenvalues().template cast<Scalar>();
     if (compute_v_) {

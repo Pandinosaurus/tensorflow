@@ -26,8 +26,8 @@ limitations under the License.
 namespace tensorflow {
 namespace grappler {
 
-Status DebugStripper::Optimize(Cluster* cluster, const GrapplerItem& item,
-                               GraphDef* output) {
+absl::Status DebugStripper::Optimize(Cluster* cluster, const GrapplerItem& item,
+                                     GraphDef* output) {
   bool can_optimize = false;
   for (const NodeDef& node : item.graph.node()) {
     if (IsAssert(node) || IsCheckNumerics(node) || IsPrint(node)) {
@@ -36,7 +36,7 @@ Status DebugStripper::Optimize(Cluster* cluster, const GrapplerItem& item,
     }
   }
   if (!can_optimize) {
-    return errors::Aborted("Nothing to do.");
+    return absl::AbortedError("Nothing to do.");
   }
 
   *output = item.graph;
@@ -47,7 +47,7 @@ Status DebugStripper::Optimize(Cluster* cluster, const GrapplerItem& item,
       EraseRegularNodeAttributes(&node);
       // Convert all its inputs into control dependency, which will then
       // be optimized away by dependency optimizer.
-      for (string& inp : *node.mutable_input()) {
+      for (std::string& inp : *node.mutable_input()) {
         if (!IsControlInput(inp)) {
           inp = AsControlDependency(NodeName(inp));
         }
@@ -56,7 +56,7 @@ Status DebugStripper::Optimize(Cluster* cluster, const GrapplerItem& item,
       // Replace with Identity op which will be pruned later.
       node.set_op("Identity");
       // Only preserve T attribute.
-      protobuf::Map<string, AttrValue> new_attr;
+      protobuf::Map<std::string, AttrValue> new_attr;
       if (node.attr().find("T") != node.attr().end()) {
         new_attr.insert({"T", node.attr().at("T")});
       }
@@ -70,7 +70,7 @@ Status DebugStripper::Optimize(Cluster* cluster, const GrapplerItem& item,
       }
     }
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 }  // end namespace grappler

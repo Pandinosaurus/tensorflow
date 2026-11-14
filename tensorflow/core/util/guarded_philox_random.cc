@@ -20,7 +20,7 @@ limitations under the License.
 
 namespace tensorflow {
 
-Status GuardedPhiloxRandom::Init(OpKernelConstruction* context) {
+absl::Status GuardedPhiloxRandom::Init(OpKernelConstruction* context) {
   // Grab seed Attrs.
   int64_t seed, seed2;
   auto status = context->GetAttr("seed", &seed);
@@ -28,14 +28,14 @@ Status GuardedPhiloxRandom::Init(OpKernelConstruction* context) {
   status = context->GetAttr("seed2", &seed2);
   if (!status.ok()) return status;
   if (seed == 0 && seed2 == 0 && OpDeterminismRequired()) {
-    return errors::InvalidArgument(
+    return absl::InvalidArgumentError(
         "When determinism is enabled, random ops "
         "must have a seed specified.");
   }
 
   // Initialize with the given seeds
   Init(seed, seed2);
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 void GuardedPhiloxRandom::Init(int64_t seed, int64_t seed2) {

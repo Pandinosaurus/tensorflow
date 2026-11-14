@@ -15,22 +15,6 @@ limitations under the License.
 #ifndef TENSORFLOW_CORE_TPU_TPU_COMPILE_INTERFACE_H_
 #define TENSORFLOW_CORE_TPU_TPU_COMPILE_INTERFACE_H_
 
-#include "absl/strings/string_view.h"
-
-// Some legacy code requires different implementations for operations like
-// fingerprint/hashing during compilation and/or graph rewriting. These
-// alternate implementations can be registered (via a module initializer) to
-// change the default behavior.
-class TpuCompileInterface {
- public:
-  virtual ~TpuCompileInterface() {}
-  static TpuCompileInterface* Get();
-  static bool RegisterImplementation(TpuCompileInterface* impl);
-
-  virtual uint64_t FingerprintString(absl::string_view str) = 0;
-
-  static inline constexpr char kTpuCompileErrorPayloadKey[] =
-      "https://www.tensorflow.org/tpu-compile-error";
-};
+#include "xla/tpu/tpu_compile_interface.h"  // IWYU pragma: export
 
 #endif  // TENSORFLOW_CORE_TPU_TPU_COMPILE_INTERFACE_H_

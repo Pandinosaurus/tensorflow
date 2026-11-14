@@ -15,12 +15,18 @@ limitations under the License.
 
 #include "tensorflow/lite/delegates/gpu/api.h"
 
+#include <cstdint>
+#include <limits>
+#include <variant>
+
+#include "tensorflow/lite/delegates/gpu/common/util.h"
+
 namespace tflite {
 namespace gpu {
 namespace {
 
 struct ObjectTypeGetter {
-  ObjectType operator()(absl::monostate) const { return ObjectType::UNKNOWN; }
+  ObjectType operator()(std::monostate) const { return ObjectType::UNKNOWN; }
   ObjectType operator()(OpenGlBuffer) const { return ObjectType::OPENGL_SSBO; }
   ObjectType operator()(OpenGlTexture) const {
     return ObjectType::OPENGL_TEXTURE;
@@ -41,7 +47,7 @@ struct ObjectTypeGetter {
 };
 
 struct ObjectValidityChecker {
-  bool operator()(absl::monostate) const { return false; }
+  bool operator()(std::monostate) const { return false; }
   bool operator()(OpenGlBuffer obj) const { return obj.id != GL_INVALID_INDEX; }
   bool operator()(OpenGlTexture obj) const {
     return obj.id != GL_INVALID_INDEX && obj.format != GL_INVALID_ENUM;
@@ -52,7 +58,7 @@ struct ObjectValidityChecker {
   bool operator()(VulkanTexture obj) const { return obj.memory; }
   bool operator()(CpuMemory obj) const {
     return obj.data != nullptr && obj.size_bytes > 0 &&
-           (data_type == DataType::UNKNOWN ||
+           (data_type == DataType::UNKNOWN || data_type == DataType::BOOL ||
             obj.size_bytes % SizeOf(data_type) == 0);
   }
   DataType data_type;
@@ -67,32 +73,35 @@ bool IsValid(const ObjectDef& def) {
 }
 
 ObjectType GetType(const TensorObject& object) {
-  return absl::visit(ObjectTypeGetter{}, object);
+  return std::visit(ObjectTypeGetter{}, object);
 }
 
-bool IsValid(const TensorObjectDef& def) { return IsValid(def.object_def); }
+bool IsValid(const TensorObjectDef& def) {
+  return IsValid(def.object_def) &&
+         NumElements(def) <= std::numeric_limits<int32_t>::max();
+}
 
 bool IsValid(const TensorObjectDef& def, const TensorObject& object) {
-  return GetType(object) == def.object_def.object_type &&
-         absl::visit(ObjectValidityChecker{def.object_def.data_type}, object);
+  return IsValid(def) && GetType(object) == def.object_def.object_type &&
+         std::visit(ObjectValidityChecker{def.object_def.data_type}, object);
 }
 
 bool IsObjectPresent(ObjectType type, const TensorObject& obj) {
   switch (type) {
     case ObjectType::CPU_MEMORY:
-      return absl::holds_alternative<CpuMemory>(obj);
+      return std::holds_alternative<CpuMemory>(obj);
     case ObjectType::OPENGL_SSBO:
-      return absl::holds_alternative<OpenGlBuffer>(obj);
+      return std::holds_alternative<OpenGlBuffer>(obj);
     case ObjectType::OPENGL_TEXTURE:
-      return absl::holds_alternative<OpenGlTexture>(obj);
+      return std::holds_alternative<OpenGlTexture>(obj);
     case ObjectType::OPENCL_BUFFER:
-      return absl::holds_alternative<OpenClBuffer>(obj);
+      return std::holds_alternative<OpenClBuffer>(obj);
     case ObjectType::OPENCL_TEXTURE:
-      return absl::holds_alternative<OpenClTexture>(obj);
+      return std::holds_alternative<OpenClTexture>(obj);
     case ObjectType::VULKAN_BUFFER:
-      return absl::holds_alternative<VulkanBuffer>(obj);
+      return std::holds_alternative<VulkanBuffer>(obj);
     case ObjectType::VULKAN_TEXTURE:
-      return absl::holds_alternative<VulkanTexture>(obj);
+      return std::holds_alternative<VulkanTexture>(obj);
     case ObjectType::UNKNOWN:
       return false;
   }
@@ -102,7 +111,7 @@ bool IsObjectInitialized(const TensorObject& obj) {
   return GetType(obj) != ObjectType::UNKNOWN;
 }
 
-uint32_t NumElements(const TensorObjectDef& def) {
+int64_t NumElements(const TensorObjectDef& def) {
   const auto& d = def.dimensions;
   switch (def.object_def.data_layout) {
     case DataLayout::BHWC:
@@ -110,7 +119,7 @@ uint32_t NumElements(const TensorObjectDef& def) {
     case DataLayout::HWDC4:
     case DataLayout::HDWC4:
     case DataLayout::DHWC4:
-      return d.b * d.h * d.w * AlignByN(d.c, 4);
+      return static_cast<int64_t>(d.b) * d.h * d.w * AlignByN(d.c, 4);
     case DataLayout::UNKNOWN:
       return 0;
   }

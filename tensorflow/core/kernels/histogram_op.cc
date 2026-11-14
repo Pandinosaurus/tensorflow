@@ -18,10 +18,21 @@ limitations under the License.
 #define EIGEN_USE_THREADS
 
 #include "tensorflow/core/kernels/histogram_op.h"
+
+#include <cmath>
+#include <limits>
+
+#include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
+#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
 #include "tensorflow/core/framework/op_kernel.h"
+#include "tensorflow/core/framework/op_requires.h"
 #include "tensorflow/core/framework/register_types.h"
+#include "tensorflow/core/framework/tensor.h"
+#include "tensorflow/core/framework/tensor_shape.h"
+#include "tensorflow/core/framework/tensor_types.h"
 #include "tensorflow/core/framework/types.h"
-#include "tensorflow/core/lib/core/threadpool.h"
+#include "tensorflow/core/platform/errors.h"
 #include "tensorflow/core/platform/types.h"
 
 namespace tensorflow {
@@ -33,43 +44,76 @@ namespace functor {
 
 template <typename T, typename Tout>
 struct HistogramFixedWidthFunctor<CPUDevice, T, Tout> {
-  static Status Compute(OpKernelContext* context,
-                        const typename TTypes<T, 1>::ConstTensor& values,
-                        const typename TTypes<T, 1>::ConstTensor& value_range,
-                        int32_t nbins, typename TTypes<Tout, 1>::Tensor& out) {
+  static absl::Status Compute(
+      OpKernelContext* context,
+      const typename TTypes<T, 1>::ConstTensor& values,
+      const typename TTypes<T, 1>::ConstTensor& value_range, int32_t nbins,
+      typename TTypes<Tout, 1>::Tensor& out) {
     const CPUDevice& d = context->eigen_device<CPUDevice>();
 
+    if (nbins == 1) {
+      out(0) = static_cast<Tout>(values.size());
+      return absl::OkStatus();
+    }
+
     Tensor index_to_bin_tensor;
-
     TF_RETURN_IF_ERROR(context->forward_input_or_allocate_temp(
-        {0}, DataTypeToEnum<int32>::value, TensorShape({values.size()}),
+        {0}, DataTypeToEnum<int32_t>::value, TensorShape({values.size()}),
         &index_to_bin_tensor));
-    auto index_to_bin = index_to_bin_tensor.flat<int32>();
+    auto index_to_bin = index_to_bin_tensor.flat<int32_t>();
 
-    const double step = static_cast<double>(value_range(1) - value_range(0)) /
-                        static_cast<double>(nbins);
+    // Avoid overflow in step computation.
+    const double step =
+        static_cast<double>(value_range(1)) / static_cast<double>(nbins) -
+        static_cast<double>(value_range(0)) / static_cast<double>(nbins);
+    if (!std::isfinite(step)) {
+      return absl::InvalidArgumentError("Step is not finite");
+    }
+    if (step <= 0.0) {
+      return absl::InvalidArgumentError(
+          "Step size in histogram computation must be positive. Check if "
+          "value_range is too narrow or suffers from precision loss.");
+    }
     const double nbins_minus_1 = static_cast<double>(nbins - 1);
+
+    // We cannot handle NANs in the algorithm below (due to the cast to int32)
+    const Eigen::Tensor<int32_t, 1, 1> nans_tensor =
+        values.isnan().template cast<int32_t>();
+    const Eigen::Tensor<int32_t, 0, 1> reduced_tensor = nans_tensor.sum();
+    const int num_nans = reduced_tensor(0);
+    if (num_nans > 0) {
+      return absl::InvalidArgumentError(
+          "Histogram values must not contain NaN");
+    }
 
     // The calculation is done by finding the slot of each value in `values`.
     // With [a, b]:
     //   step = (b - a) / nbins
     //   (x - a) / step
     // , then the entries are mapped to output.
-
-    // Bug fix: Switch the order of cwiseMin and int32-casting to avoid
-    // producing a negative index when casting an big int64 number to int32
-    index_to_bin.device(d) =
-        ((values.cwiseMax(value_range(0)) - values.constant(value_range(0)))
-             .template cast<double>() /
-         step)
-            .cwiseMin(nbins_minus_1)
-            .template cast<int32>();
+    //
+    // Bound range and cast to double _before_ subtracting the lower-bound to
+    // avoid overflow.  Otherwise the difference may not fit within the type
+    // (e.g. int32).
+    index_to_bin.device(d) = ((values.cwiseMax(value_range(0))
+                                   .cwiseMin(value_range(1))
+                                   .template cast<double>() -
+                               static_cast<double>(value_range(0))) /
+                              step)
+                                 .cwiseMin(nbins_minus_1)
+                                 .template cast<int32_t>();
 
     out.setZero();
     for (int32_t i = 0; i < index_to_bin.size(); i++) {
-      out(index_to_bin(i)) += Tout(1);
+      int32_t bin_index = index_to_bin(i);
+      if (bin_index >= 0 && bin_index < nbins) {
+        out(bin_index) += Tout(1);
+      } else {
+        return absl::InvalidArgumentError(
+            "Histogram value generated an out-of-bound bin index");
+      }
     }
-    return Status::OK();
+    return absl::OkStatus();
   }
 };
 
@@ -86,26 +130,29 @@ class HistogramFixedWidthOp : public OpKernel {
     const Tensor& nbins_tensor = ctx->input(2);
 
     OP_REQUIRES(ctx, TensorShapeUtils::IsVector(value_range_tensor.shape()),
-                errors::InvalidArgument("value_range should be a vector."));
+                absl::InvalidArgumentError("value_range should be a vector."));
     OP_REQUIRES(ctx, (value_range_tensor.shape().num_elements() == 2),
-                errors::InvalidArgument(
+                absl::InvalidArgumentError(
                     "value_range should be a vector of 2 elements."));
     OP_REQUIRES(ctx, TensorShapeUtils::IsScalar(nbins_tensor.shape()),
-                errors::InvalidArgument("nbins should be a scalar."));
+                absl::InvalidArgumentError("nbins should be a scalar."));
 
     const auto values = values_tensor.flat<T>();
     const auto value_range = value_range_tensor.flat<T>();
-    const auto nbins = nbins_tensor.scalar<int32>()();
+    const auto nbins = nbins_tensor.scalar<int32_t>()();
 
     OP_REQUIRES(
-        ctx, (value_range(0) < value_range(1)),
+        ctx, value_range(0) < value_range(1),
         errors::InvalidArgument("value_range should satisfy value_range[0] < "
                                 "value_range[1], but got '[",
                                 value_range(0), ", ", value_range(1), "]'"));
     OP_REQUIRES(
-        ctx, (nbins > 0),
-        errors::InvalidArgument("nbins should be a positive number, but got '",
-                                nbins, "'"));
+        ctx, nbins > 0,
+        absl::InvalidArgumentError(absl::StrCat(
+            "nbins should be a positive number, but got '", nbins, "'")));
+    OP_REQUIRES(ctx, nbins < std::numeric_limits<int32_t>::max(),
+                absl::InvalidArgumentError(
+                    "nbins + 1 must not exceed the maximum value of int32_t"));
 
     Tensor* out_tensor;
     OP_REQUIRES_OK(ctx,

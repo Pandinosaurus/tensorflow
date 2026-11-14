@@ -29,7 +29,7 @@ namespace grappler {
 class GraphMemory {
  public:
   struct LiveTensor {
-    string node;
+    std::string node;
     int output_id;
     size_t memory_used;
     Costs::Duration allocation_time;
@@ -43,16 +43,16 @@ class GraphMemory {
   explicit GraphMemory(const GrapplerItem& item)
       : item_(item), unknown_usage_({-1, {}}) {}
 
-  Status InferStatically(
-      const std::unordered_map<string, DeviceProperties>& devices);
-  Status InferDynamically(Cluster* cluster);
+  absl::Status InferStatically(
+      const std::unordered_map<std::string, DeviceProperties>& devices);
+  absl::Status InferDynamically(Cluster* cluster);
 
   // Worst case memory usage in bytes, or -1 if the usage is unknown. If there
   // are multiple devices, returns the highest per device memory usage.
   int64_t GetWorstCaseMemoryUsage() const;
 
   // Returns the peak memory usage for the specified device.
-  const MemoryUsage& GetPeakMemoryUsage(const string& device) const {
+  const MemoryUsage& GetPeakMemoryUsage(const std::string& device) const {
     auto it = peak_usage_.find(device);
     if (it == peak_usage_.end()) {
       return unknown_usage_;
@@ -70,8 +70,8 @@ class GraphMemory {
   void InferFromTrace(const StepStats& timeline);
 
   const GrapplerItem& item_;
-  std::unordered_map<string, int64_t> worst_case_memory_usage_;
-  std::unordered_map<string, MemoryUsage> peak_usage_;
+  std::unordered_map<std::string, int64_t> worst_case_memory_usage_;
+  std::unordered_map<std::string, MemoryUsage> peak_usage_;
   const MemoryUsage unknown_usage_;
 };
 

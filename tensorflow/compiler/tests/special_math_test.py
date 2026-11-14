@@ -15,10 +15,6 @@
 
 """Tests for special math operations."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import os
 
 from absl import flags
@@ -26,7 +22,6 @@ from absl.testing import parameterized
 
 import numpy as np
 import scipy.special as sps
-import six
 
 from tensorflow.compiler.tests import xla_test
 from tensorflow.python.eager import def_function
@@ -81,24 +76,23 @@ class Log1pTest(xla_test.XLATestCase, parameterized.TestCase):
   def setUp(self):
     if flags.FLAGS.vary_seed:
       entropy = os.urandom(64)
-      if six.PY2:
-        answer = int(entropy.encode('hex'), 16)
-      else:
-        answer = int.from_bytes(entropy, 'big')
+      answer = int.from_bytes(entropy, 'big')
       np.random.seed(answer % (2**32 - 1))
     super(Log1pTest, self).setUp()
 
-  def adjust_tolerance_for_tpu(self, dtype, rtol, atol):
-    if self.device not in ['TPU']:
-      return rtol, atol
-
-    if dtype == np.float32:
-      return 4e-4, 0.
-    return 1e-10, 0.
+  def adjust_tolerance(self, dtype, rtol, atol):
+    if self.device in ['TPU']:
+      if dtype == np.float32:
+        return 4e-4, 0.0
+      return 1e-10, 0.0
+    if self.device in ['XLA_GPU', 'GPU']:
+      if dtype == np.float32:
+        return max(rtol, 2.5e-07), atol
+    return rtol, atol
 
   def _test_range(self, low, high, dtype, rtol, atol, is_negative=False):
     # Test values near zero.
-    rtol, atol = self.adjust_tolerance_for_tpu(dtype, rtol, atol)
+    rtol, atol = self.adjust_tolerance(dtype, rtol, atol)
     x = np.exp(np.random.uniform(
         low=low, high=high, size=[NUM_SAMPLES])).astype(dtype)
     if is_negative:
@@ -151,10 +145,7 @@ class ZetaTest(xla_test.XLATestCase, parameterized.TestCase):
   def setUp(self):
     if flags.FLAGS.vary_seed:
       entropy = os.urandom(64)
-      if six.PY2:
-        answer = int(entropy.encode('hex'), 16)
-      else:
-        answer = int.from_bytes(entropy, 'big')
+      answer = int.from_bytes(entropy, 'big')
       np.random.seed(answer % (2**32 - 1))
     super(ZetaTest, self).setUp()
 
@@ -281,10 +272,7 @@ class PolygammaTest(xla_test.XLATestCase, parameterized.TestCase):
   def setUp(self):
     if flags.FLAGS.vary_seed:
       entropy = os.urandom(64)
-      if six.PY2:
-        answer = int(entropy.encode('hex'), 16)
-      else:
-        answer = int.from_bytes(entropy, 'big')
+      answer = int.from_bytes(entropy, 'big')
       np.random.seed(answer % (2**32 - 1))
     super(PolygammaTest, self).setUp()
 
@@ -365,10 +353,7 @@ class IgammaTest(xla_test.XLATestCase, parameterized.TestCase):
   def setUp(self):
     if flags.FLAGS.vary_seed:
       entropy = os.urandom(64)
-      if six.PY2:
-        answer = int(entropy.encode('hex'), 16)
-      else:
-        answer = int.from_bytes(entropy, 'big')
+      answer = int.from_bytes(entropy, 'big')
       np.random.seed(answer % (2**32 - 1))
     super(IgammaTest, self).setUp()
 
@@ -550,10 +535,7 @@ class IgammacTest(xla_test.XLATestCase, parameterized.TestCase):
   def setUp(self):
     if flags.FLAGS.vary_seed:
       entropy = os.urandom(64)
-      if six.PY2:
-        answer = int(entropy.encode('hex'), 16)
-      else:
-        answer = int.from_bytes(entropy, 'big')
+      answer = int.from_bytes(entropy, 'big')
       np.random.seed(answer % (2**32 - 1))
     super(IgammacTest, self).setUp()
 

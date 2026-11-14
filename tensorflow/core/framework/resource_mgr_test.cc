@@ -16,10 +16,17 @@ limitations under the License.
 #include "tensorflow/core/framework/resource_mgr.h"
 
 #include <memory>
+#include <string>
+#include <vector>
 
+#include <gmock/gmock.h>
+#include "absl/base/nullability.h"
+#include "absl/status/status.h"
+#include "xla/tsl/lib/core/status_test_util.h"
 #include "tensorflow/core/framework/device_attributes.pb.h"
 #include "tensorflow/core/framework/node_def.pb.h"
 #include "tensorflow/core/framework/node_def_util.h"
+#include "tensorflow/core/framework/resource_handle.pb.h"
 #include "tensorflow/core/lib/core/errors.h"
 #include "tensorflow/core/lib/core/refcount.h"
 #include "tensorflow/core/lib/core/status_test_util.h"
@@ -33,63 +40,83 @@ limitations under the License.
 
 namespace tensorflow {
 
+using ::testing::HasSubstr;
+using ::tsl::testing::StatusIs;
+
 class Resource : public ResourceBase {
  public:
-  explicit Resource(const string& label) : label_(label) {}
+  explicit Resource(const std::string& label) : label_(label) {}
   ~Resource() override {}
 
-  string DebugString() const override { return strings::StrCat("R/", label_); }
+  std::string DebugString() const override {
+    return absl::StrCat("R/", label_);
+  }
 
  private:
-  string label_;
+  std::string label_;
 };
 
 class Other : public ResourceBase {
  public:
-  explicit Other(const string& label) : label_(label) {}
+  explicit Other(const std::string& label) : label_(label) {}
   ~Other() override {}
 
-  string DebugString() const override { return strings::StrCat("O/", label_); }
+  std::string DebugString() const override {
+    return absl::StrCat("O/", label_);
+  }
 
  private:
-  string label_;
+  std::string label_;
+};
+
+class Finalizable : public ResourceBase {
+ public:
+  explicit Finalizable(int* absl_nonnull finalize_count)
+      : finalize_count_(*finalize_count) {}
+  ~Finalizable() override = default;
+
+  std::string DebugString() const override { return "Finalizable"; }
+  void Finalize() override { ++finalize_count_; }
+
+ private:
+  int& finalize_count_;
 };
 
 template <typename T>
-string Find(const ResourceMgr& rm, const string& container,
-            const string& name) {
+std::string Find(const ResourceMgr& rm, const std::string& container,
+                 const std::string& name) {
   T* r;
   TF_CHECK_OK(rm.Lookup(container, name, &r));
-  const string ret = r->DebugString();
+  const std::string ret = r->DebugString();
   r->Unref();
   return ret;
 }
 
 template <typename T>
-string LookupOrCreate(ResourceMgr* rm, const string& container,
-                      const string& name, const string& label) {
+std::string LookupOrCreate(ResourceMgr* rm, const std::string& container,
+                           const std::string& name, const std::string& label) {
   T* r;
   TF_CHECK_OK(rm->LookupOrCreate<T>(container, name, &r, [&label](T** ret) {
     *ret = new T(label);
-    return Status::OK();
+    return absl::OkStatus();
   }));
-  const string ret = r->DebugString();
+  const std::string ret = r->DebugString();
   r->Unref();
   return ret;
 }
 
-static void HasError(const Status& s, const error::Code code,
-                     const string& substr) {
+static void HasError(const absl::Status& s, const error::Code code,
+                     const std::string& substr) {
   EXPECT_EQ(s.code(), code);
-  EXPECT_TRUE(absl::StrContains(s.error_message(), substr))
+  EXPECT_TRUE(absl::StrContains(s.message(), substr))
       << s << ", expected substring " << substr;
 }
 
 template <typename T>
-Status FindErr(const ResourceMgr& rm, const string& container,
-               const string& name) {
+absl::Status FindErr(const ResourceMgr& rm, const std::string& container,
+                     const std::string& name) {
   T* r;
-  Status s = rm.Lookup(container, name, &r);
+  absl::Status s = rm.Lookup(container, name, &r);
   CHECK(!s.ok());
   return s;
 }
@@ -168,17 +195,31 @@ TEST(ResourceMgrTest, CreateUnowned) {
   HasError(FindErr<Resource>(rm, "foo", "xxx"), error::NOT_FOUND,
            "Resource foo/xxx");
 
-  // Delete foo/bar/Resource.
-  TF_CHECK_OK(rm.Delete<Resource>("foo", "bar"));
-  HasError(FindErr<Resource>(rm, "foo", "bar"), error::NOT_FOUND,
-           "Resource foo/bar");
-  // Deleting foo/bar/Resource a second time is not OK.
-  HasError(rm.Delete<Resource>("foo", "bar"), error::NOT_FOUND,
-           "Resource foo/bar");
+  // Deleting foo/bar/Resource is not OK because it is not owned by the manager.
+  HasError(rm.Delete<Resource>("foo", "bar"), error::INTERNAL,
+           "Cannot delete an unowned Resource foo/bar");
 
   TF_CHECK_OK(rm.CreateUnowned("foo", "bar", kitty.get()));
   EXPECT_TRUE(kitty->RefCountIsOne());
   EXPECT_EQ("R/kitty", Find<Resource>(rm, "foo", "bar"));
+
+  {
+    core::RefCountPtr<Resource> dog{new Resource("dog")};
+    TF_CHECK_OK(rm.CreateUnowned("foo", "bark", dog.get()));
+    EXPECT_EQ("R/dog", Find<Resource>(rm, "foo", "bark"));
+    EXPECT_EQ(1, dog->WeakRefCount());
+    {
+      ResourceMgr rm1;
+      TF_CHECK_OK(rm1.CreateUnowned("foo", "bark", dog.get()));
+      EXPECT_EQ("R/dog", Find<Resource>(rm1, "foo", "bark"));
+      EXPECT_EQ(2, dog->WeakRefCount());
+    }
+    // If manager goes out of scope, the resource loses the weak ref.
+    EXPECT_EQ(1, dog->WeakRefCount());
+  }
+  // If resource goes out of scope, the look up reports not found.
+  HasError(FindErr<Resource>(rm, "foo", "bark"), error::NOT_FOUND,
+           "Resource foo/bark");
 
   // Drop the whole container foo.
   TF_CHECK_OK(rm.Cleanup("foo"));
@@ -224,7 +265,7 @@ TEST(ResourceMgrTest, CreateOrLookupRaceCondition) {
               Env::Default()->SleepForMicroseconds(1 * 1000 * 1000);
               atomic_int += 1;
               *ret = new Resource("label");
-              return Status::OK();
+              return absl::OkStatus();
             }));
         r->Unref();
       });
@@ -234,9 +275,61 @@ TEST(ResourceMgrTest, CreateOrLookupRaceCondition) {
   EXPECT_EQ(1, atomic_int);
 }
 
-Status ComputePolicy(const string& attr_container,
-                     const string& attr_shared_name,
-                     bool use_node_name_as_default, string* result) {
+TEST(ResourceMgrTest, Finalize) {
+  ResourceMgr rm;
+  int finalize_count_ = 0;
+  TF_ASSERT_OK(rm.Create("container", "resource-name",
+                         new Finalizable(&finalize_count_)));
+  EXPECT_EQ(finalize_count_, 0);
+
+  // Finalizable::Finalize called.
+  rm.Finalize();
+  EXPECT_EQ(finalize_count_, 1);
+}
+
+TEST(ResourceMgrTest, MultipleFinalize) {
+  ResourceMgr rm;
+  int finalize_count_ = 0;
+  TF_ASSERT_OK(rm.Create("container", "resource-name",
+                         new Finalizable(&finalize_count_)));
+  EXPECT_EQ(finalize_count_, 0);
+
+  // Finalizable::Finalize should be called only once.
+  rm.Finalize();
+  EXPECT_EQ(finalize_count_, 1);
+  rm.Finalize();
+  EXPECT_EQ(finalize_count_, 1);
+}
+
+TEST(ResourceMgrTest, CreateFailAfterFinalize) {
+  ResourceMgr rm;
+  rm.Finalize();
+
+  // Create should fail after finalization.
+  int finalize_count_ = 0;
+  Finalizable* finalizable = new Finalizable(&finalize_count_);
+  EXPECT_THAT(rm.Create("container", "resource-name", finalizable),
+              absl_testing::StatusIs(absl::StatusCode::kFailedPrecondition,
+                                     HasSubstr("ResourceMgr is finalized")));
+  finalizable->Unref();
+}
+
+TEST(ResourceMgrTest, CreateUnownedFailAfterFinalize) {
+  ResourceMgr rm;
+  rm.Finalize();
+
+  // Create should fail after finalization.
+  int finalize_count_ = 0;
+  Finalizable* finalizable = new Finalizable(&finalize_count_);
+  EXPECT_THAT(rm.CreateUnowned("container", "resource-name", finalizable),
+              absl_testing::StatusIs(absl::StatusCode::kFailedPrecondition,
+                                     HasSubstr("ResourceMgr is finalized")));
+  finalizable->Unref();
+}
+
+absl::Status ComputePolicy(const std::string& attr_container,
+                           const std::string& attr_shared_name,
+                           bool use_node_name_as_default, std::string* result) {
   ContainerInfo cinfo;
   ResourceMgr rmgr;
   NodeDef ndef;
@@ -249,12 +342,13 @@ Status ComputePolicy(const string& attr_container,
   }
   TF_RETURN_IF_ERROR(cinfo.Init(&rmgr, ndef, use_node_name_as_default));
   *result = cinfo.DebugString();
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-string Policy(const string& attr_container, const string& attr_shared_name,
-              bool use_node_name_as_default) {
-  string ret;
+std::string Policy(const std::string& attr_container,
+                   const std::string& attr_shared_name,
+                   bool use_node_name_as_default) {
+  std::string ret;
   TF_CHECK_OK(ComputePolicy(attr_container, attr_shared_name,
                             use_node_name_as_default, &ret));
   return ret;
@@ -276,9 +370,10 @@ TEST(ContainerInfo, Basic) {
   EXPECT_EQ(Policy(".cat", "bar", true), "[.cat,bar,public]");
 }
 
-Status WrongPolicy(const string& attr_container, const string& attr_shared_name,
-                   bool use_node_name_as_default) {
-  string dbg;
+absl::Status WrongPolicy(const std::string& attr_container,
+                         const std::string& attr_shared_name,
+                         bool use_node_name_as_default) {
+  std::string dbg;
   auto s = ComputePolicy(attr_container, attr_shared_name,
                          use_node_name_as_default, &dbg);
   CHECK(!s.ok());
@@ -306,7 +401,7 @@ TEST(ContainerInfo, Error) {
 // handles.
 class StubDevice : public DeviceBase {
  public:
-  explicit StubDevice(const string& name) : DeviceBase(nullptr) {
+  explicit StubDevice(const std::string& name) : DeviceBase(nullptr) {
     attr_.set_name(name);
   }
 
@@ -315,7 +410,7 @@ class StubDevice : public DeviceBase {
   }
 
   const DeviceAttributes& attributes() const override { return attr_; }
-  const string& name() const override { return attr_.name(); }
+  const std::string& name() const override { return attr_.name(); }
 
  private:
   DeviceAttributes attr_;
@@ -324,7 +419,7 @@ class StubDevice : public DeviceBase {
 // Empty stub resource for testing resource handles.
 class StubResource : public ResourceBase {
  public:
-  string DebugString() const override { return ""; }
+  std::string DebugString() const override { return ""; }
   int value_{0};
 };
 
@@ -355,6 +450,63 @@ TEST(ResourceHandleTest, CRUD) {
     core::RefCountPtr<StubResource> unused;
     EXPECT_FALSE(LookupResource(&ctx, p, &unused).ok());
   }
+}
+
+TEST(ResourceHandleTest, ResourceFromValidIntInput) {
+  ResourceMgr resource_mgr("");
+  OpKernelContext::Params params;
+  params.resource_manager = &resource_mgr;
+  StubDevice device("device_name");
+  params.device = &device;
+  OpKernelContext ctx(&params, 1);
+
+  ResourceHandleProto proto;
+  proto.set_device("cpu:0");
+  proto.set_container("test_container");
+  proto.set_name("test_var");
+  auto handle = std::make_unique<ResourceHandle>(proto);
+  auto expected_summary =
+      "ResourceHandle(name=\"test_var\", device=\"cpu:0\", "
+      "container=\"test_container\", type=\"\", dtype and shapes : \"[  ]\")";
+  EXPECT_EQ(handle->SummarizeValue(), expected_summary);
+
+  Tensor arg0(DT_RESOURCE, TensorShape({2}));
+  arg0.flat<ResourceHandle>()(0) = *handle;
+  std::vector<tensorflow::TensorValue> inputs{TensorValue(new Tensor(arg0))};
+  params.inputs = inputs;
+
+  ResourceHandle get_int_handle;
+  TF_ASSERT_OK(HandleFromInput(&ctx, 0, &get_int_handle));
+  EXPECT_EQ(get_int_handle.SummarizeValue(), expected_summary);
+  delete inputs.at(0).tensor;
+}
+
+TEST(ResourceHandleTest, ResourceFromInvalidIntInput) {
+  ResourceMgr resource_mgr("");
+  OpKernelContext::Params params;
+  params.resource_manager = &resource_mgr;
+  StubDevice device("device_name");
+  params.device = &device;
+  OpKernelContext ctx(&params, 0);
+
+  ResourceHandle get_int_handle;
+  EXPECT_FALSE(HandleFromInput(&ctx, 0, &get_int_handle).ok());
+}
+
+TEST(ResourceHandleTest, ResourceFromIntInputWithoutResource) {
+  ResourceMgr resource_mgr("");
+  OpKernelContext::Params params;
+  params.resource_manager = &resource_mgr;
+  StubDevice device("device_name");
+  params.device = &device;
+  OpKernelContext ctx(&params, 1);
+
+  std::vector<tensorflow::TensorValue> inputs{TensorValue(new Tensor())};
+  params.inputs = inputs;
+
+  ResourceHandle get_int_handle;
+  EXPECT_FALSE(HandleFromInput(&ctx, 0, &get_int_handle).ok());
+  delete inputs.at(0).tensor;
 }
 
 TEST(ResourceHandleTest, LookupDeleteGenericResource) {
@@ -413,7 +565,7 @@ TEST(ResourceHandleTest, DifferentDevice) {
 // Other stub resource to test type-checking of resource handles.
 class OtherStubResource : public ResourceBase {
  public:
-  string DebugString() const override { return ""; }
+  std::string DebugString() const override { return ""; }
 };
 
 TEST(ResourceHandleTest, DifferentType) {

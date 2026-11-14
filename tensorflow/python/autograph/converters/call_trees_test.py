@@ -1,4 +1,3 @@
-# python3
 # Copyright 2017 The TensorFlow Authors. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -15,11 +14,8 @@
 # ==============================================================================
 """Tests for call_trees module."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
-import imp
+import random
+import types
 
 from tensorflow.python.autograph.converters import call_trees
 from tensorflow.python.autograph.converters import functions
@@ -219,7 +215,7 @@ class CallTreesTest(converter_testing.TestCase):
 
     tracking_list = []
 
-    pdb = imp.new_module('fake_pdb')
+    pdb = types.ModuleType('fake_pdb')
     pdb.set_trace = lambda: tracking_list.append(1)
 
     def f():
@@ -261,6 +257,73 @@ class CallTreesTest(converter_testing.TestCase):
 
     self.assertEqual(321, tr(tc, 1))
     self.assertListEqual(mock.calls, [((1,), None)])
+
+  def test_python_random_warning(self):
+    """Test that using Python random module triggers a warning."""
+    # Reset the warning flag for testing
+    call_trees.python_random_warned = False
+
+    def f():
+      return random.randint(1, 10)
+
+    with self.assertLogs(level='WARNING') as logs:
+      tr, mock = self._transform_with_mock(f)
+
+    self.assertLen(logs.output, 1)
+    self.assertIn(
+        "Detected use of Python's `random.randint()` inside a tf.function.",
+        logs.output[0],
+    )
+
+    # The function should still be callable
+    result = tr()
+    self.assertIsInstance(result, int)
+    self.assertGreaterEqual(result, 1)
+    self.assertLessEqual(result, 10)
+
+  def test_python_random_randrange_warning(self):
+    """Test that using Python random.randrange triggers a warning."""
+    # Reset the warning flag for testing
+    call_trees.python_random_warned = False
+
+    def f():
+      return random.randrange(0, 100)
+
+    with self.assertLogs(level='WARNING') as logs:
+      tr, mock = self._transform_with_mock(f)
+
+    self.assertLen(logs.output, 1)
+    self.assertIn(
+        "Detected use of Python's `random.randrange()` inside a tf.function.",
+        logs.output[0],
+    )
+
+    # The function should still be callable
+    result = tr()
+    self.assertIsInstance(result, int)
+    self.assertGreaterEqual(result, 0)
+    self.assertLess(result, 100)
+
+  def test_python_random_choice_warning(self):
+    """Test that using Python random.choice triggers a warning."""
+    # Reset the warning flag for testing
+    call_trees.python_random_warned = False
+
+    def f():
+      return random.choice([1, 2, 3])
+
+    with self.assertLogs(level='WARNING') as logs:
+      tr, mock = self._transform_with_mock(f)
+
+    self.assertLen(logs.output, 1)
+    self.assertIn(
+        "Detected use of Python's `random.choice()` inside a tf.function.",
+        logs.output[0],
+    )
+
+    # The function should still be callable
+    result = tr()
+    self.assertIn(result, [1, 2, 3])
 
 
 if __name__ == '__main__':

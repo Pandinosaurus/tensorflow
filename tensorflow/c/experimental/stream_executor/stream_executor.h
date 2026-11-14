@@ -93,6 +93,17 @@ extern "C" {
 typedef struct SP_Stream_st* SP_Stream;
 typedef struct SP_Event_st* SP_Event;
 typedef struct SP_Timer_st* SP_Timer;
+
+typedef struct SP_StreamOptions {
+  size_t struct_size;
+  void* ext;  // reserved for future use
+  TF_Bool has_priority;
+  int priority;
+} SP_StreamOptions;
+
+#define SP_STREAM_OPTIONS_STRUCT_SIZE \
+  TF_OFFSET_OF_END(SP_StreamOptions, priority)
+
 // Takes `callback_arg` passed to `host_callback` as the first argument.
 typedef void (*SE_StatusCallbackFn)(void* const, TF_Status* const);
 
@@ -137,7 +148,7 @@ typedef enum SE_EventStatus {
 
 // Memory allocation information.
 // This matches DeviceMemoryBase defined here:
-// https://cs.opensource.google/tensorflow/tensorflow/+/refs/tags/v2.3.0:tensorflow/stream_executor/device_memory.h;l=57
+// https://cs.opensource.google/tensorflow/tensorflow/+/refs/tags/v2.3.0:tensorflow/compiler/xla/stream_executor/device_memory.h;l=57
 typedef struct SP_DeviceMemoryBase {
   size_t struct_size;
   void* ext;  // Reserved for future use
@@ -412,10 +423,15 @@ typedef struct SP_StreamExecutor {
   // `callback_arg` should be passed as the first argument to `callback_fn`.
   TF_Bool (*host_callback)(const SP_Device* device, SP_Stream stream,
                            SE_StatusCallbackFn callback_fn, void* callback_arg);
+
+  // Same as create_stream but takes additional options.
+  void (*create_stream_with_options)(const SP_Device* device,
+                                     const SP_StreamOptions* options,
+                                     SP_Stream* stream, TF_Status* status);
 } SP_StreamExecutor;
 
 #define SP_STREAMEXECUTOR_STRUCT_SIZE \
-  TF_OFFSET_OF_END(SP_StreamExecutor, host_callback)
+  TF_OFFSET_OF_END(SP_StreamExecutor, create_stream_with_options)
 
 typedef struct SE_CreateStreamExecutorParams {
   size_t struct_size;
@@ -450,9 +466,15 @@ typedef struct SP_Platform {
   // Whether to wrap allocator for this device with an allocator that uses BFC
   // (best-fit with coalescing) strategy.
   TF_Bool use_bfc_allocator;
+
+  // Whether to force the memory allocations to grow over time instead of
+  // allocating it all at once. When this is set to true, the value of
+  // allow_growth is ignored.
+  TF_Bool force_memory_growth;
 } SP_Platform;
 
-#define SP_PLATFORM_STRUCT_SIZE TF_OFFSET_OF_END(SP_Platform, use_bfc_allocator)
+#define SP_PLATFORM_STRUCT_SIZE \
+  TF_OFFSET_OF_END(SP_Platform, force_memory_growth)
 
 typedef struct SP_PlatformFns {
   size_t struct_size;

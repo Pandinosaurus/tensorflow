@@ -20,6 +20,7 @@ limitations under the License.
 #include <unordered_map>
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"
 #include "tensorflow/core/common_runtime/device.h"
 #include "tensorflow/core/platform/macros.h"
 #include "tensorflow/core/platform/types.h"
@@ -27,7 +28,7 @@ limitations under the License.
 
 namespace tensorflow {
 
-typedef std::vector<std::pair<Device*, int32>> PrioritizedDeviceVector;
+typedef std::vector<std::pair<Device*, int32_t>> PrioritizedDeviceVector;
 
 // DeviceSet is a container class for managing the various types of
 // devices used by a model.
@@ -60,7 +61,7 @@ class DeviceSet {
 
   // Finds the device with the given "fullname". Returns nullptr if
   // not found.
-  Device* FindDeviceByName(const string& fullname) const;
+  Device* FindDeviceByName(const std::string& fullname) const;
 
   // Return the list of unique device types in this set, ordered
   // with more preferable devices earlier.
@@ -106,6 +107,9 @@ class DeviceSet {
  private:
   mutable mutex devices_mu_;
 
+  mutable absl::flat_hash_map<DeviceNameUtils::ParsedName, std::vector<Device*>>
+      matching_device_cache_;
+
   // Not owned.
   std::vector<Device*> devices_;
 
@@ -120,13 +124,14 @@ class DeviceSet {
       TF_GUARDED_BY(devices_mu_);
 
   // Fullname -> device* for device in devices_.
-  std::unordered_map<string, Device*> device_by_name_;
+  std::unordered_map<std::string, Device*> device_by_name_;
 
   // client_device_ points to an element of devices_ that we consider
   // to be the client device (in this local process).
   Device* client_device_ = nullptr;
 
-  TF_DISALLOW_COPY_AND_ASSIGN(DeviceSet);
+  DeviceSet(const DeviceSet&) = delete;
+  void operator=(const DeviceSet&) = delete;
 };
 
 }  // namespace tensorflow

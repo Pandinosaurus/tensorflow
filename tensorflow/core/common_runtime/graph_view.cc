@@ -16,39 +16,44 @@ limitations under the License.
 #include "tensorflow/core/common_runtime/graph_view.h"
 
 #include <atomic>
+#include <cstdint>
 #include <deque>
+#include <limits>
 #include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
+#include "absl/log/check.h"
 #include "tensorflow/core/common_runtime/device.h"
 #include "tensorflow/core/framework/node_def_util.h"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/tensor.h"
+#include "tensorflow/core/graph/algorithm.h"
 #include "tensorflow/core/graph/edgeset.h"
 #include "tensorflow/core/graph/graph.h"
 #include "tensorflow/core/lib/core/errors.h"
 #include "tensorflow/core/lib/gtl/inlined_vector.h"
 #include "tensorflow/core/lib/strings/str_util.h"
+#include "tensorflow/core/util/determinism.h"
 #include "tensorflow/core/util/device_name_utils.h"
 
 namespace tensorflow {
 
-string NodeItem::DebugString() const {
-  string ret = strings::StrCat("{name:'", kernel->name(), "' id:", node_id);
+std::string NodeItem::DebugString() const {
+  std::string ret = absl::StrCat("{name:'", kernel->name(), "' id:", node_id);
   if (is_source) {
-    strings::StrAppend(&ret, " source}");
+    absl::StrAppend(&ret, " source}");
   } else {
-    strings::StrAppend(&ret, " def:{", SummarizeNodeDef(kernel->def()), "}}");
+    absl::StrAppend(&ret, " def:{", SummarizeNodeDef(kernel->def()), "}}");
   }
   return ret;
 }
 
 GraphView::~GraphView() {
-  static_assert(std::is_trivially_destructible<AllocatorAttributes>::value,
+  static_assert(std::is_trivially_destructible_v<AllocatorAttributes>,
                 "Update code if AllocatorAttributes gains a destructor");
-  static_assert(std::is_trivially_destructible<EdgeInfo>::value,
+  static_assert(std::is_trivially_destructible_v<EdgeInfo>,
                 "Update code if EdgeInfo gains a destructor");
   for (int i = 0; i < num_nodes_; i++) {
     NodeItem* n = node(i);
@@ -62,10 +67,10 @@ GraphView::~GraphView() {
 }
 
 namespace {
-typedef std::tuple<int32, int32> OutputAndControlEdges;
+typedef std::tuple<int32_t, int32_t> OutputAndControlEdges;
 
 OutputAndControlEdges CountOutputEdges(const Node* n) {
-  DCHECK_LE(n->out_edges().size(), kint32max);
+  DCHECK_LE(n->out_edges().size(), std::numeric_limits<int32_t>::max());
   int32_t num_output_edges = 0;
   int32_t num_output_control_edges = 0;
   for (auto e : n->out_edges()) {
@@ -97,8 +102,8 @@ size_t GraphView::NodeItemBytes(const Node* n) {
             sizeof(ControlEdgeInfo)                // output_control_edges[...]
       + num_outputs * sizeof(AllocatorAttributes)  // output_attr[...]
       + num_outputs * sizeof(int)                  // forward_from[num_outputs]
-      + num_inputs * sizeof(uint8)                 // input_type[num_inputs]
-      + num_outputs * sizeof(uint8);               // output_type[num_outputs]
+      + num_inputs * sizeof(uint8_t)               // input_type[num_inputs]
+      + num_outputs * sizeof(uint8_t);             // output_type[num_outputs]
   static constexpr size_t kItemAlignment = sizeof(NodeItem*);
   static_assert(kItemAlignment % alignof(NodeItem) == 0,
                 "NodeItem must be aligned with kItemAlignment");
@@ -121,7 +126,8 @@ size_t GraphView::NodeItemBytes(const Node* n) {
 
 char* GraphView::InitializeNode(char* ptr, const Node* n) {
   const int id = n->id();
-  CHECK(node_offsets_[id] == kuint32max);  // Initial value in constructor
+  CHECK(node_offsets_[id] ==
+        std::numeric_limits<uint32_t>::max());  // Initial value in constructor
 
   const size_t bytes = NodeItemBytes(n);
   constexpr size_t kItemAlignment = sizeof(NodeItem*);
@@ -133,8 +139,9 @@ char* GraphView::InitializeNode(char* ptr, const Node* n) {
   // (versus 64 bits on most machines if we just stored an array of NodeItem*
   // pointers). Casting to int64 is needed on 32bit CPU to avoid comparing
   // values as "int" vs "size_t" in CHECK_LE.
-  CHECK_LE(static_cast<int64_t>(ptr - space_), kuint32max);
-  const uint32 offset = static_cast<uint32>(ptr - space_);
+  CHECK_LE(static_cast<int64_t>(ptr - space_),
+           std::numeric_limits<uint32_t>::max());
+  const uint32_t offset = static_cast<uint32_t>(ptr - space_);
   node_offsets_[id] = offset;
   ptr += bytes;
 
@@ -155,7 +162,7 @@ char* GraphView::InitializeNode(char* ptr, const Node* n) {
   // a given output slot.  For all but the last, we need to do a copy of the
   // Tensor when propagating results downstream in the graph, but for the
   // last one, we can just do a move of the Tensor object to propagate it.
-  gtl::InlinedVector<EdgeInfo*, 4> last_indices(num_outputs, nullptr);
+  absl::InlinedVector<EdgeInfo*, 4UL> last_indices(num_outputs, nullptr);
   EdgeInfo* dst_edge = item->output_edge_base();
   for (auto e : n->out_edges()) {
     if (e->IsControlEdge()) continue;
@@ -190,10 +197,10 @@ char* GraphView::InitializeNode(char* ptr, const Node* n) {
   }
 
   DCHECK_LT(DataType_MAX, 255);  // Must fit in uint8
-  uint8* input_types = item->input_type_base();
+  uint8_t* input_types = item->input_type_base();
   item->is_any_input_ref_typed = false;
   for (int i = 0; i < num_inputs; i++) {
-    input_types[i] = static_cast<uint8>(n->input_type(i));
+    input_types[i] = static_cast<uint8_t>(n->input_type(i));
     DCHECK_EQ(item->input_type(i), n->input_type(i));
     item->is_any_input_ref_typed |= IsRefType(n->input_type(i));
   }
@@ -201,16 +208,16 @@ char* GraphView::InitializeNode(char* ptr, const Node* n) {
   // Check ScopedAllocatorAttrs and forward_from.  Also assign output_types.
   {
     std::vector<int> forward_input;
-    Status fwd_status =
+    absl::Status fwd_status =
         GetNodeAttr(n->attrs(), "_forward_input", &forward_input);
     std::vector<int> scoped_allocator_attrs;
-    Status sa_status =
+    absl::Status sa_status =
         GetNodeAttr(n->attrs(), "_scoped_allocator", &scoped_allocator_attrs);
 
     int* forward_from = item->forward_from_base();
-    uint8* output_types = item->output_type_base();
+    uint8_t* output_types = item->output_type_base();
     for (int i = 0; i < num_outputs; ++i) {
-      output_types[i] = static_cast<uint8>(n->output_type(i));
+      output_types[i] = static_cast<uint8_t>(n->output_type(i));
       DCHECK_EQ(item->output_type(i), n->output_type(i));
 
       forward_from[i] = OpKernelContext::Params::kNoReservation;
@@ -242,33 +249,48 @@ char* GraphView::InitializeNode(char* ptr, const Node* n) {
   return ptr;
 }
 
-Status GraphView::Initialize(const Graph* g) {
+absl::Status GraphView::Initialize(const Graph* g) {
   CHECK(node_offsets_ == nullptr);
   const int num_nodes = g->num_node_ids();
   num_nodes_ = num_nodes;
   size_t total_bytes = 0;
   for (const Node* n : g->nodes()) {
-    if (n->out_edges().size() > kint32max) {
-      return errors::InvalidArgument(
-          "The executor cannot handle nodes with more than ", kint32max,
-          " output edges. Node ", n->name(), " had ", n->out_edges().size(),
-          " output edges.");
+    if (n->out_edges().size() > std::numeric_limits<int32_t>::max()) {
+      return absl::InvalidArgumentError(absl::StrCat(
+          "The executor cannot handle nodes with more than ",
+          std::numeric_limits<int32_t>::max(), " output edges. Node ",
+          n->name(), " had ", n->out_edges().size(), " output edges."));
     }
     total_bytes += NodeItemBytes(n);
   }
 
-  node_offsets_ = new uint32[num_nodes];
+  node_offsets_ = new uint32_t[num_nodes];
   for (int i = 0; i < num_nodes; i++) {
-    node_offsets_[i] = kuint32max;
+    node_offsets_[i] = std::numeric_limits<uint32_t>::max();
   }
 
   space_ = new char[total_bytes];  // NodeItem objects are allocated here
   char* ptr = space_;
-  for (const Node* n : g->nodes()) {
-    ptr = InitializeNode(ptr, n);
+  auto it = g->nodes();
+  if (OpOrderDeterminismRequired()) {
+    // For OpOrder determinism, we need node_id's to be stable across runs. We
+    // assign node_ids in the order in which `InitializeNode` is called on each
+    // node. However, `g` exposes a NodeIter of nodes, which does not guarantee
+    // a deterministic ordering across runs. Since NodeIter is immutable, we
+    // must sort a local copy. We sort by node_name, which is set in the
+    // GraphDef, so must be stable across runs.
+    std::vector<Node*> nodes(it.begin(), it.end());
+    std::sort(nodes.begin(), nodes.end(), NodeComparatorName());
+    for (const Node* n : nodes) {
+      ptr = InitializeNode(ptr, n);
+    }
+  } else {
+    for (const Node* n : it) {
+      ptr = InitializeNode(ptr, n);
+    }
   }
   CHECK_EQ(ptr, space_ + total_bytes);
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 namespace {
@@ -306,8 +328,8 @@ void GraphView::SetScopedAllocatorAttrs(
       NodeItem* item = node(use_node->id());
       AllocatorAttributes* use_attrs = item->output_attr_base();
       std::vector<int> scoped_allocator_attrs;
-      Status s = GetNodeAttr(use_node->attrs(), "_scoped_allocator",
-                             &scoped_allocator_attrs);
+      absl::Status s = GetNodeAttr(use_node->attrs(), "_scoped_allocator",
+                                   &scoped_allocator_attrs);
       if (!s.ok()) {
         VLOG(2) << "Failed to find expected ScopedAllocator attr on "
                 << use_node->name();
@@ -334,20 +356,20 @@ void GraphView::SetScopedAllocatorAttrs(
 }
 
 namespace {
-Status InferAllocAttr(const Node* n, const Node* dst,
-                      const DeviceNameUtils::ParsedName& local_dev_name,
-                      AllocatorAttributes* attr) {
-  Status s;
+absl::Status InferAllocAttr(const Node* n, const Node* dst,
+                            const DeviceNameUtils::ParsedName& local_dev_name,
+                            AllocatorAttributes* attr) {
+  absl::Status s;
   // Note that it's possible for *n to be a Recv and *dst to be a Send,
   // so these two cases are not mutually exclusive.
   if (IsRecv(n)) {
-    string src_name;
+    std::string src_name;
     s = GetNodeAttr(n->attrs(), "send_device", &src_name);
     if (!s.ok()) return s;
     DeviceNameUtils::ParsedName parsed_src_name;
     if (!DeviceNameUtils::ParseFullName(src_name, &parsed_src_name)) {
-      s = errors::Internal("Bad send_device attr '", src_name, "' in node ",
-                           n->name());
+      s = absl::InternalError(absl::StrCat("Bad send_device attr '", src_name,
+                                           "' in node ", n->name()));
       return s;
     }
     if (!DeviceNameUtils::IsSameAddressSpace(parsed_src_name, local_dev_name)) {
@@ -366,13 +388,13 @@ Status InferAllocAttr(const Node* n, const Node* dst,
     }
   }
   if (IsSend(dst)) {
-    string dst_name;
+    std::string dst_name;
     s = GetNodeAttr(dst->attrs(), "recv_device", &dst_name);
     if (!s.ok()) return s;
     DeviceNameUtils::ParsedName parsed_dst_name;
     if (!DeviceNameUtils::ParseFullName(dst_name, &parsed_dst_name)) {
-      s = errors::Internal("Bad recv_device attr '", dst_name, "' in node ",
-                           n->name());
+      s = absl::InternalError(absl::StrCat("Bad recv_device attr '", dst_name,
+                                           "' in node ", n->name()));
       return s;
     }
     if (!DeviceNameUtils::IsSameAddressSpace(parsed_dst_name, local_dev_name)) {
@@ -401,9 +423,9 @@ Status InferAllocAttr(const Node* n, const Node* dst,
 }
 }  // namespace
 
-Status GraphView::SetAllocAttrs(const Graph* g, const Device* device) {
-  Status s;
-  DeviceNameUtils::ParsedName local_dev_name = device->parsed_name();
+absl::Status GraphView::SetAllocAttrs(const Graph* g, const Device* device) {
+  absl::Status s;
+  const DeviceNameUtils::ParsedName& local_dev_name = device->parsed_name();
 
   std::vector<const Node*> scoped_allocator_instances;
   for (const Node* n : g->nodes()) {

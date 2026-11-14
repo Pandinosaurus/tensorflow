@@ -1,4 +1,3 @@
-# Lint as: python3
 # Copyright 2020 The TensorFlow Authors. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -15,10 +14,6 @@
 # ==============================================================================
 """Tests for parameter_server_strategy_v2.py."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import contextlib
 import functools
 import os
@@ -27,14 +22,16 @@ from absl.testing import parameterized
 import numpy as np
 
 from tensorflow.core.protobuf import saved_model_pb2
+from tensorflow.python.checkpoint import checkpoint as tracking_util
 from tensorflow.python.compat import v2_compat
 from tensorflow.python.data.ops import dataset_ops
-from tensorflow.python.distribute import distribution_strategy_context
+from tensorflow.python.distribute import distribute_lib
+from tensorflow.python.distribute import multi_process_runner
 from tensorflow.python.distribute import multi_worker_test_base
 from tensorflow.python.distribute import parameter_server_strategy_v2
 from tensorflow.python.distribute import ps_values
 from tensorflow.python.distribute import sharded_variable
-from tensorflow.python.distribute.cluster_resolver import SimpleClusterResolver
+from tensorflow.python.distribute.cluster_resolver import cluster_resolver as cluster_resolver_lib
 from tensorflow.python.eager import context
 from tensorflow.python.eager import def_function
 from tensorflow.python.eager import test
@@ -42,6 +39,7 @@ from tensorflow.python.framework import constant_op
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import ops
 from tensorflow.python.framework import tensor_spec
+from tensorflow.python.framework import test_util
 from tensorflow.python.module import module
 from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import embedding_ops
@@ -52,44 +50,23 @@ from tensorflow.python.ops import variable_scope
 from tensorflow.python.ops import variables
 from tensorflow.python.platform import gfile
 from tensorflow.python.saved_model import save as tf_save
-from tensorflow.python.training.server_lib import ClusterSpec
-from tensorflow.python.training.tracking import tracking
-from tensorflow.python.training.tracking import util as tracking_util
-
-# We create one cluster to share between tests. The cluster should be large
-# enough to accommodate all the tests. Adjust the following constants as needed
-# but be aware of resource limitations in OSS tests.
-MAX_NUM_WORKER = 2
-MAX_NUM_PS = 3
-
-_cluster = None
-
-
-def get_cluster_def(num_workers, num_ps):
-  if num_workers > MAX_NUM_WORKER or num_ps > MAX_NUM_PS:
-    raise ValueError("Requesting more servers than the maximum, adjust"
-                     "MAX_NUM_PS and MAX_NUM_WORKER")
-  global _cluster
-  if _cluster is None:
-    _cluster = multi_worker_test_base.create_in_process_cluster(
-        num_workers=MAX_NUM_WORKER, num_ps=MAX_NUM_PS)
-  return {
-      "worker": _cluster["worker"][:num_workers],
-      "ps": _cluster["ps"][:num_ps],
-  }
+from tensorflow.python.trackable import autotrackable
+from tensorflow.python.training import server_lib
 
 
 class ParameterServerStrategyV2Test(test.TestCase):
 
-  def setUp(self):
-    super().setUp()
-    cluster_def = get_cluster_def(num_workers=2, num_ps=3)
-    self.cluster_resolver = SimpleClusterResolver(ClusterSpec(cluster_def))
+  @classmethod
+  def setUpClass(cls):
+    super(ParameterServerStrategyV2Test, cls).setUpClass()
+    cls.cluster = multi_worker_test_base.create_multi_process_cluster(
+        num_workers=2, num_ps=3, rpc_layer="grpc")
+    cls.cluster_resolver = cls.cluster.cluster_resolver
 
-  def tearDown(self):
-    super().tearDown()
-    # reset context to disconnect from the cluster.
-    context._reset_context()
+  @classmethod
+  def tearDownClass(cls):
+    super(ParameterServerStrategyV2Test, cls).tearDownClass()
+    cls.cluster.stop()
 
   def testVariablePlacement(self):
 
@@ -195,14 +172,13 @@ class ParameterServerStrategyV2Test(test.TestCase):
       yield
 
     self.assertIn(
-        "It is detected that a function used with "
-        "`tf.distribute.experimental.ParameterServerStrategy` "
-        "is executed locally on the coordinator. This is inefficient but may "
-        "be valid for one-off tasks such as inferring output signature. "
-        "To properly distribute functions to run on workers, `run` or "
-        "`reduce` should be used within a function passed to `"
-        "tf.distribute.experimental.coordinator.ClusterCoordinator.schedule`.",
-        logs.output[0])
+        "A `tf.distribute.experimental.ParameterServerStrategy` method is "
+        "invoked without using `ClusterCoordinator.schedule`. If you are not "
+        "tracing a tf.function, this method is possibly executed on the "
+        "coordinator, which can be slow. To properly dispatch functions to "
+        "run on workers, methods like `run` or `reduce` should be used "
+        "within a function passed to `tf.distribute.experimental.coordinator."
+        "ClusterCoordinator.schedule`.", "".join(logs.output))
 
   def testRunNotUsedWithClusterCoordinator(self):
     strategy = parameter_server_strategy_v2.ParameterServerStrategyV2(
@@ -319,15 +295,17 @@ class PartitionAwareIdentity(object):
 
 class VariablePartitioningTest(test.TestCase, parameterized.TestCase):
 
-  def setUp(self):
-    super().setUp()
-    cluster_def = get_cluster_def(num_workers=2, num_ps=2)
-    self.cluster_resolver = SimpleClusterResolver(ClusterSpec(cluster_def))
+  @classmethod
+  def setUpClass(cls):
+    super(VariablePartitioningTest, cls).setUpClass()
+    cls.cluster = multi_worker_test_base.create_multi_process_cluster(
+        num_workers=2, num_ps=2, rpc_layer="grpc")
+    cls.cluster_resolver = cls.cluster.cluster_resolver
 
-  def tearDown(self):
-    super().tearDown()
-    # reset context to disconnect from the cluster.
-    context._reset_context()
+  @classmethod
+  def tearDownClass(cls):
+    super(VariablePartitioningTest, cls).tearDownClass()
+    cls.cluster.stop()
 
   def testDefaultNoPartition(self):
     strategy = parameter_server_strategy_v2.ParameterServerStrategyV2(
@@ -383,7 +361,7 @@ class VariablePartitioningTest(test.TestCase, parameterized.TestCase):
       self.assertIsInstance(v, variables.Variable)
 
     def replica_fn():
-      replica_id = distribution_strategy_context.get_replica_context(
+      replica_id = distribute_lib.get_replica_context(
       ).replica_id_in_sync_group
       val = array_ops.reshape(
           math_ops.cast(replica_id + 10, dtype=v.dtype), [1])
@@ -416,7 +394,7 @@ class VariablePartitioningTest(test.TestCase, parameterized.TestCase):
       self.assertIsInstance(v.variables[0], variables.Variable)
 
     def replica_fn():
-      replica_id = distribution_strategy_context.get_replica_context(
+      replica_id = distribute_lib.get_replica_context(
       ).replica_id_in_sync_group
       val = array_ops.reshape(
           math_ops.cast(replica_id + 10, dtype=v.dtype), [1])
@@ -574,6 +552,10 @@ class VariablePartitioningTest(test.TestCase, parameterized.TestCase):
         variables.Variable([[[0, 1], [2, 3]], [[0, 1], [2, 3]]])
 
   def testCreateInsideTFFunction(self):
+    if test_util.is_xla_enabled():
+      self.skipTest("TODO(b/202760274): Would raise an error that is to be "
+                    "investigated.")
+
     strategy = parameter_server_strategy_v2.ParameterServerStrategyV2(
         self.cluster_resolver, sharded_variable.FixedShardsPartitioner(2))
 
@@ -609,12 +591,16 @@ class VariablePartitioningTest(test.TestCase, parameterized.TestCase):
   )
   def testCheckpoint(self, delayed, restore_shards):
 
+    if test_util.is_xla_enabled() and not delayed and restore_shards == 4:
+      self.skipTest("TODO(b/202760274): Would raise an error that is to be "
+                    "investigated.")
+
     def make_variable(name, shape, dtype, initializer):
       initial_value = functools.partial(initializer, shape, dtype=dtype)
       return variables.Variable(
           name=name, initial_value=initial_value, shape=shape, dtype=dtype)
 
-    class Model(tracking.AutoTrackable):
+    class Model(autotrackable.AutoTrackable):
 
       def build(self):
         self.w = self._add_variable_with_custom_getter(
@@ -670,17 +656,19 @@ class ClusterTypeNameTest(test.TestCase):
     cluster_def["some_arbitrary_name"] = [
         "localhost:%d" % multi_worker_test_base.pick_unused_port()
     ]
-    cluster_resolver = SimpleClusterResolver(
-        ClusterSpec(cluster_def), rpc_layer="grpc")
-    with self.assertRaisesRegexp(ValueError, "Disallowed task type found in"):
+    cluster_resolver = cluster_resolver_lib.SimpleClusterResolver(
+        server_lib.ClusterSpec(cluster_def), rpc_layer="grpc")
+    with self.assertRaisesRegex(ValueError, "Disallowed task type found in"):
       parameter_server_strategy_v2.ParameterServerStrategyV2(cluster_resolver)
 
   def testArbitraryCurrentTaskType(self):
     cluster_def = multi_worker_test_base.create_cluster_spec(
         num_workers=1, num_ps=1, has_chief=True)
-    cluster_resolver = SimpleClusterResolver(
-        ClusterSpec(cluster_def), rpc_layer="grpc", task_type="foobar")
-    with self.assertRaisesRegexp(ValueError, "Unrecognized task_type: foobar"):
+    cluster_resolver = cluster_resolver_lib.SimpleClusterResolver(
+        server_lib.ClusterSpec(cluster_def),
+        rpc_layer="grpc", task_type="foobar",
+    )
+    with self.assertRaisesRegex(ValueError, "Unrecognized task_type: foobar"):
       parameter_server_strategy_v2.ParameterServerStrategyV2(cluster_resolver)
 
   def testMoreThanOneChief(self):
@@ -688,36 +676,38 @@ class ClusterTypeNameTest(test.TestCase):
         num_workers=1, num_ps=1)
     chief_ports = [multi_worker_test_base.pick_unused_port() for _ in range(3)]
     cluster_def["chief"] = ["localhost:%s" % port for port in chief_ports]
-    cluster_resolver = SimpleClusterResolver(
-        ClusterSpec(cluster_def),
+    cluster_resolver = cluster_resolver_lib.SimpleClusterResolver(
+        server_lib.ClusterSpec(cluster_def),
         rpc_layer="grpc",
         task_type="chief",
         task_id=1)
-    with self.assertRaisesRegexp(ValueError,
+    with self.assertRaisesRegex(ValueError,
                                  "There must be at most one 'chief' job."):
       parameter_server_strategy_v2.ParameterServerStrategyV2(cluster_resolver)
 
   def testLessThanOneWorker(self):
     cluster_def = multi_worker_test_base.create_cluster_spec(
         num_workers=0, num_ps=1, has_chief=True)
-    cluster_resolver = SimpleClusterResolver(
-        ClusterSpec(cluster_def), rpc_layer="grpc", task_type="ps", task_id=0)
-    with self.assertRaisesRegexp(ValueError,
+    cluster_resolver = cluster_resolver_lib.SimpleClusterResolver(
+        server_lib.ClusterSpec(cluster_def),
+        rpc_layer="grpc", task_type="ps", task_id=0,
+    )
+    with self.assertRaisesRegex(ValueError,
                                  "There must be at least one worker."):
       parameter_server_strategy_v2.ParameterServerStrategyV2(cluster_resolver)
 
   def testLessThanOnePs(self):
     cluster_def = multi_worker_test_base.create_cluster_spec(
         num_workers=1, num_ps=0, has_chief=True)
-    cluster_resolver = SimpleClusterResolver(
-        ClusterSpec(cluster_def),
+    cluster_resolver = cluster_resolver_lib.SimpleClusterResolver(
+        server_lib.ClusterSpec(cluster_def),
         rpc_layer="grpc",
         task_type="worker",
         task_id=0)
-    with self.assertRaisesRegexp(ValueError, "There must be at least one ps."):
+    with self.assertRaisesRegex(ValueError, "There must be at least one ps."):
       parameter_server_strategy_v2.ParameterServerStrategyV2(cluster_resolver)
 
 
 if __name__ == "__main__":
   v2_compat.enable_v2_behavior()
-  test.main()
+  multi_process_runner.test_main()

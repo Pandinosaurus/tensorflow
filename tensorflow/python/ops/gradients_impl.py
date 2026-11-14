@@ -14,29 +14,41 @@
 # ==============================================================================
 """Implements the graph generation for computation of gradients."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
+from tensorflow.compiler.jit.ops import xla_ops_grad  # pylint: disable=unused-import
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import ops
 from tensorflow.python.ops import array_grad  # pylint: disable=unused-import
 from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import check_ops  # pylint: disable=unused-import
 from tensorflow.python.ops import control_flow_grad  # pylint: disable=unused-import
-from tensorflow.python.ops import control_flow_ops
+from tensorflow.python.ops import cudnn_rnn_grad  # pylint: disable=unused-import
 from tensorflow.python.ops import gradients_util
 from tensorflow.python.ops import image_grad  # pylint: disable=unused-import
+from tensorflow.python.ops import io_ops  # pylint: disable=unused-import
 from tensorflow.python.ops import linalg_grad  # pylint: disable=unused-import
 from tensorflow.python.ops import linalg_ops  # pylint: disable=unused-import
 from tensorflow.python.ops import logging_ops  # pylint: disable=unused-import
+from tensorflow.python.ops import lookup_grad  # pylint: disable=unused-import
 from tensorflow.python.ops import manip_grad  # pylint: disable=unused-import
 from tensorflow.python.ops import math_grad  # pylint: disable=unused-import
 from tensorflow.python.ops import math_ops
+from tensorflow.python.ops import nccl_ops  # pylint: disable=unused-import
+from tensorflow.python.ops import nn_grad  # pylint: disable=unused-import
 from tensorflow.python.ops import optional_grad  # pylint: disable=unused-import
+from tensorflow.python.ops import parsing_grad  # pylint: disable=unused-import
+from tensorflow.python.ops import proto_ops  # pylint: disable=unused-import
 from tensorflow.python.ops import random_grad  # pylint: disable=unused-import
+from tensorflow.python.ops import rnn_grad  # pylint: disable=unused-import
+from tensorflow.python.ops import sdca_ops  # pylint: disable=unused-import
+from tensorflow.python.ops import sets  # pylint: disable=unused-import
+from tensorflow.python.ops import sparse_grad  # pylint: disable=unused-import
+from tensorflow.python.ops import tensor_array_grad  # pylint: disable=unused-import
 from tensorflow.python.ops import tensor_array_ops
+from tensorflow.python.ops import while_loop
+from tensorflow.python.ops.linalg.sparse import sparse_csr_matrix_grad  # pylint: disable=unused-import
+from tensorflow.python.ops.signal import fft_ops  # pylint: disable=unused-import
 from tensorflow.python.ops.unconnected_gradients import UnconnectedGradients
+from tensorflow.python.training import checkpoint_ops  # pylint: disable=unused-import
 from tensorflow.python.util.tf_export import tf_export
 
 
@@ -405,7 +417,10 @@ def hessians(ys,
     LookupError: if one of the operations between `xs` and `ys` does not
       have a registered gradient function.
   """
-  xs = gradients_util._AsList(xs)  # pylint: disable=protected-access
+  # pylint: disable=protected-access
+  ys_list = gradients_util._AsList(ys)
+  xs = gradients_util._AsList(xs)
+  # pylint: enable=protected-access
   kwargs = {
       "colocate_gradients_with_ops": colocate_gradients_with_ops,
       "gate_gradients": gate_gradients,
@@ -413,30 +428,35 @@ def hessians(ys,
   }
   # Compute first-order derivatives and iterate for each x in xs.
   hessians = []
-  _gradients = gradients(ys, xs, **kwargs)
-  for gradient, x in zip(_gradients, xs):
-    # change shape to one-dimension without graph branching
-    gradient = array_ops.reshape(gradient, [-1])
+  # _AsList() passes tuples through unchanged, so cast before concatenating.
+  with ops.name_scope(name, "hessians", list(ys_list) + list(xs)):
+    _gradients = gradients(ys, xs, **kwargs)
+    for gradient, x in zip(_gradients, xs):
+      # change shape to one-dimension without graph branching
+      gradient = array_ops.reshape(gradient, [-1])
 
-    # Declare an iterator and tensor array loop variables for the gradients.
-    n = array_ops.size(x)
-    loop_vars = [
-        array_ops.constant(0, dtypes.int32),
-        tensor_array_ops.TensorArray(x.dtype, n)
-    ]
-    # Iterate over all elements of the gradient and compute second order
-    # derivatives.
-    _, hessian = control_flow_ops.while_loop(
-        lambda j, _: j < n,
-        lambda j, result: (j + 1,
-                           result.write(j, gradients(gradient[j], x)[0])),
-        loop_vars
-    )
+      # Declare an iterator and tensor array loop variables for the gradients.
+      n = array_ops.size(x)
+      loop_vars = [
+          array_ops.constant(0, dtypes.int32),
+          tensor_array_ops.TensorArray(x.dtype, n),
+      ]
+      # Iterate over all elements of the gradient and compute second order
+      # derivatives.
+      _, hessian = while_loop.while_loop(
+          lambda j, _: j < n,
+          lambda j, result: (
+              j + 1,
+              result.write(j, gradients(gradient[j], x)[0]),
+          ),
+          loop_vars,
+      )
 
-    _shape = array_ops.shape(x)
-    _reshaped_hessian = array_ops.reshape(hessian.stack(),
-                                          array_ops.concat((_shape, _shape), 0))
-    hessians.append(_reshaped_hessian)
+      _shape = array_ops.shape(x)
+      _reshaped_hessian = array_ops.reshape(
+          hessian.stack(), array_ops.concat((_shape, _shape), 0)
+      )
+      hessians.append(_reshaped_hessian)
   return hessians
 
 

@@ -24,13 +24,13 @@ limitations under the License.
 namespace tensorflow {
 namespace {
 
-string DataDependencyPath() {
+std::string DataDependencyPath() {
   return io::JoinPath("tensorflow", "core", "platform", "resource_loader.h");
 }
 
 TEST(ResourceLoaderTest, FindsAndOpensFile) {
-  string filepath = GetDataDependencyFilepath(DataDependencyPath());
-  Status s = Env::Default()->FileExists(filepath);
+  std::string filepath = GetDataDependencyFilepath(DataDependencyPath());
+  absl::Status s = Env::Default()->FileExists(filepath);
   EXPECT_TRUE(s.ok()) << "No file found at this location: " << filepath;
 }
 

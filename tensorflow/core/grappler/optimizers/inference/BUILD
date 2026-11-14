@@ -1,3 +1,20 @@
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_python//python:proto.bzl", "py_proto_library")
 load("//tensorflow:tensorflow.bzl", "tf_cc_test")
 load("//tensorflow/core/platform:build_config.bzl", "tf_proto_library")
 
@@ -9,16 +26,25 @@ DEFAULT_VISIBILITY = [
 ]
 
 package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
     default_visibility = DEFAULT_VISIBILITY,
     licenses = ["notice"],
 )
 
+# Expand the DEFAULT_VISIBILITY so that we can replace with public visibility with copybara.
 tf_proto_library(
     name = "batch_op_rewriter_proto",
     srcs = ["batch_op_rewriter.proto"],
-    cc_api_version = 2,
-    visibility = DEFAULT_VISIBILITY,
+    visibility = ["//visibility:public"],
 )
+
+# copybara:uncomment_begin(google-only)
+# py_proto_library(
+#     name = "batch_op_rewriter_proto_py_pb2",
+#     visibility = ["//visibility:public"],
+#     deps = [":batch_op_rewriter_proto"],
+# )
+# copybara:uncomment_end
 
 cc_library(
     name = "batch_op_rewriter",
@@ -27,11 +53,13 @@ cc_library(
     deps = [
         ":batch_op_rewriter_proto_cc",
         "//tensorflow/core:lib",
+        "//tensorflow/core:lib_headers_for_pybind",
         "//tensorflow/core:protos_all_cc",
         "//tensorflow/core/grappler:grappler_item",
         "//tensorflow/core/grappler/optimizers:custom_graph_optimizer",
         "//tensorflow/core/grappler/optimizers:custom_graph_optimizer_registry",
         "//tensorflow/tools/graph_transforms:transform_utils",
+        "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/strings",
         "@com_google_protobuf//:protobuf",
@@ -49,9 +77,9 @@ tf_cc_test(
         "//tensorflow/core:protos_all_cc",
         "//tensorflow/core:test",
         "//tensorflow/core:test_main",
-        "//tensorflow/core:testlib",
         "//tensorflow/core/grappler:grappler_item",
         "//tensorflow/core/grappler/optimizers:graph_optimizer",
+        "//tensorflow/core/platform:errors",
         "//tensorflow/tools/graph_transforms:transform_utils",
         "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/strings",

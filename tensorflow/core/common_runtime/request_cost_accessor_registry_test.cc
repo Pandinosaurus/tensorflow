@@ -15,7 +15,8 @@ limitations under the License.
 
 #include "tensorflow/core/common_runtime/request_cost_accessor_registry.h"
 
-#include "absl/time/time.h"
+#include <memory>
+
 #include "tensorflow/core/common_runtime/request_cost_accessor.h"
 #include "tensorflow/core/platform/test.h"
 
@@ -40,7 +41,7 @@ TEST(RequestCostAccessorRegistryTest, Basic) {
 
 TEST(RequestCostAccessorRegistryDeathTest, CrashWhenRegisterTwice) {
   const auto creator = []() {
-    return absl::make_unique<TestRequestCostAccessor>();
+    return std::make_unique<TestRequestCostAccessor>();
   };
   EXPECT_DEATH(
       RequestCostAccessorRegistry::RegisterRequestCostAccessor("test", creator),

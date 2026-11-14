@@ -14,24 +14,25 @@ limitations under the License.
 ==============================================================================*/
 
 // Disallow Numpy 1.7 deprecated symbols.
+#include "tensorflow/core/framework/tensor.h"
+#include "tensorflow/core/framework/tensor_shape.h"
+#include "tensorflow/core/framework/types.pb.h"
+#include "tensorflow/core/platform/types.h"
 #define NPY_NO_DEPRECATED_API NPY_1_7_API_VERSION
 
 #include "numpy/arrayobject.h"
-#include "numpy/ufuncobject.h"
-#include "pybind11/chrono.h"
-#include "pybind11/complex.h"
-#include "pybind11/functional.h"
-#include "pybind11/pybind11.h"
-#include "pybind11/stl.h"
+#include "pybind11/chrono.h"  // from @pybind11
+#include "pybind11/complex.h"  // from @pybind11
+#include "pybind11/functional.h"  // from @pybind11
+#include "pybind11/pybind11.h"  // from @pybind11
+#include "pybind11/stl.h"  // from @pybind11
 #include "tensorflow/c/checkpoint_reader.h"
+#include "tensorflow/c/safe_ptr.h"
 #include "tensorflow/c/tf_status.h"
-#include "tensorflow/core/lib/core/errors.h"
-#include "tensorflow/core/lib/core/status.h"
 #include "tensorflow/python/lib/core/ndarray_tensor.h"
-#include "tensorflow/python/lib/core/py_exception_registry.h"
 #include "tensorflow/python/lib/core/pybind11_lib.h"
 #include "tensorflow/python/lib/core/pybind11_status.h"
-#include "tensorflow/python/lib/core/safe_ptr.h"
+#include "tensorflow/python/lib/core/safe_pyobject_ptr.h"
 
 namespace py = pybind11;
 
@@ -100,11 +101,14 @@ struct type_caster<tensorflow::DataType> {
 namespace tensorflow {
 
 static py::object CheckpointReader_GetTensor(
-    tensorflow::checkpoint::CheckpointReader* reader, const string& name) {
+    tensorflow::checkpoint::CheckpointReader* reader, const std::string& name) {
   Safe_TF_StatusPtr status = make_safe(TF_NewStatus());
   PyObject* py_obj = Py_None;
   std::unique_ptr<tensorflow::Tensor> tensor;
-  reader->GetTensor(name, &tensor, status.get());
+  {
+    py::gil_scoped_release release;
+    reader->GetTensor(name, &tensor, status.get());
+  }
 
   // Error handling if unable to get Tensor.
   tensorflow::MaybeRaiseFromTFStatus(status.get());
@@ -118,7 +122,7 @@ static py::object CheckpointReader_GetTensor(
 
 }  // namespace tensorflow
 
-PYBIND11_MODULE(_pywrap_checkpoint_reader, m) {
+PYBIND11_MODULE(_pywrap_checkpoint_reader, m, py::mod_gil_not_used()) {
   // Initialization code to use numpy types in the type casters.
   import_array1();
   py::class_<tensorflow::checkpoint::CheckpointReader> checkpoint_reader_class(
@@ -130,15 +134,21 @@ PYBIND11_MODULE(_pywrap_checkpoint_reader, m) {
         // pybind11 support smart pointers and will own freeing the memory when
         // complete.
         // https://pybind11.readthedocs.io/en/master/advanced/smart_ptrs.html#std-unique-ptr
-        auto checkpoint =
-            std::make_unique<tensorflow::checkpoint::CheckpointReader>(
-                filename, status.get());
+        auto checkpoint = [&]() {
+          py::gil_scoped_release release;
+          return std::make_unique<tensorflow::checkpoint::CheckpointReader>(
+              filename, status.get());
+        }();
         tensorflow::MaybeRaiseFromTFStatus(status.get());
         return checkpoint;
       }))
       .def("debug_string",
            [](tensorflow::checkpoint::CheckpointReader& self) {
-             return py::bytes(self.DebugString());
+             const std::string debug_str = [&]() {
+               py::gil_scoped_release release;
+               return self.DebugString();
+             }();
+             return py::bytes(debug_str);
            })
       .def("get_variable_to_shape_map",
            &tensorflow::checkpoint::CheckpointReader::GetVariableToShapeMap)

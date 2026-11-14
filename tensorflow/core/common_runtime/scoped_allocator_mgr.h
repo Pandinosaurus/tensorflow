@@ -18,7 +18,10 @@ limitations under the License.
 #include <string>
 #include <unordered_map>
 
+#include "absl/status/status.h"
+#include "absl/types/span.h"
 #include "tensorflow/core/common_runtime/scoped_allocator.h"
+#include "tensorflow/core/framework/types.pb.h"
 #include "tensorflow/core/lib/core/refcount.h"
 #include "tensorflow/core/lib/core/status.h"
 #include "tensorflow/core/platform/mutex.h"
@@ -31,10 +34,10 @@ class ScopedAllocatorMgr;
 class ScopedAllocatorContainer : public core::RefCounted {
  public:
   // Establishes a reachable ScopedAllocator.
-  Status AddScopedAllocator(
+  absl::Status AddScopedAllocator(
       const Tensor& backing_tensor, int32_t scope_id,
       const std::string& scope_name,
-      const gtl::ArraySlice<ScopedAllocator::Field>& fields,
+      const absl::Span<const ScopedAllocator::Field>& fields,
       int32_t expected_call_count);
 
   ScopedAllocatorInstance* GetInstance(int32_t scope_id);
@@ -47,14 +50,14 @@ class ScopedAllocatorContainer : public core::RefCounted {
   friend class ScopedAllocatorMgr;
   ScopedAllocatorContainer(const ScopedAllocatorMgr* mgr, int64_t step_id)
       : mgr_(mgr), step_id_(step_id) {}
-  ~ScopedAllocatorContainer();
+  ~ScopedAllocatorContainer() override;
 
  private:
   const ScopedAllocatorMgr* mgr_;
   int64_t step_id_;
   mutex mu_;
   struct SAField {
-    int32 field_index;
+    int32_t field_index;
     union {
       ScopedAllocator* scoped_allocator;
       ScopedAllocatorInstance* instance;
@@ -67,7 +70,7 @@ class ScopedAllocatorContainer : public core::RefCounted {
         : field_index(ScopedAllocator::kBackingIndex),
           scoped_allocator(nullptr) {}
   };
-  std::unordered_map<int32, SAField> allocators_ TF_GUARDED_BY(mu_);
+  std::unordered_map<int32_t, SAField> allocators_ TF_GUARDED_BY(mu_);
 };
 
 // At most one of these exists per device.
@@ -80,10 +83,10 @@ class ScopedAllocatorMgr {
   ScopedAllocatorContainer* GetContainer(int64_t step_id);
 
   // Establishes a reachable ScopedAllocator.
-  Status AddScopedAllocator(
+  absl::Status AddScopedAllocator(
       const Tensor& backing_tensor, int64_t step_id, int32_t scope_id,
       const std::string& scope_name,
-      const gtl::ArraySlice<ScopedAllocator::Field>& fields,
+      const absl::Span<const ScopedAllocator::Field>& fields,
       int32_t expected_call_count);
 
   void Cleanup(int64_t step_id);
@@ -94,7 +97,7 @@ class ScopedAllocatorMgr {
   // backing tensor, for convenience.  (The same value can be obtained
   // by summing offset and bytes in the last field.)
   static size_t PopulateFields(int32_t scope_id,
-                               const gtl::ArraySlice<TensorShape>& shapes,
+                               const absl::Span<const TensorShape>& shapes,
                                const DataType dtype,
                                std::vector<ScopedAllocator::Field>* fields);
 

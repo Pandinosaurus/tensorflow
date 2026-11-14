@@ -1,0 +1,530 @@
+/* Copyright 2025 The OpenXLA Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+==============================================================================*/
+
+#include "xla/backends/cpu/codegen/fusion_emitter.h"
+
+#include <algorithm>
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <optional>
+#include <string>
+#include <utility>
+
+#include "absl/algorithm/container.h"
+#include "absl/container/inlined_vector.h"
+#include "absl/log/check.h"
+#include "absl/log/log.h"
+#include "absl/numeric/bits.h"
+#include "absl/status/status.h"
+#include "absl/status/status_macros.h"
+#include "absl/status/statusor.h"
+#include "absl/strings/str_cat.h"
+#include "absl/strings/string_view.h"
+#include "absl/types/span.h"
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallVector.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/IR/Builders.h"
+#include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/Location.h"
+#include "mlir/IR/MLIRContext.h"
+#include "mlir/IR/OwningOpRef.h"
+#include "mlir/IR/Types.h"
+#include "mlir/IR/Value.h"
+#include "mlir/IR/ValueRange.h"
+#include "xla/backends/cpu/alignment.h"
+#include "xla/backends/cpu/codegen/emitters/cpu_scatter_emitter.h"
+#include "xla/backends/cpu/codegen/kernel_api_ir_builder.h"
+#include "xla/backends/cpu/codegen/symbol_name_util.h"
+#include "xla/backends/cpu/codegen/tiled/tiled_fusion_emitter.h"
+#include "xla/codegen/emitters/computation_partitioner.h"
+#include "xla/codegen/emitters/concatenate_kernel_emitter.h"
+#include "xla/codegen/emitters/dynamic_update_slice_kernel_emitter.h"
+#include "xla/codegen/emitters/elemental_hlo_to_mlir.h"
+#include "xla/codegen/emitters/ir/xla_ops.h"
+#include "xla/codegen/emitters/kernel_api_builder.h"
+#include "xla/codegen/emitters/kernel_arguments.h"
+#include "xla/codegen/emitters/loop_kernel_emitter.h"
+#include "xla/codegen/emitters/type_util.h"
+#include "xla/codegen/hlo_fusion_spec.h"
+#include "xla/codegen/ir_emission_utils.h"
+#include "xla/codegen/kernel_definition.h"
+#include "xla/codegen/mlir_kernel_source.h"
+#include "xla/codegen/xtile/block_level_parameters.h"
+#include "xla/hlo/ir/hlo_computation.h"
+#include "xla/hlo/ir/hlo_instruction.h"
+#include "xla/hlo/ir/hlo_instructions.h"
+#include "xla/hlo/ir/hlo_opcode.h"
+#include "xla/hlo/utils/hlo_traversal.h"
+#include "xla/layout_util.h"
+#include "xla/primitive_util.h"
+#include "xla/runtime/work_cluster.h"
+#include "xla/runtime/work_dimensions.h"
+#include "xla/runtime/work_group.h"
+#include "xla/runtime/work_item.h"
+#include "xla/runtime/work_tile_size.h"
+#include "xla/service/buffer_assignment.h"
+#include "xla/service/cpu/backend_config.pb.h"
+#include "xla/service/gpu/backend_configs.pb.h"
+#include "xla/service/llvm_ir/llvm_util.h"
+#include "xla/shape.h"
+#include "xla/shape_util.h"
+#include "xla/status_macros.h"
+#include "xla/tsl/platform/statusor.h"
+#include "xla/util.h"
+#include "xla/xla_data.pb.h"
+
+namespace xla::cpu {
+
+using ::mlir::MLIRContext;
+using ::xla::xtile::BlockLevelParameters;
+
+static absl::StatusOr<std::string> GetName(const HloFusionInstruction& fusion,
+                                           bool use_unique_c_name) {
+  if (!use_unique_c_name) {
+    return std::string(fusion.name());
+  }
+
+  return ConvertToCName(
+      absl::StrCat(fusion.GetModule()->name(), "_", fusion.name()));
+}
+
+static HloInstructionAdaptor FindNonTrivialHero(
+    const HloInstructionAdaptor& instr) {
+  HloInstructionAdaptor hero = instr;
+
+  // Go up the chain of trivial element-wise(+bitcast, -copy) operations. Note
+  // that no memoization is needed due to number of operands constraints: we
+  // never have to revisit same nodes.
+  while (IsIntermediate(&hero.instruction(), /*allowed_operand_count=*/1) &&
+         hero.parent().ContainsInstruction(hero.GetOperand(0))) {
+    hero = hero.GetOperand(0);
+  }
+
+  // Try a bit harder to find a concat hero. The concat emitter also work if
+  // there are elementwise ops with more than 1 operand on the path between root
+  // and the root op.
+  auto is_concatenate = [](const HloInstruction& node) {
+    return node.opcode() == HloOpcode::kConcatenate;
+  };
+  if (auto concatenate = FindHero(hero, std::move(is_concatenate))) {
+    return *concatenate;
+  }
+
+  // We just want to use the root for the loop emitter.
+  return instr;
+}
+
+static const HloInstruction& FindNonTrivialHero(const HloInstruction& instr) {
+  CHECK_NE(instr.opcode(), HloOpcode::kFusion);
+  auto fusion_adaptor = HloFusionAdaptor::ForComputation(instr.parent());
+  HloInstructionAdaptor instr_adaptor(instr, fusion_adaptor.get());
+  return FindNonTrivialHero(instr_adaptor).instruction();
+}
+
+emitters::KernelArguments::BufferAlignment GetDefaultBufferAlignment() {
+  emitters::KernelArguments::BufferAlignment buffer_alignment;
+  buffer_alignment.entry_parameter_align_bytes = MinAlign();
+  buffer_alignment.xla_allocated_buffer_align_bytes = MinAlign();
+  buffer_alignment.constant_buffer_align_bytes = MinAlign();
+
+  return buffer_alignment;
+}
+
+static int64_t GetWorkGroupCount(const HloFusionInstruction& fusion) {
+  auto backend_config_or = fusion.backend_config<BackendConfig>();
+  if (!backend_config_or.ok()) {
+    return 1;
+  }
+  absl::Span<const int64_t> outer_dimension_partitions =
+      backend_config_or->outer_dimension_partitions();
+
+  if (outer_dimension_partitions.empty()) {
+    return 1;
+  }
+
+  return absl::c_accumulate(outer_dimension_partitions, 1,
+                            std::multiplies<int64_t>());
+}
+
+// Returns the maximum number of sub-byte elements packed into a single byte
+// across all outputs of `shape` (e.g. 2 for 4-bit types, 4 for 2-bit types, or
+// 1 if there are no packed sub-byte outputs).
+static int64_t GetMaxSubByteElementsPerByte(const Shape& shape) {
+  int64_t max_elements_per_byte = 1;
+  ShapeUtil::ForEachSubshape(
+      shape, [&](const Shape& subshape, const ShapeIndex&) {
+        if (subshape.IsArray() &&
+            primitive_util::IsSubByteNonPredType(subshape.element_type())) {
+          int64_t bit_width = primitive_util::BitWidth(subshape.element_type());
+          CHECK(absl::has_single_bit(static_cast<uint64_t>(bit_width)))
+              << "Expected power-of-2 sub-byte bit width, got " << bit_width;
+          max_elements_per_byte =
+              std::max<int64_t>(max_elements_per_byte, 8 / bit_width);
+        }
+      });
+  return max_elements_per_byte;
+}
+
+// Partitions the iteration space of `shape` across workgroups along the
+// major physical dimensions so each workgroup executes a contiguous slice of
+// elements. Leading dimensions smaller than the requested workgroup count are
+// folded into the next dimension until there is enough work to split, at which
+// point we define the "split tile" size. All remaining minor dimensions are
+// kept intact in each tile.
+//
+// For packed sub-byte outputs, if allow_sub_byte_multi_work_group is:
+// - true, the split tile size is rounded up to a multiple of the
+// elements-per-byte packing factor, so that distinct workgroups never
+// share a byte.
+// - false, a single workgroup is used.
+static WorkDimensions GetWorkDimensions(
+    const Shape& shape, const HloFusionInstruction& fusion,
+    bool allow_sub_byte_multi_work_group = true) {
+  if (!shape.has_layout()) {
+    Shape shape_with_layout = shape;
+    LayoutUtil::SetToDefaultLayout(&shape_with_layout);
+    return GetWorkDimensions(shape_with_layout, fusion,
+                             allow_sub_byte_multi_work_group);
+  }
+  auto minor_to_major = LayoutUtil::MinorToMajor(shape.layout());
+  if (minor_to_major.empty()) {
+    return WorkDimensions{};
+  }
+
+  int64_t total_elements = ShapeUtil::ElementsIn(shape);
+  if (total_elements == 0) {
+    return WorkDimensions{};
+  }
+
+  int64_t sub_byte_alignment = GetMaxSubByteElementsPerByte(fusion.shape());
+  bool has_sub_byte_output = sub_byte_alignment > 1;
+  bool can_parallelize =
+      allow_sub_byte_multi_work_group || !has_sub_byte_output;
+  int64_t work_group_count =
+      can_parallelize ? std::min(GetWorkGroupCount(fusion), total_elements) : 1;
+  NumWorkGroups num_work_groups{static_cast<uint64_t>(work_group_count)};
+
+  WorkTileSize work_tile_size;
+  int64_t folded_dims = 1;
+  for (int64_t dim : llvm::reverse(minor_to_major)) {
+    int64_t dim_size = ShapeUtil::GetDimension(shape, dim);
+    int64_t accumulated_dim_size = folded_dims * dim_size;
+    if (accumulated_dim_size < work_group_count) {
+      folded_dims *= dim_size;
+    } else if (work_group_count != 1) {
+      // Round `split_tile` up to `sub_byte_alignment` so that
+      // `split_tile * (product of minor dims)` is a whole number of bytes.
+      int64_t split_tile =
+          RoundUpTo(CeilOfRatio(accumulated_dim_size, work_group_count),
+                    sub_byte_alignment);
+      work_tile_size.dimensions.push_back(split_tile);
+      num_work_groups = NumWorkGroups{
+          static_cast<uint64_t>(CeilOfRatio(accumulated_dim_size, split_tile))};
+      work_group_count = 1;
+    } else {
+      work_tile_size.dimensions.push_back(dim_size);
+    }
+  }
+
+  return WorkDimensions{NumWorkClusters{}, num_work_groups, NumWorkItems{},
+                        work_tile_size};
+}
+
+// Get the work dimensions for the given fusion.
+// TODO(willfroom): Make this have more smarts to give better dims.
+static WorkDimensions GetLoopEmitterWorkDims(const HloFusionInstruction& fusion,
+                                             const HloFusionSpec& fusion_spec) {
+  Shape indexing_shape =
+      emitters::LoopFusionKernelEmitter::GetIndexingShape(fusion_spec);
+
+  return GetWorkDimensions(indexing_shape, fusion);
+}
+
+static WorkDimensions GetConcatenateEmitterWorkDims(
+    const HloFusionInstruction& fusion, const HloFusionSpec& fusion_spec) {
+  if (emitters::ConcatenateFusionKernelEmitter::CanEmitFastCpuCopy(
+          fusion_spec, BackendKind::kCpu)) {
+    const HloInstruction& concat = fusion_spec.fusion_root(0).instruction();
+    const Shape& output_shape = concat.shape();
+    if (ShapeUtil::IsZeroElementArray(output_shape)) {
+      return WorkDimensions{};
+    }
+    auto min2maj = LayoutUtil::MinorToMajor(output_shape.layout());
+    auto concat_dim_it = absl::c_find(min2maj, concat.concatenate_dimension());
+    if (std::next(concat_dim_it) == min2maj.end()) {
+      return WorkDimensions{};
+    }
+    int64_t outer_dim_size = output_shape.dimensions(min2maj.back());
+    uint64_t num_groups = static_cast<uint64_t>(std::max<int64_t>(
+        1, std::min(GetWorkGroupCount(fusion), outer_dim_size)));
+    return WorkDimensions{NumWorkClusters{}, NumWorkGroups{num_groups},
+                          NumWorkItems{}, WorkTileSize{}};
+  }
+  Shape indexing_shape =
+      emitters::ConcatenateFusionKernelEmitter::GetIndexingShape(fusion_spec);
+
+  return GetWorkDimensions(indexing_shape, fusion,
+                           /*allow_sub_byte_multi_work_group=*/false);
+}
+
+static WorkDimensions GetDynamicUpdateSliceEmitterWorkDims(
+    const HloFusionInstruction& fusion, const HloFusionSpec& fusion_spec) {
+  Shape indexing_shape =
+      emitters::DynamicUpdateSliceKernelEmitter::GetIndexingShape(fusion_spec);
+
+  return GetWorkDimensions(indexing_shape, fusion,
+                           /*allow_sub_byte_multi_work_group=*/false);
+}
+
+static HloFusionSpec GetLoopFusionSpec(const HloFusionInstruction& fusion) {
+  // Crash OK, this is checked in the caller.
+  CHECK(fusion.fusion_kind() == HloFusionInstruction::FusionKind::kLoop);
+
+  std::unique_ptr<HloFusionAdaptor> fusion_adaptor =
+      HloFusionAdaptor::ForInstruction(&fusion);
+  // Loop fusion simply uses the roots as the hero instructions.
+  // When we want to support more complex fusion kinds, we will need to port the
+  // GPU code to get the non-trivial hero instructions.
+  absl::InlinedVector<HloInstructionAdaptor, 2> roots =
+      fusion_adaptor->GetRoots();
+  absl::InlinedVector<HloInstructionAdaptor, 2> heroes = {
+      FindNonTrivialHero(fusion_adaptor->GetRoots().front())};
+
+  return HloFusionSpec(std::move(fusion_adaptor), std::move(roots),
+                       std::move(heroes));
+}
+
+static absl::StatusOr<KernelDefinition<MlirKernelSource>> EmitLoopFusionKernel(
+    MLIRContext& context, const HloFusionInstruction& fusion,
+    const BufferAssignment* buffer_assignment, absl::string_view name) {
+  VLOG(2) << "Emitting loop fusion kernel: " << name;
+  HloFusionSpec fusion_spec = GetLoopFusionSpec(fusion);
+  auto work_dimensions = GetLoopEmitterWorkDims(fusion, fusion_spec);
+
+  emitters::LoopFusionKernelEmitter loop_fusion_emitter(
+      context, fusion, std::move(fusion_spec), buffer_assignment,
+      GetDefaultBufferAlignment(), work_dimensions, name, BackendKind::kCpu);
+  ABSL_ASSIGN_OR_RETURN(auto mlir_kernel_definition,
+                   loop_fusion_emitter.EmitKernelDefinition());
+
+  mlir::OpBuilder builder(&context);
+  mlir_kernel_definition.source().module().getOperation()->setAttr(
+      xla::CpuMemoryRegionNameAttr::name,
+      builder.getStringAttr(
+          BuildModuleMemoryRegionName(loop_fusion_emitter.name(), &fusion)));
+
+  return mlir_kernel_definition;
+}
+
+static absl::StatusOr<KernelDefinition<MlirKernelSource>>
+EmitConcatenateFusionKernel(MLIRContext& context,
+                            const HloFusionInstruction& fusion,
+                            const BufferAssignment* buffer_assignment,
+                            absl::string_view name) {
+  VLOG(2) << "Emitting concatenate fusion kernel: " << name;
+  HloFusionSpec fusion_spec = GetLoopFusionSpec(fusion);
+  auto work_dimensions = GetConcatenateEmitterWorkDims(fusion, fusion_spec);
+
+  emitters::ConcatenateFusionKernelEmitter concatenate_fusion_emitter(
+      context, fusion, std::move(fusion_spec), buffer_assignment,
+      GetDefaultBufferAlignment(), work_dimensions, name, BackendKind::kCpu);
+  ABSL_ASSIGN_OR_RETURN(auto mlir_kernel_definition,
+                   concatenate_fusion_emitter.EmitKernelDefinition());
+
+  mlir::OpBuilder builder(&context);
+  mlir_kernel_definition.source().module().getOperation()->setAttr(
+      xla::CpuMemoryRegionNameAttr::name,
+      builder.getStringAttr(BuildModuleMemoryRegionName(
+          concatenate_fusion_emitter.name(), &fusion)));
+
+  return mlir_kernel_definition;
+}
+
+static absl::StatusOr<KernelDefinition<MlirKernelSource>>
+EmitDynamicUpdateSliceFusionKernel(MLIRContext& context,
+                                   const HloFusionInstruction& fusion,
+                                   const BufferAssignment* buffer_assignment,
+                                   absl::string_view name) {
+  VLOG(2) << "Emitting dynamic update slice fusion kernel: " << name;
+  HloFusionSpec fusion_spec = GetLoopFusionSpec(fusion);
+  auto work_dimensions =
+      GetDynamicUpdateSliceEmitterWorkDims(fusion, fusion_spec);
+
+  emitters::DynamicUpdateSliceKernelEmitter emitter(
+      context, fusion, std::move(fusion_spec), buffer_assignment,
+      GetDefaultBufferAlignment(), work_dimensions, name, BackendKind::kCpu);
+  ABSL_ASSIGN_OR_RETURN(auto mlir_kernel_definition, emitter.EmitKernelDefinition());
+
+  mlir::OpBuilder builder(&context);
+  mlir_kernel_definition.source().module().getOperation()->setAttr(
+      xla::CpuMemoryRegionNameAttr::name,
+      builder.getStringAttr(
+          BuildModuleMemoryRegionName(emitter.name(), &fusion)));
+
+  return mlir_kernel_definition;
+}
+
+static absl::Status CheckSupportedCpuFmaOps(const HloComputation& computation) {
+  for (const HloInstruction* instr : computation.instructions()) {
+    if (instr->opcode() == HloOpcode::kFma) {
+      PrimitiveType type = instr->shape().element_type();
+      if (type != F32 && type != F64) {
+        return absl::UnimplementedError(absl::StrCat(
+            "Fma is not supported for element type ",
+            primitive_util::LowercasePrimitiveTypeName(type), " on CPU"));
+      }
+    }
+    for (const HloComputation* called : instr->called_computations()) {
+      ABSL_RETURN_IF_ERROR(CheckSupportedCpuFmaOps(*called));
+    }
+  }
+  return absl::OkStatus();
+}
+
+absl::StatusOr<KernelDefinition<MlirKernelSource>> EmitFusionKernel(
+    MLIRContext& mlir_context, const HloFusionInstruction& fusion,
+    const BufferAssignment* buffer_assignment, bool use_unique_c_name,
+    bool enable_tiled_emitter) {
+  ABSL_RETURN_IF_ERROR(
+      CheckSupportedCpuFmaOps(*fusion.fused_instructions_computation()));
+  ABSL_ASSIGN_OR_RETURN(std::string name, GetName(fusion, use_unique_c_name));
+
+  std::optional<BlockLevelParameters> block_level_parameters;
+  auto gpu_config_or = fusion.backend_config<gpu::GpuBackendConfig>();
+  if (gpu_config_or.ok() && gpu_config_or->has_fusion_backend_config() &&
+      gpu_config_or->fusion_backend_config().has_block_level_fusion_config()) {
+    block_level_parameters = BlockLevelParameters::FromBlockLevelFusionConfig(
+        gpu_config_or->fusion_backend_config().block_level_fusion_config());
+  }
+
+  if (enable_tiled_emitter || block_level_parameters.has_value()) {
+    TiledEmissionResult result = EmitTiledFusionKernel(
+        mlir_context, fusion, buffer_assignment, name,
+        GetWorkGroupCount(fusion), block_level_parameters);
+    if (result.kernel.ok()) {
+      return std::move(*result.kernel);
+    }
+
+    if (result.tiling_succeeded) {
+      return result.kernel.status();
+    }
+
+    VLOG(2) << "Tiled emitter failed due to tiling failure: "
+            << result.kernel.status() << ", falling back to loop emitter.";
+  }
+
+  if (fusion.fused_expression_root()->opcode() == HloOpcode::kScatter) {
+    TF_RET_CHECK(buffer_assignment != nullptr);
+    CpuScatterFusion kernel_emitter(*buffer_assignment, &fusion, &mlir_context);
+    return kernel_emitter.EmitKernelDefinition();
+  }
+
+  if (fusion.fusion_kind() == HloFusionInstruction::FusionKind::kLoop) {
+    const HloInstruction& hero =
+        FindNonTrivialHero(*fusion.fused_expression_root());
+    if (hero.opcode() == HloOpcode::kConcatenate) {
+      return EmitConcatenateFusionKernel(mlir_context, fusion,
+                                         buffer_assignment, name);
+    }
+    auto fusion_spec = GetLoopFusionSpec(fusion);
+    if (IsDynamicUpdateSliceFusion(fusion_spec)) {
+      ABSL_ASSIGN_OR_RETURN(bool can_emit_dus,
+                       CanEmitFusedDynamicUpdateSlice(fusion_spec.fusion()));
+      if (can_emit_dus) {
+        return EmitDynamicUpdateSliceFusionKernel(mlir_context, fusion,
+                                                  buffer_assignment, name);
+      }
+    }
+    return EmitLoopFusionKernel(mlir_context, fusion, buffer_assignment, name);
+  }
+  return absl::UnimplementedError("Fusion kind not supported.");
+}
+
+static absl::Status VerifySortComparator(const HloComputation& computation) {
+  for (const HloInstruction* instr : computation.instructions()) {
+    if (!emitters::IsSupportedElementalOp(instr->opcode())) {
+      return Unimplemented("Unsupported instruction in sort comparator: %s",
+                           instr->ToString());
+    }
+    for (const HloComputation* called : instr->called_computations()) {
+      ABSL_RETURN_IF_ERROR(VerifySortComparator(*called));
+    }
+  }
+  return absl::OkStatus();
+}
+
+absl::StatusOr<MlirKernelSource> EmitSortComparator(
+    MLIRContext& mlir_context, const HloComputation& comparator,
+    absl::string_view comparator_name) {
+  ABSL_RETURN_IF_ERROR(VerifySortComparator(comparator));
+
+  mlir::OpBuilder builder(&mlir_context);
+  auto loc = mlir::NameLoc::get(builder.getStringAttr(comparator.name()));
+  mlir::OwningOpRef<mlir::ModuleOp> module = llvm_ir::CreateMlirModuleOp(
+      loc, absl::StrCat(comparator.name(), "_comparator_module"));
+
+  const HloInstruction* root = comparator.root_instruction();
+  emitters::SetIndexDataLayout(*module, *root, /*force_64_bit=*/true);
+
+  llvm::SmallVector<mlir::Type> param_types;
+  param_types.reserve(comparator.num_parameters());
+  for (const HloInstruction* param : comparator.parameter_instructions()) {
+    param_types.push_back(
+        emitters::TensorShapeToMlirType(param->shape(), builder));
+  }
+
+  builder.setInsertionPointToStart(module->getBody());
+  auto entry_func = mlir::func::FuncOp::create(
+      builder, loc, comparator_name,
+      mlir::FunctionType::get(&mlir_context, param_types,
+                              {builder.getI1Type()}));
+  entry_func->setAttr("xla.cpu.is_comparator", builder.getUnitAttr());
+  SetBackendKind(&mlir_context, entry_func, BackendKind::kCpu);
+
+  emitters::PartitionedComputations computations(&comparator, &mlir_context);
+  ABSL_ASSIGN_OR_RETURN(
+      emitters::CallTargetProvider call_targets,
+      emitters::EmitPartitionedComputations(*module, computations));
+
+  mlir::ImplicitLocOpBuilder entry_builder(loc, entry_func);
+  entry_builder.setInsertionPointToStart(entry_func.addEntryBlock());
+
+  llvm::SmallVector<mlir::Value> scalar_args;
+  scalar_args.reserve(comparator.num_parameters());
+  for (mlir::Value arg : entry_func.getArguments()) {
+    scalar_args.push_back(mlir::tensor::ExtractOp::create(entry_builder, arg,
+                                                          mlir::ValueRange{}));
+  }
+
+  mlir::func::FuncOp root_fn = call_targets(root);
+  mlir::Value cmp_result =
+      PureCallOp::create(entry_builder, root_fn, scalar_args).getResult(0);
+  mlir::Value cmp_i1 = mlir::arith::TruncIOp::create(
+      entry_builder, entry_builder.getI1Type(), cmp_result);
+  mlir::func::ReturnOp::create(entry_builder, cmp_i1);
+
+  module->getOperation()->setAttr(
+      xla::CpuMemoryRegionNameAttr::name,
+      builder.getStringAttr(
+          BuildModuleMemoryRegionName("sort_comparator", root)));
+
+  return MlirKernelSource(std::move(module));
+}
+
+}  // namespace xla::cpu

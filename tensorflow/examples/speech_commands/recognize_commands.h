@@ -16,11 +16,15 @@ limitations under the License.
 #ifndef TENSORFLOW_EXAMPLES_SPEECH_COMMANDS_RECOGNIZE_COMMANDS_H_
 #define TENSORFLOW_EXAMPLES_SPEECH_COMMANDS_RECOGNIZE_COMMANDS_H_
 
+#include <cstdint>
 #include <deque>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
+#include "absl/status/status.h"
 #include "tensorflow/core/framework/tensor.h"
+#include "tensorflow/core/platform/status.h"
 #include "tensorflow/core/platform/types.h"
 
 namespace tensorflow {
@@ -47,29 +51,29 @@ class RecognizeCommands {
   // initially being populated for example. The suppression argument disables
   // further recognitions for a set time after one has been triggered, which can
   // help reduce spurious recognitions.
-  explicit RecognizeCommands(const std::vector<string>& labels,
+  explicit RecognizeCommands(const std::vector<std::string>& labels,
                              int32_t average_window_duration_ms = 1000,
                              float detection_threshold = 0.2,
                              int32_t suppression_ms = 500,
                              int32_t minimum_count = 3);
 
   // Call this with the results of running a model on sample data.
-  Status ProcessLatestResults(const Tensor& latest_results,
-                              const int64_t current_time_ms,
-                              string* found_command, float* score,
-                              bool* is_new_command);
+  absl::Status ProcessLatestResults(const Tensor& latest_results,
+                                    const int64_t current_time_ms,
+                                    std::string* found_command, float* score,
+                                    bool* is_new_command);
 
  private:
   // Configuration
-  std::vector<string> labels_;
-  int32 average_window_duration_ms_;
+  std::vector<std::string> labels_;
+  int32_t average_window_duration_ms_;
   float detection_threshold_;
-  int32 suppression_ms_;
-  int32 minimum_count_;
+  int32_t suppression_ms_;
+  int32_t minimum_count_;
 
   // Working variables
   std::deque<std::pair<int64_t, Tensor>> previous_results_;
-  string previous_top_label_;
+  std::string previous_top_label_;
   int64_t labels_count_;
   int64_t previous_top_label_time_;
 };

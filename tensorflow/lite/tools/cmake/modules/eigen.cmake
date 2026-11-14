@@ -21,9 +21,14 @@ include(OverridableFetchContent)
 
 OverridableFetchContent_Declare(
   eigen
-  GIT_REPOSITORY https://gitlab.com/libeigen/eigen
+  GIT_REPOSITORY https://gitlab.com/libeigen/eigen.git
   # Sync with tensorflow/third_party/eigen3/workspace.bzl
-  GIT_TAG 7792b1e909a98703181aecb8810b4b654004c25d
+  GIT_TAG 48f0b66cb2c41a392f88be7485205f71b97b1a16
+  # Download a pinned archive from the TensorFlow mirror by default instead of
+  # cloning gitlab.com, which is frequently rate limited on CI. Set
+  # OVERRIDABLE_FETCH_CONTENT_USE_GIT=ON to clone GIT_REPOSITORY instead.
+  URL https://storage.googleapis.com/mirror.tensorflow.org/gitlab.com/libeigen/eigen/-/archive/48f0b66cb2c41a392f88be7485205f71b97b1a16/eigen-48f0b66cb2c41a392f88be7485205f71b97b1a16.tar.gz
+  URL_HASH SHA256=08d6c23c6c935cf4828500df08b2c09316f9a3848a5592f37ba8cf3a96c74641
   # It's not currently (cmake 3.17) possible to shallow clone with a GIT TAG
   # as cmake attempts to git checkout the commit hash after the clone
   # which doesn't work as it's a shallow clone hence a different commit hash.
@@ -94,7 +99,7 @@ set(EIGEN_TEST_NO_EXPLICIT_VECTORIZATION OFF CACHE BOOL "Disable vectorization")
 set(EIGEN_TEST_X87 OFF CACHE BOOL "Disable X87 instructions test")
 set(EIGEN_TEST_32BIT OFF CACHE BOOL "Disable 32-bit instructions test")
 set(EIGEN_TEST_NO_EXPLICIT_ALIGNMENT OFF CACHE BOOL "Disable alignment test")
-set(EIGEN_TEST_NO_EXCEPTIONS OFF CACHE BOOL "Disable alignment test")
+set(EIGEN_TEST_NO_EXCEPTIONS OFF CACHE BOOL "Disable exceptions test")
 set(EIGEN_TEST_SYCL OFF CACHE BOOL "Disable Sycl test")
 set(EIGEN_SYCL_TRISYCL OFF CACHE BOOL "Disable triSYCL test")
 # Make sure only MPL2.0 or more permissively licensed code is included.

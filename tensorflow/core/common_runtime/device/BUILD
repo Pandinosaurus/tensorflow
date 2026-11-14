@@ -1,37 +1,42 @@
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
 load(
     "//tensorflow:tensorflow.bzl",
+    "if_cuda_or_rocm",
     "tf_copts",
     "tf_cuda_library",
 )
-
-# buildifier: disable=same-origin-load
-load("//tensorflow:tensorflow.bzl", "tf_cuda_cc_test")
-
-# buildifier: disable=same-origin-load
-load("//tensorflow:tensorflow.bzl", "filegroup")
-
-# For platform specific build config
 load(
-    "//tensorflow/core/platform:build_config.bzl",
-    "tf_kernel_tests_linkstatic",
-)
-load(
-    "//tensorflow/core/platform:rules_cc.bzl",
-    "cc_library",
+    "//tensorflow:tensorflow.default.bzl",
+    "filegroup",
+    "tf_cuda_cc_test",
 )
 load(
     "//tensorflow/core/platform:build_config_root.bzl",
     "if_static",
     "tf_cuda_tests_tags",
 )
+load(
+    "//tensorflow/core/platform:rules_cc.bzl",
+    "cc_library",
+)
 
 package(
-    default_visibility = [
-        "//tensorflow:internal",
-        "//tensorflow_models:__subpackages__",
-    ],
-    # features = ["-parse_headers"],
-    features = ["-layering_check"],
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
+    default_visibility = ["//tensorflow:internal"],
     licenses = ["notice"],
 )
 
@@ -43,6 +48,8 @@ cc_library(
     ],
     deps = [
         "//tensorflow/core:lib",
+        "//tensorflow/core/platform:types",
+        "@xla//xla/tsl/framework:device_id",
     ] + if_static([
         ":device_id_impl",
     ]),
@@ -50,7 +57,6 @@ cc_library(
 
 cc_library(
     name = "device_id_impl",
-    srcs = ["device_id_manager.cc"],
     hdrs = [
         "device_id.h",
         "device_id_manager.h",
@@ -59,6 +65,7 @@ cc_library(
         "//tensorflow/core:framework",
         "//tensorflow/core:lib",
         "//tensorflow/core:lib_internal",
+        "@xla//xla/tsl/framework:device_id_impl",
     ],
 )
 
@@ -68,7 +75,6 @@ tf_cuda_library(
         "device_id.h",
     ],
     hdrs = [
-        "device_host_allocator.h",
         "device_mem_allocator.h",
     ],
     visibility = ["//visibility:public"],
@@ -78,6 +84,8 @@ tf_cuda_library(
         "//tensorflow/core:lib_internal",
         "//tensorflow/core/framework:allocator",
         "//tensorflow/core/platform:stream_executor",
+        "@xla//xla/stream_executor/integrations:device_mem_allocator",
+        "@xla//xla/tsl/framework:device_id",
     ],
 )
 
@@ -85,11 +93,10 @@ filegroup(
     name = "device_runtime_headers",
     srcs = [
         "device_event_mgr.h",
-        "device_host_allocator.h",
         "device_id.h",
         "device_id_manager.h",
-        "device_id_utils.h",
         "device_mem_allocator.h",
+        "@xla//xla/tsl/framework:device_runtime_headers",
     ],
 )
 
@@ -104,12 +111,13 @@ cc_library(
     copts = tf_copts(),
     visibility = ["//visibility:public"],
     deps = [
-        "//tensorflow/core:framework",
         "//tensorflow/core:framework_internal",
         "//tensorflow/core:lib",
         "//tensorflow/core:lib_internal",
         "//tensorflow/core:protos_all_cc",
         "//tensorflow/core/platform:stream_executor",
+        "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/synchronization",
     ],
 )
 
@@ -118,6 +126,7 @@ cc_library(
     textual_hdrs = [
         "device_event_mgr.h",
     ],
+    deps = ["@com_google_absl//absl/synchronization"],
 )
 
 cc_library(
@@ -128,6 +137,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         "//tensorflow/core:lib",
+        "//tensorflow/core/platform:regexp",
     ],
 )
 
@@ -140,7 +150,6 @@ tf_cuda_cc_test(
     srcs = [
         "device_id_manager_test.cc",
     ],
-    linkstatic = tf_kernel_tests_linkstatic(),
     tags = tf_cuda_tests_tags(),
     deps = [
         ":device_id",
@@ -157,13 +166,13 @@ tf_cuda_cc_test(
         "//tensorflow/core/common_runtime:core_cpu_internal",
         "//tensorflow/core/common_runtime:direct_session_internal",
         "//tensorflow/core/kernels:ops_util",
+        "@com_google_googletest//:gtest",
     ],
 )
 
 tf_cuda_cc_test(
     name = "device_event_mgr_test",
     srcs = ["device_event_mgr_test.cc"],
-    linkstatic = tf_kernel_tests_linkstatic(),
     tags = tf_cuda_tests_tags(),
     deps = [
         ":device_event_mgr",
@@ -176,5 +185,12 @@ tf_cuda_cc_test(
         "//tensorflow/core:test_main",
         "//tensorflow/core:testlib",
         "//tensorflow/core/kernels:cwise_op",
-    ],
+        "@com_google_absl//absl/synchronization",
+        "@xla//xla/tsl/framework:device_id",
+    ] + if_cuda_or_rocm([
+        "@xla//xla/stream_executor/gpu:gpu_init",
+        "//tensorflow/core/common_runtime:dma_helper",
+        "//tensorflow/core/common_runtime/gpu:gpu_runtime",
+        "//tensorflow/core/platform:stream_executor",
+    ]),
 )

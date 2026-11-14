@@ -15,6 +15,7 @@ limitations under the License.
 #ifndef TENSORFLOW_LITE_KERNELS_INTERNAL_REFERENCE_RESIZE_NEAREST_NEIGHBOR_H_
 #define TENSORFLOW_LITE_KERNELS_INTERNAL_REFERENCE_RESIZE_NEAREST_NEIGHBOR_H_
 
+#include <algorithm>
 #include <cmath>
 
 #include "tensorflow/lite/kernels/internal/cppmath.h"
@@ -70,9 +71,11 @@ inline void ResizeNearestNeighbor(
   int32_t output_height = output_size_data[0];
   int32_t output_width = output_size_data[1];
 
-  const int col_offset = input_shape.Dims(3);
-  const int row_offset = input_shape.Dims(2) * col_offset;
-  const int batch_offset = input_shape.Dims(1) * row_offset;
+  const int64_t col_offset = input_shape.Dims(3);
+  const int64_t row_offset =
+      static_cast<int64_t>(input_shape.Dims(2)) * col_offset;
+  const int64_t batch_offset =
+      static_cast<int64_t>(input_shape.Dims(1)) * row_offset;
 
   const T* input_ptr = input_data;
   T* output_ptr = output_data;

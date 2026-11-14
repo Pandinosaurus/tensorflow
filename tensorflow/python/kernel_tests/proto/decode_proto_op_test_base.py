@@ -16,10 +16,6 @@
 """Tests for decode_proto op."""
 
 # Python3 preparedness imports.
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import itertools
 
 from absl.testing import parameterized
@@ -244,11 +240,10 @@ class DecodeProtoOpTestBase(test_base.ProtoOpTestBase, parameterized.TestCase):
     # format being the same for packed and unpacked fields, and reparse the
     # test message using the packed version of the proto.
     packed_batch = [
-        # Note: float_format='.17g' is necessary to ensure preservation of
-        # doubles and floats in text format.
         text_format.Parse(
-            text_format.MessageToString(value, float_format='.17g'),
-            test_example_pb2.PackedTestValue()).SerializeToString()
+            text_format.MessageToString(value),
+            test_example_pb2.PackedTestValue(),
+        ).SerializeToString()
         for value in case.values
     ]
 
@@ -263,12 +258,7 @@ class DecodeProtoOpTestBase(test_base.ProtoOpTestBase, parameterized.TestCase):
 
   @parameterized.named_parameters(*test_base.ProtoOpTestBase.named_parameters())
   def testText(self, case):
-    # Note: float_format='.17g' is necessary to ensure preservation of
-    # doubles and floats in text format.
-    text_batch = [
-        text_format.MessageToString(
-            value, float_format='.17g') for value in case.values
-    ]
+    text_batch = [text_format.MessageToString(value) for value in case.values]
 
     self._runDecodeProtoTests(
         case.fields,
@@ -301,7 +291,7 @@ class DecodeProtoOpTestBase(test_base.ProtoOpTestBase, parameterized.TestCase):
     field_names = ['sizes']
     field_types = [dtypes.int32]
 
-    with self.assertRaisesRegexp(
+    with self.assertRaisesRegex(
         errors.DataLossError, 'Unable to parse binary protobuf'
         '|Failed to consume entire buffer'):
       self.evaluate(
@@ -311,6 +301,25 @@ class DecodeProtoOpTestBase(test_base.ProtoOpTestBase, parameterized.TestCase):
               field_names=field_names,
               output_types=field_types,
               sanitize=sanitize))
+
+  def testUnexpectedType(self):
+    with self.assertRaisesRegex(
+        errors.InvalidArgumentError,
+        'Unexpected output type.*int64 to DT_STRING'):
+      msg = test_example_pb2.TestValue(
+          int64_value_with_default=3
+      ).SerializeToString()
+      msg_type = 'tensorflow.contrib.proto.TestValue'
+      field_names = ['int64_value_with_default']
+      field_types = [dtypes.string]
+      self.evaluate(
+          self._decode_module.decode_proto(
+              msg,
+              message_type=msg_type,
+              field_names=field_names,
+              output_types=field_types,
+          )
+      )
 
   def testOutOfOrderRepeated(self):
     fragments = [

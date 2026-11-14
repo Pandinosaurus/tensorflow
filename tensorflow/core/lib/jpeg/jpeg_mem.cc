@@ -20,15 +20,23 @@ limitations under the License.
 
 #include <setjmp.h>
 #include <string.h>
+
 #include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <functional>
 #include <memory>
-#include <string>
+#include <ostream>
 #include <utility>
 
+#include "absl/log/check.h"
+#include "absl/log/log.h"
+#include "jpeglib.h"  // from @libjpeg_turbo
 #include "tensorflow/core/lib/jpeg/jpeg_handle.h"
 #include "tensorflow/core/platform/dynamic_annotations.h"
+#include "tensorflow/core/platform/jpeg.h"
 #include "tensorflow/core/platform/logging.h"
-#include "tensorflow/core/platform/mem.h"
+#include "tensorflow/core/platform/tstring.h"
 #include "tensorflow/core/platform/types.h"
 
 namespace tensorflow {
@@ -51,7 +59,7 @@ class FewerArgsForCompiler {
  public:
   FewerArgsForCompiler(int datasize, const UncompressFlags& flags,
                        int64_t* nwarn,
-                       std::function<uint8*(int, int, int)> allocate_output)
+                       std::function<uint8_t*(int, int, int)> allocate_output)
       : datasize_(datasize),
         flags_(flags),
         pnwarn_(nwarn),
@@ -65,7 +73,7 @@ class FewerArgsForCompiler {
   const int datasize_;
   const UncompressFlags flags_;
   int64_t* const pnwarn_;
-  std::function<uint8*(int, int, int)> allocate_output_;
+  std::function<uint8_t*(int, int, int)> allocate_output_;
   int height_read_;  // number of scanline lines successfully read
   int height_;
   int stride_;
@@ -78,8 +86,8 @@ bool IsCropWindowValid(const UncompressFlags& flags, int input_image_width,
   // within the original image.
   return flags.crop_width > 0 && flags.crop_height > 0 && flags.crop_x >= 0 &&
          flags.crop_y >= 0 &&
-         flags.crop_y + flags.crop_height <= input_image_height &&
-         flags.crop_x + flags.crop_width <= input_image_width;
+         flags.crop_height <= input_image_height - flags.crop_y &&
+         flags.crop_width <= input_image_width - flags.crop_x;
 }
 
 #ifdef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
@@ -88,13 +96,13 @@ bool IsCropWindowValid(const UncompressFlags& flags, int input_image_width,
 void no_print(j_common_ptr cinfo) {}
 #endif
 
-uint8* UncompressLow(const void* srcdata, FewerArgsForCompiler* argball) {
+uint8_t* UncompressLow(const void* srcdata, FewerArgsForCompiler* argball) {
   // unpack the argball
   const int datasize = argball->datasize_;
   const auto& flags = argball->flags_;
   const int ratio = flags.ratio;
   int components = flags.components;
-  int stride = flags.stride;              // may be 0
+  int stride = flags.stride;                // may be 0
   int64_t* const nwarn = argball->pnwarn_;  // may be NULL
 
   // Can't decode if the ratio is not recognized by libjpeg
@@ -245,8 +253,8 @@ uint8* UncompressLow(const void* srcdata, FewerArgsForCompiler* argball) {
                                         target_output_height, components);
   }
 #else
-  uint8* dstdata = argball->allocate_output_(target_output_width,
-                                             target_output_height, components);
+  uint8_t* dstdata = argball->allocate_output_(
+      target_output_width, target_output_height, components);
 #endif
   if (dstdata == nullptr) {
     jpeg_destroy_decompress(&cinfo);
@@ -370,7 +378,7 @@ uint8* UncompressLow(const void* srcdata, FewerArgsForCompiler* argball) {
     // Start on the last line.
     JSAMPLE* scanlineptr = static_cast<JSAMPLE*>(
         dstdata + static_cast<int64_t>(target_output_height - 1) * stride);
-    const JSAMPLE kOpaque = -1;  // All ones appropriate for JSAMPLE.
+    const JSAMPLE kOpaque = 0xFF;  // All ones appropriate for JSAMPLE.
     const int right_rgb = (target_output_width - 1) * 3;
     const int right_rgba = (target_output_width - 1) * 4;
 
@@ -502,12 +510,12 @@ uint8* UncompressLow(const void* srcdata, FewerArgsForCompiler* argball) {
 //  associated libraries aren't good enough to guarantee that 7
 //  parameters won't get clobbered by the longjmp.  So we help
 //  it out a little.
-uint8* Uncompress(const void* srcdata, int datasize,
-                  const UncompressFlags& flags, int64_t* nwarn,
-                  std::function<uint8*(int, int, int)> allocate_output) {
+uint8_t* Uncompress(const void* srcdata, int datasize,
+                    const UncompressFlags& flags, int64_t* nwarn,
+                    std::function<uint8_t*(int, int, int)> allocate_output) {
   FewerArgsForCompiler argball(datasize, flags, nwarn,
                                std::move(allocate_output));
-  uint8* const dstdata = UncompressLow(srcdata, &argball);
+  uint8_t* const dstdata = UncompressLow(srcdata, &argball);
 
   const float fraction_read =
       argball.height_ == 0
@@ -522,30 +530,50 @@ uint8* Uncompress(const void* srcdata, int datasize,
   // If there was an error in reading the jpeg data,
   // set the unread pixels to black
   if (argball.height_read_ != argball.height_) {
-    const int first_bad_line = argball.height_read_;
-    uint8* start = dstdata + first_bad_line * argball.stride_;
-    const int nbytes = (argball.height_ - first_bad_line) * argball.stride_;
-    memset(static_cast<void*>(start), 0, nbytes);
+    if (argball.height_read_ < 0 || argball.height_read_ > argball.height_ ||
+        argball.stride_ < 0) {
+      return nullptr;
+    }
+    const uint64_t total_bytes = static_cast<uint64_t>(argball.height_) *
+                                 static_cast<uint64_t>(argball.stride_);
+    if (total_bytes > SIZE_MAX) {
+      return nullptr;
+    }
+    const size_t stride = static_cast<size_t>(argball.stride_);
+    const size_t start_offset =
+        static_cast<size_t>(argball.height_read_) * stride;
+    const size_t nbytes =
+        static_cast<size_t>(argball.height_ - argball.height_read_) * stride;
+    memset(static_cast<void*>(dstdata + start_offset), 0, nbytes);
   }
 
   return dstdata;
 }
 
-uint8* Uncompress(const void* srcdata, int datasize,
-                  const UncompressFlags& flags, int* pwidth, int* pheight,
-                  int* pcomponents, int64_t* nwarn) {
-  uint8* buffer = nullptr;
-  uint8* result =
-      Uncompress(srcdata, datasize, flags, nwarn,
-                 [=, &buffer](int width, int height, int components) {
-                   if (pwidth != nullptr) *pwidth = width;
-                   if (pheight != nullptr) *pheight = height;
-                   if (pcomponents != nullptr) *pcomponents = components;
-                   buffer = new uint8[height * width * components];
-                   return buffer;
-                 });
-  if (!result) delete[] buffer;
-  return result;
+uint8_t* Uncompress(const void* srcdata, int datasize,
+                    const UncompressFlags& flags, int* pwidth, int* pheight,
+                    int* pcomponents, int64_t* nwarn) {
+  std::unique_ptr<uint8_t[]> buffer;
+  uint8_t* result = Uncompress(
+      srcdata, datasize, flags, nwarn,
+      [&buffer, &flags, pwidth, pheight, pcomponents](int width, int height,
+                                                      int components) {
+        if (pwidth != nullptr) *pwidth = width;
+        if (pheight != nullptr) *pheight = height;
+        if (pcomponents != nullptr) *pcomponents = components;
+
+        const int64_t min_stride = static_cast<int64_t>(width) * components;
+        const int64_t row_stride =
+            std::max(min_stride, static_cast<int64_t>(flags.stride));
+        const int64_t total_size = static_cast<int64_t>(height) * row_stride;
+        if (total_size < 0 || total_size >= (1LL << 29)) {
+          return static_cast<uint8_t*>(nullptr);
+        }
+        buffer.reset(new uint8_t[total_size]);
+        return buffer.get();
+      });
+  if (!result) return nullptr;
+  return buffer.release();
 }
 
 // ----------------------------------------------------------------------------
@@ -592,7 +620,7 @@ bool GetImageInfo(const void* srcdata, int datasize, int* width, int* height,
 // Compression
 
 namespace {
-bool CompressInternal(const uint8* srcdata, int width, int height,
+bool CompressInternal(const uint8_t* srcdata, int width, int height,
                       const CompressFlags& flags, tstring* output) {
   if (output == nullptr) {
     LOG(ERROR) << "Output buffer is null: ";
@@ -620,6 +648,14 @@ bool CompressInternal(const uint8* srcdata, int width, int height,
     in_stride = width * (static_cast<int>(flags.format) & 0xff);
   } else if (in_stride < width * components) {
     LOG(ERROR) << "Incompatible input stride";
+    return false;
+  }
+
+  constexpr char kXmpNamespace[] = "http://ns.adobe.com/xap/1.0/";
+  constexpr size_t kXmpNamespaceLen = sizeof(kXmpNamespace) - 1;
+  constexpr size_t kMaxApp1Payload = 65533;
+  if (flags.xmp_metadata.size() > kMaxApp1Payload - kXmpNamespaceLen - 1) {
+    LOG(ERROR) << "XMP metadata too large: " << flags.xmp_metadata.size();
     return false;
   }
 
@@ -704,24 +740,22 @@ bool CompressInternal(const uint8* srcdata, int width, int height,
   if (!flags.xmp_metadata.empty()) {
     // XMP metadata is embedded in the APP1 tag of JPEG and requires this
     // namespace header string (null-terminated)
-    const string name_space = "http://ns.adobe.com/xap/1.0/";
-    const int name_space_length = name_space.size();
-    const int metadata_length = flags.xmp_metadata.size();
-    const int packet_length = metadata_length + name_space_length + 1;
+    const size_t metadata_length = flags.xmp_metadata.size();
+    const size_t packet_length = metadata_length + kXmpNamespaceLen + 1;
     std::unique_ptr<JOCTET[]> joctet_packet(new JOCTET[packet_length]);
 
-    for (int i = 0; i < name_space_length; i++) {
+    for (size_t i = 0; i < kXmpNamespaceLen; i++) {
       // Conversion char --> JOCTET
-      joctet_packet[i] = name_space[i];
+      joctet_packet[i] = kXmpNamespace[i];
     }
-    joctet_packet[name_space_length] = 0;  // null-terminate namespace string
+    joctet_packet[kXmpNamespaceLen] = 0;  // null-terminate namespace string
 
-    for (int i = 0; i < metadata_length; i++) {
+    for (size_t i = 0; i < metadata_length; i++) {
       // Conversion char --> JOCTET
-      joctet_packet[i + name_space_length + 1] = flags.xmp_metadata[i];
+      joctet_packet[i + kXmpNamespaceLen + 1] = flags.xmp_metadata[i];
     }
     jpeg_write_marker(&cinfo, JPEG_APP0 + 1, joctet_packet.get(),
-                      packet_length);
+                      static_cast<unsigned int>(packet_length));
   }
 
   // JSAMPLEs per row in image_buffer
@@ -729,8 +763,9 @@ bool CompressInternal(const uint8* srcdata, int width, int height,
       new JSAMPLE[width * cinfo.input_components]);
   while (cinfo.next_scanline < cinfo.image_height) {
     JSAMPROW row_pointer[1];  // pointer to JSAMPLE row[s]
-    const uint8* r = &srcdata[cinfo.next_scanline * in_stride];
-    uint8* p = static_cast<uint8*>(row_temp.get());
+    const uint8_t* r =
+        &srcdata[cinfo.next_scanline * static_cast<int64_t>(in_stride)];
+    uint8_t* p = static_cast<uint8_t*>(row_temp.get());
     switch (flags.format) {
       case FORMAT_RGBA: {
         for (int i = 0; i < width; ++i, p += 3, r += 4) {
@@ -770,14 +805,14 @@ bool CompressInternal(const uint8* srcdata, int width, int height,
 
 bool Compress(const void* srcdata, int width, int height,
               const CompressFlags& flags, tstring* output) {
-  return CompressInternal(static_cast<const uint8*>(srcdata), width, height,
+  return CompressInternal(static_cast<const uint8_t*>(srcdata), width, height,
                           flags, output);
 }
 
 tstring Compress(const void* srcdata, int width, int height,
                  const CompressFlags& flags) {
   tstring temp;
-  CompressInternal(static_cast<const uint8*>(srcdata), width, height, flags,
+  CompressInternal(static_cast<const uint8_t*>(srcdata), width, height, flags,
                    &temp);
   // If CompressInternal fails, temp will be empty.
   return temp;

@@ -13,13 +13,23 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include <locale>
+#include <algorithm>
+#include <cstdint>
+#include <limits>
 #include <string>
+#include <vector>
 
-#include "absl/strings/ascii.h"
+#include "absl/log/check.h"
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
 #include "tensorflow/core/framework/op_kernel.h"
+#include "tensorflow/core/framework/op_requires.h"
+#include "tensorflow/core/framework/tensor.h"
+#include "tensorflow/core/framework/tensor_shape.h"
+#include "tensorflow/core/framework/types.h"
 #include "tensorflow/core/platform/errors.h"
+#include "tensorflow/core/platform/tstring.h"
 
 namespace tensorflow {
 namespace text {
@@ -47,24 +57,39 @@ class StringNGramsOp : public tensorflow::OpKernel {
                     ngram_width - 1);
   }
 
-  int get_num_ngrams(const int length, const int ngram_width) const {
+  absl::StatusOr<int> get_num_ngrams(const int length,
+                                     const int ngram_width) const {
+    int64_t limit = std::numeric_limits<int32_t>::max();
     int pad_width = get_pad_width(ngram_width);
+    if (pad_width > limit / 2 - length) {
+      return absl::InvalidArgumentError(absl::StrCat(
+          "Pad width could lead to integer overflow, got pad_width = ",
+          pad_width));
+    }
     return std::max(0, ((length + 2 * pad_width) - ngram_width) + 1);
   }
 
   void Compute(tensorflow::OpKernelContext* context) override {
     for (int ngram_width : ngram_widths_) {
-      OP_REQUIRES(
-          context, ngram_width > 0,
-          errors::InvalidArgument("ngram_widths must contain positive values"));
+      OP_REQUIRES(context, ngram_width > 0,
+                  absl::InvalidArgumentError(
+                      "ngram_widths must contain positive values"));
     }
 
     const tensorflow::Tensor* data;
     OP_REQUIRES_OK(context, context->input("data", &data));
+    OP_REQUIRES(context, TensorShapeUtils::IsVector(data->shape()),
+                absl::InvalidArgumentError(
+                    absl::StrCat("data must be a vector, got shape: ",
+                                 data->shape().DebugString())));
     const auto& input_data = data->flat<tstring>().data();
 
     const tensorflow::Tensor* splits;
     OP_REQUIRES_OK(context, context->input("data_splits", &splits));
+    OP_REQUIRES(context, TensorShapeUtils::IsVector(splits->shape()),
+                absl::InvalidArgumentError(
+                    absl::StrCat("data_splits must be a vector, got shape: ",
+                                 splits->shape().DebugString())));
     const auto& splits_vec = splits->flat<SPLITS_TYPE>();
 
     // Validate that the splits are valid indices into data, only if there are
@@ -72,10 +97,10 @@ class StringNGramsOp : public tensorflow::OpKernel {
     const int input_data_size = data->flat<tstring>().size();
     const int splits_vec_size = splits_vec.size();
     if (splits_vec_size > 0) {
-      int prev_split = splits_vec(0);
+      SPLITS_TYPE prev_split = splits_vec(0);
       OP_REQUIRES(context, prev_split == 0,
-                  errors::InvalidArgument("First split value must be 0, got ",
-                                          prev_split));
+                  absl::InvalidArgumentError(absl::StrCat(
+                      "First split value must be 0, got ", prev_split)));
       for (int i = 1; i < splits_vec_size; ++i) {
         bool valid_splits = splits_vec(i) >= prev_split;
         valid_splits = valid_splits && (splits_vec(i) <= input_data_size);
@@ -86,9 +111,9 @@ class StringNGramsOp : public tensorflow::OpKernel {
         prev_split = splits_vec(i);
       }
       OP_REQUIRES(context, prev_split == input_data_size,
-                  errors::InvalidArgument(
+                  absl::InvalidArgumentError(absl::StrCat(
                       "Last split value must be data size. Expected ",
-                      input_data_size, ", got ", prev_split));
+                      input_data_size, ", got ", prev_split)));
     }
 
     int num_batch_items = splits_vec.size() - 1;
@@ -111,13 +136,24 @@ class StringNGramsOp : public tensorflow::OpKernel {
     ngrams_splits_data[0] = 0;
     for (int i = 1; i <= num_batch_items; ++i) {
       int length = splits_vec(i) - splits_vec(i - 1);
-      int num_ngrams = 0;
-      for (int ngram_width : ngram_widths_)
-        num_ngrams += get_num_ngrams(length, ngram_width);
+      int64_t num_ngrams = 0;
+      for (int ngram_width : ngram_widths_) {
+        auto ngrams_or = get_num_ngrams(length, ngram_width);
+        OP_REQUIRES_OK(context, ngrams_or.status());
+        num_ngrams += ngrams_or.value();
+      }
       if (preserve_short_ && length > 0 && num_ngrams == 0) {
         num_ngrams = 1;
       }
-      ngrams_splits_data[i] = ngrams_splits_data[i - 1] + num_ngrams;
+      OP_REQUIRES(
+          context,
+          num_ngrams <= std::numeric_limits<SPLITS_TYPE>::max() -
+                            static_cast<int64_t>(ngrams_splits_data[i - 1]),
+          absl::InvalidArgumentError(absl::StrCat(
+              "Up to batch item ", i,
+              ", the number of ngrams exceeds maximum for SPLITS_TYPE")));
+      ngrams_splits_data[i] =
+          ngrams_splits_data[i - 1] + static_cast<SPLITS_TYPE>(num_ngrams);
     }
 
     tensorflow::Tensor* ngrams;
@@ -129,11 +165,13 @@ class StringNGramsOp : public tensorflow::OpKernel {
 
     for (int i = 0; i < num_batch_items; ++i) {
       auto data_start = &input_data[splits_vec(i)];
-      int output_start_idx = ngrams_splits_data[i];
+      int64_t output_start_idx = ngrams_splits_data[i];
       for (int ngram_width : ngram_widths_) {
         auto output_start = &ngrams_data[output_start_idx];
         int length = splits_vec(i + 1) - splits_vec(i);
-        int num_ngrams = get_num_ngrams(length, ngram_width);
+        auto ngrams_or = get_num_ngrams(length, ngram_width);
+        OP_REQUIRES_OK(context, ngrams_or.status());
+        int num_ngrams = ngrams_or.value();
         CreateNgrams(data_start, output_start, num_ngrams, ngram_width);
         output_start_idx += num_ngrams;
       }
@@ -152,6 +190,16 @@ class StringNGramsOp : public tensorflow::OpKernel {
         // We don't have to worry about dynamic padding sizes here: if padding
         // was dynamic, every sequence would have had sufficient padding to
         // generate at least one ngram.
+
+        // If reached here, pad_width should be > 0, pad_width_ = -1,
+        // which indicates max(ngram_widths) - 1 cannot be used here since
+        // ngram_width is not known.
+        OP_REQUIRES(context, pad_width_ >= 0,
+                    absl::InvalidArgumentError(
+                        absl::StrCat("Pad width should be >= 0 when "
+                                     "preserve_short_sequences is True and "
+                                     "ngram_widths are not provided, got ",
+                                     pad_width_)));
         int ngram_width = data_length + 2 * pad_width_;
         auto output_start = &ngrams_data[output_start_idx];
         int num_ngrams = 1;
@@ -226,9 +274,9 @@ class StringNGramsOp : public tensorflow::OpKernel {
     }
   }
 
-  string separator_;
-  string left_pad_;
-  string right_pad_;
+  std::string separator_;
+  std::string left_pad_;
+  std::string right_pad_;
   bool use_pad_;
   bool extend_pad_;
   bool preserve_short_;
@@ -240,12 +288,12 @@ class StringNGramsOp : public tensorflow::OpKernel {
 }  // namespace
 REGISTER_KERNEL_BUILDER(Name("StringNGrams")
                             .Device(tensorflow::DEVICE_CPU)
-                            .TypeConstraint<int32>("Tsplits"),
-                        StringNGramsOp<int32>);
+                            .TypeConstraint<int32_t>("Tsplits"),
+                        StringNGramsOp<int32_t>);
 REGISTER_KERNEL_BUILDER(Name("StringNGrams")
                             .Device(tensorflow::DEVICE_CPU)
                             .TypeConstraint<int64_t>("Tsplits"),
-                        StringNGramsOp<int64>);
+                        StringNGramsOp<int64_t>);
 
 }  // namespace text
 }  // namespace tensorflow

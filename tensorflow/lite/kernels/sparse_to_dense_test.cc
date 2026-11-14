@@ -18,6 +18,7 @@ limitations under the License.
 #include <vector>
 
 #include <gtest/gtest.h>
+#include "tensorflow/lite/c/c_api_types.h"
 #include "tensorflow/lite/kernels/test_util.h"
 #include "tensorflow/lite/schema/schema_generated.h"
 
@@ -96,9 +97,11 @@ TEST_P(SparseToDenseOpModelTest, ZeroDimensionTest) {
   SparseToDenseOpModel<float> m({1}, {1}, {1}, 0, TensorType_INT32,
                                 TensorType_FLOAT32, {5}, GetParam());
   m.PopulateTensor<int32_t>(m.indices(), {3});
-  m.PopulateTensor<int32_t>(m.output_shape(), {5});
+  if (GetParam() != TestType::kConstant) {
+    m.PopulateTensor<int32_t>(m.output_shape(), {5});
+  }
   m.PopulateTensor<float>(m.values(), {7});
-  m.Invoke();
+  ASSERT_EQ(m.Invoke(), kTfLiteOk);
   ASSERT_EQ(m.IsDynamicOutput(), GetParam() == TestType::kDynamic);
   EXPECT_THAT(m.GetOutput(), ElementsAreArray({0, 0, 0, 7, 0}));
   EXPECT_THAT(m.GetOutputShape(), ElementsAreArray({5}));
@@ -108,9 +111,11 @@ TEST_P(SparseToDenseOpModelTest, OneDimensionTest) {
   SparseToDenseOpModel<float> m({3}, {1}, {3}, 0, TensorType_INT32,
                                 TensorType_FLOAT32, {7}, GetParam());
   m.PopulateTensor<int32_t>(m.indices(), {1, 3, 5});
-  m.PopulateTensor<int32_t>(m.output_shape(), {7});
+  if (GetParam() != TestType::kConstant) {
+    m.PopulateTensor<int32_t>(m.output_shape(), {7});
+  }
   m.PopulateTensor<float>(m.values(), {2, 4, 6});
-  m.Invoke();
+  ASSERT_EQ(m.Invoke(), kTfLiteOk);
   ASSERT_EQ(m.IsDynamicOutput(), GetParam() == TestType::kDynamic);
   EXPECT_THAT(m.GetOutput(), ElementsAreArray({0, 2, 0, 4, 0, 6, 0}));
   EXPECT_THAT(m.GetOutputShape(), ElementsAreArray({7}));
@@ -120,9 +125,11 @@ TEST_P(SparseToDenseOpModelTest, TwoDimensionsTest) {
   SparseToDenseOpModel<float> m({3, 3}, {3}, {3}, 0, TensorType_INT32,
                                 TensorType_FLOAT32, {3, 3, 3}, GetParam());
   m.PopulateTensor<int32_t>(m.indices(), {0, 0, 0, 1, 2, 1, 2, 0, 1});
-  m.PopulateTensor<int32_t>(m.output_shape(), {3, 3, 3});
+  if (GetParam() != TestType::kConstant) {
+    m.PopulateTensor<int32_t>(m.output_shape(), {3, 3, 3});
+  }
   m.PopulateTensor<float>(m.values(), {2, 4, 6});
-  m.Invoke();
+  ASSERT_EQ(m.Invoke(), kTfLiteOk);
   ASSERT_EQ(m.IsDynamicOutput(), GetParam() == TestType::kDynamic);
   EXPECT_THAT(m.GetOutput(),
               ElementsAreArray({2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -134,9 +141,11 @@ TEST_P(SparseToDenseOpModelTest, Int64IndexTest) {
   SparseToDenseOpModel<float> m({3, 3}, {3}, {3}, -1, TensorType_INT64,
                                 TensorType_FLOAT32, {3, 3, 3}, GetParam());
   m.PopulateTensor<int64_t>(m.indices(), {0, 0, 0, 1, 2, 1, 2, 0, 1});
-  m.PopulateTensor<int32_t>(m.output_shape(), {3, 3, 3});
+  if (GetParam() != TestType::kConstant) {
+    m.PopulateTensor<int32_t>(m.output_shape(), {3, 3, 3});
+  }
   m.PopulateTensor<float>(m.values(), {2, 4, 6});
-  m.Invoke();
+  ASSERT_EQ(m.Invoke(), kTfLiteOk);
   ASSERT_EQ(m.IsDynamicOutput(), GetParam() == TestType::kDynamic);
   EXPECT_THAT(
       m.GetOutput(),
@@ -149,9 +158,11 @@ TEST_P(SparseToDenseOpModelTest, DefaultValueTest) {
   SparseToDenseOpModel<float> m({3, 3}, {3}, {3}, -1, TensorType_INT32,
                                 TensorType_FLOAT32, {3, 3, 3}, GetParam());
   m.PopulateTensor<int32_t>(m.indices(), {0, 0, 0, 1, 2, 1, 2, 0, 1});
-  m.PopulateTensor<int32_t>(m.output_shape(), {3, 3, 3});
+  if (GetParam() != TestType::kConstant) {
+    m.PopulateTensor<int32_t>(m.output_shape(), {3, 3, 3});
+  }
   m.PopulateTensor<float>(m.values(), {2, 4, 6});
-  m.Invoke();
+  ASSERT_EQ(m.Invoke(), kTfLiteOk);
   ASSERT_EQ(m.IsDynamicOutput(), GetParam() == TestType::kDynamic);
   EXPECT_THAT(
       m.GetOutput(),
@@ -164,9 +175,11 @@ TEST_P(SparseToDenseOpModelTest, Int32ValueTest) {
   SparseToDenseOpModel<int32_t> m({3, 3}, {3}, {3}, -1, TensorType_INT32,
                                   TensorType_INT32, {3, 3, 3}, GetParam());
   m.PopulateTensor<int32_t>(m.indices(), {0, 0, 0, 1, 2, 1, 2, 0, 1});
-  m.PopulateTensor<int32_t>(m.output_shape(), {3, 3, 3});
+  if (GetParam() != TestType::kConstant) {
+    m.PopulateTensor<int32_t>(m.output_shape(), {3, 3, 3});
+  }
   m.PopulateTensor<int32_t>(m.values(), {2, 4, 6});
-  m.Invoke();
+  ASSERT_EQ(m.Invoke(), kTfLiteOk);
   ASSERT_EQ(m.IsDynamicOutput(), GetParam() == TestType::kDynamic);
   EXPECT_THAT(
       m.GetOutput(),
@@ -179,9 +192,11 @@ TEST_P(SparseToDenseOpModelTest, Int64ValueTest) {
   SparseToDenseOpModel<int64_t> m({3, 3}, {3}, {3}, -1, TensorType_INT32,
                                   TensorType_INT64, {3, 3, 3}, GetParam());
   m.PopulateTensor<int32_t>(m.indices(), {0, 0, 0, 1, 2, 1, 2, 0, 1});
-  m.PopulateTensor<int32_t>(m.output_shape(), {3, 3, 3});
+  if (GetParam() != TestType::kConstant) {
+    m.PopulateTensor<int32_t>(m.output_shape(), {3, 3, 3});
+  }
   m.PopulateTensor<int64_t>(m.values(), {2, 4, 6});
-  m.Invoke();
+  ASSERT_EQ(m.Invoke(), kTfLiteOk);
   ASSERT_EQ(m.IsDynamicOutput(), GetParam() == TestType::kDynamic);
   EXPECT_THAT(
       m.GetOutput(),
@@ -194,9 +209,11 @@ TEST_P(SparseToDenseOpModelTest, Int8ValueTest) {
   SparseToDenseOpModel<int8_t> m({3, 3}, {3}, {3}, -1, TensorType_INT32,
                                  TensorType_INT8, {3, 3, 3}, GetParam());
   m.PopulateTensor<int32_t>(m.indices(), {0, 0, 0, 1, 2, 1, 2, 0, 1});
-  m.PopulateTensor<int32_t>(m.output_shape(), {3, 3, 3});
+  if (GetParam() != TestType::kConstant) {
+    m.PopulateTensor<int32_t>(m.output_shape(), {3, 3, 3});
+  }
   m.PopulateTensor<int8_t>(m.values(), {2, 4, 6});
-  m.Invoke();
+  ASSERT_EQ(m.Invoke(), kTfLiteOk);
   ASSERT_EQ(m.IsDynamicOutput(), GetParam() == TestType::kDynamic);
   EXPECT_THAT(
       m.GetOutput(),
@@ -209,13 +226,64 @@ TEST_P(SparseToDenseOpModelTest, UInt8ValueTest) {
   SparseToDenseOpModel<uint8_t> m({3, 3}, {3}, {3}, 1, TensorType_INT32,
                                   TensorType_UINT8, {3, 3, 3}, GetParam());
   m.PopulateTensor<int32_t>(m.indices(), {0, 0, 0, 1, 2, 1, 2, 0, 1});
-  m.PopulateTensor<int32_t>(m.output_shape(), {3, 3, 3});
+  if (GetParam() != TestType::kConstant) {
+    m.PopulateTensor<int32_t>(m.output_shape(), {3, 3, 3});
+  }
   m.PopulateTensor<uint8_t>(m.values(), {2, 4, 6});
-  m.Invoke();
+  ASSERT_EQ(m.Invoke(), kTfLiteOk);
   ASSERT_EQ(m.IsDynamicOutput(), GetParam() == TestType::kDynamic);
   EXPECT_THAT(m.GetOutput(),
               ElementsAreArray({2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
                                 1, 1, 4, 1, 1, 6, 1, 1, 1, 1, 1, 1, 1}));
+  EXPECT_THAT(m.GetOutputShape(), ElementsAreArray({3, 3, 3}));
+}
+
+TEST_P(SparseToDenseOpModelTest, OutOfBoundsIndexTest) {
+  SparseToDenseOpModel<float> m({3, 3}, {3}, {3}, 0, TensorType_INT32,
+                                TensorType_FLOAT32, {3, 3, 3}, GetParam());
+  m.PopulateTensor<int32_t>(m.indices(), {0, 0, 0, 1, 5, 1, 2, 0, 1});
+  if (GetParam() != TestType::kConstant) {
+    m.PopulateTensor<int32_t>(m.output_shape(), {3, 3, 3});
+  }
+  m.PopulateTensor<float>(m.values(), {2, 4, 6});
+  ASSERT_EQ(m.Invoke(), kTfLiteError);
+}
+
+TEST_P(SparseToDenseOpModelTest, NegativeIndexTest) {
+  SparseToDenseOpModel<float> m({3, 3}, {3}, {3}, 0, TensorType_INT32,
+                                TensorType_FLOAT32, {3, 3, 3}, GetParam());
+  m.PopulateTensor<int32_t>(m.indices(), {0, 0, 0, 1, -1, 1, 2, 0, 1});
+  if (GetParam() != TestType::kConstant) {
+    m.PopulateTensor<int32_t>(m.output_shape(), {3, 3, 3});
+  }
+  m.PopulateTensor<float>(m.values(), {2, 4, 6});
+  ASSERT_EQ(m.Invoke(), kTfLiteError);
+}
+
+TEST_P(SparseToDenseOpModelTest, ScalarValueOutOfBoundsIndexTest) {
+  SparseToDenseOpModel<float> m({3, 3}, {3}, {}, 0, TensorType_INT32,
+                                TensorType_FLOAT32, {3, 3, 3}, GetParam());
+  m.PopulateTensor<int32_t>(m.indices(), {0, 0, 0, 1, 5, 1, 2, 0, 1});
+  if (GetParam() != TestType::kConstant) {
+    m.PopulateTensor<int32_t>(m.output_shape(), {3, 3, 3});
+  }
+  m.PopulateTensor<float>(m.values(), {2});
+  ASSERT_EQ(m.Invoke(), kTfLiteError);
+}
+
+TEST_P(SparseToDenseOpModelTest, ScalarValueSuccessTest) {
+  SparseToDenseOpModel<float> m({3, 3}, {3}, {}, 0, TensorType_INT32,
+                                TensorType_FLOAT32, {3, 3, 3}, GetParam());
+  m.PopulateTensor<int32_t>(m.indices(), {0, 0, 0, 1, 2, 1, 2, 0, 1});
+  if (GetParam() != TestType::kConstant) {
+    m.PopulateTensor<int32_t>(m.output_shape(), {3, 3, 3});
+  }
+  m.PopulateTensor<float>(m.values(), {5});
+  ASSERT_EQ(m.Invoke(), kTfLiteOk);
+  ASSERT_EQ(m.IsDynamicOutput(), GetParam() == TestType::kDynamic);
+  EXPECT_THAT(m.GetOutput(),
+              ElementsAreArray({5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                                0, 0, 5, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0}));
   EXPECT_THAT(m.GetOutputShape(), ElementsAreArray({3, 3, 3}));
 }
 

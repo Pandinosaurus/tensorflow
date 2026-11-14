@@ -19,17 +19,16 @@ limitations under the License.
 #include <random>
 
 #include <gtest/gtest.h>
+#include "tensorflow/lite/delegates/xnnpack/fingerprint_test_helpers.h"
 #include "tensorflow/lite/delegates/xnnpack/fully_connected_tester.h"
 #include "tensorflow/lite/delegates/xnnpack/xnnpack_delegate.h"
 
 namespace tflite {
 namespace xnnpack {
 
-TEST(FullyConnected, 1D) {
-  std::unique_ptr<TfLiteDelegate, decltype(&TfLiteXNNPackDelegateDelete)>
-      xnnpack_delegate(TfLiteXNNPackDelegateCreate(nullptr),
-                       TfLiteXNNPackDelegateDelete);
+struct FullyConnectedTest : public DelegateTest {};
 
+TEST_F(FullyConnectedTest, 1D) {
   std::random_device random_device;
   auto rng = std::mt19937(random_device());
   auto channels_rng =
@@ -37,18 +36,17 @@ TEST(FullyConnected, 1D) {
   const auto input_channels = channels_rng();
   const auto output_channels = channels_rng();
 
-  FullyConnectedTester()
-      .InputShape({input_channels})
+  FullyConnectedTester tester;
+  tester.InputShape({input_channels})
       .InputChannels(input_channels)
       .OutputChannels(output_channels)
-      .Test(xnnpack_delegate.get());
+      .ReuseGeneratedModel(true);
+  tester.Test(xnnpack_delegate.get());
+  // Second run to test cache lookup runs.
+  tester.Test(xnnpack_delegate.get());
 }
 
-TEST(FullyConnected, 1DKeepDims) {
-  std::unique_ptr<TfLiteDelegate, decltype(&TfLiteXNNPackDelegateDelete)>
-      xnnpack_delegate(TfLiteXNNPackDelegateCreate(nullptr),
-                       TfLiteXNNPackDelegateDelete);
-
+TEST_F(FullyConnectedTest, 1DKeepDims) {
   std::random_device random_device;
   auto rng = std::mt19937(random_device());
   auto channels_rng =
@@ -56,19 +54,18 @@ TEST(FullyConnected, 1DKeepDims) {
   const auto input_channels = channels_rng();
   const auto output_channels = channels_rng();
 
-  FullyConnectedTester()
-      .InputShape({input_channels})
+  FullyConnectedTester tester;
+  tester.InputShape({input_channels})
       .InputChannels(input_channels)
       .OutputChannels(output_channels)
       .KeepDims(true)
-      .Test(xnnpack_delegate.get());
+      .ReuseGeneratedModel(true);
+  tester.Test(xnnpack_delegate.get());
+  // Second run to test cache lookup runs.
+  tester.Test(xnnpack_delegate.get());
 }
 
-TEST(FullyConnected, 2D) {
-  std::unique_ptr<TfLiteDelegate, decltype(&TfLiteXNNPackDelegateDelete)>
-      xnnpack_delegate(TfLiteXNNPackDelegateCreate(nullptr),
-                       TfLiteXNNPackDelegateDelete);
-
+TEST_F(FullyConnectedTest, 2D) {
   std::random_device random_device;
   auto rng = std::mt19937(random_device());
   auto batch_rng =
@@ -79,18 +76,17 @@ TEST(FullyConnected, 2D) {
   const auto input_channels = channels_rng();
   const auto output_channels = channels_rng();
 
-  FullyConnectedTester()
-      .InputShape({batch, input_channels})
+  FullyConnectedTester tester;
+  tester.InputShape({batch, input_channels})
       .InputChannels(input_channels)
       .OutputChannels(output_channels)
-      .Test(xnnpack_delegate.get());
+      .ReuseGeneratedModel(true);
+  tester.Test(xnnpack_delegate.get());
+  // Second run to test cache lookup runs.
+  tester.Test(xnnpack_delegate.get());
 }
 
-TEST(FullyConnected, 2DKeepDims) {
-  std::unique_ptr<TfLiteDelegate, decltype(&TfLiteXNNPackDelegateDelete)>
-      xnnpack_delegate(TfLiteXNNPackDelegateCreate(nullptr),
-                       TfLiteXNNPackDelegateDelete);
-
+TEST_F(FullyConnectedTest, 2DKeepDims) {
   std::random_device random_device;
   auto rng = std::mt19937(random_device());
   auto batch_rng =
@@ -101,19 +97,18 @@ TEST(FullyConnected, 2DKeepDims) {
   const auto input_channels = channels_rng();
   const auto output_channels = channels_rng();
 
-  FullyConnectedTester()
-      .InputShape({batch, input_channels})
+  FullyConnectedTester tester;
+  tester.InputShape({batch, input_channels})
       .InputChannels(input_channels)
       .OutputChannels(output_channels)
       .KeepDims(true)
-      .Test(xnnpack_delegate.get());
+      .ReuseGeneratedModel(true);
+  tester.Test(xnnpack_delegate.get());
+  // Second run to test cache lookup runs.
+  tester.Test(xnnpack_delegate.get());
 }
 
-TEST(FullyConnected, 3D) {
-  std::unique_ptr<TfLiteDelegate, decltype(&TfLiteXNNPackDelegateDelete)>
-      xnnpack_delegate(TfLiteXNNPackDelegateCreate(nullptr),
-                       TfLiteXNNPackDelegateDelete);
-
+TEST_F(FullyConnectedTest, 3D) {
   std::random_device random_device;
   auto rng = std::mt19937(random_device());
   auto shape_rng =
@@ -125,18 +120,17 @@ TEST(FullyConnected, 3D) {
   const auto input_channels = channels_rng();
   const auto output_channels = channels_rng();
 
-  FullyConnectedTester()
-      .InputShape({batch, width, input_channels})
+  FullyConnectedTester tester;
+  tester.InputShape({batch, width, input_channels})
       .InputChannels(input_channels)
       .OutputChannels(output_channels)
-      .Test(xnnpack_delegate.get());
+      .ReuseGeneratedModel(true);
+  tester.Test(xnnpack_delegate.get());
+  // Second run to test cache lookup runs.
+  tester.Test(xnnpack_delegate.get());
 }
 
-TEST(FullyConnected, 3DReshape) {
-  std::unique_ptr<TfLiteDelegate, decltype(&TfLiteXNNPackDelegateDelete)>
-      xnnpack_delegate(TfLiteXNNPackDelegateCreate(nullptr),
-                       TfLiteXNNPackDelegateDelete);
-
+TEST_F(FullyConnectedTest, 3DReshape) {
   std::random_device random_device;
   auto rng = std::mt19937(random_device());
   auto shape_rng =
@@ -148,18 +142,17 @@ TEST(FullyConnected, 3DReshape) {
   const auto input_channels = channels_rng();
   const auto output_channels = channels_rng();
 
-  FullyConnectedTester()
-      .InputShape({batch, width, input_channels})
+  FullyConnectedTester tester;
+  tester.InputShape({batch, width, input_channels})
       .InputChannels(width * input_channels)
       .OutputChannels(output_channels)
-      .Test(xnnpack_delegate.get());
+      .ReuseGeneratedModel(true);
+  tester.Test(xnnpack_delegate.get());
+  // Second run to test cache lookup runs.
+  tester.Test(xnnpack_delegate.get());
 }
 
-TEST(FullyConnected, 3DKeepDims) {
-  std::unique_ptr<TfLiteDelegate, decltype(&TfLiteXNNPackDelegateDelete)>
-      xnnpack_delegate(TfLiteXNNPackDelegateCreate(nullptr),
-                       TfLiteXNNPackDelegateDelete);
-
+TEST_F(FullyConnectedTest, 3DKeepDims) {
   std::random_device random_device;
   auto rng = std::mt19937(random_device());
   auto shape_rng =
@@ -171,19 +164,18 @@ TEST(FullyConnected, 3DKeepDims) {
   const auto input_channels = channels_rng();
   const auto output_channels = channels_rng();
 
-  FullyConnectedTester()
-      .InputShape({batch, width, input_channels})
+  FullyConnectedTester tester;
+  tester.InputShape({batch, width, input_channels})
       .InputChannels(input_channels)
       .OutputChannels(output_channels)
       .KeepDims(true)
-      .Test(xnnpack_delegate.get());
+      .ReuseGeneratedModel(true);
+  tester.Test(xnnpack_delegate.get());
+  // Second run to test cache lookup runs.
+  tester.Test(xnnpack_delegate.get());
 }
 
-TEST(FullyConnected, 4D) {
-  std::unique_ptr<TfLiteDelegate, decltype(&TfLiteXNNPackDelegateDelete)>
-      xnnpack_delegate(TfLiteXNNPackDelegateCreate(nullptr),
-                       TfLiteXNNPackDelegateDelete);
-
+TEST_F(FullyConnectedTest, 4D) {
   std::random_device random_device;
   auto rng = std::mt19937(random_device());
   auto shape_rng =
@@ -196,18 +188,17 @@ TEST(FullyConnected, 4D) {
   const auto input_channels = channels_rng();
   const auto output_channels = channels_rng();
 
-  FullyConnectedTester()
-      .InputShape({batch, height, width, input_channels})
+  FullyConnectedTester tester;
+  tester.InputShape({batch, height, width, input_channels})
       .InputChannels(input_channels)
       .OutputChannels(output_channels)
-      .Test(xnnpack_delegate.get());
+      .ReuseGeneratedModel(true);
+  tester.Test(xnnpack_delegate.get());
+  // Second run to test cache lookup runs.
+  tester.Test(xnnpack_delegate.get());
 }
 
-TEST(FullyConnected, 4DKeepDims) {
-  std::unique_ptr<TfLiteDelegate, decltype(&TfLiteXNNPackDelegateDelete)>
-      xnnpack_delegate(TfLiteXNNPackDelegateCreate(nullptr),
-                       TfLiteXNNPackDelegateDelete);
-
+TEST_F(FullyConnectedTest, 4DKeepDims) {
   std::random_device random_device;
   auto rng = std::mt19937(random_device());
   auto shape_rng =
@@ -220,19 +211,18 @@ TEST(FullyConnected, 4DKeepDims) {
   const auto input_channels = channels_rng();
   const auto output_channels = channels_rng();
 
-  FullyConnectedTester()
-      .InputShape({batch, height, width, input_channels})
+  FullyConnectedTester tester;
+  tester.InputShape({batch, height, width, input_channels})
       .InputChannels(input_channels)
       .OutputChannels(output_channels)
       .KeepDims(true)
-      .Test(xnnpack_delegate.get());
+      .ReuseGeneratedModel(true);
+  tester.Test(xnnpack_delegate.get());
+  // Second run to test cache lookup runs.
+  tester.Test(xnnpack_delegate.get());
 }
 
-TEST(FullyConnected, NoBias) {
-  std::unique_ptr<TfLiteDelegate, decltype(&TfLiteXNNPackDelegateDelete)>
-      xnnpack_delegate(TfLiteXNNPackDelegateCreate(nullptr),
-                       TfLiteXNNPackDelegateDelete);
-
+TEST_F(FullyConnectedTest, NoBias) {
   std::random_device random_device;
   auto rng = std::mt19937(random_device());
   auto batch_rng =
@@ -243,19 +233,18 @@ TEST(FullyConnected, NoBias) {
   const auto input_channels = channels_rng();
   const auto output_channels = channels_rng();
 
-  FullyConnectedTester()
-      .InputShape({batch, input_channels})
+  FullyConnectedTester tester;
+  tester.InputShape({batch, input_channels})
       .InputChannels(input_channels)
       .OutputChannels(output_channels)
       .NoBias()
-      .Test(xnnpack_delegate.get());
+      .ReuseGeneratedModel(true);
+  tester.Test(xnnpack_delegate.get());
+  // Second run to test cache lookup runs.
+  tester.Test(xnnpack_delegate.get());
 }
 
-TEST(FullyConnected, FP16Weights) {
-  std::unique_ptr<TfLiteDelegate, decltype(&TfLiteXNNPackDelegateDelete)>
-      xnnpack_delegate(TfLiteXNNPackDelegateCreate(nullptr),
-                       TfLiteXNNPackDelegateDelete);
-
+TEST_F(FullyConnectedTest, FP16Weights) {
   std::random_device random_device;
   auto rng = std::mt19937(random_device());
   auto batch_rng =
@@ -266,19 +255,18 @@ TEST(FullyConnected, FP16Weights) {
   const auto input_channels = channels_rng();
   const auto output_channels = channels_rng();
 
-  FullyConnectedTester()
-      .InputShape({batch, input_channels})
+  FullyConnectedTester tester;
+  tester.InputShape({batch, input_channels})
       .InputChannels(input_channels)
       .OutputChannels(output_channels)
       .FP16Weights()
-      .Test(xnnpack_delegate.get());
+      .ReuseGeneratedModel(true);
+  tester.Test(xnnpack_delegate.get());
+  // Second run to test cache lookup runs.
+  tester.Test(xnnpack_delegate.get());
 }
 
-TEST(FullyConnected, FP16WeightsNoBias) {
-  std::unique_ptr<TfLiteDelegate, decltype(&TfLiteXNNPackDelegateDelete)>
-      xnnpack_delegate(TfLiteXNNPackDelegateCreate(nullptr),
-                       TfLiteXNNPackDelegateDelete);
-
+TEST_F(FullyConnectedTest, FP16WeightsNoBias) {
   std::random_device random_device;
   auto rng = std::mt19937(random_device());
   auto batch_rng =
@@ -289,20 +277,19 @@ TEST(FullyConnected, FP16WeightsNoBias) {
   const auto input_channels = channels_rng();
   const auto output_channels = channels_rng();
 
-  FullyConnectedTester()
-      .InputShape({batch, input_channels})
+  FullyConnectedTester tester;
+  tester.InputShape({batch, input_channels})
       .InputChannels(input_channels)
       .OutputChannels(output_channels)
       .FP16Weights()
       .NoBias()
-      .Test(xnnpack_delegate.get());
+      .ReuseGeneratedModel(true);
+  tester.Test(xnnpack_delegate.get());
+  // Second run to test cache lookup runs.
+  tester.Test(xnnpack_delegate.get());
 }
 
-TEST(FullyConnected, INT8Weights) {
-  std::unique_ptr<TfLiteDelegate, decltype(&TfLiteXNNPackDelegateDelete)>
-      xnnpack_delegate(TfLiteXNNPackDelegateCreate(nullptr),
-                       TfLiteXNNPackDelegateDelete);
-
+TEST_F(FullyConnectedTest, DynamicWeights) {
   std::random_device random_device;
   auto rng = std::mt19937(random_device());
   auto batch_rng =
@@ -313,19 +300,18 @@ TEST(FullyConnected, INT8Weights) {
   const auto input_channels = channels_rng();
   const auto output_channels = channels_rng();
 
-  FullyConnectedTester()
-      .InputShape({batch, input_channels})
+  FullyConnectedTester tester;
+  tester.InputShape({batch, input_channels})
       .InputChannels(input_channels)
       .OutputChannels(output_channels)
-      .INT8Weights()
-      .Test(xnnpack_delegate.get());
+      .DynamicWeights()
+      .ReuseGeneratedModel(true);
+  tester.Test(xnnpack_delegate.get());
+  // Second run to test cache lookup runs.
+  tester.Test(xnnpack_delegate.get());
 }
 
-TEST(FullyConnected, INT8WeightsNoBias) {
-  std::unique_ptr<TfLiteDelegate, decltype(&TfLiteXNNPackDelegateDelete)>
-      xnnpack_delegate(TfLiteXNNPackDelegateCreate(nullptr),
-                       TfLiteXNNPackDelegateDelete);
-
+TEST_F(FullyConnectedTest, DynamicWeightsNoBias) {
   std::random_device random_device;
   auto rng = std::mt19937(random_device());
   auto batch_rng =
@@ -336,20 +322,19 @@ TEST(FullyConnected, INT8WeightsNoBias) {
   const auto input_channels = channels_rng();
   const auto output_channels = channels_rng();
 
-  FullyConnectedTester()
-      .InputShape({batch, input_channels})
+  FullyConnectedTester tester;
+  tester.InputShape({batch, input_channels})
       .InputChannels(input_channels)
       .OutputChannels(output_channels)
-      .INT8Weights()
+      .DynamicWeights()
       .NoBias()
-      .Test(xnnpack_delegate.get());
+      .ReuseGeneratedModel(true);
+  tester.Test(xnnpack_delegate.get());
+  // Second run to test cache lookup runs.
+  tester.Test(xnnpack_delegate.get());
 }
 
-TEST(FullyConnected, ReluActivation) {
-  std::unique_ptr<TfLiteDelegate, decltype(&TfLiteXNNPackDelegateDelete)>
-      xnnpack_delegate(TfLiteXNNPackDelegateCreate(nullptr),
-                       TfLiteXNNPackDelegateDelete);
-
+TEST_F(FullyConnectedTest, DynamicBias) {
   std::random_device random_device;
   auto rng = std::mt19937(random_device());
   auto batch_rng =
@@ -360,19 +345,153 @@ TEST(FullyConnected, ReluActivation) {
   const auto input_channels = channels_rng();
   const auto output_channels = channels_rng();
 
-  FullyConnectedTester()
-      .InputShape({batch, input_channels})
+  FullyConnectedTester tester;
+  tester.InputShape({batch, input_channels})
+      .InputChannels(input_channels)
+      .OutputChannels(output_channels)
+      .DynamicBias()
+      .ReuseGeneratedModel(true);
+  tester.Test(xnnpack_delegate.get());
+  // Second run to test cache lookup runs.
+  tester.Test(xnnpack_delegate.get());
+}
+
+TEST_F(FullyConnectedTest, DynamicWeightsAndBias) {
+  std::random_device random_device;
+  auto rng = std::mt19937(random_device());
+  auto batch_rng =
+      std::bind(std::uniform_int_distribution<int32_t>(2, 5), std::ref(rng));
+  auto channels_rng =
+      std::bind(std::uniform_int_distribution<int32_t>(2, 9), std::ref(rng));
+  const auto batch = batch_rng();
+  const auto input_channels = channels_rng();
+  const auto output_channels = channels_rng();
+
+  FullyConnectedTester tester;
+  tester.InputShape({batch, input_channels})
+      .InputChannels(input_channels)
+      .OutputChannels(output_channels)
+      .DynamicWeights()
+      .DynamicBias()
+      .ReuseGeneratedModel(true);
+  tester.Test(xnnpack_delegate.get());
+  // Second run to test cache lookup runs.
+  tester.Test(xnnpack_delegate.get());
+}
+
+TEST_F(FullyConnectedTest, TensorWiseQuantizedInt8Weights) {
+  std::random_device random_device;
+  auto rng = std::mt19937(random_device());
+  auto batch_rng =
+      std::bind(std::uniform_int_distribution<int32_t>(2, 5), std::ref(rng));
+  auto channels_rng =
+      std::bind(std::uniform_int_distribution<int32_t>(2, 9), std::ref(rng));
+  const auto batch = batch_rng();
+  const auto input_channels = channels_rng();
+  const auto output_channels = channels_rng();
+
+  FullyConnectedTester tester;
+  tester.InputShape({batch, input_channels})
+      .InputChannels(input_channels)
+      .OutputChannels(output_channels)
+      .TensorWiseQuantizedInt8Weights()
+      .ReuseGeneratedModel(true);
+  tester.Test(xnnpack_delegate.get());
+  // Second run to test cache lookup runs.
+  tester.Test(xnnpack_delegate.get());
+}
+
+TEST_F(FullyConnectedTest, TensorWiseQuantizedInt8WeightsNoBias) {
+  std::random_device random_device;
+  auto rng = std::mt19937(random_device());
+  auto batch_rng =
+      std::bind(std::uniform_int_distribution<int32_t>(2, 5), std::ref(rng));
+  auto channels_rng =
+      std::bind(std::uniform_int_distribution<int32_t>(2, 9), std::ref(rng));
+  const auto batch = batch_rng();
+  const auto input_channels = channels_rng();
+  const auto output_channels = channels_rng();
+
+  FullyConnectedTester tester;
+  tester.InputShape({batch, input_channels})
+      .InputChannels(input_channels)
+      .OutputChannels(output_channels)
+      .TensorWiseQuantizedInt8Weights()
+      .NoBias()
+      .ReuseGeneratedModel(true);
+  tester.Test(xnnpack_delegate.get());
+  // Second run to test cache lookup runs.
+  tester.Test(xnnpack_delegate.get());
+}
+
+TEST_F(FullyConnectedTest, ChannelWiseQuantizedInt8Weights) {
+  std::random_device random_device;
+  auto rng = std::mt19937(random_device());
+  auto batch_rng =
+      std::bind(std::uniform_int_distribution<int32_t>(2, 5), std::ref(rng));
+  auto channels_rng =
+      std::bind(std::uniform_int_distribution<int32_t>(2, 9), std::ref(rng));
+  const auto batch = batch_rng();
+  const auto input_channels = channels_rng();
+  const auto output_channels = channels_rng();
+
+  FullyConnectedTester tester;
+  tester.InputShape({batch, input_channels})
+      .InputChannels(input_channels)
+      .OutputChannels(output_channels)
+      .ChannelWiseQuantizedInt8Weights()
+      .ReuseGeneratedModel(true);
+  tester.Test(xnnpack_delegate.get());
+  // Second run to test cache lookup runs.
+  tester.Test(xnnpack_delegate.get());
+}
+
+TEST_F(FullyConnectedTest, ChannelWiseQuantizedInt8WeightsNoBias) {
+  std::random_device random_device;
+  auto rng = std::mt19937(random_device());
+  auto batch_rng =
+      std::bind(std::uniform_int_distribution<int32_t>(2, 5), std::ref(rng));
+  auto channels_rng =
+      std::bind(std::uniform_int_distribution<int32_t>(2, 9), std::ref(rng));
+  const auto batch = batch_rng();
+  const auto input_channels = channels_rng();
+  const auto output_channels = channels_rng();
+
+  FullyConnectedTester tester;
+  tester.InputShape({batch, input_channels})
+      .InputChannels(input_channels)
+      .OutputChannels(output_channels)
+      .ChannelWiseQuantizedInt8Weights()
+      .NoBias()
+      .ReuseGeneratedModel(true);
+  tester.Test(xnnpack_delegate.get());
+  // Second run to test cache lookup runs.
+  tester.Test(xnnpack_delegate.get());
+}
+
+TEST_F(FullyConnectedTest, ReluActivation) {
+  std::random_device random_device;
+  auto rng = std::mt19937(random_device());
+  auto batch_rng =
+      std::bind(std::uniform_int_distribution<int32_t>(2, 5), std::ref(rng));
+  auto channels_rng =
+      std::bind(std::uniform_int_distribution<int32_t>(2, 9), std::ref(rng));
+  const auto batch = batch_rng();
+  const auto input_channels = channels_rng();
+  const auto output_channels = channels_rng();
+
+  FullyConnectedTester tester;
+  tester.InputShape({batch, input_channels})
       .InputChannels(input_channels)
       .OutputChannels(output_channels)
       .ReluActivation()
-      .Test(xnnpack_delegate.get());
+      .ReuseGeneratedModel(true);
+  tester.Test(xnnpack_delegate.get());
+  // Second run to test cache lookup runs.
+  tester.Test(xnnpack_delegate.get());
 }
 
-TEST(FullyConnected, Relu6Activation) {
-  std::unique_ptr<TfLiteDelegate, decltype(&TfLiteXNNPackDelegateDelete)>
-      xnnpack_delegate(TfLiteXNNPackDelegateCreate(nullptr),
-                       TfLiteXNNPackDelegateDelete);
-
+TEST_F(FullyConnectedTest, Relu6Activation) {
   std::random_device random_device;
   auto rng = std::mt19937(random_device());
   auto batch_rng =
@@ -383,19 +502,18 @@ TEST(FullyConnected, Relu6Activation) {
   const auto input_channels = channels_rng();
   const auto output_channels = channels_rng();
 
-  FullyConnectedTester()
-      .InputShape({batch, input_channels})
+  FullyConnectedTester tester;
+  tester.InputShape({batch, input_channels})
       .InputChannels(input_channels)
       .OutputChannels(output_channels)
       .Relu6Activation()
-      .Test(xnnpack_delegate.get());
+      .ReuseGeneratedModel(true);
+  tester.Test(xnnpack_delegate.get());
+  // Second run to test cache lookup runs.
+  tester.Test(xnnpack_delegate.get());
 }
 
-TEST(FullyConnected, ReluMinus1To1Activation) {
-  std::unique_ptr<TfLiteDelegate, decltype(&TfLiteXNNPackDelegateDelete)>
-      xnnpack_delegate(TfLiteXNNPackDelegateCreate(nullptr),
-                       TfLiteXNNPackDelegateDelete);
-
+TEST_F(FullyConnectedTest, ReluMinus1To1Activation) {
   std::random_device random_device;
   auto rng = std::mt19937(random_device());
   auto batch_rng =
@@ -406,21 +524,22 @@ TEST(FullyConnected, ReluMinus1To1Activation) {
   const auto input_channels = channels_rng();
   const auto output_channels = channels_rng();
 
-  FullyConnectedTester()
-      .InputShape({batch, input_channels})
+  FullyConnectedTester tester;
+  tester.InputShape({batch, input_channels})
       .InputChannels(input_channels)
       .OutputChannels(output_channels)
       .ReluMinus1To1Activation()
-      .Test(xnnpack_delegate.get());
+      .ReuseGeneratedModel(true);
+  tester.Test(xnnpack_delegate.get());
+  // Second run to test cache lookup runs.
+  tester.Test(xnnpack_delegate.get());
 }
 
-TEST(FullyConnected, MultiThreading) {
+TEST_F(FullyConnectedTest, MultiThreading) {
   TfLiteXNNPackDelegateOptions delegate_options =
       TfLiteXNNPackDelegateOptionsDefault();
   delegate_options.num_threads = 2;
-  std::unique_ptr<TfLiteDelegate, decltype(&TfLiteXNNPackDelegateDelete)>
-      xnnpack_delegate(TfLiteXNNPackDelegateCreate(&delegate_options),
-                       TfLiteXNNPackDelegateDelete);
+  UseCustomDelegate(delegate_options);
 
   std::random_device random_device;
   auto rng = std::mt19937(random_device());
@@ -432,11 +551,45 @@ TEST(FullyConnected, MultiThreading) {
   const auto input_channels = channels_rng();
   const auto output_channels = channels_rng();
 
-  FullyConnectedTester()
-      .InputShape({batch, input_channels})
+  FullyConnectedTester tester;
+  tester.InputShape({batch, input_channels})
       .InputChannels(input_channels)
       .OutputChannels(output_channels)
-      .Test(xnnpack_delegate.get());
+      .ReuseGeneratedModel(true);
+  tester.Test(xnnpack_delegate.get());
+  // Second run to test cache lookup runs.
+  tester.Test(xnnpack_delegate.get());
+}
+
+TEST_F(FullyConnectedTest, WeightsCache) {
+  TfLiteXNNPackDelegateOptions delegate_options =
+      TfLiteXNNPackDelegateOptionsDefault();
+  std::unique_ptr<TfLiteXNNPackDelegateWeightsCache,
+                  decltype(&TfLiteXNNPackDelegateWeightsCacheDelete)>
+      weights_cache(TfLiteXNNPackDelegateWeightsCacheCreate(),
+                    TfLiteXNNPackDelegateWeightsCacheDelete);
+  delegate_options.weights_cache = weights_cache.get();
+  UseCustomDelegate(delegate_options);
+
+  std::random_device random_device;
+  auto rng = std::mt19937(random_device());
+  auto batch_rng =
+      std::bind(std::uniform_int_distribution<int32_t>(2, 5), std::ref(rng));
+  auto channels_rng =
+      std::bind(std::uniform_int_distribution<int32_t>(2, 9), std::ref(rng));
+  const auto batch = batch_rng();
+  const auto input_channels = channels_rng();
+  const auto output_channels = channels_rng();
+
+  FullyConnectedTester tester;
+  tester.InputShape({batch, input_channels})
+      .InputChannels(input_channels)
+      .OutputChannels(output_channels)
+      .WeightsCache(weights_cache.get())
+      .ReuseGeneratedModel(true);
+  tester.Test(xnnpack_delegate.get());
+  // Second run to test cache lookup runs.
+  tester.Test(xnnpack_delegate.get());
 }
 
 }  // namespace xnnpack

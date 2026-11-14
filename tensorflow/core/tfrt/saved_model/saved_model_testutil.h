@@ -12,30 +12,45 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
-#ifndef TENSORFLOW_TFRT_SAVED_MODEL_SAVED_MODEL_TESTUTIL_H_
-#define TENSORFLOW_TFRT_SAVED_MODEL_SAVED_MODEL_TESTUTIL_H_
+#ifndef TENSORFLOW_CORE_TFRT_SAVED_MODEL_SAVED_MODEL_TESTUTIL_H_
+#define TENSORFLOW_CORE_TFRT_SAVED_MODEL_SAVED_MODEL_TESTUTIL_H_
 
 #include <stdlib.h>
 
 #include <limits>
+#include <memory>
+#include <optional>
+#include <string>
+#include <vector>
 
 #include "tensorflow/cc/saved_model/loader.h"
+#include "tensorflow/compiler/mlir/tfrt/translate/tfrt_compile_options.h"
 #include "tensorflow/core/tfrt/runtime/runtime.h"
 #include "tensorflow/core/tfrt/saved_model/saved_model.h"
 #include "tfrt/host_context/host_context.h"  // from @tf_runtime
-#include "tfrt/tensor/btf_util.h"  // from @tf_runtime
 
+#if defined(PLATFORM_GOOGLE)
 ABSL_DECLARE_FLAG(bool, enable_optimizer);
 ABSL_DECLARE_FLAG(std::string, force_data_format);
+#endif
 
-namespace tfrt {
-namespace saved_model_test {
+namespace tensorflow {
+namespace tfrt_stub {
 
 std::unique_ptr<tensorflow::tfrt_stub::Runtime> DefaultTfrtRuntime(
     int num_threads);
 
+struct UserSavedModelOptions {
+  bool enable_mlrt = false;
+  bool enable_optimizer = false;
+  bool enable_grappler = false;
+  std::string force_data_format = "";
+  tensorflow::SessionMetadata session_metadata;
+};
+
 SavedModel::Options DefaultSavedModelOptions(
-    tensorflow::tfrt_stub::Runtime* runtime);
+    tensorflow::tfrt_stub::Runtime* runtime,
+    std::optional<UserSavedModelOptions> user_options = std::nullopt);
 
 class TFRTSavedModelTest {
  public:
@@ -45,7 +60,9 @@ class TFRTSavedModelTest {
 
   SavedModel* GetSavedModel() { return saved_model_.get(); }
 
-  HostContext* GetHostContext() const { return saved_model_->GetHostContext(); }
+  tfrt::HostContext* GetHostContext() const {
+    return saved_model_->GetHostContext();
+  }
 
  private:
   std::unique_ptr<tensorflow::tfrt_stub::Runtime> runtime_;
@@ -99,9 +116,13 @@ void ComputeCurrentTFResult(const std::string& saved_model_dir,
                             bool disable_grappler = false);
 
 void ExpectTensorEqual(const tensorflow::Tensor& x, const tensorflow::Tensor& y,
-                       absl::optional<double> error = absl::nullopt);
+                       std::optional<double> error = std::nullopt);
 
-}  // namespace saved_model_test
-}  // namespace tfrt
+SavedModel::Options DefaultTpuModelOptions(
+    tensorflow::tfrt_stub::Runtime* runtime,
+    tensorflow::TfrtDeviceInfraTarget device_target);
 
-#endif  // TENSORFLOW_TFRT_SAVED_MODEL_SAVED_MODEL_TESTUTIL_H_
+}  // namespace tfrt_stub
+}  // namespace tensorflow
+
+#endif  // TENSORFLOW_CORE_TFRT_SAVED_MODEL_SAVED_MODEL_TESTUTIL_H_

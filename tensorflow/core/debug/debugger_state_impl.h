@@ -26,31 +26,32 @@ namespace tensorflow {
 class DebuggerState : public DebuggerStateInterface {
  public:
   DebuggerState(const DebugOptions& debug_options);
-  virtual ~DebuggerState();
+  ~DebuggerState() override;
 
   // Publish metadata about the debugged Session::Run() call.
   //
   // See the doc string of DebuggerStateInterface::PublishDebugMetadata() for
   // details.
-  Status PublishDebugMetadata(const int64_t global_step,
-                              const int64_t session_run_count,
-                              const int64_t executor_step_count,
-                              const std::vector<string>& input_names,
-                              const std::vector<string>& output_names,
-                              const std::vector<string>& target_names) override;
+  absl::Status PublishDebugMetadata(
+      const int64_t global_step, const int64_t session_run_count,
+      const int64_t executor_step_count,
+      const std::vector<std::string>& input_names,
+      const std::vector<std::string>& output_names,
+      const std::vector<std::string>& target_names) override;
 
  private:
-  std::unordered_set<string> debug_urls_;
+  std::unordered_set<std::string> debug_urls_;
 };
 
 class DebugGraphDecorator : public DebugGraphDecoratorInterface {
  public:
   DebugGraphDecorator(const DebugOptions& debug_options)
       : debug_options_(debug_options) {}
-  virtual ~DebugGraphDecorator() {}
+  ~DebugGraphDecorator() override = default;
 
-  Status DecorateGraph(Graph* graph, Device* device) override;
-  Status PublishGraph(const Graph& graph, const string& device_name) override;
+  absl::Status DecorateGraph(Graph* graph, Device* device) override;
+  absl::Status PublishGraph(const Graph& graph,
+                            const std::string& device_name) override;
 
  private:
   DebugOptions debug_options_;

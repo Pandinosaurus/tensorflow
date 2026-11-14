@@ -1,3 +1,18 @@
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
 # Description:
 #   Provides ApiDef access and ApiDef validation for TensorFlow.
 #
@@ -6,22 +21,23 @@
 #   :python_api_def
 #   :java_api_def
 
-load("//tensorflow/core/platform:rules_cc.bzl", "cc_library")
+load(
+    "@local_config_tensorrt//:build_defs.bzl",
+    "if_tensorrt",
+)
+load(
+    "@xla//xla/tsl/mkl:build_defs.bzl",
+    "if_mkl",
+)
 load(
     "//tensorflow:tensorflow.bzl",
     "tf_cc_binary",
     "tf_cc_test",
 )
-load(
-    "//third_party/mkl:build_defs.bzl",
-    "if_mkl",
-)
-load(
-    "@local_config_tensorrt//:build_defs.bzl",
-    "if_tensorrt",
-)
+load("//tensorflow/core/platform:rules_cc.bzl", "cc_library")
 
 package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
     default_visibility = ["//visibility:private"],
     licenses = ["notice"],
 )
@@ -64,6 +80,7 @@ cc_library(
         "//tensorflow/core:op_gen_lib",
         "//tensorflow/core:ops",
         "//tensorflow/core:protos_all_cc",
+        "@com_google_absl//absl/strings:str_format",
     ],
 )
 
@@ -115,5 +132,8 @@ tf_cc_test(
         "//tensorflow/core:test",
         "//tensorflow/core:test_main",
         "//tensorflow/core/platform:resource_loader",
+        "//tensorflow/core/tpu/ops:sparse_core_ops",
+        "//tensorflow/core/tpu/ops:sparse_core_preprocess_ops",
+        "//tensorflow/core/tpu/ops:tpu_copy_with_dynamic_shape_op",
     ],
 )

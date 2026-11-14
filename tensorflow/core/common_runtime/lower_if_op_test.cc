@@ -35,7 +35,7 @@ limitations under the License.
 namespace tensorflow {
 namespace {
 
-AttrValue FuncAttr(const string& name) {
+AttrValue FuncAttr(const std::string& name) {
   AttrValue attr;
   attr.mutable_func()->set_name(name);
   return attr;
@@ -49,7 +49,7 @@ SessionOptions SessionOptionsWithInlining() {
   return session_options;
 }
 
-Status Rewrite(std::unique_ptr<Graph>* graph) {
+absl::Status Rewrite(std::unique_ptr<Graph>* graph) {
   FunctionLibraryDefinition flib_def((*graph)->flib_def());
   GraphOptimizationPassOptions opt_options;
   SessionOptions session_options = SessionOptionsWithInlining();
@@ -153,8 +153,8 @@ TEST(LowerIfOpTest, BranchFunctionsWithoutOutputs) {
   using FDH = ::tensorflow::FunctionDefHelper;
 
   // Wrap AssignAddVariable + Const into a function.
-  const auto assign_add = [](const string& fn_name, int v) {
-    const Tensor tensor = test::AsScalar<int32>(v);
+  const auto assign_add = [](const std::string& fn_name, int v) {
+    const Tensor tensor = test::AsScalar<int32_t>(v);
     return FDH::Create(
         fn_name, {"v: resource"}, {}, {},
         {

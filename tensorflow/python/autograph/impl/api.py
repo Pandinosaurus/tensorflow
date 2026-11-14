@@ -14,10 +14,6 @@
 # ==============================================================================
 """This module contains the user- and codegen-facing API for AutoGraph."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import functools
 import importlib
 import inspect
@@ -25,8 +21,6 @@ import os
 import sys
 import textwrap
 import traceback
-
-import six
 
 from tensorflow.python.autograph import operators
 from tensorflow.python.autograph import utils
@@ -61,7 +55,7 @@ from tensorflow.python.autograph.pyct import transpiler
 from tensorflow.python.autograph.pyct.static_analysis import activity
 from tensorflow.python.autograph.pyct.static_analysis import reaching_definitions
 from tensorflow.python.autograph.utils import ag_logging as logging
-from tensorflow.python.eager import function
+from tensorflow.python.eager.polymorphic_function import tf_method_target
 from tensorflow.python.framework import errors_impl
 from tensorflow.python.util import tf_decorator
 from tensorflow.python.util import tf_inspect
@@ -396,7 +390,7 @@ def converted_call(f, args, kwargs, caller_fn_scope=None, options=None):
 
       f_self = getattr(f, '__self__', None)
       if f_self is not None:
-        if isinstance(f_self, function.TfMethodTarget):
+        if isinstance(f_self, tf_method_target.TfMethodTarget):
           f_self = f_self.target
         effective_args = (f_self,) + effective_args
 
@@ -457,7 +451,8 @@ def _call_unconverted(f, args, kwargs, options, update_cache=True):
   if update_cache:
     conversion.cache_allowlisted(f, options)
 
-  if inspect.ismethod(f) and isinstance(f.__self__, function.TfMethodTarget):
+  if (inspect.ismethod(f) and
+      isinstance(f.__self__, tf_method_target.TfMethodTarget)):
     return f.__self__.call(args, kwargs)
 
   if kwargs is not None:
@@ -609,8 +604,7 @@ def call_with_unspecified_conversion_status(func):
 def _log_callargs(f, args, kwargs):
   """Logging helper."""
   logging.log(2, 'Defaults of %s : %s', f, f.__defaults__)
-  if not six.PY2:
-    logging.log(2, 'KW defaults of %s : %s', f, f.__kwdefaults__)
+  logging.log(2, 'KW defaults of %s : %s', f, f.__kwdefaults__)
 
   if kwargs is not None:
     callargs = tf_inspect.getcallargs(f, *args, **kwargs)

@@ -82,14 +82,14 @@ TEST(DirectSessionWithTrackingAllocTest, CostModelTest) {
       ->set_pin_to_host_optimization(RewriterConfig::OFF);
   std::unique_ptr<Session> session(NewSession(options));
   TF_ASSERT_OK(session->Create(def));
-  std::vector<std::pair<string, Tensor>> inputs;
+  std::vector<std::pair<std::string, Tensor>> inputs;
 
   // Request two targets: one fetch output and one non-fetched output.
-  std::vector<string> output_names = {y->name() + ":0"};
-  std::vector<string> target_nodes = {y_neg->name()};
+  std::vector<std::string> output_names = {y->name() + ":0"};
+  std::vector<std::string> target_nodes = {y_neg->name()};
   std::vector<Tensor> outputs;
   const int64_t start_micros = Env::Default()->NowMicros();
-  Status s = session->Run(inputs, output_names, target_nodes, &outputs);
+  absl::Status s = session->Run(inputs, output_names, target_nodes, &outputs);
   const int64_t run_duration_micros =
       Env::Default()->NowMicros() - start_micros;
   TF_ASSERT_OK(s);
@@ -194,11 +194,11 @@ static void TestHWAccelerator(bool enableHWTrace) {
   options.config.mutable_graph_options()->set_build_cost_model(1);
   std::unique_ptr<Session> session(NewSession(options));
   TF_ASSERT_OK(session->Create(def));
-  std::vector<std::pair<string, Tensor>> inputs;
+  std::vector<std::pair<std::string, Tensor>> inputs;
 
   // Request two targets: one fetch output and one non-fetched output.
-  std::vector<string> output_names = {y->name() + ":0"};
-  std::vector<string> target_nodes = {y_neg->name()};
+  std::vector<std::string> output_names = {y->name() + ":0"};
+  std::vector<std::string> target_nodes = {y_neg->name()};
   std::vector<Tensor> outputs;
   const int64_t start_micros = Env::Default()->NowMicros();
 
@@ -207,8 +207,8 @@ static void TestHWAccelerator(bool enableHWTrace) {
     run_options.set_trace_level(RunOptions::FULL_TRACE);
   }
   RunMetadata run_metadata;
-  Status s = session->Run(run_options, inputs, output_names, target_nodes,
-                          &outputs, &run_metadata);
+  absl::Status s = session->Run(run_options, inputs, output_names, target_nodes,
+                                &outputs, &run_metadata);
   const int64_t run_duration_micros =
       Env::Default()->NowMicros() - start_micros;
   TF_ASSERT_OK(s);
@@ -278,17 +278,17 @@ TEST(DirectSessionWithTrackingAllocTest, CostGraph) {
       ->set_opt_level(OptimizerOptions::L0);
   std::unique_ptr<Session> session(NewSession(options));
   TF_ASSERT_OK(session->Create(def));
-  std::vector<std::pair<string, Tensor>> inputs;
+  std::vector<std::pair<std::string, Tensor>> inputs;
 
   // Request two targets: one fetch output and one non-fetched output.
   RunOptions run_options;
-  std::vector<string> output_names = {y->name() + ":0"};
-  std::vector<string> target_nodes = {y_neg->name()};
+  std::vector<std::string> output_names = {y->name() + ":0"};
+  std::vector<std::string> target_nodes = {y_neg->name()};
   std::vector<Tensor> outputs;
   RunMetadata run_metadata;
   const int64_t start_micros = Env::Default()->NowMicros();
-  Status s = session->Run(run_options, inputs, output_names, target_nodes,
-                          &outputs, &run_metadata);
+  absl::Status s = session->Run(run_options, inputs, output_names, target_nodes,
+                                &outputs, &run_metadata);
   const int64_t run_duration_micros =
       Env::Default()->NowMicros() - start_micros;
   TF_ASSERT_OK(s);
@@ -337,15 +337,15 @@ TEST(DirectSessionWithTrackingAllocTest, TrackMemoryAllocation) {
       ->set_constant_folding(RewriterConfig::OFF);
   std::unique_ptr<Session> session(NewSession(options));
   TF_ASSERT_OK(session->Create(def));
-  std::vector<std::pair<string, Tensor>> inputs;
+  std::vector<std::pair<std::string, Tensor>> inputs;
 
   RunOptions run_options;
   run_options.set_trace_level(RunOptions::FULL_TRACE);
-  std::vector<string> output_names = {y->name() + ":0"};
+  std::vector<std::string> output_names = {y->name() + ":0"};
   std::vector<Tensor> outputs;
   RunMetadata run_metadata;
-  Status s = session->Run(run_options, inputs, output_names, {}, &outputs,
-                          &run_metadata);
+  absl::Status s = session->Run(run_options, inputs, output_names, {}, &outputs,
+                                &run_metadata);
   TF_ASSERT_OK(s);
 
   for (const auto& dev_stat : run_metadata.step_stats().dev_stats()) {
